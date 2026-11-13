@@ -80,7 +80,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 | T02 | Terraform bootstrap | T01 | `infra/bootstrap/` | done |
 | T03 | Module `project-base` | T01 | `infra/modules/project-base/` | done |
 | T04 | Module `identity` | T01 | `infra/modules/identity/` | in-progress |
-| T05 | Module `healthcare` | T01 | `infra/modules/healthcare/` | in-progress |
+| T05 | Module `healthcare` | T01 | `infra/modules/healthcare/` | done |
 | T06 | FHIR mapping library | T01 | `libs/pulsebridge_fhir/` | in-progress |
 | T07 | HL7v2 helpers (hl7apy) | T01 | `libs/pulsebridge_hl7v2/` | in-progress |
 
