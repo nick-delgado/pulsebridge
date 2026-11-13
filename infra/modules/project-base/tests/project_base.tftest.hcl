@@ -1,10 +1,42 @@
 # Behaviour tests for project-base. They run with `terraform test` from the module directory.
 #
 # mock_provider replaces the real google provider: no credentials are read and no API is called.
-# Every run uses `command = plan`, so nothing is created even in the mock. The assertions check
-# the planned configuration of each resource.
+# Every run uses `command = plan`, so nothing is created even in the mock.
+#
+# In a plan, attributes the provider computes (id, self_link) are unknown, so a plain plan test
+# cannot check that a subnet or firewall rule is attached to *this* network. The override_resource
+# blocks below give the network and subnets fixed, known ids at plan time (override_during = plan,
+# Terraform 1.11+). Every resource that references them then carries a known value the tests can
+# compare, and a resource wired to another network (such as "default") shows up as a mismatch.
 
 mock_provider "google" {}
+
+override_resource {
+  target          = google_compute_network.this
+  override_during = plan
+  values = {
+    id        = "projects/example-project-123/global/networks/pulsebridge-vpc"
+    self_link = "https://www.googleapis.com/compute/v1/projects/example-project-123/global/networks/pulsebridge-vpc"
+  }
+}
+
+override_resource {
+  target          = google_compute_subnetwork.edge
+  override_during = plan
+  values = {
+    id        = "projects/example-project-123/regions/us-central1/subnetworks/pulsebridge-edge"
+    self_link = "https://www.googleapis.com/compute/v1/projects/example-project-123/regions/us-central1/subnetworks/pulsebridge-edge"
+  }
+}
+
+override_resource {
+  target          = google_compute_subnetwork.serverless
+  override_during = plan
+  values = {
+    id        = "projects/example-project-123/regions/us-central1/subnetworks/pulsebridge-serverless"
+    self_link = "https://www.googleapis.com/compute/v1/projects/example-project-123/regions/us-central1/subnetworks/pulsebridge-serverless"
+  }
+}
 
 variables {
   # Synthetic values: no real project is involved.
@@ -37,6 +69,11 @@ run "default_api_list_covers_stack_and_excludes_identity_platform" {
   }
 
   assert {
+    condition     = !contains(keys(google_project_service.this), "iap.googleapis.com")
+    error_message = "The IAP API must not be enabled while enable_iap_ssh is false."
+  }
+
+  assert {
     condition     = alltrue([for s in google_project_service.this : s.disable_on_destroy == false && s.disable_dependent_services == false])
     error_message = "APIs must stay enabled on destroy."
   }
@@ -57,6 +94,20 @@ run "api_list_variable_drives_enabled_services" {
   assert {
     condition     = google_project_service.this["run.googleapis.com"].service == "run.googleapis.com" && google_project_service.this["run.googleapis.com"].project == "example-project-123"
     error_message = "Each google_project_service must enable its own API in the given project."
+  }
+}
+
+run "iap_api_enabled_only_with_iap_ssh" {
+  command = plan
+
+  variables {
+    enabled_apis   = ["run.googleapis.com", "compute.googleapis.com"]
+    enable_iap_ssh = true
+  }
+
+  assert {
+    condition     = toset(keys(google_project_service.this)) == toset(["run.googleapis.com", "compute.googleapis.com", "iap.googleapis.com"])
+    error_message = "With enable_iap_ssh, exactly the listed APIs plus iap.googleapis.com must be enabled."
   }
 }
 
@@ -109,14 +160,29 @@ run "nat_created_when_flag_true" {
   }
 
   assert {
+    condition     = google_compute_router.nat[0].network == "projects/example-project-123/global/networks/pulsebridge-vpc"
+    error_message = "The Cloud Router must be attached to this module's VPC."
+  }
+
+  assert {
+    condition     = google_compute_router_nat.this[0].router == google_compute_router.nat[0].name
+    error_message = "Cloud NAT must be configured on this module's Cloud Router."
+  }
+
+  assert {
     condition     = google_compute_router_nat.this[0].source_subnetwork_ip_ranges_to_nat == "LIST_OF_SUBNETWORKS"
-    error_message = "NAT must translate only the listed (edge) subnet, not every subnet."
+    error_message = "NAT must translate only the listed subnet, not every subnet."
+  }
+
+  assert {
+    condition     = length(google_compute_router_nat.this[0].subnetwork) == 1 && one(google_compute_router_nat.this[0].subnetwork).name == "https://www.googleapis.com/compute/v1/projects/example-project-123/regions/us-central1/subnetworks/pulsebridge-edge"
+    error_message = "The only subnet NAT translates must be the edge subnet."
   }
 }
 
 # --- Network -------------------------------------------------------------------------------------
 
-run "custom_vpc_with_private_google_access" {
+run "custom_vpc_and_subnet_attachment" {
   command = plan
 
   assert {
@@ -124,9 +190,13 @@ run "custom_vpc_with_private_google_access" {
     error_message = "The VPC must be custom mode (no auto-created subnets)."
   }
 
+  # Both subnets must sit in this module's VPC, not in "default" or any other network.
   assert {
-    condition     = google_compute_network.this.name != "default"
-    error_message = "The module must not use the project's default network."
+    condition = alltrue([
+      google_compute_subnetwork.edge.network == "projects/example-project-123/global/networks/pulsebridge-vpc",
+      google_compute_subnetwork.serverless.network == "projects/example-project-123/global/networks/pulsebridge-vpc",
+    ])
+    error_message = "Both subnets must be attached to this module's VPC."
   }
 
   assert {
@@ -135,8 +205,18 @@ run "custom_vpc_with_private_google_access" {
   }
 
   assert {
+    condition     = google_compute_subnetwork.serverless.private_ip_google_access == true
+    error_message = "The serverless subnet needs Private Google Access."
+  }
+
+  assert {
     condition     = google_compute_subnetwork.edge.ip_cidr_range == "10.10.0.0/24" && google_compute_subnetwork.serverless.ip_cidr_range == "10.10.1.0/24"
     error_message = "Subnets must use the configured CIDR ranges."
+  }
+
+  assert {
+    condition     = google_compute_subnetwork.edge.region == "us-central1" && google_compute_subnetwork.serverless.region == "us-central1"
+    error_message = "Subnets must be in the configured region."
   }
 }
 
@@ -156,9 +236,30 @@ run "firewall_default_posture" {
     error_message = "No allow rule may accept traffic from anywhere (0.0.0.0/0 or ::/0)."
   }
 
+  # source_ranges only filter INGRESS rules; on an EGRESS rule they are not the source of
+  # traffic at all, so a rule that silently became EGRESS would no longer mean what it says.
+  assert {
+    condition     = alltrue([for r in google_compute_firewall.allow : r.direction == "INGRESS"]) && google_compute_firewall.deny_all_ingress.direction == "INGRESS"
+    error_message = "Every firewall rule in this module must be an INGRESS rule."
+  }
+
+  # Every rule must protect this module's VPC; a rule on another network protects nothing here.
+  assert {
+    condition = alltrue(concat(
+      [for r in google_compute_firewall.allow : r.network == "projects/example-project-123/global/networks/pulsebridge-vpc"],
+      [google_compute_firewall.deny_all_ingress.network == "projects/example-project-123/global/networks/pulsebridge-vpc"],
+    ))
+    error_message = "Every firewall rule must be attached to this module's VPC."
+  }
+
   assert {
     condition     = google_compute_firewall.deny_all_ingress.priority == 65534 && one(google_compute_firewall.deny_all_ingress.deny).protocol == "all" && length(google_compute_firewall.deny_all_ingress.allow) == 0
     error_message = "An explicit lowest-priority deny-all ingress rule must exist and allow nothing."
+  }
+
+  assert {
+    condition     = google_compute_firewall.deny_all_ingress.source_ranges == toset(["0.0.0.0/0"])
+    error_message = "The deny-all rule must cover every IPv4 source."
   }
 }
 
@@ -219,10 +320,15 @@ run "iap_ssh_is_limited_to_iap_range" {
     error_message = "SSH must be open only to Identity-Aware Proxy's TCP forwarding range."
   }
 
-  # The check that matters most, repeated with every optional rule switched on.
+  # The checks that matter most, repeated with every optional rule switched on.
   assert {
     condition     = alltrue([for r in google_compute_firewall.allow : !contains(r.source_ranges, "0.0.0.0/0") && !contains(r.source_ranges, "::/0")])
     error_message = "No allow rule may accept traffic from anywhere, even with optional rules on."
+  }
+
+  assert {
+    condition     = alltrue([for r in google_compute_firewall.allow : r.direction == "INGRESS" && r.network == "projects/example-project-123/global/networks/pulsebridge-vpc"])
+    error_message = "Every allow rule, including IAP SSH, must be INGRESS on this module's VPC."
   }
 }
 

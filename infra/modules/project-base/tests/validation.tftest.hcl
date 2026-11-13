@@ -51,6 +51,59 @@ run "rejects_edge_cidr_without_prefix" {
   expect_failures = [var.edge_subnet_cidr]
 }
 
+run "rejects_malformed_serverless_cidr_with_its_own_error" {
+  # Before the try() guard, the overlap check crashed with "Invalid index" on this value.
+  command = plan
+  variables {
+    serverless_subnet_cidr = "foo"
+  }
+  expect_failures = [var.serverless_subnet_cidr]
+}
+
+run "rejects_malformed_edge_cidr_without_crashing_overlap_check" {
+  command = plan
+  variables {
+    edge_subnet_cidr = "foo"
+  }
+  expect_failures = [var.edge_subnet_cidr]
+}
+
+run "rejects_edge_cidr_with_host_bits" {
+  command = plan
+  variables {
+    edge_subnet_cidr = "10.10.0.5/24"
+  }
+  expect_failures = [var.edge_subnet_cidr]
+}
+
+run "rejects_serverless_cidr_with_host_bits" {
+  command = plan
+  variables {
+    serverless_subnet_cidr = "10.10.1.5/24"
+  }
+  expect_failures = [var.serverless_subnet_cidr]
+}
+
+run "accepts_longest_name_prefix" {
+  # 38 characters: the longest prefix that keeps "<prefix>-allow-serverless-to-edge" within 63.
+  command = plan
+  variables {
+    name_prefix = "abcdefghijklmnopqrstuvwxyz0123456789ab"
+  }
+  assert {
+    condition     = length(google_compute_firewall.allow["allow-serverless-to-edge"].name) == 63
+    error_message = "The longest allowed prefix must produce a 63-character firewall rule name."
+  }
+}
+
+run "rejects_name_prefix_one_too_long" {
+  command = plan
+  variables {
+    name_prefix = "abcdefghijklmnopqrstuvwxyz0123456789abc"
+  }
+  expect_failures = [var.name_prefix]
+}
+
 run "rejects_serverless_subnet_smaller_than_26" {
   command = plan
   variables {
