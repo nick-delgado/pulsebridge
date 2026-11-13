@@ -9,8 +9,10 @@ The full design is in `pulsebridge-projectbrief.md`. Read it before making desig
 its "Decisions log" as settled and its "Open questions and spikes" as unresolved.
 
 This is a portfolio project. It is meant to showcase FHIR R4, HL7v2 and Terraform, so favour code
-that is readable and standards-correct over clever shortcuts (for example, the HL7v2 parser and the
-FHIR mapping are written by hand on purpose, not delegated to a managed mapping service).
+that is readable and standards-correct over clever shortcuts. The v2-to-FHIR mapping and the
+Google-Health-to-FHIR mapping are our own code on purpose, not a managed mapping service; they are
+what a reviewer should read. HL7v2 messages are parsed, built and validated with `hl7apy`; do not
+hand-write an ER7 parser.
 
 ## Credentials and secrets (hard rules)
 
@@ -61,7 +63,8 @@ The repo must work for a stranger who clones it and connects their own Google He
 - `docs/workplan.md` is the task list. Each task has an ID, dependencies, acceptance criteria and
   the paths it owns. Only the orchestrating session edits it.
 - Each task is built in its own git worktree: branch `task/<id>-<slug>`, worktree
-  `.worktrees/<id>-<slug>` (git-ignored). Never work on a task in the main checkout.
+  `.worktrees/<id>-<slug>` (git-ignored). Never work on a task in the main checkout. Task branches
+  are pushed to GitHub (`task/*` only); merging into the integration branch is the orchestrator's job.
 - Build with the `feature-builder` agent, which follows the `feature-dev` skill: build, test with
   break-checks, self-review, then an explained summary published as an artifact (not committed).
 - Review with the `review-work` skill (`/review-work <task-id> <base-branch>`), which runs the

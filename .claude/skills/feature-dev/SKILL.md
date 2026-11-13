@@ -37,7 +37,10 @@ git -C <repo> worktree add <repo>/.worktrees/<id>-<slug> -b task/<id>-<slug> <ba
   Terraform pattern, add a short comment naming the rule it follows (for example the LOINC code,
   the HL7v2 field such as `OBX-5`, or why a resource has a given lifecycle setting).
 - Nothing specific to the author is hardcoded; secrets never appear in code, logs, fixtures or state.
-- Commit in small logical commits on the task branch. Do not push unless your brief says to.
+- Commit in small logical commits on the task branch.
+- Push the task branch when the work is committed, and again after later commits:
+  `git push -u origin task/<id>-<slug>`. Push to no other branch, and never force-push. If the
+  push is refused, report it and carry on; do not work around it.
 
 ## 3. Test
 

@@ -15,17 +15,24 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
   the same path. If a task needs a change outside its paths, the agent reports it instead of
   making it.
 - Branch and worktree naming: branch `task/<id>-<slug>`, worktree `.worktrees/<id>-<slug>`
-  (see `.claude/skills/feature-dev/SKILL.md`).
+  (see `.claude/skills/feature-dev/SKILL.md`). Task branches are pushed to GitHub.
+
+## Decisions made
+
+| # | Decision | Outcome |
+| --- | --- | --- |
+| D1 | Dev project | The existing GCP project is prod. A second project for dev is created when we reach T26; until then CI only runs `plan` for dev. |
+| D2 | Connecting Google Health | A CLI script runs the OAuth flow. Three values live in Secret Manager: OAuth client ID, OAuth client secret, refresh token. |
+| D3 | HL7v2 parsing | Use `hl7apy` to parse, build and validate messages. "Own parser" in the brief means the v2-to-FHIR mapping is ours (no Whistle or Dataflow). The mapping is the code a reviewer should read. |
+| D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
 
 ## Open decisions (need the user)
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| D1 | The existing GCP project is prod. Dev needs its own project for apply-on-merge and nightly destroy in CI. | Create a second project for dev when we reach T26; until then CI only runs `plan` for dev. |
-| D2 | How a deployer connects their Google Health account (T11). | A CLI script that runs the OAuth flow and stores the refresh token in Secret Manager; a dashboard button can follow later. |
-| D3 | The brief lists `hl7apy` for `v2-to-fhir` but also says "own parser". | Hand-written parser with no HL7 library, since the parser is the showcase. |
 | D4 | Dashboard hosting: bucket + Cloud CDN, or Firebase Hosting. | Decide in T22; bucket + load balancer has an hourly forwarding-rule cost, Firebase Hosting does not. |
 | D5 | Dashboard framework. | Vite + TypeScript with a small chart library, no heavy framework. |
+| D7 | Where the `AE` for a malformed message comes from. The HL7v2 store returns the ACK at ingest, before `v2-to-fhir` runs, so the mapper cannot change the ACK the simulator receives. | Simulator validates before sending; the store rejects what it cannot parse; `v2-to-fhir` records a mapping error (an `AE` outcome in the messages log) for messages that ingest but cannot be mapped. Confirm in S5. |
 
 ## Wave 0: spikes (not started; on hold until the user says go)
 
@@ -51,7 +58,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 | T04 | Module `identity` | T01 | `infra/modules/identity/` | todo |
 | T05 | Module `healthcare` | T01 | `infra/modules/healthcare/` | todo |
 | T06 | FHIR mapping library | T01 | `libs/pulsebridge_fhir/` | todo |
-| T07 | HL7v2 library | T01 | `libs/pulsebridge_hl7v2/` | todo |
+| T07 | HL7v2 helpers (hl7apy) | T01 | `libs/pulsebridge_hl7v2/` | todo |
 
 **T01 Repo scaffolding.** Python tooling (ruff, pytest), a Makefile with `lint`, `test`, `fmt`,
 `tf-validate` targets, pre-commit hooks including a secret scanner, and a CI workflow that runs
@@ -78,7 +85,8 @@ Artifact Registry.
 **T04 Module `identity`.** Service accounts, IAM bindings, Secret Manager secrets (no values),
 reviewer login resources (pending S6).
 - AC: one service account per service, each with only the roles its service needs, listed in the README.
-- AC: secrets are created without versions; no secret value appears in code or state.
+- AC: secrets are created without versions; no secret value appears in code or state. The Google
+  Health secrets are three: OAuth client ID, OAuth client secret, refresh token.
 - AC: `terraform validate` passes.
 
 **T05 Module `healthcare`.** Healthcare dataset, FHIR R4 store, HL7v2 store, Pub/Sub topic and
@@ -98,12 +106,17 @@ heart-rate `Observation` (LOINC 8867-4, UCUM `/min`), blood-pressure panel `Obse
 - AC: invalid input (missing time, out-of-range value, wrong unit) raises a clear error.
 - AC: example outputs are written to `libs/pulsebridge_fhir/examples/` for the validator (T08).
 
-**T07 HL7v2 library.** Pure Python, no HL7 library (see D3). MLLP framing, ORU^R01 builder,
-parser for MSH/PID/OBR/OBX, ACK builder and parser.
-- AC: parser honours the separators declared in MSH-1 and MSH-2 and handles escape sequences.
-- AC: build then parse round-trips an ORU^R01 with two OBX segments.
-- AC: a malformed message gives a typed error that maps to an `AE` ACK, never an unhandled exception.
+**T07 HL7v2 library.** Thin, shared helpers over `hl7apy` (see D3); no hand-written ER7 parser.
+ORU^R01 builder for a blood-pressure reading (two OBX: LOINC 8480-6 and 8462-4), validation of a
+message before it is sent, ACK parsing, MLLP framing for the client side, and a small set of sample
+messages (valid, and malformed in different ways) reused by T12 and T13.
+- AC: the builder produces an ORU^R01 that passes `hl7apy` validation; a message with a missing
+  required field or a wrong OBX value type fails validation with a clear error.
+- AC: a built message parses back to the same patient identifier, LOINC codes, values, units and
+  observation time (OBX-14).
+- AC: ACK parsing returns the acknowledgment code (`AA`, `AE`, `AR`) and the control ID it answers.
 - AC: MLLP framing handles a message split across TCP reads and two messages in one read.
+- AC: sample messages are synthetic and live in `libs/pulsebridge_hl7v2/samples/`.
 
 ## Wave 2: services and CI checks
 
@@ -135,18 +148,34 @@ filter and paging, maps them with T06, writes a transaction Bundle.
 - AC: refresh token is read from Secret Manager at run time; nothing is logged that reveals it.
 - AC: tests use recorded synthetic responses, not the author's data.
 
-**T11 Google Health connect flow.** Lets the deployer authorise their own account (see D2).
-- AC: takes the OAuth client ID and secret from Secret Manager or prompts; none is committed.
-- AC: stores the refresh token as a new Secret Manager version and prints only a success message.
+**T11 Google Health connect flow.** CLI script that lets the deployer authorise their own account
+(see D2).
+- AC: reads the OAuth client ID and client secret from Secret Manager; if they are absent it
+  prompts for them without echo and stores them. None is committed or printed.
+- AC: runs the OAuth authorization-code flow and stores the refresh token as a new Secret Manager
+  version; prints only a success message.
+- AC: `health-sync` needs exactly these three secrets and nothing else from the deployer.
 - AC: documented in `docs/setup.md` terms a new user can follow.
 
-**T12 `v2-to-fhir` service.** Pub/Sub push handler: fetches the stored HL7v2 message, parses it
-with T07, writes one blood-pressure panel Observation plus Provenance pointing at the v2 message.
-- AC: a malformed message writes an error record and acknowledges the push; the subscription never stalls.
-- AC: a duplicate push does not create a second Observation.
+**T12 `v2-to-fhir` service.** Pub/Sub push handler plus the v2-to-FHIR mapping, which is the
+showcase code. The mapping lives in a single module (`services/v2-to-fhir/mapping.py`) with no
+GCP calls, so it can be read and tested on its own. Input is either the raw ER7 parsed with
+`hl7apy` or the HL7v2 store's `parsedData`; pick one and explain why in the service README.
+- AC: OBX-3 LOINC codes map to `Observation.code` (panel 85354-9) and `component` (8480-6, 8462-4);
+  OBX-5 and OBX-6 map to the component value and UCUM unit.
+- AC: OBX-14 maps to `effectiveDateTime`, with the time zone handled explicitly.
+- AC: MSH and PID identifiers map to the `Patient` and `Device` references.
+- AC: a `Provenance` points back to the HL7v2 store message name.
+- AC: the write is a conditional update keyed on the message control ID, so a redelivered push
+  does not create a second Observation.
+- AC: malformed input gives an `AE` outcome and an error record; the push is acknowledged and the
+  subscription never stalls (see D7).
+- AC: unit tests run the mapping against the T07 sample messages, including a malformed one.
 
-**T13 Cuff simulator backend.** Builds an ORU^R01 from bounded systolic and diastolic values and
-sends it by MLLP (default) or HTTPS ingest; returns the ACK.
+**T13 Cuff simulator backend.** Builds an ORU^R01 with the T07 builder from bounded systolic and
+diastolic values, validates it with `hl7apy` before sending, and sends it by MLLP (default) or
+HTTPS ingest; returns the ACK.
+- AC: a message that fails validation is never sent.
 - AC: inputs outside bounds are rejected; no free text reaches the message.
 - AC: rate-limited; both transports covered by tests against a fake listener.
 

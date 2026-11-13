@@ -16,7 +16,7 @@ A reviewer should leave with one sentence: he can take consumer and device healt
 | --- | --- |
 | Terraform / IaC | Every resource, including the VM, provisioned from modules with remote state and plan-on-PR CI |
 | FHIR R4 | Observation, Patient and Device resources written to a Cloud Healthcare FHIR store; conditional creates; validator pass |
-| HL7v2 | ORU^R01 messages from the device simulator, ingested over MLLP and mapped to FHIR with your own parser |
+| HL7v2 | ORU^R01 messages from the device simulator, ingested over MLLP and mapped to FHIR with our own mapping code (parsing by `hl7apy`) |
 | SMART on FHIR / OAuth2 | Registered OAuth2 client against OpenEMR; scoped token flow visible in the trace panel |
 | EHR integration | Vitals written into OpenEMR (ONC-certified) and visible in the patient chart |
 | Serverless / cost | Cloud Run scale-to-zero, Scheduler, pay-per-use Healthcare API; idle cost near $0 apart from the VM |
@@ -31,7 +31,7 @@ Secondary goal: the repo is cloneable. Someone who finds it on GitHub can run on
 The top row is the wearable path, the middle row the device path; both end in the same FHIR store that the dashboard reads and the share button forwards.
 
 1. **Ingestion, wearable.** Cloud Scheduler fires `health-sync` every 15 minutes. It pulls new heart-rate samples from the Google Health API (`dataPoints` list with a time filter and page token), maps each to a FHIR `Observation` (LOINC 8867-4, UCUM `/min`, category vital-signs, `Device` reference for the watch), and writes them to the FHIR store as a transaction `Bundle` using conditional updates keyed on the Google data-point `name` so re-delivery is idempotent.
-2. **Ingestion, device.** The cuff simulator's backend emits an HL7v2 `ORU^R01` over MLLP to the adapter on the VM. The adapter ingests into the HL7v2 store and returns the ACK to the simulator. Ingest publishes to Pub/Sub; `v2-to-fhir` parses PID/OBR/OBX from the stored message (own parser, not a managed mapping) and writes the same `Observation` shape to the FHIR store with provenance pointing at the v2 message.
+2. **Ingestion, device.** The cuff simulator's backend emits an HL7v2 `ORU^R01` over MLLP to the adapter on the VM. The adapter ingests into the HL7v2 store and returns the ACK to the simulator. Ingest publishes to Pub/Sub; `v2-to-fhir` reads PID/OBR/OBX from the stored message (parsed with `hl7apy`; the v2-to-FHIR mapping is our own code, not a managed mapping) and writes the same `Observation` shape to the FHIR store with provenance pointing at the v2 message.
 3. **Presentation.** The PHR dashboard is a static single-page app. It authenticates the viewer, then calls `Observation?patient=&code=8867-4&date=` on the FHIR store through a thin Cloud Run proxy that holds the service credentials. Selecting a point opens the trace panel: the FHIR JSON and, for device-sourced points, the original v2 message and its ACK.
 4. **Share with clinic.** One button sends the `Patient` (conditional create on an identifier) and the selected `Observation`s to OpenEMR's FHIR API using a registered OAuth2 client. The trace panel shows the token exchange and the `201 Created` responses. The reading then appears in the patient's chart in OpenEMR.
 
@@ -53,7 +53,7 @@ Fourteen pieces, all on GCP, all created by Terraform except the Google Health O
 | PHR dashboard | Cloud Storage bucket + Cloud CDN (or Firebase Hosting) | Static SPA: chart, trace panel, share button | cents |
 | FHIR proxy | Cloud Run service | Holds service-account credentials; exposes a narrow read API to the SPA; executes the share action against OpenEMR | $0 |
 | OpenEMR | Docker on the e2-micro (official OpenEMR image + MariaDB) | The clinic. Receives shared vitals via its FHIR API; reviewer account for chart view | rides the VM |
-| Secrets | Secret Manager | Google Health refresh token, OpenEMR client secret, DB password | \~$0 |
+| Secrets | Secret Manager | Google Health OAuth client ID, client secret and refresh token, OpenEMR client secret, DB password | \~$0 |
 | Identity | Service accounts, IAM bindings, Identity Platform (reviewer login) | Least-privilege per service; password-protected demo | $0 |
 
 The e2-micro is the only always-on piece and the only one that costs money if it leaves the free tier. It carries three jobs, OpenEMR, MariaDB and MLLP termination, because each needs a long-lived process or persistent local state and none fits Cloud Run cleanly. Add a 2 GB swap file and a low-memory MariaDB config; if page loads are unacceptable, move to e2-small, which leaves the free tier.
@@ -172,7 +172,7 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 | Terraform portability | Module interfaces, not resources | Terraform resources are provider-specific; portability lives in the variable/output contract of each module | Placeholder-templating script (rejected: reinvents modules) |
 | Last-mile EMR | OpenEMR | ONC-certified, PHP/MariaDB (own stack), FHIR R4 API with OAuth2; forces real auth, conformance and patient matching | hapi.fhir.org (no auth, public, PHI risk); Epic sandbox (stretch) |
 | FHIR store | Cloud Healthcare API FHIR store | Managed, R4, pay-per-op, first-class Terraform resource; leaves compute free for the app | HAPI (2 GB RAM), Medplum (4 GB), WSO2 FHIR Server (Go; viable fallback) |
-| HL7v2 path | Simulator → MLLP → Google mllp-adapter → HL7v2 store → Pub/Sub → own parser | Puts v2 where it lives in the real world; own parser is the showcase; managed store gives ACK and notifications for free | Client-side v2 formatting (rejected: never parsed or acked); Dataflow + Whistle (rejected: always-on cost, hides the mapping) |
+| HL7v2 path | Simulator → MLLP → Google mllp-adapter → HL7v2 store → Pub/Sub → own mapping | Puts v2 where it lives in the real world; `hl7apy` builds, validates and parses messages, and our own v2-to-FHIR mapping module is the showcase; managed store gives ACK and notifications for free | Client-side v2 formatting (rejected: never parsed or acked); Dataflow + Whistle (rejected: always-on cost, hides the mapping) |
 | Wearable source | Google Health API (cloud) | Legacy Fitbit Web API turned off Nov 2, 2026; Health API has \~5 s heart-rate samples by default and webhook subscriptions | Health Connect (on-device, needs an Android app) |
 | Compute for the VM | Fresh e2-micro via Terraform, hosting OpenEMR, MariaDB and the MLLP adapter | Clean lifecycle, reproducible, free tier; the existing instance stays untouched | Reuse existing e2-micro (rejected: mixed workloads) |
 | Environments | dev + prod roots, dev is the quick-start | Shows enterprise structure without making a cloner learn it | Single env; workspaces |
