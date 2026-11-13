@@ -27,9 +27,11 @@ concurrency:
 env:
   PYTHON_VERSION: "3.13"
   TERRAFORM_VERSION: "1.17.2"
-  # gitleaks v8.30.1 needs Go 1.24.11 or newer; setup-go sets GOTOOLCHAIN=local, so Go will not
-  # download a newer toolchain by itself and this version must satisfy it.
-  GO_VERSION: "1.24.11"
+  # Go builds two tools from source: gitleaks v8.30.1 (needs Go 1.24.11 or newer) and the
+  # actionlint pre-commit hook v1.7.12 (needs Go 1.25.0 or newer). setup-go sets GOTOOLCHAIN=local,
+  # so Go will not download a newer toolchain by itself: this version must satisfy both. Raise it
+  # when either tool is upgraded.
+  GO_VERSION: "1.25.9"
 
 jobs:
   lint-and-test:
