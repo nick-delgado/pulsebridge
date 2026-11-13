@@ -180,12 +180,18 @@ def test_reader_reports_connection_closed_mid_frame(server):
 
 
 def test_reader_reports_a_reset_as_connection_closed(server):
+    connected = threading.Event()
+
     def reset(conn):
         # SO_LINGER with a zero timeout makes close() send a TCP reset (RST), not an orderly FIN.
+        # Wait until the client holds its connected socket, so the reset reaches recv() and not
+        # the connect() inside the fixture.
+        connected.wait(2)
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
 
     client = server(reset)
     with client:
+        connected.set()
         time.sleep(0.1)  # let the reset arrive before we read
         with pytest.raises(MllpConnectionClosed) as caught:
             MllpReader(client).read_frame(timeout=2)
