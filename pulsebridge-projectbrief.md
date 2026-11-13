@@ -30,7 +30,7 @@ Secondary goal: the repo is cloneable. Someone who finds it on GitHub can run on
 
 The top row is the wearable path, the middle row the device path; both end in the same FHIR store that the dashboard reads and the share button forwards.
 
-1. **Ingestion, wearable.** Cloud Scheduler fires `health-sync` every 15 minutes. It pulls new heart-rate samples from the Google Health API (`dataPoints` list with a time filter and page token), maps each to a FHIR `Observation` (LOINC 8867-4, UCUM `/min`, category vital-signs, `Device` reference for the watch), and writes them to the FHIR store as a transaction `Bundle` using conditional updates keyed on the Google data-point `name` so re-delivery is idempotent.
+1. **Ingestion, wearable.** Cloud Scheduler fires `health-sync` every 15 minutes. It pulls heart rate from the Google Health API as five-minute roll-ups (`dataPoints:rollUp`, which returns the minimum, average and maximum per window; the watch records a sample every 1 to 3 seconds, about 37,000 a day, which is too many to store one by one). It maps each window to a FHIR `Observation` (LOINC 8867-4, UCUM `/min`, category vital-signs, `effectivePeriod` for the window, the average as the value with minimum and maximum as components, `Device` reference for the watch), and writes them to the FHIR store as a transaction `Bundle` using conditional updates keyed on patient, code and window start time so re-delivery is idempotent. Google's data points carry no `name` to key on.
 2. **Ingestion, device.** The cuff simulator's backend emits an HL7v2 `ORU^R01` over MLLP to the adapter on the VM. The adapter ingests into the HL7v2 store and returns the ACK to the simulator. Ingest publishes to Pub/Sub; `v2-to-fhir` reads PID/OBR/OBX from the stored message (parsed with `hl7apy`; the v2-to-FHIR mapping is our own code, not a managed mapping) and writes the same `Observation` shape to the FHIR store with provenance pointing at the v2 message.
 3. **Presentation.** The PHR dashboard is a static single-page app. It authenticates the viewer, then calls `Observation?patient=&code=8867-4&date=` on the FHIR store through a thin Cloud Run proxy that holds the service credentials. Selecting a point opens the trace panel: the FHIR JSON and, for device-sourced points, the original v2 message and its ACK.
 4. **Share with clinic.** One button sends the `Patient` (search by identifier, then create if absent; OpenEMR ignores conditional create), creates an `Encounter` for the share (OpenEMR rejects an Observation without one), and sends the selected `Observation`s to OpenEMR's FHIR API as individual requests using a registered OAuth2 client (client credentials grant, authenticated with a signed key). The trace panel shows the token exchange and the `201 Created` responses. The reading then appears in the patient's chart in OpenEMR.
@@ -81,20 +81,21 @@ One page, no navigation. A line-art silhouette of the patient sits in the centre
 
 **Right: heart-rate chart**
 
-- [ ] Line chart of watch heart rate, last 24 h by default, selectable 7 d / 30 d
+- [ ] Line chart of watch heart rate (five-minute averages, about 288 points a day), last 24 h by default, selectable 7 d / 30 d
 - [ ] Min, mean and max for the window under the chart
 - [ ] Selecting a point fills the right trace panel and shows time, value and source below the chart
 
 **Trace panels, share action, messages log**
 
 - [ ] Left panel tabs: HL7v2 as sent, ACK as received (commit-level acknowledgment) with the application-level outcome, FHIR as stored
-- [ ] Right panel tabs: FHIR as stored, Google Health JSON it came from
+- [ ] Right panel tabs: FHIR as stored, Google Health JSON it came from (the roll-up window)
 - [ ] Share with clinic acts on whatever is selected on either side; its own trace (token request, each request sent, 201 Created responses, link to the OpenEMR chart; OpenEMR accepts no transaction Bundle) appears under the button
 - [ ] Messages log as a collapsible strip at the bottom: one row per HL7v2 message (type, commit-level acknowledgment, application-level outcome and reason, store id, resulting Observation) and per FHIR transaction (Bundle, HTTP status, resource ids)
 
 **Ingestion**
 
-- [ ] `health-sync` is idempotent (conditional update on Google data-point id); backfill command for the last N days
+- [ ] `health-sync` is idempotent (conditional update keyed on patient, code and window start time); backfill command for the last N days
+- [ ] An expired or revoked Google refresh token shows as "reconnect needed" in the status strip, not as a crash
 - [ ] Malformed messages are handled per layer, following HL7 enhanced acknowledgment mode (MSH-15/16): the simulator rejects structurally invalid messages before sending (`hl7apy` validation); the store rejects unparseable messages with `AE` and a reason, which the adapter relays and the simulator shows (commit-level acknowledgment); bad MLLP framing or a Healthcare API failure yields no acknowledgment at all, which the simulator shows as a timeout or closed connection; `v2-to-fhir` records `application_outcome: accepted|error` plus a reason for messages that parse but cannot be mapped (unknown code, missing OBX-14, non-numeric OBX-5), and never crashes the subscription. Optionally it also writes an `ACK^R01` with MSA-1=AE back into the HL7v2 store
 - [ ] Every Observation carries `device` and a `Provenance` naming the source system
 
@@ -174,9 +175,10 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 | Last-mile EMR | OpenEMR | ONC-certified, PHP/MariaDB (own stack), FHIR R4 API with OAuth2; forces real auth, conformance and patient matching | hapi.fhir.org (no auth, public, PHI risk); Epic sandbox (stretch) |
 | FHIR store | Cloud Healthcare API FHIR store | Managed, R4, pay-per-op, first-class Terraform resource; leaves compute free for the app | HAPI (2 GB RAM), Medplum (4 GB), WSO2 FHIR Server (Go; viable fallback) |
 | HL7v2 path | Simulator → MLLP → Google mllp-adapter → HL7v2 store → Pub/Sub → own mapping | Puts v2 where it lives in the real world; `hl7apy` builds, validates and parses messages, and our own v2-to-FHIR mapping module is the showcase; managed store gives ACK and notifications for free | Client-side v2 formatting (rejected: never parsed or acked); Dataflow + Whistle (rejected: always-on cost, hides the mapping) |
-| Wearable source | Google Health API (cloud) | Legacy Fitbit Web API turned off Nov 2, 2026; Health API has \~5 s heart-rate samples by default and webhook subscriptions | Health Connect (on-device, needs an Android app) |
+| Wearable source | Google Health API (cloud) | Legacy Fitbit Web API turned off Nov 2, 2026; Health API has heart-rate samples every 1 to 3 seconds (about 37,000 a day), a roll-up method, and webhook subscriptions | Health Connect (on-device, needs an Android app) |
 | Compute for the VM | Fresh e2-micro via Terraform, hosting OpenEMR, MariaDB and the MLLP adapter | Clean lifecycle, reproducible, free tier; the existing instance stays untouched | Reuse existing e2-micro (rejected: mixed workloads) |
 | Environments | dev + prod roots, dev is the quick-start | Shows enterprise structure without making a cloner learn it | Single env; workspaces |
+| Heart-rate granularity | Five-minute roll-ups (about 288 Observations a day) | Raw samples would be over a million Observations a month; five minutes keeps the store and the chart small while still showing the day's shape | Every sample; one-minute or fifteen-minute roll-ups; FHIR `SampledData` (samples are unevenly spaced) |
 | Wearable account | Per deployment: each deployer registers their own OAuth app and connects their own Google Health account | Keeps the PHR single-patient and the repo free of the author's credentials | Hosted multi-user connect (rejected: strangers' PHI, scope verification) |
 | CI authentication | Workload Identity Federation | No long-lived keys in GitHub | Service account key secret |
 | Product name | PulseBridge | PulseBridge; repo slug pulsebridge; demo at pulsebridge.tinkeringnick.com |  |
@@ -187,7 +189,7 @@ Run these before building; each is a half-day and any one of them can change the
 
 - [x] **OpenEMR FHIR write support.** Resolved by spike S1 (`docs/spikes/s1.md`): on OpenEMR 8.5.0, `POST /apis/default/fhir/Observation` is accepted for heart rate and the blood-pressure panel and lands in the Vitals form. No REST fallback is needed. An Encounter is required, Patient conditional create is ignored, and there is no Bundle endpoint.
 - [x] **OpenEMR on the e2-micro.** Resolved by spike S2 (`docs/spikes/s2.md`): OpenEMR, MariaDB and the mllp-adapter run together on the e2-micro with no out-of-memory kills; warm responses are well under a second. Acceptable for one reviewer at a time, with Apache capped at four workers. e2-small was not tested.
-- [ ] **Google Health API registration.** Register the OAuth app, obtain a token, pull one day of `heart-rate` data points; confirm the exact field names and whether webhook payloads carry samples or only notifications.
+- [x] **Google Health API registration.** Resolved by spike S3 (`docs/spikes/s3.md`): the OAuth app, the connect flow and a one-day pull of `heart-rate` all work with the `googlehealth.health_metrics_and_measurements.readonly` scope, and the field names are recorded. Still unknown: what a webhook notification carries. Known limit: while the OAuth app is in Testing status the refresh token expires after 7 days.
 - [x] **mllp-adapter on e2-micro.** Resolved by spike S4 (`docs/spikes/s4.md`): Google's adapter runs next to MariaDB in about 27 MiB and relays the store's ACK in a median of 75 ms. No Python listener is needed. Memory with OpenEMR also running is spike S2's question.
 - [ ] **HL7v2 store notification.** Confirm `ingest` (not `import`) publishes to Pub/Sub, and the message body format the push subscription delivers.
 - [ ] **Reviewer auth.** Identity Platform vs a static password in the fhir-proxy; pick the simpler one that still looks deliberate.

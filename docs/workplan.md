@@ -24,6 +24,7 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D1 | Dev project | The existing GCP project is prod. A second project for dev is created when we reach T26; until then CI only runs `plan` for dev. |
 | D2 | Connecting Google Health | A CLI script runs the OAuth flow. Three values live in Secret Manager: OAuth client ID, OAuth client secret, refresh token. |
 | D3 | HL7v2 parsing | Use `hl7apy` to parse, build and validate messages. "Own parser" in the brief means the v2-to-FHIR mapping is ours (no Whistle or Dataflow). The mapping is the code a reviewer should read. |
+| D8 | Heart-rate granularity | Five-minute roll-ups from the Google Health API's `rollUp` method (about 288 Observations a day), not raw samples (about 37,000 a day). See `docs/spikes/s3.md`. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
 | D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
@@ -123,12 +124,23 @@ push subscription, HL7v2 notification config.
 - AC: `terraform validate` passes.
 
 **T06 FHIR mapping library.** Pure Python, no GCP calls. Builders for `Patient`, `Device`,
-heart-rate `Observation` (LOINC 8867-4, UCUM `/min`), blood-pressure panel `Observation`
+heart-rate `Observation` (LOINC 8867-4, UCUM `/min`; one per five-minute roll-up window, see D8),
+blood-pressure panel `Observation`
 (LOINC 85354-9 with components 8480-6 and 8462-4, `mm[Hg]`), `Provenance`, and a transaction
 `Bundle` using conditional updates.
 - AC: every Observation has status, vital-signs category, code, subject, effective time, value with
   UCUM unit, and a `device` reference.
-- AC: building the same input twice gives the same conditional-update key (idempotency).
+- AC: building the same input twice gives the same conditional-update key (idempotency). For
+  heart rate the key is built from patient, code and window start time; Google's data points have
+  no `name`.
+- AC: a heart-rate Observation uses `effectivePeriod` for the window, the average as
+  `valueQuantity`, and the minimum and maximum as components. The component codes are checked
+  against LOINC and the choice is explained, not guessed.
+- AC: the mapper takes the roll-up shape recorded in `docs/spikes/s3.md` (numbers for minimum and
+  maximum, a decimal average, UTC window times) and applies the user's UTC offset to the FHIR times.
+- AC: `Patient.identifier` can carry the Google Health user ID; the `Device` identifier is
+  derived, because Google supplies only a display name. `Provenance` records the source platform
+  and recording method.
 - AC: invalid input (missing time, out-of-range value, wrong unit) raises a clear error.
 - AC: example outputs are written to `libs/pulsebridge_fhir/examples/` for the validator (T08).
 
@@ -166,14 +178,23 @@ resources from T06.
 - AC: CI fails when an example resource is made invalid (demonstrated in the task summary).
 
 **T09 Synthetic data seeder.** Backs the `use_synthetic_data` flag: generates plausible heart-rate
-samples for a synthetic patient and writes them through the T06 mapper.
+roll-up windows (the same five-minute shape the Google Health API returns) for a synthetic patient
+and writes them through the T06 mapper.
 - AC: output is deterministic for a given seed; re-running does not duplicate Observations.
 - AC: no real health data is used.
 
-**T10 `health-sync` service.** Pulls new heart-rate points from the Google Health API with a time
-filter and paging, maps them with T06, writes a transaction Bundle.
-- AC: idempotent on re-delivery (conditional update keyed on the data-point name).
-- AC: `backfill --days N` command exists.
+**T10 `health-sync` service.** Pulls five-minute heart-rate roll-ups from the Google Health API
+(`dataPoints:rollUp`, see D8 and `docs/spikes/s3.md`), maps them with T06, writes a transaction
+Bundle.
+- AC: idempotent on re-delivery (conditional update keyed on patient, code and window start).
+- AC: each run re-requests a range that overlaps the previous run, and a window that was only
+  partly synced is updated on the next run, not skipped.
+- AC: follows `nextPageToken`; handles results arriving newest first and windows with no data
+  being absent.
+- AC: `backfill --days N` command exists and splits the range into requests of at most 14 days
+  (the API's limit for heart-rate roll-ups).
+- AC: an expired or revoked refresh token gives a clear "reconnect needed" status that the proxy
+  can show, not a crash or a retry loop.
 - AC: refresh token is read from Secret Manager at run time; nothing is logged that reveals it.
 - AC: tests use recorded synthetic responses, not the author's data.
 
@@ -181,8 +202,13 @@ filter and paging, maps them with T06, writes a transaction Bundle.
 (see D2).
 - AC: reads the OAuth client ID and client secret from Secret Manager; if they are absent it
   prompts for them without echo and stores them. None is committed or printed.
-- AC: runs the OAuth authorization-code flow and stores the refresh token as a new Secret Manager
-  version; prints only a success message.
+- AC: runs the OAuth authorization-code flow with PKCE and a `state` check, requesting offline
+  access and a consent prompt (without them Google returns no refresh token), and stores the
+  refresh token as a new Secret Manager version; prints only a success message.
+- AC: listens on a loopback port for the redirect when run on the deployer's machine, and
+  accepts a pasted redirect address when it cannot.
+- AC: reports when the refresh token will expire (7 days while the OAuth app is in Testing status).
+- AC: the scope requested is `googlehealth.health_metrics_and_measurements.readonly`, as a variable.
 - AC: `health-sync` needs exactly these three secrets and nothing else from the deployer.
 - AC: documented in `docs/setup.md` terms a new user can follow.
 
@@ -266,7 +292,8 @@ and right panels, share button placeholder, collapsible messages log, a typed AP
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | todo |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief.
-- AC (T17): 24 h, 7 d and 30 d windows; min, mean and max; selecting a point fills the trace panel.
+- AC (T17): 24 h, 7 d and 30 d windows of five-minute averages; min, mean and max for the window;
+  selecting a point fills the trace panel with that roll-up window.
 - AC (T18): bounded inputs, transport toggle, "send malformed" checkbox, readings list with ACK
   code, three trace tabs; the trace shows the commit-level acknowledgment and the application-level
   outcome as two separately labelled items.
@@ -348,6 +375,8 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
 bootstrap, register a Google Health OAuth app, connect an account, deploy, destroy. README: pitch,
 GIF, architecture, standards map, deploy, what this is not.
 - AC: no step relies on the author's accounts; every command uses a placeholder or a variable.
+- AC: the guide explains the OAuth app's Testing status (test users only, refresh token expires
+  after 7 days) and how to move it to "In production".
 
 **T29 End-to-end smoke test.** Simulated cuff reading through MLLP to the FHIR store, then shared
 to OpenEMR, asserted from the APIs.
