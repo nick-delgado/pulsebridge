@@ -8,9 +8,10 @@ mock_provider "google" {
 }
 
 variables {
-  create_project    = false
-  project_id        = "example-project"
-  github_repository = "example-owner/example-repo"
+  create_project       = false
+  project_id           = "example-project"
+  github_repository    = "example-owner/example-repo"
+  github_repository_id = "123456789"
 }
 
 run "valid_baseline_passes" {
@@ -125,12 +126,70 @@ run "rejects_non_numeric_repository_id" {
   expect_failures = [var.github_repository_id]
 }
 
+run "rejects_null_repository_id" {
+  command = plan
+  variables {
+    # The ID is mandatory: there is no name-only mode.
+    github_repository_id = null
+  }
+  expect_failures = [var.github_repository_id]
+}
+
+run "rejects_non_numeric_owner_id" {
+  command = plan
+  variables {
+    github_repository_owner_id = "example-owner"
+  }
+  expect_failures = [var.github_repository_owner_id]
+}
+
+run "rejects_ref_that_could_inject_cel" {
+  command = plan
+  variables {
+    # A quote would close the CEL string literal and append "|| true" to the condition.
+    github_allowed_refs = ["refs/heads/main\" || true || \""]
+  }
+  expect_failures = [var.github_allowed_refs]
+}
+
+run "rejects_ref_outside_heads_and_tags" {
+  command = plan
+  variables {
+    github_allowed_refs = ["main"]
+  }
+  expect_failures = [var.github_allowed_refs]
+}
+
 run "rejects_reserved_pool_prefix" {
   command = plan
   variables {
     wif_pool_id = "gcp-github"
   }
   expect_failures = [var.wif_pool_id]
+}
+
+run "rejects_reserved_provider_prefix" {
+  command = plan
+  variables {
+    wif_provider_id = "gcp-oidc"
+  }
+  expect_failures = [var.wif_provider_id]
+}
+
+run "rejects_short_provider_id" {
+  command = plan
+  variables {
+    wif_provider_id = "gh"
+  }
+  expect_failures = [var.wif_provider_id]
+}
+
+run "rejects_bad_bucket_location" {
+  command = plan
+  variables {
+    state_bucket_location = "us central1"
+  }
+  expect_failures = [var.state_bucket_location]
 }
 
 run "rejects_bad_bucket_name" {

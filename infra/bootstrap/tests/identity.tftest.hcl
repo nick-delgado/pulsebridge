@@ -7,19 +7,20 @@ mock_provider "google" {
 }
 
 variables {
-  create_project    = false
-  project_id        = "example-project"
-  github_repository = "example-owner/example-repo"
+  create_project       = false
+  project_id           = "example-project"
+  github_repository    = "example-owner/example-repo"
+  github_repository_id = "123456789"
 }
 
 run "wif_provider_is_pinned_to_one_repository" {
   command = plan
 
   assert {
-    # Exact string: the condition must be an equality on the repository claim, nothing looser
-    # (no startsWith on the owner, no `true`).
-    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\""
-    error_message = "The attribute condition must pin assertion.repository to var.github_repository exactly."
+    # Exact string: equality on BOTH the repository name and its immutable numeric ID, nothing
+    # looser (no startsWith on the owner, no `true`, no name-only match).
+    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\""
+    error_message = "The attribute condition must pin assertion.repository and assertion.repository_id exactly."
   }
 
   assert {
@@ -30,9 +31,11 @@ run "wif_provider_is_pinned_to_one_repository" {
   assert {
     condition = (
       google_iam_workload_identity_pool_provider.github.attribute_mapping["google.subject"] == "assertion.sub" &&
-      google_iam_workload_identity_pool_provider.github.attribute_mapping["attribute.repository"] == "assertion.repository"
+      google_iam_workload_identity_pool_provider.github.attribute_mapping["attribute.repository"] == "assertion.repository" &&
+      google_iam_workload_identity_pool_provider.github.attribute_mapping["attribute.repository_id"] == "assertion.repository_id" &&
+      google_iam_workload_identity_pool_provider.github.attribute_mapping["attribute.repository_owner_id"] == "assertion.repository_owner_id"
     )
-    error_message = "google.subject and attribute.repository must be mapped from GitHub's claims."
+    error_message = "google.subject, attribute.repository, attribute.repository_id and attribute.repository_owner_id must be mapped from GitHub's claims."
   }
 
   assert {
@@ -44,21 +47,23 @@ run "wif_provider_is_pinned_to_one_repository" {
   }
 
   assert {
-    condition     = google_service_account_iam_member.deployer_github_wif.member == "principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.repository/example-owner/example-repo"
-    error_message = "Only identities from var.github_repository may impersonate the deployer."
+    # Keyed on the immutable repository ID, so the binding is never weaker than the condition.
+    condition     = google_service_account_iam_member.deployer_github_wif.member == "principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.repository_id/123456789"
+    error_message = "Only identities from the repository with ID var.github_repository_id may impersonate the deployer."
   }
 }
 
-run "wif_condition_also_pins_repository_id_when_given" {
+run "wif_condition_adds_owner_id_and_refs_when_given" {
   command = plan
 
   variables {
-    github_repository_id = "123456789"
+    github_repository_owner_id = "987654"
+    github_allowed_refs        = ["refs/heads/main", "refs/tags/v1.0.0"]
   }
 
   assert {
-    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\""
-    error_message = "With github_repository_id set, the condition must pin both the name and the numeric ID."
+    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\" && assertion.repository_owner_id == \"987654\" && assertion.ref in [\"refs/heads/main\", \"refs/tags/v1.0.0\"]"
+    error_message = "github_repository_owner_id and github_allowed_refs must each add their clause to the condition."
   }
 }
 

@@ -12,8 +12,9 @@ mock_provider "google" {
 }
 
 variables {
-  project_id        = "example-project"
-  github_repository = "example-owner/example-repo"
+  project_id           = "example-project"
+  github_repository    = "example-owner/example-repo"
+  github_repository_id = "123456789"
 }
 
 run "create_mode_creates_project_and_links_billing" {
@@ -90,6 +91,21 @@ run "create_mode_under_optional_folder" {
   assert {
     condition     = google_project.this[0].name == "PulseBridge demo"
     error_message = "project_name must be used as the display name when set."
+  }
+}
+
+run "create_mode_under_optional_org" {
+  command = plan
+
+  variables {
+    create_project  = true
+    billing_account = "000000-AAAAAA-111111"
+    org_id          = "987654321"
+  }
+
+  assert {
+    condition     = google_project.this[0].org_id == "987654321" && google_project.this[0].folder_id == null
+    error_message = "org_id must be passed through as the project's parent."
   }
 }
 

@@ -254,13 +254,40 @@ variable "github_repository" {
 }
 
 variable "github_repository_id" {
-  description = "Optional numeric ID of the GitHub repository (`gh api repos/OWNER/NAME --jq .id`). When set, the attribute condition also pins this ID, so a different repository later created under the same owner/name (after a rename or deletion) cannot match. Recommended."
+  description = "Numeric ID of the same GitHub repository: the `id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .id`. Required. Names can be reused after a repository is deleted or renamed, or its owner account is renamed; the numeric ID never is. Both the attribute condition and the impersonation binding match on it."
+  type        = string
+  # No default: required. Left nullable on purpose so an explicit null reaches the validation
+  # below and is rejected with a clear message (tests/validation.tftest.hcl checks this).
+
+  validation {
+    # can() is false for null too, so null is rejected here.
+    condition     = can(regex("^[1-9][0-9]*$", var.github_repository_id))
+    error_message = "github_repository_id must be the numeric repository ID, for example \"123456789\" (the `id` field of the GitHub API's repository object)."
+  }
+}
+
+variable "github_repository_owner_id" {
+  description = "Optional numeric ID of the repository's owner (user or organization): the `owner.id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .owner.id`. When set, the attribute condition also requires `assertion.repository_owner_id` to match."
   type        = string
   default     = null
 
   validation {
-    condition     = var.github_repository_id == null || can(regex("^[0-9]+$", coalesce(var.github_repository_id, "x")))
-    error_message = "github_repository_id must be the numeric repository ID, for example 123456789."
+    condition     = var.github_repository_owner_id == null || can(regex("^[1-9][0-9]*$", coalesce(var.github_repository_owner_id, "x")))
+    error_message = "github_repository_owner_id must be the numeric owner ID, for example \"12345678\"."
+  }
+}
+
+variable "github_allowed_refs" {
+  description = "Optional list of git refs (for example [\"refs/heads/main\"]) allowed to obtain deployer tokens. Empty (the default) allows every branch, tag and pull-request ref in the repository; see README.md (\"What the condition does not restrict\"). Note that pull-request workflows run on refs/pull/N/merge, so restricting refs also blocks plan-on-PR with this identity."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    # Each value is pasted into a CEL string literal in the attribute condition, so the allowed
+    # characters exclude quotes and backslashes: a value cannot close the literal and inject CEL.
+    condition     = alltrue([for r in var.github_allowed_refs : can(regex("^refs/(heads|tags)/[A-Za-z0-9._/-]{1,200}$", r))])
+    error_message = "Each entry of github_allowed_refs must look like refs/heads/<branch> or refs/tags/<tag>, using only letters, digits, '.', '_', '/' and '-'."
   }
 }
 

@@ -19,8 +19,14 @@ billing_account = "000000-AAAAAA-000000" # `gcloud billing accounts list`
 
 # The one repository whose workflows may deploy, exactly as GitHub shows it (case matters).
 github_repository = "your-github-user/pulsebridge"
-# Recommended: also pin the numeric ID (`gh api repos/OWNER/NAME --jq .id`).
-# github_repository_id = "000000000"
+# Required: the same repository's numeric ID, which (unlike the name) can never be reused by a
+# different repository. It is the `id` field of https://api.github.com/repos/<owner>/<name>, or
+# run `gh api repos/<owner>/<name> --jq .id`.
+github_repository_id = "123456789"
+# Optional: the owner's numeric ID (`gh api repos/<owner>/<name> --jq .owner.id`).
+# github_repository_owner_id = "12345678"
+# Optional: only these refs may get deployer tokens (also blocks plan-on-PR; see README.md).
+# github_allowed_refs = ["refs/heads/main"]
 
 # --- Optional ------------------------------------------------------------------------------------
 

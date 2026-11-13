@@ -6,9 +6,10 @@ mock_provider "google" {
 }
 
 variables {
-  create_project    = false
-  project_id        = "example-project"
-  github_repository = "example-owner/example-repo"
+  create_project       = false
+  project_id           = "example-project"
+  github_repository    = "example-owner/example-repo"
+  github_repository_id = "123456789"
 }
 
 run "bucket_is_versioned_private_and_protected" {
