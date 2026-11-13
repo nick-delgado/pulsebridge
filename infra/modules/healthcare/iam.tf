@@ -43,64 +43,64 @@ resource "google_pubsub_subscription_iam_member" "pubsub_agent_ingest_subscriber
   member       = "serviceAccount:${local.pubsub_service_agent}"
 }
 
-# To sign the push request's OIDC token, the Pub/Sub service agent creates tokens as the push
-# service account. Granted on that one account, not project-wide.
-resource "google_service_account_iam_member" "pubsub_agent_token_creator" {
-  count = var.push_enabled && var.grant_pubsub_token_creator ? 1 : 0
-
-  service_account_id = "projects/${var.project_id}/serviceAccounts/${var.push_service_account_email}"
-  role               = "roles/iam.serviceAccountTokenCreator"
-  member             = "serviceAccount:${local.pubsub_service_agent}"
-}
+# Not here: the Pub/Sub service agent's roles/iam.serviceAccountTokenCreator on the push
+# service account (needed to mint the push OIDC token). Module identity owns that one grant;
+# if two modules managed the same IAM member, destroying either would remove the other's grant.
+# tests/check_ordering.sh fails if a token-creator grant reappears in this module.
 
 # ---------------------------------------------------------------------------------------------
 # Store-level bindings for the application service accounts (module identity creates them)
 # ---------------------------------------------------------------------------------------------
 
 locals {
-  # Which narrowest predefined role each account gets on each store. Accounts absent from
-  # var.store_iam_service_accounts get nothing.
+  # Which narrowest predefined role each account gets on each store. Keys are module
+  # identity's account names. Accounts absent from var.store_iam_service_accounts get nothing,
+  # and keys of that map not listed here (scheduler-invoker, pubsub-push, ...) are ignored.
   # hl7V2Consumer is described by Google as "list and read HL7v2 messages, update message
   # labels, and publish new messages": it carries healthcare.hl7V2Messages.update, which
   # messages.patch (labels only) requires. hl7V2Editor would add delete and ingest.
   store_role_matrix = {
-    health_sync = {
+    "health-sync" = {
       fhir = "roles/healthcare.fhirResourceEditor" # conditional update / executeBundle of Observations
     }
-    v2_to_fhir = {
+    "seeder" = {
+      fhir = "roles/healthcare.fhirResourceEditor" # synthetic-data seeder (T09), same write pattern
+    }
+    "v2-to-fhir" = {
       fhir  = "roles/healthcare.fhirResourceEditor" # write Patient, Device, Observation, Provenance
       hl7v2 = "roles/healthcare.hl7V2Consumer"      # messages.get + messages.patch (outcome labels, S5)
     }
-    fhir_proxy = {
+    "fhir-proxy" = {
       fhir  = "roles/healthcare.fhirResourceReader" # search and read only
       hl7v2 = "roles/healthcare.hl7V2Consumer"      # messages.list (label filter) + messages.get
     }
-    edge_vm = {
+    "edge-vm" = {
       hl7v2 = "roles/healthcare.hl7V2Ingest" # MLLP adapter -> messages:ingest
     }
-    cuff_sim = {
+    "cuff-sim" = {
       hl7v2 = "roles/healthcare.hl7V2Ingest" # HTTPS transport -> messages:ingest
     }
   }
 
-  # Keys depend only on the map's keys, which the caller writes literally, so for_each is
-  # known at plan time even when the emails are not yet.
+  # Iterate over this module's own account names and keep those the caller supplied. The
+  # for_each keys therefore depend only on key names (known at plan time), never on the
+  # emails, which may still be unknown on the first apply.
   fhir_store_bindings = {
-    for account, email in var.store_iam_service_accounts :
+    for account, roles in local.store_role_matrix :
     account => {
-      role   = local.store_role_matrix[account].fhir
-      member = "serviceAccount:${email}"
+      role   = roles.fhir
+      member = "serviceAccount:${var.store_iam_service_accounts[account]}"
     }
-    if contains(keys(local.store_role_matrix[account]), "fhir")
+    if contains(keys(var.store_iam_service_accounts), account) && contains(keys(roles), "fhir")
   }
 
   hl7v2_store_bindings = {
-    for account, email in var.store_iam_service_accounts :
+    for account, roles in local.store_role_matrix :
     account => {
-      role   = local.store_role_matrix[account].hl7v2
-      member = "serviceAccount:${email}"
+      role   = roles.hl7v2
+      member = "serviceAccount:${var.store_iam_service_accounts[account]}"
     }
-    if contains(keys(local.store_role_matrix[account]), "hl7v2")
+    if contains(keys(var.store_iam_service_accounts), account) && contains(keys(roles), "hl7v2")
   }
 }
 

@@ -37,20 +37,17 @@ module "healthcare" {
   # create a cycle: only the subscription depends on it, not the stores ingestion reads.
   push_enabled               = true
   push_endpoint              = "${module.ingestion.v2_to_fhir_url}/pubsub/hl7v2"
+  # Referencing module identity's output makes push wait for identity, which also owns the
+  # Pub/Sub agent's token-creator grant on this account (see "IAM").
   push_service_account_email = module.identity.service_account_emails["pubsub-push"]
 
-  store_iam_service_accounts = {
-    health_sync = module.identity.service_account_emails["health-sync"]
-    v2_to_fhir  = module.identity.service_account_emails["v2-to-fhir"]
-    fhir_proxy  = module.identity.service_account_emails["fhir-proxy"]
-    edge_vm     = module.identity.service_account_emails["edge-vm"]
-    cuff_sim    = module.identity.service_account_emails["cuff-sim"]
-  }
+  # Module identity's map as it is: this module uses the keys it knows and ignores the rest.
+  store_iam_service_accounts = module.identity.service_account_emails
 }
 ```
 
-The output names of `module.ingestion` and `module.identity` above are illustrative; T20, T04 and
-T25 settle them.
+`module.identity.service_account_emails` is module identity's output (T04). The
+`module.ingestion` output name above is illustrative; T20 and T25 settle it.
 
 ## FHIR store settings
 
@@ -104,8 +101,7 @@ subscription therefore always exists, and `push_config` is added only when `push
 true. Before that it is a pull subscription nobody reads, so notifications wait in it for up to 7
 days and are pushed once push is switched on; changing pull to push is an in-place update. The
 switch is a plain bool rather than "is `push_endpoint` set", because Terraform must know at plan
-time whether to create the token-creator binding, and a Cloud Run URL is unknown until that
-service exists. In one env root the whole stack applies in one run: only the subscription depends
+time whether to add the push config, and a Cloud Run URL is unknown until that service exists. In one env root the whole stack applies in one run: only the subscription depends
 on the URL, not the stores.
 
 Both subscriptions have `expiration_policy { ttl = "" }`: by default Pub/Sub deletes a
@@ -122,20 +118,31 @@ All bindings are resource-level and additive (`*_iam_member`); none is project-l
 | Cloud Healthcare service agent `service-<number>@gcp-sa-healthcare` | `roles/pubsub.publisher` | ingest topic | Publishes the HL7v2 store's notifications. The store depends on this binding: creating a store whose topic it cannot publish to fails with 403 (S5). |
 | Pub/Sub service agent `service-<number>@gcp-sa-pubsub` | `roles/pubsub.publisher` | dead-letter topic | Forwards failed notifications. |
 | Pub/Sub service agent | `roles/pubsub.subscriber` | ingest subscription | Acknowledges the original once it is dead-lettered. |
-| Pub/Sub service agent | `roles/iam.serviceAccountTokenCreator` | the push service account only | Mints the push OIDC token. Only when `push_enabled` and `grant_pubsub_token_creator`. |
 
-**Application service accounts** (emails from module identity, each optional, keys of
-`store_iam_service_accounts`). The narrowest predefined Healthcare roles:
+**Not in this module: the push token grant.** To sign the push request's OIDC token, the
+Pub/Sub service agent needs `roles/iam.serviceAccountTokenCreator` on the push service account.
+Module identity (T04) is the single owner of that grant: if two modules managed the same IAM
+member, destroying either would delete the other's grant. In the root, passing
+`module.identity.service_account_emails["pubsub-push"]` as `push_service_account_email` makes
+the push switch depend on module identity, so the grant is applied first. IAM changes take a
+little while to propagate, so the first pushes after switching on may fail and be retried;
+with the retry policy above that costs a few delivery attempts, not messages.
+`tests/check_ordering.sh` fails if a token-creator grant appears in this module.
+
+**Application service accounts** (module identity's map, passed as it is to
+`store_iam_service_accounts`). Every key is optional, and keys not listed here (for example
+`scheduler-invoker`, `pubsub-push`) are ignored. The narrowest predefined Healthcare roles:
 
 | Key (account) | Role | Resource | Needed for |
 | --- | --- | --- | --- |
-| `health_sync` | `roles/healthcare.fhirResourceEditor` | FHIR store | Conditional updates in a transaction Bundle |
-| `v2_to_fhir` | `roles/healthcare.fhirResourceEditor` | FHIR store | Writing Patient, Device, Observation, Provenance |
-| `v2_to_fhir` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.get` and `messages.patch` with `updateMask=labels` (outcome labels, S5). Google's IAM reference describes Consumer as "list and read HL7v2 messages, update message labels, and publish new messages", which covers `healthcare.hl7V2Messages.update` (the permission `messages.patch` needs). Found through search-result summaries of that page, not by reading the role directly; the first apply must confirm the label patch. Editor would also allow delete and ingest. |
-| `fhir_proxy` | `roles/healthcare.fhirResourceReader` | FHIR store | Search and read for the dashboard and share |
-| `fhir_proxy` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.list` filtered by label, `messages.get` for the trace. Consumer also lets it patch labels and create messages, which the proxy does not need; no narrower predefined role covers list + get, so a custom role would be the next step. |
-| `edge_vm` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | MLLP adapter `messages:ingest` (S4) |
-| `cuff_sim` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | HTTPS ingest transport |
+| `health-sync` | `roles/healthcare.fhirResourceEditor` | FHIR store | Conditional updates in a transaction Bundle |
+| `seeder` | `roles/healthcare.fhirResourceEditor` | FHIR store | Synthetic-data seeder (T09), same write pattern as health-sync. Nothing on the HL7v2 store. Present only when module identity creates that account. |
+| `v2-to-fhir` | `roles/healthcare.fhirResourceEditor` | FHIR store | Writing Patient, Device, Observation, Provenance |
+| `v2-to-fhir` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.get` and `messages.patch` with `updateMask=labels` (outcome labels, S5). Google's IAM reference describes Consumer as "list and read HL7v2 messages, update message labels, and publish new messages", which covers `healthcare.hl7V2Messages.update` (the permission `messages.patch` needs). Found through search-result summaries of that page, not by reading the role directly; the first apply must confirm the label patch. Editor would also allow delete and ingest. |
+| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | FHIR store | Search and read for the dashboard and share |
+| `fhir-proxy` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.list` filtered by label, `messages.get` for the trace. Consumer also lets it patch labels and create messages, which the proxy does not need; no narrower predefined role covers list + get, so a custom role would be the next step. |
+| `edge-vm` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | MLLP adapter `messages:ingest` (S4) |
+| `cuff-sim` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | HTTPS ingest transport |
 
 None of these least-privilege roles has been exercised against the API yet: spikes S4 and S5 used
 broadly privileged accounts. Confirm each on the first apply (T25/T29).
@@ -166,8 +173,6 @@ From spike S5's "What was not verified" and this module's own choices:
   not rely on that default.
 - **Push delivery, OIDC, retry and dead-letter behaviour** are from Pub/Sub documentation; S5 had
   no endpoint. First confirmation comes with T20/T29.
-- **Token-creator grant**: needed only in projects created before 8 April 2021; granted on the one
-  account by default because it is narrow.
 - **Service agents exist** once the APIs are enabled (module project-base). If an apply runs
   before the agent is created, the IAM binding fails; re-running the apply fixes it.
 - **Least-privilege roles** in the table above are untested.
@@ -178,13 +183,18 @@ From spike S5's "What was not verified" and this module's own choices:
 `terraform test` in this directory runs the files under `tests/` against a mocked Google provider:
 no credentials, nothing created.
 
-`terraform test` cannot see `depends_on`, so the ordering edges are checked by a static script.
-It runs `terraform graph` (no credentials needed after `terraform init -backend=false`) and
-fails if any of these edges is missing:
+`terraform test` cannot see `depends_on` or which module owns a grant, so a static script checks
+both. It needs no credentials after `terraform init -backend=false`, and fails if:
 
-- HL7v2 store -> Healthcare service agent's publisher binding on the ingest topic
-- ingest subscription -> Pub/Sub service agent's publisher binding on the dead-letter topic
-- ingest subscription -> the push service account's token-creator grant
+- any `.tf` file here manages a service account's IAM or grants
+  `roles/iam.serviceAccountTokenCreator` (module identity owns that grant);
+- `terraform graph` lacks either ordering edge: HL7v2 store -> the Healthcare service agent's
+  publisher binding on the ingest topic, and ingest subscription -> the Pub/Sub service
+  agent's publisher binding on the dead-letter topic.
+
+Run every Terraform command for this module with Google credentials removed from the
+environment (no `GOOGLE_APPLICATION_CREDENTIALS`, no project variables, no gcloud config), so a
+mock that fails to apply can never reach a real project.
 
 ```bash
 terraform init -backend=false   # once
@@ -221,7 +231,6 @@ tests/check_ordering.sh         # from this directory, or pass the module path a
 | [google_pubsub_topic.ingest](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_topic) | resource |
 | [google_pubsub_topic_iam_member.healthcare_agent_publisher](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_topic_iam_member) | resource |
 | [google_pubsub_topic_iam_member.pubsub_agent_dead_letter_publisher](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_topic_iam_member) | resource |
-| [google_service_account_iam_member.pubsub_agent_token_creator](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account_iam_member) | resource |
 | [google_project.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/data-sources/project) | data source |
 
 ## Inputs
@@ -230,21 +239,20 @@ tests/check_ordering.sh         # from this directory, or pass the module path a
 |------|-------------|------|---------|:--------:|
 | <a name="input_ack_deadline_seconds"></a> [ack\_deadline\_seconds](#input\_ack\_deadline\_seconds) | How long Pub/Sub waits for v2-to-fhir to answer a push before treating it as failed and retrying. 60 s covers a Cloud Run cold start plus a FHIR write; the Pub/Sub default of 10 s does not. | `number` | `60` | no |
 | <a name="input_deletion_policy"></a> [deletion\_policy](#input\_deletion\_policy) | What `terraform destroy` (or a replacing apply) may do to the dataset and the two stores.<br/>"DELETE" (default) deletes them together with every stored FHIR resource and HL7v2 message,<br/>so a destroyed dev stack leaves nothing billable. "PREVENT" makes destroy fail instead, which<br/>suits prod where the data is real. The setting is read from state, so switching from PREVENT<br/>to DELETE needs an apply before the destroy. "ABANDON" is not offered: it would leave the<br/>stores, and their storage bill, behind without Terraform knowing. | `string` | `"DELETE"` | no |
-| <a name="input_grant_pubsub_token_creator"></a> [grant\_pubsub\_token\_creator](#input\_grant\_pubsub\_token\_creator) | Grant the Pub/Sub service agent roles/iam.serviceAccountTokenCreator on the push service account only, so it can mint the OIDC token. Google adds an equivalent grant automatically only in projects created after 8 April 2021; the per-account grant is narrow and works in both. Only applies when push\_enabled is true. | `bool` | `true` | no |
 | <a name="input_hl7v2_parser_version"></a> [hl7v2\_parser\_version](#input\_hl7v2\_parser\_version) | Version of the HL7v2 store's built-in (unschematized) parser, which fills the stored message's parsedData. Cannot be changed after the store is created (spike S4). V1 is the version spikes S4 and S5 tested; see the README before changing it. | `string` | `"V1"` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the stores, topics and subscriptions (the dataset resource has no labels). | `map(string)` | `{}` | no |
 | <a name="input_location"></a> [location](#input\_location) | Cloud Healthcare API location for the dataset and both stores (a region such as "us-central1", or a multi-region such as "us"). Stored health data stays in this location. | `string` | `"us-central1"` | no |
 | <a name="input_max_delivery_attempts"></a> [max\_delivery\_attempts](#input\_max\_delivery\_attempts) | Delivery attempts before a notification is moved to the dead-letter topic. v2-to-fhir acknowledges mapping errors itself (D7), so only infrastructure failures retry; 10 attempts with the default backoff span roughly 40 minutes, enough to ride out a cold start or a short API outage. | `number` | `10` | no |
-| <a name="input_message_retention_duration"></a> [message\_retention\_duration](#input\_message\_retention\_duration) | How long the ingest and dead-letter subscriptions keep unacknowledged notifications (a duration such as "604800s" = 7 days, Pub/Sub's default). Retaining unacknowledged messages is not billed. | `string` | `"604800s"` | no |
+| <a name="input_message_retention_duration"></a> [message\_retention\_duration](#input\_message\_retention\_duration) | How long the ingest and dead-letter subscriptions keep unacknowledged notifications (a duration such as "604800s" = 7 days, Pub/Sub's default). Pub/Sub allows up to 31 days; this module caps it at 7 days as a cost choice, since unacknowledged messages older than a day can be billed as storage (negligible at this volume, but not zero). | `string` | `"604800s"` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every resource name in this module (dataset, stores, topics, subscriptions). Lets two stacks share one project without colliding. | `string` | `"pulsebridge"` | no |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the GCP project that holds the Healthcare dataset and the Pub/Sub topics. Comes from the env root; never hardcoded. | `string` | n/a | yes |
 | <a name="input_push_audience"></a> [push\_audience](#input\_push\_audience) | Audience (aud claim) of the OIDC token. null (default) uses the endpoint's origin, scheme and host only, which is the Cloud Run service URL that Cloud Run checks tokens against. | `string` | `null` | no |
 | <a name="input_push_enabled"></a> [push\_enabled](#input\_push\_enabled) | Turn the ingest subscription into an OIDC-authenticated push subscription to v2-to-fhir.<br/>false (default): the subscription exists as a pull subscription and simply holds<br/>notifications (up to the retention period) until push is switched on, so nothing is lost<br/>while the v2-to-fhir service does not exist yet. true: push\_endpoint and<br/>push\_service\_account\_email are required. This is a plain bool, not derived from<br/>push\_endpoint, so Terraform knows at plan time which resources to create even when the<br/>endpoint is a Cloud Run URL that is only known after apply. | `bool` | `false` | no |
 | <a name="input_push_endpoint"></a> [push\_endpoint](#input\_push\_endpoint) | HTTPS URL Pub/Sub posts each notification to: the v2-to-fhir Cloud Run service URL plus its handler path (from module ingestion, T20). Required when push\_enabled is true. | `string` | `null` | no |
-| <a name="input_push_service_account_email"></a> [push\_service\_account\_email](#input\_push\_service\_account\_email) | Service account Pub/Sub signs the push request's OIDC token as. It needs roles/run.invoker on the v2-to-fhir service (granted by module ingestion). Required when push\_enabled is true. | `string` | `null` | no |
+| <a name="input_push_service_account_email"></a> [push\_service\_account\_email](#input\_push\_service\_account\_email) | Service account Pub/Sub signs the push request's OIDC token as: module identity's "pubsub-push" account. It needs roles/run.invoker on v2-to-fhir (module ingestion), and the Pub/Sub service agent needs roles/iam.serviceAccountTokenCreator on it, which module identity grants. Required when push\_enabled is true. | `string` | `null` | no |
 | <a name="input_retry_maximum_backoff"></a> [retry\_maximum\_backoff](#input\_retry\_maximum\_backoff) | Longest wait between redeliveries of one notification (a duration such as "600s"). | `string` | `"600s"` | no |
 | <a name="input_retry_minimum_backoff"></a> [retry\_minimum\_backoff](#input\_retry\_minimum\_backoff) | Shortest wait before Pub/Sub redelivers a notification v2-to-fhir did not acknowledge (a duration such as "10s"). Waits grow exponentially up to retry\_maximum\_backoff. | `string` | `"10s"` | no |
-| <a name="input_store_iam_service_accounts"></a> [store\_iam\_service\_accounts](#input\_store\_iam\_service\_accounts) | Service account emails (from module identity) to grant store-level roles to. Each key is<br/>optional; leave a key out and no binding is made for it. Allowed keys and what they get<br/>(see the README table):<br/>  health\_sync -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  v2\_to\_fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;<br/>                 HL7v2 store: roles/healthcare.hl7V2Editor (get message, patch its labels)<br/>  fhir\_proxy  -> FHIR store: roles/healthcare.fhirResourceReader;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)<br/>  edge\_vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)<br/>  cuff\_sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)<br/>A map rather than an object with optional attributes: the keys are written literally by the<br/>caller, so Terraform knows at plan time which bindings exist even while the emails are<br/>still unknown (first apply, accounts not yet created). | `map(string)` | `{}` | no |
+| <a name="input_store_iam_service_accounts"></a> [store\_iam\_service\_accounts](#input\_store\_iam\_service\_accounts) | Module identity's map of account name to service account email, passed as it is<br/>(store\_iam\_service\_accounts = module.identity.service\_account\_emails). Keys this module<br/>knows get store-level roles (see the README table); every key is optional, and keys it does<br/>not know (for example scheduler-invoker, pubsub-push) are ignored:<br/>  health-sync -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  seeder      -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  v2-to-fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)<br/>  fhir-proxy  -> FHIR store: roles/healthcare.fhirResourceReader;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)<br/>  edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)<br/>  cuff-sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)<br/>Bindings are chosen by key name only, so Terraform knows at plan time which exist even<br/>while the emails are still unknown (first apply, accounts not yet created). | `map(string)` | `{}` | no |
 | <a name="input_time_zone"></a> [time\_zone](#input\_time\_zone) | IANA time zone of the Healthcare dataset. The API uses it to read HL7v2 times that carry no UTC offset (for example an OBX-14 without '+hhmm'). UTC is the safe default; the cuff simulator sends explicit offsets anyway. | `string` | `"UTC"` | no |
 
 ## Outputs

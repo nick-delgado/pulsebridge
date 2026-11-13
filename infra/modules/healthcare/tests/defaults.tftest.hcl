@@ -153,10 +153,6 @@ run "subscription_is_pull_with_dead_letter_when_no_endpoint" {
     condition     = google_pubsub_subscription.dead_letter.topic == "projects/example-project/topics/pulsebridge-hl7v2-ingest-dead-letter"
     error_message = "The dead-letter topic must have its own subscription, or dead-lettered messages are dropped."
   }
-  assert {
-    condition     = length(google_service_account_iam_member.pubsub_agent_token_creator) == 0
-    error_message = "No token-creator grant without push."
-  }
 }
 
 run "healthcare_agent_is_publisher_on_ingest_topic_and_nothing_wider" {
@@ -179,7 +175,6 @@ run "healthcare_agent_is_publisher_on_ingest_topic_and_nothing_wider" {
       ] : m if strcontains(m, "gcp-sa-healthcare")],
       [for b in google_healthcare_fhir_store_iam_member.app : b if strcontains(b.member, "gcp-sa-healthcare")],
       [for b in google_healthcare_hl7_v2_store_iam_member.app : b if strcontains(b.member, "gcp-sa-healthcare")],
-      [for b in google_service_account_iam_member.pubsub_agent_token_creator : b if strcontains(b.member, "gcp-sa-healthcare")],
     )) == 0
     error_message = "The Healthcare service agent must hold no other binding in this module."
   }

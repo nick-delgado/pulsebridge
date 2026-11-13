@@ -130,21 +130,11 @@ run "rejects_retention_over_7_days" {
   expect_failures = [var.message_retention_duration]
 }
 
-run "rejects_unknown_iam_account_key" {
-  command = plan
-  variables {
-    store_iam_service_accounts = {
-      openemr = "openemr@example-project.iam.gserviceaccount.com"
-    }
-  }
-  expect_failures = [var.store_iam_service_accounts]
-}
-
 run "rejects_non_service_account_iam_email" {
   command = plan
   variables {
     store_iam_service_accounts = {
-      fhir_proxy = "person@example.com"
+      "fhir-proxy" = "person@example.com"
     }
   }
   expect_failures = [var.store_iam_service_accounts]
@@ -166,7 +156,19 @@ run "accepts_valid_full_input" {
     retry_maximum_backoff      = "600s"
     message_retention_duration = "600s"
     store_iam_service_accounts = {
-      health_sync = "health-sync@example-project.iam.gserviceaccount.com"
+      "health-sync"       = "health-sync@example-project.iam.gserviceaccount.com"
+      "scheduler-invoker" = "scheduler-invoker@example-project.iam.gserviceaccount.com"
+    }
+  }
+}
+
+run "ignores_unknown_key_without_validating_it" {
+  # Keys this module does not use are ignored, so even a value that is not a service account
+  # email under such a key passes validation.
+  command = plan
+  variables {
+    store_iam_service_accounts = {
+      "some-future-account" = "not-an-email"
     }
   }
 }

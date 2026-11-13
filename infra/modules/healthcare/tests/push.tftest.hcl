@@ -43,22 +43,6 @@ run "push_config_with_oidc_when_endpoint_given" {
   }
 }
 
-run "pubsub_agent_can_mint_tokens_for_the_push_account_only" {
-  command = apply
-
-  assert {
-    condition     = length(google_service_account_iam_member.pubsub_agent_token_creator) == 1
-    error_message = "push_enabled must add one token-creator grant."
-  }
-  assert {
-    condition = (
-      google_service_account_iam_member.pubsub_agent_token_creator[0].service_account_id == "projects/example-project/serviceAccounts/pulsebridge-push@example-project.iam.gserviceaccount.com" &&
-      google_service_account_iam_member.pubsub_agent_token_creator[0].role == "roles/iam.serviceAccountTokenCreator" &&
-      google_service_account_iam_member.pubsub_agent_token_creator[0].member == "serviceAccount:service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com"
-    )
-    error_message = "Token creator must be granted to the Pub/Sub agent on the push account only."
-  }
-}
 
 run "explicit_audience_overrides_default" {
   command = apply
@@ -73,22 +57,10 @@ run "explicit_audience_overrides_default" {
   }
 }
 
-run "token_creator_grant_can_be_turned_off" {
-  command = apply
-
-  variables {
-    grant_pubsub_token_creator = false
-  }
-
-  assert {
-    condition     = length(google_service_account_iam_member.pubsub_agent_token_creator) == 0
-    error_message = "grant_pubsub_token_creator = false must skip the grant."
-  }
-}
 
 run "endpoint_alone_does_not_switch_on_push" {
   # The decision is the plan-time bool, never "is the endpoint set", so an endpoint that is
-  # wired but not yet switched on leaves the subscription pulling (and no token grant).
+  # wired but not yet switched on leaves the subscription pulling.
   command = apply
 
   variables {
@@ -98,9 +70,5 @@ run "endpoint_alone_does_not_switch_on_push" {
   assert {
     condition     = length(google_pubsub_subscription.ingest.push_config) == 0
     error_message = "push_enabled = false must leave the subscription without a push config even when an endpoint is given."
-  }
-  assert {
-    condition     = length(google_service_account_iam_member.pubsub_agent_token_creator) == 0
-    error_message = "push_enabled = false must not grant token creator."
   }
 }

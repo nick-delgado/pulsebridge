@@ -127,7 +127,7 @@ variable "push_endpoint" {
 }
 
 variable "push_service_account_email" {
-  description = "Service account Pub/Sub signs the push request's OIDC token as. It needs roles/run.invoker on the v2-to-fhir service (granted by module ingestion). Required when push_enabled is true."
+  description = "Service account Pub/Sub signs the push request's OIDC token as: module identity's \"pubsub-push\" account. It needs roles/run.invoker on v2-to-fhir (module ingestion), and the Pub/Sub service agent needs roles/iam.serviceAccountTokenCreator on it, which module identity grants. Required when push_enabled is true."
   type        = string
   default     = null
 
@@ -146,12 +146,6 @@ variable "push_audience" {
   description = "Audience (aud claim) of the OIDC token. null (default) uses the endpoint's origin, scheme and host only, which is the Cloud Run service URL that Cloud Run checks tokens against."
   type        = string
   default     = null
-}
-
-variable "grant_pubsub_token_creator" {
-  description = "Grant the Pub/Sub service agent roles/iam.serviceAccountTokenCreator on the push service account only, so it can mint the OIDC token. Google adds an equivalent grant automatically only in projects created after 8 April 2021; the per-account grant is narrow and works in both. Only applies when push_enabled is true."
-  type        = bool
-  default     = true
 }
 
 variable "ack_deadline_seconds" {
@@ -221,30 +215,31 @@ variable "message_retention_duration" {
 
 variable "store_iam_service_accounts" {
   description = <<-EOT
-    Service account emails (from module identity) to grant store-level roles to. Each key is
-    optional; leave a key out and no binding is made for it. Allowed keys and what they get
-    (see the README table):
-      health_sync -> FHIR store: roles/healthcare.fhirResourceEditor
-      v2_to_fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;
+    Module identity's map of account name to service account email, passed as it is
+    (store_iam_service_accounts = module.identity.service_account_emails). Keys this module
+    knows get store-level roles (see the README table); every key is optional, and keys it does
+    not know (for example scheduler-invoker, pubsub-push) are ignored:
+      health-sync -> FHIR store: roles/healthcare.fhirResourceEditor
+      seeder      -> FHIR store: roles/healthcare.fhirResourceEditor
+      v2-to-fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;
                      HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)
-      fhir_proxy  -> FHIR store: roles/healthcare.fhirResourceReader;
+      fhir-proxy  -> FHIR store: roles/healthcare.fhirResourceReader;
                      HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)
-      edge_vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)
-      cuff_sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)
-    A map rather than an object with optional attributes: the keys are written literally by the
-    caller, so Terraform knows at plan time which bindings exist even while the emails are
-    still unknown (first apply, accounts not yet created).
+      edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)
+      cuff-sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)
+    Bindings are chosen by key name only, so Terraform knows at plan time which exist even
+    while the emails are still unknown (first apply, accounts not yet created).
   EOT
   type        = map(string)
   default     = {}
 
   validation {
-    condition     = alltrue([for k in keys(var.store_iam_service_accounts) : contains(["health_sync", "v2_to_fhir", "fhir_proxy", "edge_vm", "cuff_sim"], k)])
-    error_message = "store_iam_service_accounts keys must be among: health_sync, v2_to_fhir, fhir_proxy, edge_vm, cuff_sim."
-  }
-
-  validation {
-    condition     = alltrue([for v in values(var.store_iam_service_accounts) : can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z0-9.-]+\\.iam\\.gserviceaccount\\.com$", v))])
-    error_message = "store_iam_service_accounts values must be service account emails (name@project.iam.gserviceaccount.com)."
+    # Only the keys this module uses are checked; other keys are ignored, not validated.
+    condition = alltrue([
+      for k, v in var.store_iam_service_accounts :
+      can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z0-9.-]+\\.iam\\.gserviceaccount\\.com$", v))
+      if contains(["health-sync", "seeder", "v2-to-fhir", "fhir-proxy", "edge-vm", "cuff-sim"], k)
+    ])
+    error_message = "store_iam_service_accounts values for health-sync, seeder, v2-to-fhir, fhir-proxy, edge-vm and cuff-sim must be service account emails (name@project.iam.gserviceaccount.com)."
   }
 }
