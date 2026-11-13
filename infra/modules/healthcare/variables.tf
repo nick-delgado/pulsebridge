@@ -204,12 +204,12 @@ variable "max_delivery_attempts" {
 }
 
 variable "message_retention_duration" {
-  description = "How long the ingest and dead-letter subscriptions keep unacknowledged notifications (a duration such as \"604800s\" = 7 days, Pub/Sub's default). Retaining unacknowledged messages is not billed."
+  description = "How long the ingest and dead-letter subscriptions keep unacknowledged notifications (a duration such as \"604800s\" = 7 days, Pub/Sub's default). Pub/Sub allows up to 31 days; this module caps it at 7 days as a cost choice, since unacknowledged messages older than a day can be billed as storage (negligible at this volume, but not zero)."
   type        = string
   default     = "604800s"
 
   validation {
-    # Pub/Sub accepts 10 minutes to 7 days for subscription retention.
+    # Pub/Sub accepts 10 minutes to 31 days; the 7-day cap is this module's cost choice.
     condition     = can(regex("^[0-9]+s$", var.message_retention_duration)) && try(tonumber(trimsuffix(var.message_retention_duration, "s")) >= 600 && tonumber(trimsuffix(var.message_retention_duration, "s")) <= 604800, false)
     error_message = "message_retention_duration must be whole seconds with an 's' suffix, from \"600s\" to \"604800s\"."
   }
@@ -226,7 +226,7 @@ variable "store_iam_service_accounts" {
     (see the README table):
       health_sync -> FHIR store: roles/healthcare.fhirResourceEditor
       v2_to_fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;
-                     HL7v2 store: roles/healthcare.hl7V2Editor (get message, patch its labels)
+                     HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)
       fhir_proxy  -> FHIR store: roles/healthcare.fhirResourceReader;
                      HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)
       edge_vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)

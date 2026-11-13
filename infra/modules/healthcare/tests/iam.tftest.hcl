@@ -46,12 +46,12 @@ run "all_accounts_get_exactly_the_expected_roles" {
     condition = {
       for k, b in google_healthcare_hl7_v2_store_iam_member.app : k => "${b.member} ${b.role}"
       } == {
-      v2_to_fhir = "serviceAccount:v2-to-fhir@example-project.iam.gserviceaccount.com roles/healthcare.hl7V2Editor"
+      v2_to_fhir = "serviceAccount:v2-to-fhir@example-project.iam.gserviceaccount.com roles/healthcare.hl7V2Consumer"
       fhir_proxy = "serviceAccount:fhir-proxy@example-project.iam.gserviceaccount.com roles/healthcare.hl7V2Consumer"
       edge_vm    = "serviceAccount:edge-vm@example-project.iam.gserviceaccount.com roles/healthcare.hl7V2Ingest"
       cuff_sim   = "serviceAccount:cuff-sim@example-project.iam.gserviceaccount.com roles/healthcare.hl7V2Ingest"
     }
-    error_message = "HL7v2 store bindings must be exactly: v2-to-fhir editor, fhir-proxy consumer, edge-vm and cuff-sim ingest."
+    error_message = "HL7v2 store bindings must be exactly: v2-to-fhir and fhir-proxy consumer, edge-vm and cuff-sim ingest."
   }
   assert {
     condition     = alltrue([for b in google_healthcare_fhir_store_iam_member.app : b.fhir_store_id == "projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir"])

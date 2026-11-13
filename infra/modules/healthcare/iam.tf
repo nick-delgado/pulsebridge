@@ -60,13 +60,16 @@ resource "google_service_account_iam_member" "pubsub_agent_token_creator" {
 locals {
   # Which narrowest predefined role each account gets on each store. Accounts absent from
   # var.store_iam_service_accounts get nothing.
+  # hl7V2Consumer is described by Google as "list and read HL7v2 messages, update message
+  # labels, and publish new messages": it carries healthcare.hl7V2Messages.update, which
+  # messages.patch (labels only) requires. hl7V2Editor would add delete and ingest.
   store_role_matrix = {
     health_sync = {
       fhir = "roles/healthcare.fhirResourceEditor" # conditional update / executeBundle of Observations
     }
     v2_to_fhir = {
       fhir  = "roles/healthcare.fhirResourceEditor" # write Patient, Device, Observation, Provenance
-      hl7v2 = "roles/healthcare.hl7V2Editor"        # messages.get + messages.patch (outcome labels, S5)
+      hl7v2 = "roles/healthcare.hl7V2Consumer"      # messages.get + messages.patch (outcome labels, S5)
     }
     fhir_proxy = {
       fhir  = "roles/healthcare.fhirResourceReader" # search and read only

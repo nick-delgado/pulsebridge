@@ -61,7 +61,7 @@ the store and **delete its data**.
 | --- | --- | --- | --- |
 | `version` | `R4` | Every writer, the validator (T08) and OpenEMR use R4. | Immutable. |
 | `enable_update_create` | `true` | Writers are idempotent on client-derived keys (D8, T06). Update-create lets a `PUT Observation/<id>`, or a conditional update whose body carries an `id`, create the resource when it does not exist yet. A plain conditional update (`PUT Observation?identifier=...` with no `id` in the body) works either way. | With `false`, the first `PUT` to an ID the store has not seen fails, for example the first sync after a nightly dev rebuild. **Rule for writers:** client-chosen IDs appear in audit logs and Pub/Sub, so they must be opaque (a hash), never a patient identifier. |
-| `disable_referential_integrity` | `false` (integrity on) | The store refuses a write that references a resource that does not exist, so an Observation can never point at a missing Patient or Device. | With integrity off, a typo in a reference is stored silently and `Patient/$everything` misses resources. **Consequence for writers:** inside a transaction Bundle all entries are resolved together, so entry order does not matter, but references to resources created in the same Bundle must use the entry's `fullUrl` (`urn:uuid:...`). Outside a transaction, write Patient and Device before the Observation, and the Observation before its Provenance. Immutable. |
+| `disable_referential_integrity` | `false` (integrity on) | The store refuses a write that references a resource that does not exist, so an Observation can never point at a missing Patient or Device. | With integrity off, a typo in a reference is stored silently and `Patient/$everything` misses resources. **Consequence for writers:** inside a transaction Bundle all entries are resolved together, so entry order does not matter. A reference to a resource created in the same Bundle may use the entry's `fullUrl` (`urn:uuid:...`) or a plain `Patient/<id>` when that entry is a `PUT` to a client-chosen id (from knowledge of the API; confirm on first apply). Outside a transaction, write Patient and Device before the Observation, and the Observation before its Provenance. **Deletes go referrers first:** deleting an Observation fails while a Provenance targets it, and deleting a Patient fails while Observations reference it, so cleanup or regeneration (T09, manual fixes) deletes Provenance, then Observation, then Patient. `$purge` only removes old versions and does not get around this. Destroying the whole store or dataset is unaffected. Immutable. |
 | `disable_resource_versioning` | `false` (versioning on) | Each update keeps the old version (`_history`). `health-sync` rewrites overlapping windows every run; history shows how a partly synced window changed. About 1 KB per version. | No history; `_history` reads return errors. Immutable. |
 | `enable_history_import` | `false` | Only for bulk-importing past versions, which nothing here does. | An import could create versions that appear to have happened in the past. |
 | `complex_data_type_reference_parsing` | `ENABLED` | References inside complex types (for example in extensions) are checked by referential integrity too. Set explicitly because Google plans to change the default for new stores. | `DISABLED`: such references are not checked. Turning it on later can fail on existing data. |
@@ -131,9 +131,9 @@ All bindings are resource-level and additive (`*_iam_member`); none is project-l
 | --- | --- | --- | --- |
 | `health_sync` | `roles/healthcare.fhirResourceEditor` | FHIR store | Conditional updates in a transaction Bundle |
 | `v2_to_fhir` | `roles/healthcare.fhirResourceEditor` | FHIR store | Writing Patient, Device, Observation, Provenance |
-| `v2_to_fhir` | `roles/healthcare.hl7V2Editor` | HL7v2 store | `messages.get` and `messages.patch` (outcome labels, S5). Consumer has no patch; Editor is the narrowest predefined role with it, and also allows create, delete and ingest. A custom role with get + update would be narrower. |
+| `v2_to_fhir` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.get` and `messages.patch` with `updateMask=labels` (outcome labels, S5). Google's IAM reference describes Consumer as "list and read HL7v2 messages, update message labels, and publish new messages", which covers `healthcare.hl7V2Messages.update` (the permission `messages.patch` needs). Found through search-result summaries of that page, not by reading the role directly; the first apply must confirm the label patch. Editor would also allow delete and ingest. |
 | `fhir_proxy` | `roles/healthcare.fhirResourceReader` | FHIR store | Search and read for the dashboard and share |
-| `fhir_proxy` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.list` filtered by label, `messages.get` for the trace |
+| `fhir_proxy` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.list` filtered by label, `messages.get` for the trace. Consumer also lets it patch labels and create messages, which the proxy does not need; no narrower predefined role covers list + get, so a custom role would be the next step. |
 | `edge_vm` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | MLLP adapter `messages:ingest` (S4) |
 | `cuff_sim` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | HTTPS ingest transport |
 
@@ -146,8 +146,10 @@ account to create a push subscription with its OIDC token (T02's deployer accoun
 ## Cost and destroy
 
 - The Healthcare API bills per request and per GB stored; Pub/Sub bills per message volume.
-  **Nothing here is billed by the hour.** Topic retention and retained acknowledged messages,
-  which are billed, are not used; keeping unacknowledged messages in a subscription is free.
+  **Nothing here is billed by the hour.** Topic retention and retained acknowledged messages
+  are not used. Unacknowledged messages older than a day can be billed as storage; at a few
+  hundred small notifications this is negligible, and retention is capped at 7 days (Pub/Sub
+  allows 31) to keep it that way.
 - `deletion_policy = "DELETE"` (default) lets `terraform destroy` delete the dataset and both
   stores together with every stored resource and message, so a destroyed dev stack leaves nothing
   billable. Topics and subscriptions are always deleted.
@@ -175,6 +177,19 @@ From spike S5's "What was not verified" and this module's own choices:
 
 `terraform test` in this directory runs the files under `tests/` against a mocked Google provider:
 no credentials, nothing created.
+
+`terraform test` cannot see `depends_on`, so the ordering edges are checked by a static script.
+It runs `terraform graph` (no credentials needed after `terraform init -backend=false`) and
+fails if any of these edges is missing:
+
+- HL7v2 store -> Healthcare service agent's publisher binding on the ingest topic
+- ingest subscription -> Pub/Sub service agent's publisher binding on the dead-letter topic
+- ingest subscription -> the push service account's token-creator grant
+
+```bash
+terraform init -backend=false   # once
+tests/check_ordering.sh         # from this directory, or pass the module path as $1
+```
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements

@@ -41,10 +41,18 @@ resource "google_healthcare_fhir_store" "this" {
 
   # Referential integrity ON (the API default): a write is refused if it references a
   # resource that does not exist, so an Observation can never point at a missing Patient or
-  # Device. Consequence for writers: inside a transaction Bundle the store resolves all
-  # entries together, so order does not matter, but references to resources in the same
-  # Bundle must use the entry's fullUrl (urn:uuid:...). Outside a transaction, Patient and
-  # Device must be written before the Observation, and the Observation before its Provenance.
+  # Device. Consequences for writers:
+  # - Inside a transaction Bundle the store resolves all entries together, so order does not
+  #   matter. A reference to a resource created in the same Bundle may use the entry's
+  #   fullUrl (urn:uuid:...) or a plain Patient/<id> when that entry PUTs to a client-chosen
+  #   id (from knowledge of the API; confirm on first apply).
+  # - Outside a transaction, write Patient and Device before the Observation, and the
+  #   Observation before its Provenance.
+  # - Deletes must go referrers first: deleting an Observation fails while a Provenance
+  #   targets it, and deleting a Patient fails while Observations reference it. Cleanup or
+  #   regeneration (T09, manual fixes) deletes Provenance, then Observation, then Patient.
+  #   ($purge only removes a resource's old versions; it does not bypass this check.)
+  #   Deleting the whole store or dataset (terraform destroy) is unaffected.
   # Immutable after creation.
   disable_referential_integrity = false
 
@@ -119,6 +127,6 @@ resource "google_healthcare_hl7_v2_store" "this" {
   deletion_policy = var.deletion_policy
 
   # Creating a store that points at a topic it cannot publish to fails with 403 (S5), so the
-  # service agent's publisher binding must exist first.
+  # service agent's publisher binding must exist first (checked by tests/check_ordering.sh).
   depends_on = [google_pubsub_topic_iam_member.healthcare_agent_publisher]
 }

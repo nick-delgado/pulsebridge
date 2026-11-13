@@ -80,9 +80,16 @@ resource "google_pubsub_subscription" "ingest" {
     }
   }
 
-  # The Pub/Sub service agent must be able to publish to the dead-letter topic before
-  # dead-lettering works; ordering the grants first avoids a window where it cannot.
-  depends_on = [google_pubsub_topic_iam_member.pubsub_agent_dead_letter_publisher]
+  # Grants first, so the first deliveries do not burn attempts while IAM is missing:
+  # - the Pub/Sub service agent must publish to the dead-letter topic before dead-lettering
+  #   works;
+  # - with push on, it must be able to mint the OIDC token before the first push. With
+  #   push off the token-creator grant has count 0 and this edge is a no-op.
+  # (tests/check_ordering.sh checks these edges; terraform test cannot.)
+  depends_on = [
+    google_pubsub_topic_iam_member.pubsub_agent_dead_letter_publisher,
+    google_service_account_iam_member.pubsub_agent_token_creator,
+  ]
 }
 
 # Dead-lettered notifications are kept here for inspection (`gcloud pubsub subscriptions pull`).

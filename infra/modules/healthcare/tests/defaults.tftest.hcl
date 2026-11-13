@@ -295,3 +295,29 @@ run "time_zone_and_labels_reach_resources" {
     error_message = "labels must reach both stores, both topics and both subscriptions."
   }
 }
+
+run "retention_defaults_on_both_subscriptions" {
+  command = apply
+
+  assert {
+    condition     = google_pubsub_subscription.ingest.message_retention_duration == "604800s" && google_pubsub_subscription.dead_letter.message_retention_duration == "604800s"
+    error_message = "Both subscriptions must keep unacknowledged notifications for 7 days by default."
+  }
+  assert {
+    condition     = google_pubsub_subscription.ingest.retain_acked_messages == false && google_pubsub_subscription.dead_letter.retain_acked_messages == false
+    error_message = "Neither subscription may retain acknowledged messages (billed storage)."
+  }
+}
+
+run "retention_variable_reaches_both_subscriptions" {
+  command = apply
+
+  variables {
+    message_retention_duration = "86400s"
+  }
+
+  assert {
+    condition     = google_pubsub_subscription.ingest.message_retention_duration == "86400s" && google_pubsub_subscription.dead_letter.message_retention_duration == "86400s"
+    error_message = "message_retention_duration must reach both subscriptions."
+  }
+}
