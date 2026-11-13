@@ -1,0 +1,54 @@
+# Repository-wide Python tooling for PulseBridge.
+#
+# This file is not a package. It holds the shared developer tools (pinned in the "dev"
+# dependency group) and the configuration for ruff and pytest. Each library under libs/ and each
+# service under services/ has its own pyproject.toml; `make install` installs them all into one
+# virtual environment (.venv) in editable mode.
+
+[project]
+name = "pulsebridge"
+version = "0.0.0"
+description = "Personal health record on GCP: FHIR R4, HL7v2 and Terraform (repository tooling)."
+requires-python = ">=3.13"
+
+# PEP 735 dependency groups: installed with `pip install --group dev` (pip 25.1 or later).
+# Exact pins so every machine and CI run uses the same tool versions.
+[dependency-groups]
+dev = [
+  "pre-commit==4.7.0",
+  "pytest==9.2.0",
+  "pyyaml==6.0.3", # tests/tooling/test_ci_workflow.py parses the CI workflow
+  "ruff==0.17.5",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+# Python files only. Recent ruff versions also format code blocks inside Markdown; we do not want
+# `make fmt` rewriting CLAUDE.md, the brief or the work plan.
+include = ["*.py", "*.pyi", "**/pyproject.toml"]
+# Ruff already skips git-ignored paths (.venv, .worktrees); these are belt and braces.
+extend-exclude = [".worktrees", ".terraform"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes: unused imports, undefined names
+  "I",   # isort: import order
+  "B",   # flake8-bugbear: likely bugs
+  "UP",  # pyupgrade: modern syntax for the target Python version
+  "SIM", # flake8-simplify
+  "S",   # flake8-bandit: security checks (hardcoded passwords, shell injection, ...)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests use plain `assert` (S101) and run tools such as git, make and pre-commit (S603, S607).
+"**/tests/**" = ["S101", "S603", "S607"]
+
+[tool.pytest.ini_options]
+# Repository-level tooling tests live in tests/; each library and service keeps its tests next to
+# its code (libs/<name>/tests, services/<name>/tests). Paths that do not exist yet are skipped.
+testpaths = ["tests", "libs", "services"]
+# importlib mode lets several packages each have a tests/ directory with same-named test modules.
+addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
