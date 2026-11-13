@@ -98,13 +98,26 @@ def test_heart_rate_value_missing(field):
         window_from_rollup(dict(GOOD, heartRate=without(GOOD["heartRate"], field)))
 
 
-@pytest.mark.parametrize("value", ["seventy", True, None, [70], float("nan")])
-def test_heart_rate_not_a_number(value):
-    point = hr_values(beatsPerMinuteAvg=value)
-    if value is None:
-        point = dict(GOOD, heartRate=without(GOOD["heartRate"], "beatsPerMinuteAvg"))
-    with pytest.raises(FhirInputError, match="beatsPerMinuteAvg|average"):
-        window_from_rollup(point)
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("beatsPerMinuteAvg", "seventy", "beatsPerMinuteAvg 'seventy' is not a number"),
+        ("beatsPerMinuteAvg", [70], "beatsPerMinuteAvg must be a number, got list"),
+        ("beatsPerMinuteAvg", float("nan"), "average must be a finite number"),
+        # True == 1 in Python and 1 is in range, so only an explicit bool check rejects it.
+        ("beatsPerMinuteMin", True, "beatsPerMinuteMin must be a number, got bool"),
+    ],
+)
+def test_heart_rate_not_a_number(field, value, message):
+    with pytest.raises(FhirInputError, match=message):
+        window_from_rollup(hr_values(**{field: value}))
+
+
+def test_bool_rejected_in_dataclass_too():
+    start = datetime(2026, 1, 1, 14, 5, tzinfo=UTC)
+    end = datetime(2026, 1, 1, 14, 10, tzinfo=UTC)
+    with pytest.raises(FhirInputError, match="minimum must be a number, got bool"):
+        HeartRateWindow(start, end, True, 60, 70)
 
 
 def test_heart_rate_min_avg_max_out_of_order():
