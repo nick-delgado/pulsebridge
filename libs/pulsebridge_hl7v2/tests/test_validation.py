@@ -72,6 +72,18 @@ def test_every_problem_is_reported_not_just_the_first():
     assert "'LOW'" in problems[1]
 
 
+def test_every_hl7apy_error_is_reported_not_just_its_first():
+    # hl7apy's Validator raises only its first error; the report file has them all.
+    payload = replace_once(b"SYN-000123^^^PULSEBRIDGE^MR", b"")
+    payload = payload.replace(b"|F|||", b"||||")  # OBX-11 missing in both OBX
+    problems = problems_for(payload)
+    assert problems == (
+        "PID-3 (patient identifier list) is required but missing",
+        "OBX-11 (observation result status) is required but missing",
+        "OBX-11 (observation result status) is required but missing",
+    )
+
+
 def test_invalid_date_in_obx14_is_a_validation_error():
     payload = VALID.replace(b"|F|||20261113205329+0000", b"|F|||2026-11-13 20:53", 1)
     (problem,) = problems_for(payload)

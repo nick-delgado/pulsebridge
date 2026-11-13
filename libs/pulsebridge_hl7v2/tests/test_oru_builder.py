@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 from pulsebridge_hl7v2 import (
     BloodPressureReading,
+    BuildOptions,
+    Endpoints,
     Patient,
     build_bp_oru_r01,
     new_control_id,
@@ -122,6 +124,18 @@ def test_builder_refuses_unusable_control_ids(control_id):
 def test_builder_refuses_control_characters_in_patient_fields():
     with pytest.raises(ValueError, match="patient.family_name"):
         build(patient=Patient("SYN-1", "PB", "TEST\rMSH", "X"))
+
+
+def test_builder_refuses_control_characters_in_endpoint_names():
+    options = BuildOptions(endpoints=Endpoints(sending_facility="PB\rPID|1"))
+    with pytest.raises(ValueError, match="endpoints.sending_facility"):
+        build_bp_oru_r01(
+            BloodPressureReading(120, 80, SENT),
+            PATIENT,
+            control_id="SYN-1",
+            sent_at=SENT,
+            options=options,
+        )
 
 
 def test_new_control_id_is_unique_and_fits_msh10():

@@ -106,8 +106,9 @@ OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261
 | OBX-11 | `F` | Result status: final (table 0085). Required. |
 | OBX-14 | observation time with offset | When it was measured. Always written with its UTC offset so T12 never has to guess the time zone; a naive `datetime` is refused. |
 
-Values from callers (patient identifier and names) are set through hl7apy datatype objects, so
-hl7apy escapes any separator in them (`O|Brien` becomes `O\F\Brien`); they must be printable ASCII.
+Values from callers (patient identifier, names, endpoint names) are assigned to leaf components
+such as PID-5.1, never to a whole field, so hl7apy escapes any separator in them (`O|Brien` is
+written `O\F\Brien`). They must be printable ASCII.
 
 ### The control ID (MSH-10) and resends
 

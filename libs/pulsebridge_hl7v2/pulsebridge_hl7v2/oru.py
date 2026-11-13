@@ -21,7 +21,6 @@ from datetime import UTC, datetime
 
 from hl7apy.consts import VALIDATION_LEVEL
 from hl7apy.core import Message
-from hl7apy.factories import datatype_factory
 
 from .parsing import SEGMENT_TERMINATOR
 
@@ -125,14 +124,6 @@ def _check_reading(reading: BloodPressureReading) -> None:
         raise ValueError("systolic pressure must be greater than diastolic pressure")
 
 
-def _text(value: str, datatype: str = "ST"):
-    """An hl7apy datatype object. Assigning one (instead of a plain string, which hl7apy would
-    parse as ER7) makes hl7apy escape separator characters in the value (2.5.1 section 2.7)."""
-    return datatype_factory(
-        datatype, value, version=HL7_VERSION, validation_level=VALIDATION_LEVEL.STRICT
-    )
-
-
 def build_bp_oru_r01(
     reading: BloodPressureReading,
     patient: Patient,
@@ -156,9 +147,23 @@ def build_bp_oru_r01(
             f"control_id must be 1 to {_CONTROL_ID_MAX} characters of letters, digits, "
             "'.', '_' or '-'"
         )
-    for name in ("identifier", "assigning_authority", "family_name", "given_name"):
-        _check_text(f"patient.{name}", getattr(patient, name))
     options = options or BuildOptions()
+    for name in (
+        "identifier",
+        "assigning_authority",
+        "identifier_type",
+        "family_name",
+        "given_name",
+    ):
+        _check_text(f"patient.{name}", getattr(patient, name))
+    for name in (
+        "sending_application",
+        "sending_facility",
+        "receiving_application",
+        "receiving_facility",
+    ):
+        _check_text(f"endpoints.{name}", getattr(options.endpoints, name))
+    _check_text("processing_id", options.processing_id)
     sent_at = sent_at or datetime.now(UTC)
     observed = format_dtm(reading.observed_at)
 
@@ -167,10 +172,10 @@ def build_bp_oru_r01(
     # --- MSH: message header. MSH-1 ("|") and MSH-2 ("^~\&") are set by hl7apy's defaults.
     msh = msg.msh
     ep = options.endpoints
-    msh.msh_3.hd_1 = _text(ep.sending_application, "IS")  # MSH-3 sending application
-    msh.msh_4.hd_1 = _text(ep.sending_facility, "IS")  # MSH-4 sending facility
-    msh.msh_5.hd_1 = _text(ep.receiving_application, "IS")  # MSH-5 receiving application
-    msh.msh_6.hd_1 = _text(ep.receiving_facility, "IS")  # MSH-6 receiving facility
+    msh.msh_3.hd_1 = ep.sending_application  # MSH-3 sending application
+    msh.msh_4.hd_1 = ep.sending_facility  # MSH-4 sending facility
+    msh.msh_5.hd_1 = ep.receiving_application  # MSH-5 receiving application
+    msh.msh_6.hd_1 = ep.receiving_facility  # MSH-6 receiving facility
     msh.msh_7 = format_dtm(sent_at)  # MSH-7 date/time of message (required in 2.5.1)
     msh.msh_9 = "^".join(MESSAGE_TYPE)  # MSH-9 ORU^R01^ORU_R01
     msh.msh_10 = control_id  # MSH-10 message control ID (checked above: no separators)
@@ -179,15 +184,20 @@ def build_bp_oru_r01(
     # MSH-15/16 (accept/application acknowledgment type) are left empty: original
     # acknowledgment mode. Spike S4 found the store ignores them anyway.
 
+    # Caller values (names, identifiers, endpoints) are always assigned to a leaf component such
+    # as PID-5.1, never to a whole field. hl7apy then treats them as values and escapes any
+    # separator in them (2.5.1 section 2.7: "O|Brien" is written "O\F\Brien"). Assigning a
+    # string to a whole field would make hl7apy parse it as ER7, so "^" would start a new component.
+
     # --- PID: patient identification, inside the PATIENT_RESULT / PATIENT groups.
     patient_result = msg.add_group("ORU_R01_PATIENT_RESULT")
     pid = patient_result.add_group("ORU_R01_PATIENT").pid
     pid.pid_1 = "1"  # PID-1 set ID
-    pid.pid_3.cx_1 = _text(patient.identifier)  # PID-3.1 ID number
-    pid.pid_3.cx_4.hd_1 = _text(patient.assigning_authority, "IS")  # PID-3.4 assigning authority
-    pid.pid_3.cx_5 = _text(patient.identifier_type, "ID")  # PID-3.5 identifier type code
-    pid.pid_5.xpn_1.fn_1 = _text(patient.family_name)  # PID-5.1 family name
-    pid.pid_5.xpn_2 = _text(patient.given_name)  # PID-5.2 given name
+    pid.pid_3.cx_1 = patient.identifier  # PID-3.1 ID number
+    pid.pid_3.cx_4.hd_1 = patient.assigning_authority  # PID-3.4 assigning authority
+    pid.pid_3.cx_5 = patient.identifier_type  # PID-3.5 identifier type code
+    pid.pid_5.xpn_1.fn_1 = patient.family_name  # PID-5.1 family name
+    pid.pid_5.xpn_2 = patient.given_name  # PID-5.2 given name
 
     # --- OBR: the order/observation the results belong to.
     order = patient_result.add_group("ORU_R01_ORDER_OBSERVATION")
@@ -196,7 +206,7 @@ def build_bp_oru_r01(
     # OBR-3 filler order number. 2.5.1 requires OBR-2 or OBR-3; the device "fills" the order, and
     # one reading is one order, so the control ID is a natural unique number.
     obr.obr_3.ei_1 = control_id
-    obr.obr_3.ei_2 = _text(ep.sending_application, "IS")
+    obr.obr_3.ei_2 = ep.sending_application
     obr.obr_4 = (
         f"{LOINC_BP_PANEL[0]}^{LOINC_BP_PANEL[1]}^{LOINC_SYSTEM}"  # OBR-4 universal service ID
     )
