@@ -44,8 +44,8 @@ UCUM_SYSTEM = "UCUM"
 # MSH-10 is an ST of at most 20 characters in 2.5.1 (chapter 2.15.9.10).
 _CONTROL_ID_MAX = 20
 _CONTROL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,20}$")
-# Identifiers and names are written through hl7apy datatypes, which escape |^~\& for us. We still
-# limit them to printable ASCII: control characters have no place in an HL7 text field, and with
+# hl7apy escapes |^~\& in caller values for us (see build_bp_oru_r01). We still limit them to
+# printable ASCII: control characters have no place in an HL7 text field, and with
 # MSH-18 (character set) empty the receiver must assume ASCII.
 _PRINTABLE_ASCII_RE = re.compile(r"^[\x20-\x7e]+$")
 
@@ -207,9 +207,8 @@ def build_bp_oru_r01(
     # one reading is one order, so the control ID is a natural unique number.
     obr.obr_3.ei_1 = control_id
     obr.obr_3.ei_2 = ep.sending_application
-    obr.obr_4 = (
-        f"{LOINC_BP_PANEL[0]}^{LOINC_BP_PANEL[1]}^{LOINC_SYSTEM}"  # OBR-4 universal service ID
-    )
+    # OBR-4 universal service identifier: what was ordered, the LOINC blood-pressure panel.
+    obr.obr_4 = f"{LOINC_BP_PANEL[0]}^{LOINC_BP_PANEL[1]}^{LOINC_SYSTEM}"
     obr.obr_7 = observed  # OBR-7 observation date/time
 
     # --- OBX: one per measured value.
