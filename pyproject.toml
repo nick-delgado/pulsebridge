@@ -17,6 +17,7 @@ requires-python = ">=3.13"
 dev = [
   "pre-commit==4.7.0",
   "pytest==9.2.0",
+  "pyyaml==6.0.3", # tests/tooling/test_ci_workflow.py parses the CI workflow
   "ruff==0.17.5",
 ]
 
