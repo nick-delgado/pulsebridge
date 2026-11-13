@@ -196,8 +196,12 @@ def test_reader_deadline_covers_the_whole_frame_not_each_read(server):
     stop = threading.Event()
 
     def trickle(conn):
+        # One byte every 50 ms for at most 3 s, never the end bytes, then close. A reader that
+        # applied its timeout to each recv would keep reading and end with "connection closed"
+        # instead of a timeout after 0.3 s.
         conn.sendall(b"\x0b")
-        while not stop.wait(0.05):  # one byte every 50 ms, never the end bytes
+        give_up = time.monotonic() + 3
+        while not stop.wait(0.05) and time.monotonic() < give_up:
             try:
                 conn.sendall(b"M")
             except OSError:
