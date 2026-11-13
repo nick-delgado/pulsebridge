@@ -1,0 +1,21 @@
+# pulsebridge_fhir: builders for the FHIR R4 resources PulseBridge writes.
+#
+# No runtime dependencies on purpose: resources are plain dicts built by small, strictly
+# validating functions, so a reviewer can read exactly what JSON goes over the wire. See README.md.
+
+[build-system]
+# hatchling's editable install adds a .pth file and writes nothing into the source tree
+# (setuptools would leave an untracked *.egg-info directory next to the code).
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pulsebridge-fhir"
+version = "0.1.0"
+description = "FHIR R4 builders for PulseBridge: Patient, Device, vital-signs Observations, Provenance, transaction Bundle."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["pulsebridge_fhir"]
