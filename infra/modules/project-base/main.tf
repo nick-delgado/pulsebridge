@@ -12,6 +12,10 @@
 # Nothing here runs or bills by the hour unless enable_cloud_nat is true.
 
 locals {
+  # The APIs actually enabled: the caller's list, plus the IAP API when IAP SSH is switched on,
+  # so the flag works without the caller also having to edit the list.
+  enabled_apis = setunion(var.enabled_apis, var.enable_iap_ssh ? ["iap.googleapis.com"] : [])
+
   network_name           = "${var.name_prefix}-vpc"
   edge_subnet_name       = "${var.name_prefix}-edge"
   serverless_subnet_name = "${var.name_prefix}-serverless"
@@ -60,7 +64,7 @@ locals {
 # (google_project_service.this["run.googleapis.com"]), so adding or removing one API from the list
 # touches only that API instead of re-creating the others, as count with list indices would.
 resource "google_project_service" "this" {
-  for_each = var.enabled_apis
+  for_each = local.enabled_apis
 
   project = var.project_id
   service = each.value

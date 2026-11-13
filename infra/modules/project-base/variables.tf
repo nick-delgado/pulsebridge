@@ -32,10 +32,10 @@ variable "name_prefix" {
   default     = "pulsebridge"
 
   validation {
-    # The longest derived name is "<prefix>-allow-serverless-to-edge" (31 characters after the
-    # prefix); Compute Engine names are limited to 63 characters, so the prefix may use 30.
-    condition     = can(regex("^[a-z][a-z0-9-]{0,28}[a-z0-9]$", var.name_prefix))
-    error_message = "name_prefix must be 2-30 characters of lower-case letters, digits and hyphens, start with a letter and not end with a hyphen."
+    # The longest derived name is "<prefix>-allow-serverless-to-edge": the suffix is 25
+    # characters. Compute Engine names are limited to 63 characters, so the prefix may use 38.
+    condition     = can(regex("^[a-z][a-z0-9-]{0,36}[a-z0-9]$", var.name_prefix))
+    error_message = "name_prefix must be 2-38 characters of lower-case letters, digits and hyphens, start with a letter and not end with a hyphen."
   }
 }
 
@@ -86,6 +86,14 @@ variable "edge_subnet_cidr" {
     condition     = can(cidrhost(var.edge_subnet_cidr, 0)) && can(regex("^[0-9.]+/([89]|1[0-9]|2[0-9])$", var.edge_subnet_cidr))
     error_message = "edge_subnet_cidr must be a valid IPv4 CIDR block between /8 and /29, such as \"10.10.0.0/24\"."
   }
+
+  validation {
+    # GCP rejects a subnet range with host bits set (10.10.0.5/24). cidrsubnet(x, 0, 0) returns
+    # the block with host bits cleared, so it equals x only when x is already a network address.
+    # try() makes a malformed value pass here; the rule above reports it.
+    condition     = try(cidrsubnet(var.edge_subnet_cidr, 0, 0) == var.edge_subnet_cidr, true)
+    error_message = "edge_subnet_cidr must be a network address with no host bits set, such as \"10.10.0.0/24\" (not \"10.10.0.5/24\")."
+  }
 }
 
 variable "serverless_subnet_cidr" {
@@ -100,13 +108,20 @@ variable "serverless_subnet_cidr" {
   }
 
   validation {
+    condition     = try(cidrsubnet(var.serverless_subnet_cidr, 0, 0) == var.serverless_subnet_cidr, true)
+    error_message = "serverless_subnet_cidr must be a network address with no host bits set, such as \"10.10.1.0/24\" (not \"10.10.1.5/24\")."
+  }
+
+  validation {
     # Two CIDR blocks overlap exactly when they share the same network address once both are cut
-    # to the shorter of their two prefix lengths. Guarded with can() so an invalid edge CIDR
-    # reports its own error instead of this one.
-    condition = !can(cidrhost(var.edge_subnet_cidr, 0)) || (
+    # to the shorter of their two prefix lengths. If either value is malformed the expression
+    # errors, try() turns that into true, and that variable's own format rule reports it instead
+    # of a crash such as "Invalid index".
+    condition = try(
       cidrhost(format("%s/%d", split("/", var.serverless_subnet_cidr)[0], min(tonumber(split("/", var.serverless_subnet_cidr)[1]), tonumber(split("/", var.edge_subnet_cidr)[1]))), 0)
       !=
-      cidrhost(format("%s/%d", split("/", var.edge_subnet_cidr)[0], min(tonumber(split("/", var.serverless_subnet_cidr)[1]), tonumber(split("/", var.edge_subnet_cidr)[1]))), 0)
+      cidrhost(format("%s/%d", split("/", var.edge_subnet_cidr)[0], min(tonumber(split("/", var.serverless_subnet_cidr)[1]), tonumber(split("/", var.edge_subnet_cidr)[1]))), 0),
+      true
     )
     error_message = "serverless_subnet_cidr must not overlap edge_subnet_cidr."
   }
@@ -152,7 +167,7 @@ variable "edge_vm_service_account_email" {
 }
 
 variable "enable_iap_ssh" {
-  description = "Allow SSH (TCP 22) to the edge VM from Identity-Aware Proxy's TCP forwarding range only (35.235.240.0/20), for `gcloud compute ssh --tunnel-through-iap`. Off by default: nothing else in the design needs SSH."
+  description = "Allow SSH (TCP 22) to the edge VM from Identity-Aware Proxy's TCP forwarding range only (35.235.240.0/20), for `gcloud compute ssh --tunnel-through-iap`. Off by default: nothing else in the design needs SSH. When true, the module also enables iap.googleapis.com, which IAP TCP forwarding is understood to require (not confirmed against Google's documentation)."
   type        = bool
   default     = false
 }
