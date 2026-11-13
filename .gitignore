@@ -68,3 +68,11 @@ __pycache__/
 
 # Terraform lock files belong to root modules only
 infra/modules/**/.terraform.lock.hcl
+
+# Saved Terraform plans
+*.tfplan
+tfplan
+
+# Python build output
+build/
+*.egg-info/
