@@ -57,10 +57,10 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 
 | ID | Spike | Depends on | Needs | Status |
 | --- | --- | --- | --- | --- |
-| S1 | OpenEMR FHIR write support: does `POST /apis/default/fhir/Observation` (vital-signs) work, and where does it land? Fallback: standard REST vitals endpoint. | none | Docker (local) |in-progress |
-| S2 | OpenEMR + MariaDB + MLLP adapter in 1 GB plus swap: measure page load and FHIR API latency. | none | a temporary e2-micro |in-progress |
+| S1 | OpenEMR FHIR write support: does `POST /apis/default/fhir/Observation` (vital-signs) work, and where does it land? Fallback: standard REST vitals endpoint. | none | Docker (local) | done |
+| S2 | OpenEMR + MariaDB + MLLP adapter in 1 GB plus swap: measure page load and FHIR API latency. | none | a temporary e2-micro | in-progress |
 | S3 | Google Health API: register OAuth app, get a token, pull one day of heart-rate points, record exact field names and webhook payload shape. | none | the user (console) | todo |
-| S4 | Google's mllp-adapter image on e2-micro next to MariaDB. Fallback: small Python MLLP listener. | none | a temporary e2-micro |in-progress |
+| S4 | Google's mllp-adapter image on e2-micro next to MariaDB. Fallback: small Python MLLP listener. | none | a temporary e2-micro | in-progress |
 | S5 | HL7v2 store: confirm `ingest` publishes to Pub/Sub and record the push message body. Also record what the store and the MLLP adapter return for an unparseable message (D7). | none | temporary dataset | todo |
 | S6 | Reviewer auth: Identity Platform or a static password in the proxy. | none | none (desk research) | todo |
 
