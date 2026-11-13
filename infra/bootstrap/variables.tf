@@ -220,12 +220,13 @@ variable "deployer_roles" {
   }
 
   validation {
-    # Predefined roles look like roles/<service>.<role>; custom roles like projects/<p>/roles/<r>.
+    # Role names look like roles/<service>.<role> (predefined), roles/<name> (basic: rejected by
+    # the next validation, with its own message) or projects/<p>/roles/<r> (project custom role).
     condition = alltrue([
       for r in var.deployer_roles :
-      can(regex("^(roles/[a-zA-Z0-9]+\\.[a-zA-Z0-9.]+|projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/roles/[a-zA-Z0-9_.]+)$", r))
+      can(regex("^(roles/[a-zA-Z0-9]+(\\.[a-zA-Z0-9.]+)?|projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/roles/[a-zA-Z0-9_.]+)$", r))
     ])
-    error_message = "Each deployer role must be a predefined role (roles/<service>.<role>) or a project custom role (projects/<project>/roles/<role>)."
+    error_message = "Each deployer role must be a role name such as roles/<service>.<role> or a project custom role (projects/<project>/roles/<role>)."
   }
 
   validation {
