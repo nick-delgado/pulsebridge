@@ -96,6 +96,17 @@ run "short_password_is_rejected" {
   expect_failures = [var.reviewer_password]
 }
 
+run "empty_password_is_rejected_with_the_length_rule" {
+  command = plan
+
+  variables {
+    reviewer_password            = ""
+    reviewer_password_wo_version = 1
+  }
+
+  expect_failures = [var.reviewer_password]
+}
+
 run "sixteen_characters_is_accepted" {
   command = plan
 

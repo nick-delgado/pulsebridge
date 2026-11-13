@@ -76,7 +76,7 @@ variable "reviewer_password" {
   validation {
     # The proxy derives its token-signing key from this password (s6.md), so it must be long
     # enough not to be guessed. The same minimum is enforced by the T27 script.
-    condition     = var.reviewer_password == null || length(coalesce(var.reviewer_password, "")) >= 16
+    condition     = var.reviewer_password == null ? true : length(var.reviewer_password) >= 16
     error_message = "reviewer_password must be at least 16 characters."
   }
 }

@@ -149,7 +149,7 @@ Run from this directory; no credentials are needed:
 
 ```bash
 terraform init -backend=false
-terraform test                       # 18 runs, mock Google provider
+terraform test                       # 19 runs, mock Google provider
 python3 tests/state_scan.py          # reviewer password absent from state; no SA keys
 ```
 
