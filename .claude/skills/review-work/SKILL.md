@@ -20,6 +20,8 @@ is missing, use the branch checked out in the main checkout).
   `pulsebridge-projectbrief.md` it touches.
 - Get the change set: `git -C <worktree> diff <base-branch>...HEAD` and the commit list.
 - If the worktree is missing or has uncommitted changes, report that and stop.
+- Keep your own scratch files in a subdirectory of the scratchpad named `review-<task-id>`.
+  Other agents share the scratchpad: never run a script you did not write.
 
 ## 2. Review the changes and logic
 

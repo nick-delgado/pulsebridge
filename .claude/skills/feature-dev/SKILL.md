@@ -29,6 +29,9 @@ git -C <repo> worktree add <repo>/.worktrees/<id>-<slug> -b task/<id>-<slug> <ba
   switch its branch.
 - If the worktree or branch already exists, continue in it rather than recreating it.
 - Do not edit `docs/workplan.md`; the orchestrator owns it.
+- Scratch files (break-check scripts, logs, the summary HTML) go in a subdirectory of the
+  scratchpad named after the task ID, for example `<scratchpad>/t06/`. Other agents share the
+  scratchpad: never write to its root and never run a script you did not write in this task.
 
 ## 2. Build
 
