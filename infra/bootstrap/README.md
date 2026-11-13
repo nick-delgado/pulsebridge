@@ -36,6 +36,10 @@ terraform apply
 terraform output                               # values for the env roots and GitHub
 ```
 
+On a brand-new project, a freshly enabled API can take a minute to become usable. If the first
+apply fails with "API has not been used in project ... or it is disabled", wait and run
+`terraform apply` again; it continues from where it stopped.
+
 Then:
 
 - Env roots: put `state_bucket_name` in each root's `backend "gcs"` block as `bucket`, with a
