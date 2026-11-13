@@ -15,13 +15,23 @@ variables {
 }
 
 # The provider checks that a service_account_id looks like a real account name, so the mock's
-# random name for the push account is replaced with a synthetic, well-formed one. File level,
-# because the accounts are created by the first run and later runs reuse that state.
+# random names are replaced with synthetic, well-formed ones: for the push account, and for
+# fhir-proxy so that a Token Creator grant misdirected to it fails the assertion below rather than
+# the provider's format check. File level, because the accounts are created by the first run and
+# later runs reuse that state.
 override_resource {
   target = google_service_account.this["pubsub-push"]
   values = {
     name  = "projects/example-project-01/serviceAccounts/pb-pubsub-push@example-project-01.iam.gserviceaccount.com"
     email = "pb-pubsub-push@example-project-01.iam.gserviceaccount.com"
+  }
+}
+
+override_resource {
+  target = google_service_account.this["fhir-proxy"]
+  values = {
+    name  = "projects/example-project-01/serviceAccounts/pb-fhir-proxy@example-project-01.iam.gserviceaccount.com"
+    email = "pb-fhir-proxy@example-project-01.iam.gserviceaccount.com"
   }
 }
 
