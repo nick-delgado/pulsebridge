@@ -20,7 +20,7 @@ TF_ROOT ?= infra
 # Every library and service with its own pyproject.toml is installed editable into the venv.
 PACKAGE_PYPROJECTS := $(wildcard libs/*/pyproject.toml services/*/pyproject.toml)
 
-.PHONY: help install hooks lint fmt test tf-validate pre-commit check clean
+.PHONY: help install hooks lint fmt test tf-validate secret-scan pre-commit check clean
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -70,6 +70,26 @@ tf-validate: ## terraform fmt -check and validate for every Terraform directory
 		terraform -chdir="$$d" init -backend=false -input=false -no-color > /dev/null; \
 		terraform -chdir="$$d" validate -no-color; \
 	done
+
+# Secret scan of committed history. The pre-commit gitleaks hook only sees *staged* changes, so it
+# protects a commit made on a machine with hooks installed, but not a commit made with
+# `--no-verify` or from a clone without hooks. This target scans commits instead; CI runs it on
+# every pull request's commits. SECRET_SCAN_RANGE is passed to `git log`: "HEAD" means the whole
+# history, "<base>..<head>" means the commits a pull request adds.
+# gitleaks is built from source at the pinned version with `go install` (Go verifies the module
+# against its checksum database) into .venv/bin. Keep the version in step with the hook's `rev`
+# in .pre-commit-config.yaml; tests/tooling/test_ci_workflow.py checks that they match.
+GITLEAKS_VERSION := v8.30.1
+GITLEAKS := $(BIN)/gitleaks
+SECRET_SCAN_RANGE ?= HEAD
+SECRET_SCAN_REPO ?= .
+
+$(VENV)/.gitleaks-$(GITLEAKS_VERSION): | $(VENV)/.installed
+	GOBIN="$(abspath $(BIN))" go install github.com/zricethezav/gitleaks/v8@$(GITLEAKS_VERSION)
+	@touch $@
+
+secret-scan: $(VENV)/.gitleaks-$(GITLEAKS_VERSION) ## gitleaks over git history (SECRET_SCAN_RANGE, default all)
+	$(GITLEAKS) git --redact --no-banner --verbose --log-opts="$(SECRET_SCAN_RANGE)" "$(SECRET_SCAN_REPO)"
 
 pre-commit: install ## Run every pre-commit hook against all files
 	$(BIN)/pre-commit run --all-files --show-diff-on-failure

@@ -12,6 +12,9 @@ repos:
   # gitleaks knows hundreds of credential formats (private keys, API keys, tokens), and
   # detect-private-key is a simple, dependency-free backstop for PEM private keys, which is what
   # a service account key JSON carries in its "private_key" field.
+  # These hooks only see staged changes on a machine with hooks installed. Committed history is
+  # scanned separately by `make secret-scan`, which CI runs on every pull request. Keep this rev in
+  # step with GITLEAKS_VERSION in the Makefile.
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.30.1
     hooks:

@@ -1,6 +1,9 @@
 # Continuous integration: runs on every pull request (and on pushes to main) and fails the check
-# if linting, tests, Terraform validation or the pre-commit hooks fail. Each job calls the same
-# Makefile targets a developer runs locally.
+# if linting, tests, Terraform validation, the secret scan or the pre-commit hooks fail. Each job
+# calls the same Makefile targets a developer runs locally.
+#
+# No step or job may use continue-on-error: a failing check must fail the run.
+# tests/tooling/test_ci_workflow.py enforces this and the other properties CI depends on.
 #
 # Third-party actions are pinned to a full commit SHA (the tag is in the trailing comment): a tag
 # can be moved to different code, a commit SHA cannot.
@@ -24,6 +27,7 @@ concurrency:
 env:
   PYTHON_VERSION: "3.13"
   TERRAFORM_VERSION: "1.17.2"
+  GO_VERSION: "1.24.7"
 
 jobs:
   lint-and-test:
@@ -65,6 +69,41 @@ jobs:
           terraform_wrapper: false
       - run: make tf-validate
 
+  # Scans the commits themselves for credentials. The pre-commit gitleaks hook only checks what is
+  # staged on the developer's machine, so it misses a commit made with `--no-verify` or from a
+  # clone without hooks; this job does not depend on hooks having run.
+  secret-scan:
+    name: Secret scan (gitleaks over commits)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # full history, so the base commit and every pull request commit exist
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      # Pull request: only the commits it adds (reachable from its head, not from its base).
+      # Push to main: the whole history. SHAs go through env, not inline ${{ }} in the script.
+      - name: Scan commits for secrets
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            make secret-scan SECRET_SCAN_RANGE="${BASE_SHA}..${HEAD_SHA}"
+          else
+            make secret-scan SECRET_SCAN_RANGE=HEAD
+          fi
+
+  # Runs every hook over all files (ruff, actionlint, YAML/TOML checks, terraform fmt,
+  # detect-private-key). The gitleaks hook finds nothing to scan here because nothing is staged
+  # in a CI checkout; committed secrets are covered by the secret-scan job above.
   pre-commit:
     name: Pre-commit hooks (all files)
     runs-on: ubuntu-24.04

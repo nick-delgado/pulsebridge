@@ -1,10 +1,11 @@
-"""The pre-commit secret scan blocks a commit that stages a service account key.
+"""Secret scanning: the pre-commit hook and the history scan CI runs both catch a key.
 
-Each test builds a throwaway git repository in a temporary directory, installs this repository's
-.pre-commit-config.yaml as its git hook, stages a file and tries `git commit`. The fake key is
-generated at test time from random bytes and written only into that temporary directory: it is
-not a real key, it is never committed here, and the real credentials in the environment are
-never read.
+The hook tests build a throwaway git repository in a temporary directory, install this
+repository's .pre-commit-config.yaml as its git hook, stage a file and try `git commit`. The
+history tests commit with hooks bypassed and run `make secret-scan` over the commits. The fake
+key is generated at test time from random bytes and written only into a temporary directory:
+it is not a real key, it is never committed here, and the real credentials in the environment
+are never read.
 """
 
 import base64
@@ -122,3 +123,97 @@ def test_commit_without_secrets_is_accepted(scratch_repo) -> None:
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert has_commit(run)
+
+
+# --- committed history: `make secret-scan`, the command CI runs ------------------------------
+#
+# The hook above only sees staged changes. A commit made with `git commit --no-verify`, or from a
+# clone where `make hooks` was never run, skips it entirely. These tests commit a synthetic key
+# with hooks bypassed and check that the history scan CI runs still finds it.
+
+
+def run_secret_scan(repo: Path, scan_range: str) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k not in {"MAKEFLAGS", "MFLAGS", "MAKELEVEL"}}
+    return subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "-C",
+            str(REPO_ROOT),
+            "secret-scan",
+            f"SECRET_SCAN_REPO={repo}",
+            f"SECRET_SCAN_RANGE={scan_range}",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+
+
+@pytest.fixture
+def history_repo(tmp_path: Path):
+    """A scratch repository with one clean base commit and no hooks installed."""
+    repo = tmp_path / "history"
+    repo.mkdir()
+    env = git_env(tmp_path)
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=repo, env=env, capture_output=True, text=True, timeout=60
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout.strip()
+
+    def commit_file(name: str, text: str) -> str:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        git("add", name)
+        git("commit", "--quiet", "--no-verify", "-m", f"add {name}")
+        return git("rev-parse", "HEAD")
+
+    git("init", "--quiet", "--initial-branch=main")
+    base = commit_file("README.md", "Synthetic test repository.\n")
+    return repo, base, commit_file
+
+
+def test_history_scan_finds_key_committed_with_hooks_bypassed(history_repo) -> None:
+    # Pull request case: CI scans <base>..<head>, the commits the pull request adds.
+    repo, base, commit_file = history_repo
+    commit_file("docs/notes.md", "Meeting notes.\n")
+    key = fake_service_account_key()
+    head = commit_file("config/backup.json", key + "\n")
+
+    result = run_secret_scan(repo, f"{base}..{head}")
+    output = result.stdout + result.stderr
+
+    assert result.returncode != 0, output
+    assert "leaks found: 1" in output, output
+    assert "config/backup.json" in output
+    key_body_sample = json.loads(key)["private_key"].splitlines()[1]
+    assert key_body_sample not in output  # --redact
+
+
+def test_history_scan_passes_on_clean_commits(history_repo) -> None:
+    repo, base, commit_file = history_repo
+    commit_file("config/settings.json", json.dumps({"window_hours": 24}) + "\n")
+    head = commit_file("docs/notes.md", "Meeting notes.\n")
+
+    result = run_secret_scan(repo, f"{base}..{head}")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "no leaks found" in result.stdout + result.stderr
+
+
+def test_full_history_scan_finds_key_in_an_older_commit(history_repo) -> None:
+    # Push-to-main case: CI scans the whole history ("HEAD"), so a key removed in a later commit
+    # is still found; deleting the file does not remove it from git history.
+    repo, _base, commit_file = history_repo
+    commit_file("config/backup.json", fake_service_account_key() + "\n")
+    commit_file("config/backup.json", "{}\n")  # "removes" the key in a later commit
+
+    result = run_secret_scan(repo, "HEAD")
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert "leaks found: 1" in result.stdout + result.stderr
