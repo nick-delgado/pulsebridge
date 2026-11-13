@@ -59,6 +59,22 @@ run "dev_version_uses_write_only_argument" {
   }
 }
 
+# Rotation in dev: raising the number is what makes Terraform send a new value, because it keeps
+# no copy of the old one to compare with.
+run "raising_the_version_number_rotates" {
+  command = apply
+
+  variables {
+    reviewer_password            = "another-placeholder-not-real"
+    reviewer_password_wo_version = 2
+  }
+
+  assert {
+    condition     = google_secret_manager_secret_version.reviewer_password[0].secret_data_wo_version == "2"
+    error_message = "secret_data_wo_version must follow reviewer_password_wo_version."
+  }
+}
+
 run "version_without_password_is_rejected" {
   command = plan
 
