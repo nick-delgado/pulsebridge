@@ -2,7 +2,24 @@
 # The value below is a synthetic placeholder, not a real password. The full state search lives in
 # tests/state_scan.py, which also proves the search can find a value that does reach state.
 
-mock_provider "google" {}
+mock_provider "google" {
+  mock_data "google_project" {
+    defaults = {
+      number = "100000000001" # synthetic project number
+    }
+  }
+}
+
+# The Pub/Sub Token Creator grant is on by default and the provider checks that its
+# service_account_id looks like a real account name, so the push account gets a synthetic,
+# well-formed name instead of the mock's random string.
+override_resource {
+  target = google_service_account.this["pubsub-push"]
+  values = {
+    name  = "projects/example-project-01/serviceAccounts/pb-pubsub-push@example-project-01.iam.gserviceaccount.com"
+    email = "pb-pubsub-push@example-project-01.iam.gserviceaccount.com"
+  }
+}
 
 variables {
   project_id = "example-project-01"

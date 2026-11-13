@@ -1,6 +1,23 @@
 # Secret Manager secrets and their accessor bindings. Mock provider: no credentials, no cloud calls.
 
-mock_provider "google" {}
+mock_provider "google" {
+  mock_data "google_project" {
+    defaults = {
+      number = "100000000001" # synthetic project number
+    }
+  }
+}
+
+# The Pub/Sub Token Creator grant is on by default and the provider checks that its
+# service_account_id looks like a real account name, so the push account gets a synthetic,
+# well-formed name instead of the mock's random string.
+override_resource {
+  target = google_service_account.this["pubsub-push"]
+  values = {
+    name  = "projects/example-project-01/serviceAccounts/pb-pubsub-push@example-project-01.iam.gserviceaccount.com"
+    email = "pb-pubsub-push@example-project-01.iam.gserviceaccount.com"
+  }
+}
 
 variables {
   project_id            = "example-project-01"
@@ -118,4 +135,71 @@ run "labels_merge_and_deletion_protection_option" {
     condition     = alltrue([for s in google_secret_manager_secret.this : s.deletion_protection])
     error_message = "secret_deletion_protection = true must protect every secret."
   }
+}
+
+# The only write access to any secret: edge-vm on the OpenEMR key (T23 runs on the VM).
+run "only_edge_vm_can_add_openemr_key_versions" {
+  command = apply
+
+  assert {
+    condition = toset([
+      for b in google_secret_manager_secret_iam_member.writer : "${b.role}|${b.secret_id}|${b.member}"
+      ]) == toset([
+      "roles/secretmanager.secretVersionAdder|${google_secret_manager_secret.this["openemr-client-private-key"].id}|serviceAccount:${google_service_account.this["edge-vm"].email}",
+      "roles/secretmanager.viewer|${google_secret_manager_secret.this["openemr-client-private-key"].id}|serviceAccount:${google_service_account.this["edge-vm"].email}",
+    ])
+    error_message = "The writer grants must be exactly secretVersionAdder and viewer for edge-vm on the OpenEMR key secret."
+  }
+
+  # Across every secret binding the module makes, anything other than read access is exactly
+  # those two grants: no other account can add versions to any secret.
+  assert {
+    condition = length([
+      for b in concat(values(google_secret_manager_secret_iam_member.accessor), values(google_secret_manager_secret_iam_member.writer)) : b
+      if b.role != "roles/secretmanager.secretAccessor"
+    ]) == 2
+    error_message = "Only the two edge-vm grants on the OpenEMR key may be anything other than secretAccessor."
+  }
+
+  # Adding a version must not come with reading it back.
+  assert {
+    condition = length([
+      for b in google_secret_manager_secret_iam_member.accessor : b
+      if b.secret_id == google_secret_manager_secret.this["openemr-client-private-key"].id && b.member == "serviceAccount:${google_service_account.this["edge-vm"].email}"
+    ]) == 0
+    error_message = "edge-vm may add the OpenEMR key but must not be able to read it (no secretAccessor)."
+  }
+}
+
+run "openemr_key_writer_can_be_turned_off" {
+  command = apply
+
+  variables {
+    edge_vm_writes_openemr_key = false
+  }
+
+  assert {
+    condition     = length(google_secret_manager_secret_iam_member.writer) == 0
+    error_message = "edge_vm_writes_openemr_key = false must remove both writer grants."
+  }
+}
+
+run "uppercase_label_key_is_rejected" {
+  command = plan
+
+  variables {
+    secret_labels = { Env = "dev" }
+  }
+
+  expect_failures = [var.secret_labels]
+}
+
+run "label_value_with_space_is_rejected" {
+  command = plan
+
+  variables {
+    secret_labels = { env = "dev box" }
+  }
+
+  expect_failures = [var.secret_labels]
 }

@@ -92,7 +92,7 @@ locals {
     # is the private key. The client ID is plain configuration, not a secret.
     "openemr-client-private-key" = {
       readers    = ["fhir-proxy"]
-      written_by = "OpenEMR client registration script (T23), run by the deployer"
+      written_by = "OpenEMR client registration script (T23), run on the edge VM as edge-vm (see local.secret_writer_grants)"
       purpose    = "Private key (PEM) that fhir-proxy signs its OpenEMR client assertion with."
     }
     # Decision D9: shared reviewer password, checked by fhir-proxy only.
@@ -118,6 +118,27 @@ locals {
       purpose    = "Password of the OpenEMR admin user created on first boot."
     }
   }
+
+  # The only write access to any secret. The OpenEMR registration script (T23) must run on the
+  # edge VM, because it enables the new client with a database command inside the MariaDB
+  # container (spike S1). It generates the key pair there and uploads the private key as a new
+  # version of this one secret, as the VM's own account:
+  #   - secretVersionAdder: add a version (secretmanager.versions.add), nothing else;
+  #   - viewer: list and read version METADATA, so the script can see whether a key already
+  #     exists and is safe to run twice. Viewer does not include secretmanager.versions.access,
+  #     so the VM still cannot read the key's value.
+  secret_writer_grants = var.edge_vm_writes_openemr_key ? {
+    "openemr-client-private-key/edge-vm/secretVersionAdder" = {
+      secret   = "openemr-client-private-key"
+      workload = "edge-vm"
+      role     = "roles/secretmanager.secretVersionAdder"
+    }
+    "openemr-client-private-key/edge-vm/viewer" = {
+      secret   = "openemr-client-private-key"
+      workload = "edge-vm"
+      role     = "roles/secretmanager.viewer"
+    }
+  } : {}
 
   # One accessor binding per (secret, reader) pair, keyed "<secret>/<workload>".
   secret_accessors = {

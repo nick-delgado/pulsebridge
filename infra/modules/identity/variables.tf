@@ -30,9 +30,15 @@ variable "create_seeder_account" {
 }
 
 variable "grant_pubsub_token_creator" {
-  description = "Let the project's Pub/Sub service agent mint OIDC tokens for the pubsub-push account. Only projects created before 8 April 2021 need this; newer projects already allow it. The grant is on the pubsub-push account only, not project-wide."
+  description = "Let the project's Pub/Sub service agent (service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com) mint OIDC tokens for the pubsub-push account. Projects created before 8 April 2021 need it; newer ones already allow it, so granting it is harmless there. On by default because it is scoped to the pubsub-push account only, never the project. This module is the only owner of this grant; the healthcare module must not also create it."
   type        = bool
-  default     = false
+  default     = true
+}
+
+variable "edge_vm_writes_openemr_key" {
+  description = "Let the edge VM's account add versions to the openemr-client-private-key secret (roles/secretmanager.secretVersionAdder) and see whether one exists (roles/secretmanager.viewer, metadata only), both on that one secret. The OpenEMR client registration script (T23) runs on the VM, generates the key pair there and uploads the private key. The VM still cannot read the key back: it is not an accessor of that secret."
+  type        = bool
+  default     = true
 }
 
 variable "secret_labels" {
@@ -67,7 +73,7 @@ variable "secret_deletion_protection" {
 # ----------------------------------------------------------------------------------------------
 
 variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as the first version of the reviewer-password secret through the write-only argument secret_data_wo, so it never enters Terraform state or plan files. Used only when reviewer_password_wo_version > 0. Leave unset in prod; scripts/secrets/set-reviewer-password (T27) sets it there. At least 16 characters."
+  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through the write-only argument secret_data_wo, so it never enters Terraform state or plan files. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set the password EITHER this way OR with scripts/secrets/set-reviewer-password (T27), never both: while Terraform manages a version, the next apply undoes a script that disabled it. Leave unset in prod."
   type        = string
   default     = null
   sensitive   = true
@@ -82,7 +88,7 @@ variable "reviewer_password" {
 }
 
 variable "reviewer_password_wo_version" {
-  description = "Dev only: 0 (the default) creates no reviewer-password version. 1 or more creates one from reviewer_password; increase it to write a new password, because Terraform cannot see a write-only value change and only sends it when this number changes."
+  description = "Dev only: 0 (the default) creates no reviewer-password version. 1 or more creates one from reviewer_password; increase it to write a new password, because Terraform cannot see a write-only value change and only sends it when this number changes. Raising it may replace the version (old one destroyed, then the new one created); if so, for a moment the secret has no enabled version and the proxy's login answers 503. Not verified against a real apply: the mock provider used in tests does not run the real provider's planning logic."
   type        = number
   default     = 0
   nullable    = false

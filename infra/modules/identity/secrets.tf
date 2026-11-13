@@ -41,6 +41,16 @@ resource "google_secret_manager_secret_iam_member" "accessor" {
   member    = "serviceAccount:${google_service_account.this[each.value.workload].email}"
 }
 
+# The OpenEMR key writer grants (see local.secret_writer_grants): on that one secret, for edge-vm.
+resource "google_secret_manager_secret_iam_member" "writer" {
+  for_each = local.secret_writer_grants
+
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.this[each.value.secret].id
+  role      = each.value.role
+  member    = "serviceAccount:${google_service_account.this[each.value.workload].email}"
+}
+
 # Dev only (decision D9): the first reviewer-password version, from tfvars.
 #
 # `secret_data_wo` is a write-only argument (Terraform 1.11+): Terraform passes the value to the

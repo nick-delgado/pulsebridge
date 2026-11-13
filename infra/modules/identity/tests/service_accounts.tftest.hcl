@@ -63,6 +63,23 @@ run "one_account_per_workload" {
   }
 }
 
+# The healthcare module (T05) takes service_account_emails whole and picks the keys it uses, so
+# the keys must be exactly these names and known at plan time (before any account exists).
+run "email_keys_known_at_plan_time" {
+  command = plan
+
+  variables {
+    create_seeder_account = true
+  }
+
+  assert {
+    condition = toset(keys(output.service_account_emails)) == toset([
+      "health-sync", "v2-to-fhir", "cuff-sim", "fhir-proxy", "edge-vm", "scheduler-invoker", "pubsub-push", "seeder",
+    ])
+    error_message = "service_account_emails must be keyed by the workload names, known at plan time."
+  }
+}
+
 run "seeder_account_when_requested" {
   command = apply
 
@@ -101,21 +118,22 @@ run "only_project_role_is_edge_vm_log_writer" {
   }
 }
 
-run "pubsub_token_creator_off_by_default" {
-  command = apply
-
-  assert {
-    condition     = length(google_service_account_iam_member.pubsub_token_creator) == 0
-    error_message = "The Pub/Sub service agent grant must be opt-in."
-  }
-}
-
-run "pubsub_token_creator_scoped_to_push_account" {
+run "pubsub_token_creator_can_be_turned_off" {
   command = apply
 
   variables {
-    grant_pubsub_token_creator = true
+    grant_pubsub_token_creator = false
   }
+
+  assert {
+    condition     = length(google_service_account_iam_member.pubsub_token_creator) == 0
+    error_message = "grant_pubsub_token_creator = false must remove the Pub/Sub service agent grant."
+  }
+}
+
+# On by default (this module is the single owner of the grant), and scoped to one account.
+run "pubsub_token_creator_on_by_default_and_scoped_to_push_account" {
+  command = apply
 
   assert {
     condition     = google_service_account_iam_member.pubsub_token_creator[0].service_account_id == google_service_account.this["pubsub-push"].name
@@ -154,4 +172,34 @@ run "prefix_too_long_is_rejected" {
   }
 
   expect_failures = [var.name_prefix]
+}
+
+run "project_id_with_capitals_is_rejected" {
+  command = plan
+
+  variables {
+    project_id = "Example-Project-01"
+  }
+
+  expect_failures = [var.project_id]
+}
+
+run "project_id_too_short_is_rejected" {
+  command = plan
+
+  variables {
+    project_id = "ab-12" # 5 characters; project IDs have at least 6
+  }
+
+  expect_failures = [var.project_id]
+}
+
+run "project_id_ending_in_hyphen_is_rejected" {
+  command = plan
+
+  variables {
+    project_id = "example-project-"
+  }
+
+  expect_failures = [var.project_id]
 }
