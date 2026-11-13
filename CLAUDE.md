@@ -1,0 +1,57 @@
+# PulseBridge
+
+Personal health record (PHR) on GCP: ingests heart-rate data from a Pixel Watch (Google Health API)
+and blood-pressure readings from a simulated cuff (HL7v2 ORU^R01 over MLLP), stores everything as
+FHIR R4 in a Cloud Healthcare API FHIR store, charts it in a single-page dashboard, and shares
+selected readings with a clinic by writing to OpenEMR's FHIR API. All infrastructure is Terraform.
+
+The full design is in `pulsebridge-projectbrief.md`. Read it before making design decisions; treat
+its "Decisions log" as settled and its "Open questions and spikes" as unresolved.
+
+This is a portfolio project. It is meant to showcase FHIR R4, HL7v2 and Terraform, so favour code
+that is readable and standards-correct over clever shortcuts (for example, the HL7v2 parser and the
+FHIR mapping are written by hand on purpose, not delegated to a managed mapping service).
+
+## Credentials and secrets (hard rules)
+
+- Never print credential material: no `cat`, `echo`, `env` dumps or log lines that reveal service
+  account keys, OAuth client secrets, access or refresh tokens, passwords, or `GCP_SA_KEY_B64`.
+  When checking that a variable or file exists, show its name or path only, never its value.
+- Never commit credential files or secret values: service account key JSON, `.pem` files, OAuth
+  client secret files, tokens, `.env` files, Terraform state, or plan files.
+- Before every commit, review `git status` and the staged diff for secrets.
+- Secret values live in Secret Manager. Terraform creates the secret; a script adds the version
+  after apply, so the value stays out of code and, where avoidable, out of state.
+- If a secret is exposed by accident, say so immediately so it can be rotated.
+
+## No hardcoded identity
+
+The repo must work for a stranger who clones it and connects their own Google Health account.
+
+- Nothing specific to the author is hardcoded: no project IDs, project numbers, account emails,
+  OAuth client IDs, patient identifiers, domains or tokens in code or committed config.
+- All such values come from Terraform variables, environment variables or Secret Manager.
+- Committed examples use placeholders (`terraform.tfvars.example`), never real values.
+- Health data from the watch is real PHI (the author's own). Never copy it into the repo, test
+  fixtures, commit messages or logs. Tests and fixtures use synthetic data only.
+
+## GCP environment
+
+- Cloud sessions authenticate through `scripts/gcp-auth.sh`, run by the SessionStart hook in
+  `.claude/settings.json`. It decodes the service account key from `GCP_SA_KEY_B64` into the path
+  in `GOOGLE_APPLICATION_CREDENTIALS` and activates it for `gcloud`.
+- The project comes from `CLOUDSDK_CORE_PROJECT`. Read it from there; do not write it into files.
+- Check access with `gcloud auth list` and `gcloud projects describe "$CLOUDSDK_CORE_PROJECT"`.
+- Enabling an API, creating billable resources and changing IAM are changes to a real project:
+  confirm with the user before doing them outside an agreed Terraform apply.
+- Cost matters: the stack should cost near zero when idle. Flag anything always-on or billed hourly.
+
+## Conventions
+
+- Infrastructure: Terraform under `infra/` (`modules/`, `envs/dev`, `envs/prod`, `bootstrap/`).
+  Pin provider and module versions, commit `.terraform.lock.hcl`, give every variable a
+  description, and run `terraform fmt` and `terraform validate` before committing.
+- Services: Python on Cloud Run, one least-privilege service account per service.
+- FHIR: R4. Observations carry LOINC codes, UCUM units, the vital-signs category, a `device`
+  reference and a `Provenance`. Writes are idempotent (conditional create or update).
+- HL7v2: version and segment usage follow the brief (ORU^R01, PID/OBR/OBX, ACK AA/AE).
