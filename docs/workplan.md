@@ -41,12 +41,17 @@ Each layer rejects a different class of bad message, and the tests cover each cl
 | Class | Example | Caught by | What the user sees |
 | --- | --- | --- | --- |
 | Structurally invalid | missing required segment or field, wrong data type | Cuff simulator, `hl7apy` validation, before sending | Validation error; nothing is sent |
-| Unparseable | broken MSH, bad framing or separators | MLLP adapter / HL7v2 store at ingest | The NACK from the store, shown as the commit-level acknowledgment |
-| Parses but cannot be mapped | unknown OBX-3 code, missing OBX-14, non-numeric OBX-5 | `v2-to-fhir` mapping | Commit-level `AA`, application-level outcome `error` with a reason |
+| Unparseable | no MSH segment, wrong segment terminator, separators that disagree with MSH-1, empty payload | HL7v2 store at ingest; the adapter relays the store's reply | Commit-level `AE` with the store's reason from MSA-3 |
+| No acknowledgment | bad MLLP framing (adapter waits silently); Healthcare API error such as a missing store or denied permission (adapter closes the connection) | MLLP adapter | "No acknowledgment received", with timeout or connection closed as the reason |
+| Parses but cannot be mapped | unknown OBX-3 code, missing OBX-14, non-numeric OBX-5, empty or unknown MSH-9 or MSH-12, MSH-only message | `v2-to-fhir` mapping | Commit-level `AA`, application-level outcome `error` with a reason |
 
 - The mapper records `application_outcome: accepted | error` plus a `reason` for every message.
 - Optional: `v2-to-fhir` also writes an `ACK^R01` with `MSA-1 = AE` back into the HL7v2 store.
 - A mapping failure never crashes or stalls the Pub/Sub subscription.
+- Found in spike S4: the store accepts almost anything with a readable header (even a lone
+  `MSH|^~\&`) with `AA`, never returns `AR`, and ignores MSH-15/16. It replies in the original
+  (simple) acknowledgment style; "commit-level" and "application-level" are our labels, modelled on
+  enhanced mode. The store's ACK has message type `ACK`, not `ACK^R01`, and on a NACK MSA-2 is empty.
 - The simulator has a "send malformed" checkbox that bypasses validation so the later layers'
   error paths can be demonstrated.
 
@@ -112,6 +117,8 @@ reviewer login resources (pending S6).
 push subscription, HL7v2 notification config.
 - AC: FHIR store is R4 with referential integrity and update-create settings stated and explained.
 - AC: the HL7v2 store publishes ingest notifications to the topic.
+- AC: the HL7v2 store's `parserConfig.version` is set explicitly and explained (it cannot be
+  changed after creation); `rejectDuplicateMessage` and `allowNullHeader` stay at their defaults.
 - AC: the push subscription has a dead-letter topic and an OIDC-authenticated push endpoint variable.
 - AC: `terraform validate` passes.
 
@@ -129,7 +136,9 @@ heart-rate `Observation` (LOINC 8867-4, UCUM `/min`), blood-pressure panel `Obse
 ORU^R01 builder for a blood-pressure reading (two OBX: LOINC 8480-6 and 8462-4), validation of a
 message before it is sent, ACK parsing, MLLP framing for the client side, and a small set of sample
 messages reused by T12 and T13: valid ones, and at least one per malformed class in D7
-(structurally invalid, unparseable, and each parses-but-cannot-map case).
+(structurally invalid, unparseable, no acknowledgment, and each parses-but-cannot-map case). Per
+spike S4 the reliable NACK samples are "no MSH segment" and "line-feed segment terminators", and a
+missing MLLP end byte demonstrates the no-acknowledgment path.
 - AC: the builder produces an ORU^R01 that passes `hl7apy` validation; a message with a missing
   required field or a wrong OBX value type fails validation with a clear error.
 - AC: a built message parses back to the same patient identifier, LOINC codes, values, units and
@@ -204,8 +213,12 @@ HTTPS ingest; returns the ACK.
 - AC: a message that fails validation is never sent, unless "send malformed" is set.
 - AC: a `send_malformed` option bypasses validation and sends a chosen malformed sample from T07
   (never free text); it is still rate-limited.
-- AC: a NACK from the store or adapter is returned to the caller as the commit-level
-  acknowledgment, not turned into a generic error.
+- AC: a NACK from the store is returned to the caller as the commit-level acknowledgment with
+  the reason from MSA-3, not turned into a generic error. MSA-2 is not required to match on a NACK
+  (it is empty when the header could not be read), and the reply type `ACK` is accepted.
+- AC: the MLLP client has a read timeout and reports three distinct outcomes: an ACK frame,
+  connection closed with no data, and timeout. The last two are "no acknowledgment received".
+- AC: segments end with a carriage return all the way to the wire; nothing converts them to line feeds.
 - AC: inputs outside bounds are rejected; no free text reaches the message.
 - AC: rate-limited; both transports covered by tests against a fake listener.
 
@@ -217,11 +230,20 @@ reviewer auth; `CapabilityStatement`.
 - AC: the `CapabilityStatement` lists exactly what is implemented (test compares the two).
 - AC: unauthenticated requests are rejected.
 
-**T15 FHIR proxy: share to OpenEMR.** OAuth2 client flow, `Patient` conditional create,
-Observation writes, trace of each step.
-- AC: uses a registered client with scoped tokens; no admin API key.
-- AC: sharing the same reading twice does not create a duplicate patient.
-- AC: the trace returned to the dashboard never contains the client secret or the full token.
+**T15 FHIR proxy: share to OpenEMR.** Sequence found in spike S1 (`docs/spikes/s1.md`): get a
+token; search `Patient` by identifier and create it if absent; create or reuse an `Encounter`;
+`POST` each `Observation` with `subject` and `encounter` set; trace every step. OpenEMR has no
+Bundle endpoint and ignores conditional create.
+- AC: uses a registered client with the client credentials grant, authenticated by a signed
+  assertion (`private_key_jwt`) with `system/*` scopes; no admin API key and no user login.
+- AC: sharing the same reading twice does not create a duplicate patient (search, then create).
+- AC: the Patient sent has a `PT`-typed identifier, a name with `use: official`, gender and birth date.
+- AC: OpenEMR's "already exists" `400` for a repeated reading is reported as already shared, not
+  as a failure.
+- AC: the chart link is built from the numeric patient id in the Encounter-create response.
+- AC: the assertion's audience comes from configuration (OpenEMR's `site_addr_oath` value).
+- AC: the trace returned to the dashboard never contains the private key, the signed assertion
+  or the full token.
 
 **T16 Dashboard shell.** Single page: login, header status strip, line-art silhouette, empty left
 and right panels, share button placeholder, collapsible messages log, a typed API client with mock data.
@@ -257,13 +279,27 @@ OIDC invoker bindings.
 **T21 Module `edge-vm`.** e2-micro, startup script, swap file, persistent disk, MLLP adapter and
 MariaDB containers, firewall rule limited to the Cloud Run egress address.
 - AC: no public MLLP port; machine type is a variable defaulting to the free-tier size.
+- AC: the adapter image is pinned by digest and started with the flags recorded in
+  `docs/spikes/s4.md` (binary path as the command, `--hl7_v2_store_id`, `--export_stats=false`,
+  content logging off, `--restart unless-stopped`).
+- AC: the startup script checks the adapter container is up a few seconds after start and logs
+  if it is crash-looping.
+- AC: the VM runs as a dedicated service account whose only Healthcare permission is HL7v2
+  ingest on the store (not the default Compute Engine account, which has project-wide Editor).
 
 **T22 Module `phr`.** Dashboard hosting, `fhir-proxy` and cuff simulator Cloud Run services.
 - AC: hosting choice (D4) recorded with its idle cost.
 
 **T23 Module `openemr`.** OpenEMR container on the edge VM, database connection, OAuth2 client
 registration script.
-- AC: the client secret goes to Secret Manager, not to state or logs.
+- AC: the OAuth2 client's private key goes to Secret Manager, not to state or logs; the client
+  ID is plain configuration.
+- AC: OpenEMR is configured without a browser: `rest_fhir_api`, `rest_system_scopes_api` and
+  `site_addr_oath` set through `OPENEMR_SETTING_*` variables; the standard `rest_api` stays off.
+- AC: OpenEMR starts only after MariaDB is healthy (it exits if the database is not ready).
+- AC: the registration script follows the recipe in `docs/spikes/s1.md`, including enabling the
+  newly registered client, and is safe to run twice.
+- AC: the OpenEMR image is pinned by digest.
 
 **T24 Container build pipeline.** Dockerfiles and a Cloud Build config that builds on tag and
 reports image digests.
