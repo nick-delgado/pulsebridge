@@ -89,7 +89,7 @@ run "short_password_is_rejected" {
   command = plan
 
   variables {
-    reviewer_password            = "fifteen-chars-x" # 15 characters
+    reviewer_password            = substr("placeholder-not-a-real-password", 0, 15) # 15 characters
     reviewer_password_wo_version = 1
   }
 
@@ -100,7 +100,7 @@ run "sixteen_characters_is_accepted" {
   command = plan
 
   variables {
-    reviewer_password            = "sixteen-chars-xx" # 16 characters, the minimum
+    reviewer_password            = substr("placeholder-not-a-real-password", 0, 16) # 16 characters, the minimum
     reviewer_password_wo_version = 1
   }
 
