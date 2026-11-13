@@ -36,6 +36,7 @@ _FRAMINGS = {
     "missing_final_cr": lambda p: START_BLOCK + p + END_BLOCK,
 }
 _TERMINATORS = {"\r", "\n", "\r\n"}
+EVIDENCE_KINDS = ("observed in S4", "observed in S5", "inferred:")
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,9 @@ class Sample:
     name: str
     sample_class: str
     description: str
-    evidence: str  # where the expected store behaviour comes from (spike row, or "inferred")
+    # Per transport ("mllp", "https"): where the expected store outcome comes from. Each text
+    # starts with one of EVIDENCE_KINDS; "inferred:" marks expectations no spike observed.
+    evidence: dict[str, str]
     segments: tuple[str, ...]
     segment_terminator: str
     terminate_last_segment: bool
@@ -92,7 +95,7 @@ def _sample_from_json(raw: dict) -> Sample:
         name=raw["name"],
         sample_class=raw["class"],
         description=raw["description"],
-        evidence=raw["evidence"],
+        evidence=dict(raw["evidence"]),
         segments=tuple(raw["segments"]),
         segment_terminator=raw["segment_terminator"],
         terminate_last_segment=raw["terminate_last_segment"],
@@ -106,6 +109,14 @@ def _sample_from_json(raw: dict) -> Sample:
         raise ValueError(f"sample {sample.name}: unknown framing {sample.mllp_framing!r}")
     if sample.segment_terminator not in _TERMINATORS:
         raise ValueError(f"sample {sample.name}: unknown terminator")
+    if set(sample.evidence) != set(sample.transports):
+        raise ValueError(f"sample {sample.name}: evidence must name exactly its transports")
+    for transport, text in sample.evidence.items():
+        if not text.startswith(EVIDENCE_KINDS):
+            raise ValueError(
+                f"sample {sample.name}: {transport} evidence must start with one of "
+                f"{EVIDENCE_KINDS}"
+            )
     return sample
 
 
@@ -137,6 +148,7 @@ def by_class(sample_class: str) -> tuple[Sample, ...]:
 
 __all__ = [
     "CLASSES",
+    "EVIDENCE_KINDS",
     "Expected",
     "Sample",
     "all_samples",

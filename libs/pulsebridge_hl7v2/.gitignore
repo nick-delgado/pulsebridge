@@ -1,3 +1,0 @@
-# Build output from `pip install -e` / `pip wheel` (the root .gitignore does not cover these).
-build/
-*.egg-info/
