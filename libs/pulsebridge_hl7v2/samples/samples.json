@@ -1,0 +1,494 @@
+{
+  "about": "Synthetic HL7v2 sample messages for PulseBridge (task T07). See README.md in this directory.",
+  "classes": [
+    "valid",
+    "structurally_invalid",
+    "unparseable",
+    "no_acknowledgment",
+    "parses_but_cannot_map"
+  ],
+  "samples": [
+    {
+      "name": "valid_bp_reading",
+      "class": "valid",
+      "description": "The builder's ORU^R01 for 120/80 mm[Hg], observation time in UTC.",
+      "evidence": "S4 row v and S5 'valid' (same structure; S4 had no UTC offset)",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-VALID-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-VALID-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "pass",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "accepted",
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "valid_bp_reading_offset",
+      "class": "valid",
+      "description": "The builder's ORU^R01 for 135/85 mm[Hg] observed at 15:53:29 -0500 (US Eastern), to exercise time zone handling in the mapper.",
+      "evidence": "S5 stored an OBX-14 with offset -0500 and accepted it",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-VALID-0002|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-VALID-0002^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113155329-0500",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||135|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113155329-0500",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||85|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113155329-0500"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "pass",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "accepted",
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "invalid_missing_pid3",
+      "class": "structurally_invalid",
+      "description": "PID-3 (patient identifier list) is empty; it is required in 2.5.1.",
+      "evidence": "inferred: S4 found the store does not check required fields",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-BAD-0001|P|2.5.1",
+        "PID|1||||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-BAD-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "missing-patient-identifier"
+      }
+    },
+    {
+      "name": "invalid_obx14_not_hl7_date",
+      "class": "structurally_invalid",
+      "description": "OBX-14 of the systolic OBX is '2026-11-13 20:53', which is not an HL7 DTM (YYYYMMDDHHMMSS+ZZZZ).",
+      "evidence": "inferred: S4 found the store does not check data types",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-BAD-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-BAD-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||2026-11-13 20:53",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "invalid-obx-14"
+      }
+    },
+    {
+      "name": "unparseable_no_msh",
+      "class": "unparseable",
+      "description": "The MSH segment is missing; the message starts with PID.",
+      "evidence": "S4 row b3, S5 'starts with PID, no MSH'",
+      "segments": [
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-UNP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "error",
+        "commit_ack": "AE",
+        "commit_ack_reason": "Invalid MSH header",
+        "no_ack": null,
+        "application_outcome": null,
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "unparseable_lf_terminators",
+      "class": "unparseable",
+      "description": "Segments end with a line feed instead of a carriage return.",
+      "evidence": "S4 row a6, S5 'line feeds between segments'",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-UNP-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-UNP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\n",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "error",
+        "commit_ack": "AE",
+        "commit_ack_reason": "invalid segment terminator, store expects: \"\\r\"",
+        "no_ack": null,
+        "application_outcome": null,
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "unparseable_crlf_terminators",
+      "class": "unparseable",
+      "description": "Segments end with carriage return plus line feed (a Windows line ending).",
+      "evidence": "S5 '\\r\\n between segments' (HTTPS ingest; MLLP not tested)",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-UNP-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-UNP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r\n",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "error",
+        "commit_ack": "AE",
+        "commit_ack_reason": "Invalid segment name \"\\nPI\"",
+        "no_ack": null,
+        "application_outcome": null,
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "unparseable_separator_mismatch",
+      "class": "unparseable",
+      "description": "MSH-1 declares '|' as the field separator but every other field uses '#'.",
+      "evidence": "S4 row b2, S5 'MSH-1 says |, fields use #'",
+      "segments": [
+        "MSH|^~\\&#CUFFSIM#PULSEBRIDGE#PHR#PULSEBRIDGE#20261113205329+0000##ORU^R01^ORU_R01#SYN-UNP-0001#P#2.5.1",
+        "PID#1##SYN-000123^^^PULSEBRIDGE^MR##TESTPATIENT^SYNTHIA",
+        "OBR#1##SYN-UNP-0001^CUFFSIM#85354-9^Blood pressure panel with all children optional^LN###20261113205329+0000",
+        "OBX#1#NM#8480-6^Systolic blood pressure^LN##120#mm[Hg]^mm[Hg]^UCUM#####F###20261113205329+0000",
+        "OBX#2#NM#8462-4^Diastolic blood pressure^LN##80#mm[Hg]^mm[Hg]^UCUM#####F###20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "error",
+        "commit_ack": "AE",
+        "commit_ack_reason": "Invalid segment name \"PID\"",
+        "no_ack": null,
+        "application_outcome": null,
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "noack_missing_end_block",
+      "class": "no_acknowledgment",
+      "description": "A valid message after the MLLP start byte, but the end bytes (0x1C 0x0D) are never sent. The adapter waits silently.",
+      "evidence": "S4 row c1 (no reply for the full 75 s wait)",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-NOACK-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-NOACK-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "missing_end_block",
+      "transports": [
+        "mllp"
+      ],
+      "expected": {
+        "hl7apy_validation": "pass",
+        "hl7apy_parse": "ok",
+        "commit_ack": null,
+        "commit_ack_reason": null,
+        "no_ack": "timeout",
+        "application_outcome": null,
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "noack_missing_final_cr",
+      "class": "no_acknowledgment",
+      "description": "A valid message framed with the end byte 0x1C but without the final 0x0D.",
+      "evidence": "S4 row c2",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-NOACK-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-NOACK-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "missing_final_cr",
+      "transports": [
+        "mllp"
+      ],
+      "expected": {
+        "hl7apy_validation": "pass",
+        "hl7apy_parse": "ok",
+        "commit_ack": null,
+        "commit_ack_reason": null,
+        "no_ack": "timeout",
+        "application_outcome": null,
+        "mapping_reason": null
+      }
+    },
+    {
+      "name": "unmappable_unknown_obx3_code",
+      "class": "parses_but_cannot_map",
+      "description": "The systolic OBX-3 carries the unknown code 99999-9 instead of LOINC 8480-6.",
+      "evidence": "S4 row a3, S5",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|99999-9^Unknown observation^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "pass",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "unknown-obx-3-code"
+      }
+    },
+    {
+      "name": "unmappable_missing_obx14",
+      "class": "parses_but_cannot_map",
+      "description": "OBX-14 (observation time) is empty in both OBX segments. It is optional in 2.5.1, so validation passes.",
+      "evidence": "S4 row a1, S5",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "pass",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "missing-obx-14"
+      }
+    },
+    {
+      "name": "unmappable_non_numeric_obx5",
+      "class": "parses_but_cannot_map",
+      "description": "The systolic OBX-5 is 'HIGH' while OBX-2 says NM (numeric).",
+      "evidence": "S4 row a2, S5",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||HIGH|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "non-numeric-obx-5"
+      }
+    },
+    {
+      "name": "unmappable_msh_only",
+      "class": "parses_but_cannot_map",
+      "description": "A complete ORU^R01 header and nothing else: no PID, OBR or OBX.",
+      "evidence": "S4 row a4, S5",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "no-observations"
+      }
+    },
+    {
+      "name": "unmappable_empty_msh9",
+      "class": "parses_but_cannot_map",
+      "description": "MSH-9 (message type) is empty; the rest is a normal reading.",
+      "evidence": "S4 row a5, S5 (stored with msgType \"\")",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000|||SYN-MAP-0001|P|2.5.1",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "unsupported-message-type"
+      }
+    },
+    {
+      "name": "unmappable_bare_msh",
+      "class": "parses_but_cannot_map",
+      "description": "Only 'MSH|^~\\&' and a carriage return: a header with no fields at all.",
+      "evidence": "S4 row b4, S5 'MSH|^~\\& followed by \\r' (without the \\r S5 got AE)",
+      "segments": [
+        "MSH|^~\\&"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "ok",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "unsupported-message-type"
+      }
+    },
+    {
+      "name": "unmappable_unknown_version",
+      "class": "parses_but_cannot_map",
+      "description": "MSH-12 (version ID) is 9.9. The store accepts it; hl7apy refuses unknown versions.",
+      "evidence": "S4 row b8; S5 confirmed hl7apy 1.3.5 raises UnsupportedVersion",
+      "segments": [
+        "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|9.9",
+        "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA",
+        "OBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000",
+        "OBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000",
+        "OBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000"
+      ],
+      "segment_terminator": "\r",
+      "terminate_last_segment": true,
+      "mllp_framing": "standard",
+      "transports": [
+        "mllp",
+        "https"
+      ],
+      "expected": {
+        "hl7apy_validation": "fail",
+        "hl7apy_parse": "error",
+        "commit_ack": "AA",
+        "commit_ack_reason": null,
+        "no_ack": null,
+        "application_outcome": "error",
+        "mapping_reason": "unparseable-by-mapper"
+      }
+    }
+  ]
+}
