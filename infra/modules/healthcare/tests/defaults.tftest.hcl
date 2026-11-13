@@ -270,3 +270,28 @@ run "outputs_give_paths_consumers_need" {
     error_message = "Topic and subscription outputs must carry the module's names."
   }
 }
+
+run "time_zone_and_labels_reach_resources" {
+  command = apply
+
+  variables {
+    time_zone = "Europe/Amsterdam"
+    labels    = { app = "pulsebridge" }
+  }
+
+  assert {
+    condition     = google_healthcare_dataset.this.time_zone == "Europe/Amsterdam"
+    error_message = "time_zone must be set on the dataset."
+  }
+  assert {
+    condition = alltrue([for l in [
+      google_healthcare_fhir_store.this.labels,
+      google_healthcare_hl7_v2_store.this.labels,
+      google_pubsub_topic.ingest.labels,
+      google_pubsub_topic.dead_letter.labels,
+      google_pubsub_subscription.ingest.labels,
+      google_pubsub_subscription.dead_letter.labels,
+    ] : l == tomap({ app = "pulsebridge" })])
+    error_message = "labels must reach both stores, both topics and both subscriptions."
+  }
+}

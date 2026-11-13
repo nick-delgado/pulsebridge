@@ -170,3 +170,11 @@ run "accepts_valid_full_input" {
     }
   }
 }
+
+run "rejects_bad_time_zone" {
+  command = plan
+  variables {
+    time_zone = "UTC+2 summer"
+  }
+  expect_failures = [var.time_zone]
+}
