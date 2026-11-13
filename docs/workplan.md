@@ -79,7 +79,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 | T01 | Repo scaffolding | none | `Makefile`, `pyproject.toml`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, `services/README.md`, `libs/README.md`, `tests/tooling/` | done |
 | T02 | Terraform bootstrap | T01 | `infra/bootstrap/` | done |
 | T03 | Module `project-base` | T01 | `infra/modules/project-base/` | done |
-| T04 | Module `identity` | T01 | `infra/modules/identity/` | in-progress |
+| T04 | Module `identity` | T01 | `infra/modules/identity/` | done |
 | T05 | Module `healthcare` | T01 | `infra/modules/healthcare/` | done |
 | T06 | FHIR mapping library | T01 | `libs/pulsebridge_fhir/` | in-progress |
 | T07 | HL7v2 helpers (hl7apy) | T01 | `libs/pulsebridge_hl7v2/` | in-progress |
