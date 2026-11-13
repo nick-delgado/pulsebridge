@@ -68,7 +68,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T01 | Repo scaffolding | none | `Makefile`, `pyproject.toml`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, `services/README.md`, `libs/README.md`, `tests/tooling/` | in-review |
+| T01 | Repo scaffolding | none | `Makefile`, `pyproject.toml`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, `services/README.md`, `libs/README.md`, `tests/tooling/` | done |
 | T02 | Terraform bootstrap | T01 | `infra/bootstrap/` | todo |
 | T03 | Module `project-base` | T01 | `infra/modules/project-base/` | todo |
 | T04 | Module `identity` | T01 | `infra/modules/identity/` | todo |
@@ -82,6 +82,9 @@ lint and tests on pull requests.
 - AC: `make lint` and `make test` pass on a clean clone.
 - AC: CI runs both on a pull request and fails when either fails.
 - AC: the pre-commit secret scan rejects a staged file containing a fake service account key.
+- Added in review: CI also scans each pull request's commits with gitleaks (`make secret-scan`),
+  because the commit hook only sees staged changes on machines where it is installed.
+- Note for T26: the `terraform` job in `ci.yml` overlaps with T26, which should take it over.
 
 **T02 Terraform bootstrap.** One-time root run by a human with their own Google credentials.
 - AC: `create_project = true` creates a project and links the given billing account;
