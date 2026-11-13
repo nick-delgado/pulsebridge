@@ -89,6 +89,11 @@ terraform init -migrate-state -backend-config="bucket=$(terraform output -raw st
 Keep `backend_override.tf` for later runs. To go back to local state, delete it and run
 `terraform init -migrate-state` again.
 
+Know the trade-off: the deployer has object admin on this bucket (and project-level
+`roles/storage.admin`), so once bootstrap's state lives here, the identity that bootstrap governs
+can rewrite bootstrap's state or change the bucket's versioning. Keeping bootstrap's state local
+(and backed up) avoids that, at the cost of it living on one machine.
+
 ## Create or adopt
 
 `create_project` has no default, so the choice is always explicit.
@@ -130,19 +135,26 @@ predefined admin role per product the stack uses, rather than `roles/owner` or `
 The deployer also gets `roles/storage.objectAdmin` on the state bucket itself, so it can always
 read and write state even if the list above is trimmed.
 
-**The trade-off.** "Least privilege" for an account whose job is to create IAM is limited:
+**What the role list does and does not limit.** For an account whose job is to create IAM,
+"least privilege" has a hard ceiling:
 
-- `roles/resourcemanager.projectIamAdmin` lets the deployer grant any role on the project,
-  including to itself. Whoever controls the deployer (the one GitHub repository) can therefore
-  escalate to Owner-equivalent. That is inherent to a deployer that manages IAM; the protection is
-  in who can become the deployer (WIF, below), not in the role list. A further step, not taken
-  here, is an IAM condition on that grant that allows only an explicit list of roles to be granted
-  (`api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly([...])`); it is worth
-  adding once the identity module's role list is stable.
+- `roles/resourcemanager.projectIamAdmin` lets the deployer grant **any** role on the project,
+  including to itself: Owner, `roles/resourcemanager.projectDeleter`, or a billing role. So a
+  compromised deployer, or a malicious workflow in the trusted repository, can do anything an
+  Owner can, including deleting the project or changing its billing. `deletion_policy =
+  "PREVENT"` only stops *Terraform's own* `destroy` of a project bootstrap created; it is not a
+  permission and stops nobody else.
 - `roles/secretmanager.admin` can also read secret values. There is no predefined role that can
   create secrets and set their IAM without access.
-- What the list does buy over Owner: the deployer cannot delete the project, change billing, or
-  use products the stack does not use, and every grant is visible and reviewable.
+- What the list does buy: the deployer does not, *by accident*, delete the project, change
+  billing or touch products the stack does not use, because it would first have to grant itself
+  a role to do so, and every grant is visible and reviewable in the IAM policy and audit logs.
+- The real security boundary is who can become the deployer: Workload Identity Federation,
+  below, and the repository's own branch protection and workflow review.
+- Future hardening, not implemented yet: an IAM condition on the `projectIamAdmin` grant that
+  allows only an explicit list of roles to be granted
+  (`api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly([...])`). It is worth
+  adding once the identity and other modules' role lists are stable.
 
 Change the list with `deployer_roles` in `terraform.tfvars`.
 
@@ -151,23 +163,84 @@ Change the list with `deployer_roles` in `terraform.tfvars`.
 GitHub Actions gets a short-lived token for the deployer instead of a stored key:
 
 1. The workflow (with `permissions: id-token: write`) asks GitHub for a signed OIDC token whose
-   claims describe the run, for example `repository`, `repository_id`, `ref`, `sub`.
+   claims describe the run, for example `repository`, `repository_id`, `repository_owner_id`,
+   `ref`, `sub`.
 2. `google-github-actions/auth` sends it to Google's Security Token Service (STS). STS checks the
    signature against GitHub's issuer `https://token.actions.githubusercontent.com`, maps the
    claims (`attribute_mapping`) and evaluates `attribute_condition`. If the condition is false,
    the exchange is refused.
 3. STS returns a federated token for the principal
-   `principalSet://.../attribute.repository/<owner>/<name>`.
+   `principalSet://.../attribute.repository_id/<numeric id>`.
 4. That principal holds `roles/iam.workloadIdentityUser` on the deployer, so the IAM Credentials
    API issues a deployer access token valid for about an hour.
 
-All GitHub repositories share the same issuer, so without the attribute condition **any**
-repository could complete step 2. The condition pins `assertion.repository` to
-`github_repository`; setting `github_repository_id` additionally pins the numeric ID, which
-survives renames and is never reused, so a repository later created under the same name cannot
-match. The service-account binding checks the repository again, independently.
+### Why the repository's numeric ID is required
 
-A deleted pool or provider is kept for 30 days and its ID cannot be reused in that time.
+All GitHub repositories share the same issuer, so without the attribute condition **any**
+repository could complete step 2. Matching the repository **name** is not enough: names are
+reusable. If the repository is deleted or renamed, or its owner account is renamed, someone else
+can create a new repository with the old `owner/name`, and its tokens carry exactly the same
+`repository` claim. GitHub's numeric `repository_id` belongs to one repository forever, so the
+condition requires both:
+
+```
+assertion.repository == "<owner>/<name>" && assertion.repository_id == "<id>"
+```
+
+`github_repository_owner_id` (optional) adds `assertion.repository_owner_id`, the same idea for
+the owning account. Find the IDs with `gh api repos/<owner>/<name> --jq '.id, .owner.id'`, or in
+the `id` and `owner.id` fields of `https://api.github.com/repos/<owner>/<name>`.
+
+The impersonation binding is keyed on `attribute.repository_id`, not the name. A `principalSet`
+can match only one attribute, and keying it on the ID keeps the binding at least as strict as the
+condition: it would still keep a re-created repository out even if the condition were loosened.
+
+### What the condition does not restrict
+
+By default the condition says nothing about the branch (`ref`), the GitHub environment
+(`environment`) or the triggering event (`event_name`). **Any** workflow on any branch or tag in
+the repository can therefore get deployer tokens, including a `pull_request_target` workflow,
+which runs with the repository's permissions on events from forks. A "manual approval before
+prod" that exists only in workflow YAML can be bypassed by a workflow that skips it.
+
+Options for the CI/CD task (T26):
+
+- Separate identities for plan and apply: a read-only planner that any pull request may use, and
+  an applier whose condition also requires `assertion.ref == "refs/heads/main"` or
+  `assertion.environment == "prod"` (a GitHub environment with required reviewers, which GitHub
+  enforces before the job gets a token).
+- In this root, `github_allowed_refs` (optional) adds `assertion.ref in [...]` to the condition.
+  Values are validated to contain only letters, digits, `.`, `_`, `/` and `-`, so they cannot
+  inject CEL. Pull-request workflows run on `refs/pull/<n>/merge`, so setting it also blocks
+  plan-on-PR with this one identity; that is why separate identities are the better fix.
+
+### Limits and lifecycle
+
+- `google.subject` is limited to 127 bytes. It is mapped from GitHub's `sub` claim
+  (`repo:<owner>/<name>:ref:refs/heads/<branch>`, or `...:environment:<name>`), which can exceed
+  that with long owner, repository or branch names; the token exchange then fails. If that
+  happens, map `google.subject` to a shorter claim combination.
+- A deleted pool or provider is soft-deleted for 30 days and its ID cannot be reused in that time.
+
+## Teardown
+
+Bootstrap is built to be hard to destroy by accident. To really remove it, in this order:
+
+1. Destroy every env root first (`infra/envs/*`), since their state lives in the bucket.
+2. If bootstrap's own state is in the bucket, move it back to local state: delete
+   `backend_override.tf` and run `terraform init -migrate-state`.
+3. Remove `prevent_destroy = true` from `state.tf`. While it is there, `terraform destroy` fails
+   at plan time.
+4. Empty the bucket, including noncurrent versions (`gcloud storage rm --all-versions
+   "gs://<bucket>/**"`). With `force_destroy = false`, deleting a bucket that still holds objects
+   fails.
+5. Run `terraform destroy`.
+   - Adopt mode: this removes the deployer account, its grants, the pool and provider and the
+     bucket. The project and its APIs stay (`disable_on_destroy = false`). The pool and provider
+     IDs stay reserved for 30 days.
+   - Create mode: the destroy stops at the project, because `deletion_policy = "PREVENT"`
+     refuses it. Either delete the project in the console (`gcloud projects delete`), or set
+     `deletion_policy = "DELETE"`, apply, then destroy.
 
 ## Cost
 
@@ -183,7 +256,7 @@ cd infra/bootstrap
 terraform init -backend=false
 terraform validate
 terraform test              # tests/*.tftest.hcl: mocked google provider, plan only
-tests/static_checks.sh      # no key resources, no module calls, no backend block
+tests/static_checks.sh      # what terraform test cannot see (below)
 ```
 
 `terraform test` uses `mock_provider "google"` (Terraform loads the provider's schema but makes no
@@ -191,6 +264,11 @@ API calls) with `override_during = plan`, so the mocked computed values in `test
 known at plan time. The tests cover create vs adopt mode, the bucket's versioning and public
 access prevention, the WIF attribute condition and binding, the deployer's roles, the outputs,
 and that each variable validation rejects bad input.
+
+`tests/static_checks.sh` scans every `*.tf` and `*.tf.json` file for things a test cannot assert:
+no key resources, no module calls, no backend block, no authoritative IAM resources
+(`*_iam_binding`, `*_iam_policy`, which would remove existing members of an adopted project), and
+`prevent_destroy = true` on the state bucket.
 
 ## Reference
 
@@ -240,8 +318,10 @@ No modules.
 | <a name="input_deployer_account_id"></a> [deployer\_account\_id](#input\_deployer\_account\_id) | account\_id (the part before @) of the deployer service account that env roots and CI run as. 6-30 characters. | `string` | `"terraform-deployer"` | no |
 | <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/storage.admin"<br/>]</pre> | no |
 | <a name="input_folder_id"></a> [folder\_id](#input\_folder\_id) | Optional numeric folder ID to create the new project under. Leave unset for a personal account. Mutually exclusive with org\_id; only used when create\_project = true. | `string` | `null` | no |
+| <a name="input_github_allowed_refs"></a> [github\_allowed\_refs](#input\_github\_allowed\_refs) | Optional list of git refs (for example ["refs/heads/main"]) allowed to obtain deployer tokens. Empty (the default) allows every branch, tag and pull-request ref in the repository; see README.md ("What the condition does not restrict"). Note that pull-request workflows run on refs/pull/N/merge, so restricting refs also blocks plan-on-PR with this identity. | `list(string)` | `[]` | no |
 | <a name="input_github_repository"></a> [github\_repository](#input\_github\_repository) | The ONE GitHub repository, as "owner/name", whose Actions workflows may impersonate the deployer service account. Matched exactly (case-sensitive) against the `repository` claim of GitHub's OIDC token. | `string` | n/a | yes |
-| <a name="input_github_repository_id"></a> [github\_repository\_id](#input\_github\_repository\_id) | Optional numeric ID of the GitHub repository (`gh api repos/OWNER/NAME --jq .id`). When set, the attribute condition also pins this ID, so a different repository later created under the same owner/name (after a rename or deletion) cannot match. Recommended. | `string` | `null` | no |
+| <a name="input_github_repository_id"></a> [github\_repository\_id](#input\_github\_repository\_id) | Numeric ID of the same GitHub repository: the `id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .id`. Required. Names can be reused after a repository is deleted or renamed, or its owner account is renamed; the numeric ID never is. Both the attribute condition and the impersonation binding match on it. | `string` | n/a | yes |
+| <a name="input_github_repository_owner_id"></a> [github\_repository\_owner\_id](#input\_github\_repository\_owner\_id) | Optional numeric ID of the repository's owner (user or organization): the `owner.id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .owner.id`. When set, the attribute condition also requires `assertion.repository_owner_id` to match. | `string` | `null` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the project (when created) and the state bucket, for example { app = "pulsebridge" }. Keys and values: lowercase letters, digits, hyphens and underscores; keys start with a letter. | `map(string)` | `{}` | no |
 | <a name="input_org_id"></a> [org\_id](#input\_org\_id) | Optional numeric organization ID to create the new project under. Leave unset (the default) for a personal Google account with no organization. Mutually exclusive with folder\_id; only used when create\_project = true. | `string` | `null` | no |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the GCP project to create (create\_project = true) or adopt (create\_project = false). Project IDs are globally unique, 6 to 30 characters, lowercase letters, digits and hyphens, starting with a letter. | `string` | n/a | yes |
