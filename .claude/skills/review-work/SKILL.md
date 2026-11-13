@@ -46,6 +46,10 @@ a test with a matching name is not evidence on its own. Note any behaviour built
 ## 4. Check the tests
 
 1. Run the test suite and linters in the worktree. Report the real result.
+   Run every `terraform` command with Google credentials removed from the environment (unset
+   `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_SA_KEY_B64`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_CLOUD_PROJECT`
+   and `GOOGLE_PROJECT`). A mocked provider is not a guarantee: `mock_provider` has failed to apply
+   to child modules, and the real provider then ran with the session's credentials.
 2. Read each test. Flag tests that cannot fail or prove nothing: assertions on mocks the test
    configured itself, tests with no meaningful assertion, assertions that copy the implementation,
    over-mocking that bypasses the code under test, snapshots of unreviewed output.

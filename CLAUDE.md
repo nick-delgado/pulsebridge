@@ -46,6 +46,8 @@ The repo must work for a stranger who clones it and connects their own Google He
 - Check access with `gcloud auth list` and `gcloud projects describe "$CLOUDSDK_CORE_PROJECT"`.
 - Enabling an API, creating billable resources and changing IAM are changes to a real project:
   confirm with the user before doing them outside an agreed Terraform apply.
+- Outside an agreed apply, run `terraform` (validate, test, plan against mocks) with Google
+  credentials removed from the environment. A mocked provider alone is not a guarantee.
 - Cost matters: the stack should cost near zero when idle. Flag anything always-on or billed hourly.
 
 ## Conventions

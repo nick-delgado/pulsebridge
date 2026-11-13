@@ -68,6 +68,11 @@ the code happens to produce.
 For Terraform: run `terraform fmt -check` and `terraform validate`. Never run `terraform apply`,
 enable an API or create cloud resources unless your brief explicitly says so.
 
+- Run every `terraform` command with Google credentials removed from the environment (unset
+  `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_SA_KEY_B64`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_CLOUD_PROJECT`
+  and `GOOGLE_PROJECT`). A mocked provider is not a guarantee: `mock_provider` has failed to apply
+  to child modules, and the real provider then ran with the session's credentials.
+
 ## 4. Self-review
 
 Read your full diff (`git diff <base-branch>...HEAD`) as if someone else wrote it.

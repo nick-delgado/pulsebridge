@@ -120,7 +120,8 @@ for the proxy's service account. No Identity Platform resources.
   (`secret_data_wo`), so it never enters state; a test searches a state file produced with a
   dummy value and does not find it. `required_version` is pinned to a Terraform release that
   supports write-only arguments.
-- AC: only the proxy may invoke the cuff simulator (see D10).
+- The rule "only the proxy may invoke the cuff simulator" (D10) is enforced in T22, which owns the
+  Cloud Run service; this module supplies the identity and documents the rule.
 - AC: `terraform validate` passes.
 
 **T05 Module `healthcare`.** Healthcare dataset, FHIR R4 store, HL7v2 store, Pub/Sub topic and
