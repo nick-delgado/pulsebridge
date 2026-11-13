@@ -1,0 +1,30 @@
+# Copy to terraform.tfvars (git-ignored) and replace every placeholder with your own values.
+# Nothing here is a real project, billing account or repository.
+
+# --- Pick ONE mode -----------------------------------------------------------------------------
+
+# Mode A: create a new project and link billing (a personal Google account needs no organization).
+create_project  = true
+project_id      = "your-project-id"      # globally unique, 6-30 chars, e.g. "pulsebridge-dev-1234"
+billing_account = "000000-AAAAAA-000000" # `gcloud billing accounts list`
+# project_name  = "PulseBridge"          # optional display name; defaults to project_id
+# folder_id     = "000000000000"         # optional; or org_id, never both; omit for a personal account
+# org_id        = "000000000000"
+
+# Mode B: adopt a project that already exists (billing must already be linked). Use instead of A:
+# create_project = false
+# project_id     = "your-existing-project-id"
+
+# --- GitHub Actions (Workload Identity Federation) ---------------------------------------------
+
+# The one repository whose workflows may deploy, exactly as GitHub shows it (case matters).
+github_repository = "your-github-user/pulsebridge"
+# Recommended: also pin the numeric ID (`gh api repos/OWNER/NAME --jq .id`).
+# github_repository_id = "000000000"
+
+# --- Optional ------------------------------------------------------------------------------------
+
+# state_bucket_name     = "your-project-id-tfstate" # default: "<project_id>-tfstate"
+# state_bucket_location = "us-central1"             # default; a Cloud Storage free-tier region
+# labels                = { app = "pulsebridge" }
+# deployer_roles        = [ ... ]                   # see README.md "Deployer roles" before changing
