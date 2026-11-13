@@ -51,7 +51,8 @@ The repo must work for a stranger who clones it and connects their own Google He
 ## Conventions
 
 - Infrastructure: Terraform under `infra/` (`modules/`, `envs/dev`, `envs/prod`, `bootstrap/`).
-  Pin provider and module versions, commit `.terraform.lock.hcl`, give every variable a
+  Pin provider and module versions, commit `.terraform.lock.hcl` in root modules only
+  (`envs/*`, `bootstrap/`; lock files under `modules/` are git-ignored), give every variable a
   description, and run `terraform fmt` and `terraform validate` before committing.
 - Services: Python on Cloud Run, one least-privilege service account per service.
 - FHIR: R4. Observations carry LOINC codes, UCUM units, the vital-signs category, a `device`

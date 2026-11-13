@@ -68,7 +68,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T01 | Repo scaffolding | none | `Makefile`, `pyproject.toml`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, `services/README.md`, `libs/README.md` | in-progress |
+| T01 | Repo scaffolding | none | `Makefile`, `pyproject.toml`, `.pre-commit-config.yaml`, `.github/workflows/ci.yml`, `services/README.md`, `libs/README.md`, `tests/tooling/` | in-review |
 | T02 | Terraform bootstrap | T01 | `infra/bootstrap/` | todo |
 | T03 | Module `project-base` | T01 | `infra/modules/project-base/` | todo |
 | T04 | Module `identity` | T01 | `infra/modules/identity/` | todo |

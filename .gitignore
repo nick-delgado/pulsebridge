@@ -58,3 +58,13 @@ client_secret*.json
 # Agent worktrees
 .worktrees/
 .claude/worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Terraform lock files belong to root modules only
+infra/modules/**/.terraform.lock.hcl
