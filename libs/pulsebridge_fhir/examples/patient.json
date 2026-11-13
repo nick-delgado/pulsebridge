@@ -1,0 +1,35 @@
+{
+  "resourceType": "Patient",
+  "identifier": [
+    {
+      "use": "official",
+      "type": {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+            "code": "PT",
+            "display": "Patient external identifier"
+          }
+        ]
+      },
+      "system": "urn:pulsebridge:patient",
+      "value": "PB-SYN-0001"
+    },
+    {
+      "use": "secondary",
+      "system": "urn:pulsebridge:google-health-user-id",
+      "value": "synthetic-health-user-0001"
+    }
+  ],
+  "name": [
+    {
+      "use": "official",
+      "family": "Example",
+      "given": [
+        "Avery"
+      ]
+    }
+  ],
+  "gender": "female",
+  "birthDate": "1980-04-12"
+}

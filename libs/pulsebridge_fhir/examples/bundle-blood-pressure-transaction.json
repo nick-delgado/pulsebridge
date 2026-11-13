@@ -1,0 +1,250 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:7ac99545-f2c3-5140-9f42-d66791921a54",
+      "resource": {
+        "resourceType": "Patient",
+        "identifier": [
+          {
+            "use": "official",
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/v2-0203",
+                  "code": "PT",
+                  "display": "Patient external identifier"
+                }
+              ]
+            },
+            "system": "urn:pulsebridge:patient",
+            "value": "PB-SYN-0001"
+          },
+          {
+            "use": "secondary",
+            "system": "urn:pulsebridge:google-health-user-id",
+            "value": "synthetic-health-user-0001"
+          }
+        ],
+        "name": [
+          {
+            "use": "official",
+            "family": "Example",
+            "given": [
+              "Avery"
+            ]
+          }
+        ],
+        "gender": "female",
+        "birthDate": "1980-04-12"
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Patient?identifier=urn:pulsebridge:patient|PB-SYN-0001"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:95eebf63-cf9c-5007-9bca-7c92e84c69fb",
+      "resource": {
+        "resourceType": "Device",
+        "identifier": [
+          {
+            "system": "urn:pulsebridge:device",
+            "value": "95eebf63-cf9c-5007-9bca-7c92e84c69fb"
+          }
+        ],
+        "status": "active",
+        "deviceName": [
+          {
+            "name": "PulseBridge cuff simulator",
+            "type": "user-friendly-name"
+          }
+        ],
+        "patient": {
+          "reference": "urn:uuid:7ac99545-f2c3-5140-9f42-d66791921a54"
+        }
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Device?identifier=urn:pulsebridge:device|95eebf63-cf9c-5007-9bca-7c92e84c69fb"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:ce6a72d2-ab1b-5154-b7c9-fcbec30b2ecf",
+      "resource": {
+        "resourceType": "Observation",
+        "meta": {
+          "profile": [
+            "http://hl7.org/fhir/StructureDefinition/bp"
+          ]
+        },
+        "identifier": [
+          {
+            "use": "official",
+            "system": "urn:pulsebridge:observation",
+            "value": "ce6a72d2-ab1b-5154-b7c9-fcbec30b2ecf"
+          }
+        ],
+        "status": "final",
+        "category": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/observation-category",
+                "code": "vital-signs",
+                "display": "Vital Signs"
+              }
+            ],
+            "text": "Vital Signs"
+          }
+        ],
+        "code": {
+          "coding": [
+            {
+              "system": "http://loinc.org",
+              "code": "85354-9",
+              "display": "Blood pressure panel with all children optional"
+            }
+          ],
+          "text": "Blood pressure"
+        },
+        "subject": {
+          "reference": "urn:uuid:7ac99545-f2c3-5140-9f42-d66791921a54"
+        },
+        "effectiveDateTime": "2026-01-01T09:30:00-05:00",
+        "device": {
+          "reference": "urn:uuid:95eebf63-cf9c-5007-9bca-7c92e84c69fb"
+        },
+        "component": [
+          {
+            "code": {
+              "coding": [
+                {
+                  "system": "http://loinc.org",
+                  "code": "8480-6",
+                  "display": "Systolic blood pressure"
+                }
+              ],
+              "text": "Systolic"
+            },
+            "valueQuantity": {
+              "value": 121,
+              "unit": "mmHg",
+              "system": "http://unitsofmeasure.org",
+              "code": "mm[Hg]"
+            }
+          },
+          {
+            "code": {
+              "coding": [
+                {
+                  "system": "http://loinc.org",
+                  "code": "8462-4",
+                  "display": "Diastolic blood pressure"
+                }
+              ],
+              "text": "Diastolic"
+            },
+            "valueQuantity": {
+              "value": 79,
+              "unit": "mmHg",
+              "system": "http://unitsofmeasure.org",
+              "code": "mm[Hg]"
+            }
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Observation?identifier=urn:pulsebridge:observation|ce6a72d2-ab1b-5154-b7c9-fcbec30b2ecf"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:210b4290-1970-58a4-a459-976de11cc988",
+      "resource": {
+        "resourceType": "Provenance",
+        "id": "210b4290-1970-58a4-a459-976de11cc988",
+        "target": [
+          {
+            "reference": "urn:uuid:ce6a72d2-ab1b-5154-b7c9-fcbec30b2ecf"
+          }
+        ],
+        "recorded": "2026-01-01T14:20:03+00:00",
+        "activity": {
+          "coding": [
+            {
+              "system": "urn:pulsebridge:recording-method",
+              "code": "ACTIVELY_MEASURED"
+            }
+          ],
+          "text": "Recording method reported by the source: ACTIVELY_MEASURED"
+        },
+        "agent": [
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+                  "code": "performer",
+                  "display": "Performer"
+                }
+              ]
+            },
+            "who": {
+              "reference": "urn:uuid:95eebf63-cf9c-5007-9bca-7c92e84c69fb"
+            }
+          },
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+                  "code": "custodian",
+                  "display": "Custodian"
+                }
+              ]
+            },
+            "who": {
+              "identifier": {
+                "system": "urn:pulsebridge:source-platform",
+                "value": "HL7V2_STORE"
+              },
+              "display": "Source platform HL7V2_STORE"
+            }
+          },
+          {
+            "type": {
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+                  "code": "assembler",
+                  "display": "Assembler"
+                }
+              ]
+            },
+            "who": {
+              "display": "PulseBridge v2-to-fhir"
+            }
+          }
+        ],
+        "entity": [
+          {
+            "role": "source",
+            "what": {
+              "identifier": {
+                "system": "urn:pulsebridge:source-record:hl7v2-message",
+                "value": "hl7V2Stores/example-store/messages/synthetic-message-0001"
+              },
+              "display": "hl7v2-message hl7V2Stores/example-store/messages/synthetic-message-0001"
+            }
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Provenance/210b4290-1970-58a4-a459-976de11cc988"
+      }
+    }
+  ]
+}

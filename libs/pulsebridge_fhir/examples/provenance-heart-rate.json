@@ -1,0 +1,79 @@
+{
+  "resourceType": "Provenance",
+  "id": "e8bbbaae-fb0a-5a84-ae9a-16abc5181c62",
+  "target": [
+    {
+      "reference": "urn:uuid:2eb78989-1160-540e-85cd-60b73890a572"
+    }
+  ],
+  "recorded": "2026-01-01T14:20:03+00:00",
+  "activity": {
+    "coding": [
+      {
+        "system": "urn:pulsebridge:recording-method",
+        "code": "PASSIVELY_MEASURED"
+      }
+    ],
+    "text": "Recording method reported by the source: PASSIVELY_MEASURED"
+  },
+  "agent": [
+    {
+      "type": {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+            "code": "performer",
+            "display": "Performer"
+          }
+        ]
+      },
+      "who": {
+        "reference": "urn:uuid:1ce5b303-b8ab-57de-837e-76d881dd2db3"
+      }
+    },
+    {
+      "type": {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+            "code": "custodian",
+            "display": "Custodian"
+          }
+        ]
+      },
+      "who": {
+        "identifier": {
+          "system": "urn:pulsebridge:source-platform",
+          "value": "FITBIT"
+        },
+        "display": "Source platform FITBIT"
+      }
+    },
+    {
+      "type": {
+        "coding": [
+          {
+            "system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+            "code": "assembler",
+            "display": "Assembler"
+          }
+        ]
+      },
+      "who": {
+        "display": "PulseBridge health-sync"
+      }
+    }
+  ],
+  "entity": [
+    {
+      "role": "source",
+      "what": {
+        "identifier": {
+          "system": "urn:pulsebridge:source-record:google-health-heart-rate-rollup",
+          "value": "2026-01-01T14:05:00Z/2026-01-01T14:10:00Z"
+        },
+        "display": "google-health-heart-rate-rollup 2026-01-01T14:05:00Z/2026-01-01T14:10:00Z"
+      }
+    }
+  ]
+}
