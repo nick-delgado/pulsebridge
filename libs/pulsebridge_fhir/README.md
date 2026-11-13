@@ -86,8 +86,8 @@ read from the store, T15 replaces `subject` with OpenEMR's Patient, adds `encoun
 | Provenance | `PUT Provenance/<uuid>` | UUIDv5(the Observation's key) |
 
 - **Conditional update** (`PUT Type?search`) tells the server: update the one resource that
-  matches, or create one if none does. Sending the same Bundle twice therefore changes nothing new,
-  and a window whose values changed (it was only partly synced) is updated in place. The key leaves
+  matches, or create one if none does. Sending the same Bundle twice therefore creates no duplicate
+  resources (at most a new version of each), and a window whose values changed (it was only partly synced) is updated in place. The key leaves
   out the window end and the values for that reason.
 - The resource body of a conditional update carries **no `id`**: the server picks the id on create,
   and finds the existing one on update.
