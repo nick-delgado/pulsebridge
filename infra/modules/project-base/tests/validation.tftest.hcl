@@ -91,6 +91,15 @@ run "rejects_port_out_of_range" {
   expect_failures = [var.mllp_port]
 }
 
+run "rejects_same_port_for_mllp_and_https" {
+  command = plan
+  variables {
+    mllp_port          = 443
+    openemr_https_port = 443
+  }
+  expect_failures = [var.openemr_https_port]
+}
+
 run "rejects_non_service_account_email" {
   command = plan
   variables {

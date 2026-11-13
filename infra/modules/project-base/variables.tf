@@ -132,6 +132,12 @@ variable "openemr_https_port" {
     condition     = var.openemr_https_port >= 1 && var.openemr_https_port <= 65535 && floor(var.openemr_https_port) == var.openemr_https_port
     error_message = "openemr_https_port must be a whole number between 1 and 65535."
   }
+
+  validation {
+    # The MLLP adapter and OpenEMR both publish on the VM's interface; one port cannot serve both.
+    condition     = var.openemr_https_port != var.mllp_port
+    error_message = "openemr_https_port must differ from mllp_port."
+  }
 }
 
 variable "edge_vm_service_account_email" {
