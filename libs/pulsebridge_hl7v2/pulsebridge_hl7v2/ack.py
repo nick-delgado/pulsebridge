@@ -109,8 +109,12 @@ def parse_ack(payload: bytes | str) -> Ack:
         raise AckParseError(f"not a readable HL7v2 message: {exc}") from exc
 
     encoding_chars = message.encoding_chars
-    message_type = _value(message.msh.msh_9) or ""
-    if message_type.split(encoding_chars["COMPONENT"])[0] != "ACK":
+    msh_9 = message.msh.msh_9
+    message_type = _value(msh_9) or ""
+    # MSH-9.1, the message code, read through hl7apy's element tree. Its component is named MSG_1
+    # from 2.5 on and CM_MSG_1 in 2.3, so we take the first component rather than a fixed name.
+    message_code = msh_9.children[0].to_er7() if msh_9 and msh_9.children else ""
+    if message_code != "ACK":
         raise AckParseError(f"MSH-9 (message type) is {message_type!r}, not ACK")
     if not message.msa:
         raise AckParseError("ACK has no MSA segment")

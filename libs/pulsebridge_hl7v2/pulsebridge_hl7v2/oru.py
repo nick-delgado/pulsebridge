@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 
 from hl7apy.consts import VALIDATION_LEVEL
 from hl7apy.core import Message
+from hl7apy.factories import datatype_factory
 
 from .parsing import SEGMENT_TERMINATOR
 
@@ -44,10 +45,17 @@ UCUM_SYSTEM = "UCUM"
 # MSH-10 is an ST of at most 20 characters in 2.5.1 (chapter 2.15.9.10).
 _CONTROL_ID_MAX = 20
 _CONTROL_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,20}$")
-# hl7apy escapes |^~\& in caller values for us (see build_bp_oru_r01). We still limit them to
-# printable ASCII: control characters have no place in an HL7 text field, and with
-# MSH-18 (character set) empty the receiver must assume ASCII.
-_PRINTABLE_ASCII_RE = re.compile(r"^[\x20-\x7e]+$")
+# Caller values (names, identifiers, endpoint names) must be printable ASCII without a backslash.
+# - Printable ASCII: control characters have no place in an HL7 text field, and with MSH-18
+#   (character set) empty the receiver must assume ASCII.
+# - No backslash: "\" is HL7's escape character (MSH-2). hl7apy escapes | ^ & ~ in a value, but it
+#   leaves a backslash that already forms an escape sequence alone, so a value such as "A\F\B"
+#   would reach the receiver unchanged and be decoded there as "A|B". No real name or identifier
+#   needs a backslash, so we refuse it rather than guess what the caller meant.
+_CALLER_TEXT_RE = re.compile(r"^[\x20-\x5b\x5d-\x7e]+$")
+
+# MSH-11 processing ID, HL7 table 0103: P = production, T = training, D = debugging.
+PROCESSING_IDS = ("P", "T", "D")
 
 
 @dataclass(frozen=True)
@@ -88,7 +96,7 @@ class BuildOptions:
     """Header settings that rarely change."""
 
     endpoints: Endpoints = field(default_factory=Endpoints)
-    # MSH-11 processing ID, HL7 table 0103: P = production, T = training, D = debugging.
+    # MSH-11 processing ID, one of PROCESSING_IDS (HL7 table 0103).
     processing_id: str = "P"
 
 
@@ -100,14 +108,35 @@ def new_control_id() -> str:
 def format_dtm(value: datetime) -> str:
     """HL7v2 DTM (2.5.1 section 2.A.22): YYYYMMDDHHMMSS+ZZZZ. Naive datetimes are refused, because
     a time without an offset is ambiguous and T12 must map OBX-14 to FHIR with its zone."""
-    if value.tzinfo is None or value.utcoffset() is None:
+    offset = value.utcoffset() if value.tzinfo is not None else None
+    if offset is None:
         raise ValueError("time must be timezone-aware (HL7 DTM is written with its UTC offset)")
+    # DTM's offset is +/-HHMM. Python allows offsets with seconds (some historical zones have
+    # them), which strftime would write as +HHMMSS: not a valid DTM.
+    if offset.seconds % 60 or offset.microseconds:
+        raise ValueError(f"UTC offset {offset} has seconds; HL7 DTM offsets are whole minutes")
     return value.strftime("%Y%m%d%H%M%S%z")
 
 
 def _check_text(name: str, value: str) -> None:
-    if not isinstance(value, str) or not _PRINTABLE_ASCII_RE.match(value):
-        raise ValueError(f"{name} must be non-empty printable ASCII text")
+    if not isinstance(value, str) or not _CALLER_TEXT_RE.match(value):
+        raise ValueError(
+            f"{name} must be non-empty printable ASCII text without a backslash "
+            "(HL7's escape character)"
+        )
+
+
+def _value(datatype: str, text: str):
+    """Wrap a caller value in an hl7apy datatype object before assigning it.
+
+    hl7apy treats a plain string assigned to an element as ER7 to be parsed: at a field, "^"
+    starts a new component; at a component, "&" starts a new subcomponent. A datatype object is
+    taken as a value, and hl7apy escapes every separator in it when it writes ER7 (2.5.1 section
+    2.7: "A^B&C" is written "A\\S\\B\\T\\C"). So caller text can never add structure.
+    """
+    return datatype_factory(
+        datatype, text, version=HL7_VERSION, validation_level=VALIDATION_LEVEL.STRICT
+    )
 
 
 def _check_reading(reading: BloodPressureReading) -> None:
@@ -163,7 +192,11 @@ def build_bp_oru_r01(
         "receiving_facility",
     ):
         _check_text(f"endpoints.{name}", getattr(options.endpoints, name))
-    _check_text("processing_id", options.processing_id)
+    if options.processing_id not in PROCESSING_IDS:
+        raise ValueError(
+            f"processing_id must be one of {', '.join(PROCESSING_IDS)} (HL7 table 0103), "
+            f"got {options.processing_id!r}"
+        )
     sent_at = sent_at or datetime.now(UTC)
     observed = format_dtm(reading.observed_at)
 
@@ -172,32 +205,31 @@ def build_bp_oru_r01(
     # --- MSH: message header. MSH-1 ("|") and MSH-2 ("^~\&") are set by hl7apy's defaults.
     msh = msg.msh
     ep = options.endpoints
-    msh.msh_3.hd_1 = ep.sending_application  # MSH-3 sending application
-    msh.msh_4.hd_1 = ep.sending_facility  # MSH-4 sending facility
-    msh.msh_5.hd_1 = ep.receiving_application  # MSH-5 receiving application
-    msh.msh_6.hd_1 = ep.receiving_facility  # MSH-6 receiving facility
+    msh.msh_3.hd_1 = _value("IS", ep.sending_application)  # MSH-3 sending application
+    msh.msh_4.hd_1 = _value("IS", ep.sending_facility)  # MSH-4 sending facility
+    msh.msh_5.hd_1 = _value("IS", ep.receiving_application)  # MSH-5 receiving application
+    msh.msh_6.hd_1 = _value("IS", ep.receiving_facility)  # MSH-6 receiving facility
     msh.msh_7 = format_dtm(sent_at)  # MSH-7 date/time of message (required in 2.5.1)
     msh.msh_9 = "^".join(MESSAGE_TYPE)  # MSH-9 ORU^R01^ORU_R01
     msh.msh_10 = control_id  # MSH-10 message control ID (checked above: no separators)
-    msh.msh_11 = options.processing_id  # MSH-11 processing ID
+    msh.msh_11.pt_1 = _value("ID", options.processing_id)  # MSH-11.1 processing ID
     msh.msh_12 = HL7_VERSION  # MSH-12 version ID
     # MSH-15/16 (accept/application acknowledgment type) are left empty: original
     # acknowledgment mode. Spike S4 found the store ignores them anyway.
 
-    # Caller values (names, identifiers, endpoints) are always assigned to a leaf component such
-    # as PID-5.1, never to a whole field. hl7apy then treats them as values and escapes any
-    # separator in them (2.5.1 section 2.7: "O|Brien" is written "O\F\Brien"). Assigning a
-    # string to a whole field would make hl7apy parse it as ER7, so "^" would start a new component.
+    # Every caller value goes in through _value() (an hl7apy datatype object) at its own
+    # component, never as a plain string and never to a whole field, so hl7apy escapes it instead
+    # of parsing it. Fixed values written by this module (codes, units) are plain ER7.
 
     # --- PID: patient identification, inside the PATIENT_RESULT / PATIENT groups.
     patient_result = msg.add_group("ORU_R01_PATIENT_RESULT")
     pid = patient_result.add_group("ORU_R01_PATIENT").pid
     pid.pid_1 = "1"  # PID-1 set ID
-    pid.pid_3.cx_1 = patient.identifier  # PID-3.1 ID number
-    pid.pid_3.cx_4.hd_1 = patient.assigning_authority  # PID-3.4 assigning authority
-    pid.pid_3.cx_5 = patient.identifier_type  # PID-3.5 identifier type code
-    pid.pid_5.xpn_1.fn_1 = patient.family_name  # PID-5.1 family name
-    pid.pid_5.xpn_2 = patient.given_name  # PID-5.2 given name
+    pid.pid_3.cx_1 = _value("ST", patient.identifier)  # PID-3.1 ID number
+    pid.pid_3.cx_4.hd_1 = _value("IS", patient.assigning_authority)  # PID-3.4 authority
+    pid.pid_3.cx_5 = _value("ID", patient.identifier_type)  # PID-3.5 identifier type code
+    pid.pid_5.xpn_1.fn_1 = _value("ST", patient.family_name)  # PID-5.1 family name
+    pid.pid_5.xpn_2 = _value("ST", patient.given_name)  # PID-5.2 given name
 
     # --- OBR: the order/observation the results belong to.
     order = patient_result.add_group("ORU_R01_ORDER_OBSERVATION")
@@ -206,7 +238,7 @@ def build_bp_oru_r01(
     # OBR-3 filler order number. 2.5.1 requires OBR-2 or OBR-3; the device "fills" the order, and
     # one reading is one order, so the control ID is a natural unique number.
     obr.obr_3.ei_1 = control_id
-    obr.obr_3.ei_2 = ep.sending_application
+    obr.obr_3.ei_2 = _value("IS", ep.sending_application)
     # OBR-4 universal service identifier: what was ordered, the LOINC blood-pressure panel.
     obr.obr_4 = f"{LOINC_BP_PANEL[0]}^{LOINC_BP_PANEL[1]}^{LOINC_SYSTEM}"
     obr.obr_7 = observed  # OBR-7 observation date/time

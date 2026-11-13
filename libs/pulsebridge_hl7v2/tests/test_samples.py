@@ -16,7 +16,7 @@ from pulsebridge_hl7v2 import (
     parse_er7,
     validate_oru_r01,
 )
-from pulsebridge_hl7v2.samples import CLASSES, all_samples, by_class, load
+from pulsebridge_hl7v2.samples import CLASSES, EVIDENCE_KINDS, all_samples, by_class, load
 from pulsebridge_hl7v2.samples.__main__ import export
 
 ALL = all_samples()
@@ -45,6 +45,8 @@ def test_required_cases_from_the_brief_are_present():
         "unmappable_non_numeric_obx5",
         "unmappable_msh_only",
         "unmappable_unknown_version",
+        "unmappable_unknown_msh9",
+        "unmappable_empty_msh12",
     }
     assert required <= set(IDS)
 
@@ -107,14 +109,16 @@ def test_payloads_are_reproducible_bytes():
 
 
 @pytest.mark.parametrize("sample", by_class("parses_but_cannot_map"), ids=lambda s: s.name)
-def test_unmappable_samples_are_accepted_by_store_but_fail_mapping(sample):
+def test_manifest_consistency_unmappable_samples_expect_aa_then_mapping_error(sample):
+    # Checks the manifest's own consistency only; T12's tests exercise the mapper on these.
     assert sample.expected.commit_ack == "AA"
     assert sample.expected.application_outcome == "error"
     assert sample.expected.mapping_reason
 
 
 @pytest.mark.parametrize("sample", by_class("unparseable"), ids=lambda s: s.name)
-def test_unparseable_samples_get_a_nack_with_reason(sample):
+def test_manifest_consistency_unparseable_samples_expect_ae_with_reason(sample):
+    # Checks the manifest's own consistency only; the store's replies come from spikes S4/S5.
     assert sample.expected.commit_ack == "AE"
     assert sample.expected.commit_ack_reason
     assert sample.expected.application_outcome is None
@@ -136,6 +140,10 @@ def test_unmappable_samples_carry_the_defect_they_claim():
     assert order.oru_r01_observation[0].obx.obx_5.to_er7() == "HIGH"
 
     assert parse_er7(load("unmappable_empty_msh9").payload).msh.msh_9.to_er7() == ""
+    assert parse_er7(load("unmappable_unknown_msh9").payload).msh.msh_9.to_er7() == (
+        "ADT^A01^ADT_A01"
+    )
+    assert load("unmappable_empty_msh12").segments[0].endswith("|P|")
     assert load("unmappable_msh_only").segments[0].startswith("MSH|")
     assert len(load("unmappable_msh_only").segments) == 1
 
@@ -156,3 +164,63 @@ def test_export_writes_exact_bytes(tmp_path):
     for sample in ALL:
         assert (tmp_path / f"{sample.name}.hl7").read_bytes() == sample.payload
         assert (tmp_path / f"{sample.name}.mllp").read_bytes() == sample.wire_bytes
+
+
+@pytest.mark.parametrize("sample", ALL, ids=IDS)
+def test_evidence_is_given_per_transport_and_marked(sample):
+    assert set(sample.evidence) == set(sample.transports)
+    for text in sample.evidence.values():
+        assert text.startswith(EVIDENCE_KINDS)
+
+
+@pytest.mark.parametrize(
+    ("name", "transport"),
+    [
+        ("unparseable_crlf_terminators", "mllp"),  # S4 never sent CR LF
+        ("unmappable_bare_msh", "mllp"),  # S4 did not record whether row b4 ended in CR
+        ("unmappable_unknown_version", "https"),  # S5 did not send version 9.9
+        ("unmappable_empty_msh12", "https"),  # S5 did not send an empty MSH-12
+        ("valid_bp_reading_offset", "mllp"),
+        ("invalid_missing_pid3", "mllp"),
+        ("invalid_obx14_not_hl7_date", "mllp"),
+    ],
+)
+def test_expectations_no_spike_observed_are_marked_inferred(name, transport):
+    assert load(name).evidence[transport].startswith("inferred:")
+
+
+@pytest.mark.parametrize(
+    "name", ["valid_bp_reading", "unparseable_separator_mismatch", "unparseable_no_msh"]
+)
+def test_observed_evidence_says_the_exact_bytes_were_not_sent(name):
+    for text in load(name).evidence.values():
+        assert "exact bytes" in text and "not sent" in text
+
+
+def test_a_malformed_manifest_entry_is_refused():
+    from pulsebridge_hl7v2.samples import _sample_from_json
+
+    raw = {
+        "name": "x",
+        "class": "valid",
+        "description": "",
+        "evidence": {"mllp": "seen somewhere"},
+        "segments": ["MSH|^~\\&"],
+        "segment_terminator": "\r",
+        "terminate_last_segment": True,
+        "mllp_framing": "standard",
+        "transports": ["mllp"],
+        "expected": {
+            "hl7apy_validation": "fail",
+            "hl7apy_parse": "ok",
+            "commit_ack": "AA",
+            "commit_ack_reason": None,
+            "no_ack": None,
+            "application_outcome": "error",
+            "mapping_reason": None,
+        },
+    }
+    with pytest.raises(ValueError, match="evidence must start with"):
+        _sample_from_json(raw)
+    with pytest.raises(ValueError, match="exactly its transports"):
+        _sample_from_json(dict(raw, transports=["mllp", "https"]))

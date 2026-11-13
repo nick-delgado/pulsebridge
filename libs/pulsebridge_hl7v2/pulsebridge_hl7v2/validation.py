@@ -15,11 +15,15 @@ What hl7apy 1.3.5 does not check, and this module adds:
   hl7apy's validator skips "varies" fields (its source says "it should check the real rule"), so
   "HIGH" in an OBX with OBX-2 = NM passes. We check each OBX-5 value with hl7apy's own datatype
   class for the OBX-2 type, so the rules are still hl7apy's.
+- A stricter rule for NM (numeric) than hl7apy's. hl7apy reads NM with Python's ``Decimal``,
+  which also accepts "NaN", "inf", "1e3", "1_000", surrounding spaces and non-ASCII digits.
+  HL7 2.5.1 (chapter 2A, data type NM) allows only an optional sign, ASCII digits and an
+  optional decimal point, so every NM value must also match ``NM_PATTERN`` in full.
 - That OBX-2 names a data type at all when OBX-5 has a value.
 - That the message type is ORU^R01 (checked first, with a clear message).
 
-hl7apy's validator stops at the first error unless it is given a report file; we give it one in
-a temporary directory so the caller sees every problem at once.
+hl7apy's validator collects every error but raises only the first; the report file is its public
+way to read them all, so we give it one in a temporary directory and report every problem at once.
 """
 
 from __future__ import annotations
@@ -45,6 +49,10 @@ class HL7ValidationError(ValueError):
         self.problems = tuple(problems)
         super().__init__("HL7v2 validation failed: " + "; ".join(self.problems))
 
+
+# HL7 2.5.1 NM: "+" or "-" (optional), ASCII digits, an optional decimal point. No exponent, no
+# spaces, no digit separators. re.ASCII makes \d mean 0-9 only (not other scripts' digits).
+NM_PATTERN = re.compile(r"[+-]?(\d+(\.\d*)?|\.\d+)", re.ASCII)  # used with fullmatch
 
 _MISSING_CHILD_RE = re.compile(r"^Missing required child (\w+)\.(\w+)$")
 _FIELD_NAME_RE = re.compile(r"^([A-Z][A-Z0-9]{2})_(\d+)$")
@@ -98,6 +106,7 @@ def _check_obx_values(message: Message) -> list[str]:
             )
             continue
         for value in values:
+            # First hl7apy's own check of the value against the OBX-2 data type...
             try:
                 datatype_factory(
                     value_type,
@@ -110,6 +119,13 @@ def _check_obx_values(message: Message) -> list[str]:
                     f"{label}: OBX-5 value {value!r} is not a valid {value_type} "
                     f"(OBX-2 says the value type is {value_type})"
                 )
+                continue
+            # ...then our stricter NM rule for values hl7apy's Decimal-based check let through.
+            if value_type == "NM" and not NM_PATTERN.fullmatch(value):
+                problems.append(
+                    f"{label}: OBX-5 value {value!r} is not a valid NM: HL7 allows only an "
+                    "optional sign, ASCII digits and an optional decimal point"
+                )
     return problems
 
 
@@ -119,7 +135,7 @@ def _run_hl7apy_validator(message: Message) -> list[str]:
         try:
             Validator.validate(message, report_file=report)
         except hl7apy_exceptions.ValidationError:
-            pass  # hl7apy raises only the first error; the report file holds all of them
+            pass  # hl7apy raised only the first error; the report file lists all of them
         except hl7apy_exceptions.HL7apyException as exc:
             # Raised before the report is written (e.g. a reference hl7apy cannot load).
             return [f"hl7apy could not validate the message: {exc}"]
@@ -139,8 +155,8 @@ def validate_oru_r01(payload: bytes | str | Message) -> Message:
     from :func:`pulsebridge_hl7v2.oru.build_bp_oru_r01`). Raises :class:`HL7ValidationError`
     listing every problem found.
     """
-    text = payload.to_er7() if isinstance(payload, Message) else decode_payload(payload)
     try:
+        text = payload.to_er7() if isinstance(payload, Message) else decode_payload(payload)
         check_framing_text(text)
         # hl7apy's own reading of MSH-9: the message structure, e.g. "ORU_R01". Checked before
         # the STRICT parse, which otherwise fails on an empty MSH-9 with "Cannot instantiate an

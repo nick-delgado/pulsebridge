@@ -44,3 +44,9 @@ def test_decode_escapes_uses_the_message_own_separators():
 
 def test_decode_escapes_leaves_formatting_sequences_alone():
     assert decode_escapes("line\\.br\\two \\H\\x\\N\\", STANDARD) == "line\\.br\\two \\H\\x\\N\\"
+
+
+def test_empty_version_becomes_typed_error_naming_msh12():
+    # S4 row b9: the store accepts an empty MSH-12 with AA; hl7apy cannot pick a version.
+    with pytest.raises(HL7ParseError, match="MSH-12"):
+        parse_er7(load("unmappable_empty_msh12").payload)

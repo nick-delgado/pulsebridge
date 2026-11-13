@@ -5,12 +5,16 @@ loopback interface (127.0.0.1) inside the test process. No external network is t
 """
 
 import socket
+import struct
 import threading
+import time
 
 import pytest
 from pulsebridge_hl7v2.mllp import (
+    DEFAULT_MAX_FRAME_BYTES,
     MllpConnectionClosed,
     MllpDecoder,
+    MllpFrameTooLarge,
     MllpReader,
     MllpTimeout,
     frame,
@@ -173,3 +177,102 @@ def test_reader_reports_connection_closed_mid_frame(server):
     with client, pytest.raises(MllpConnectionClosed) as caught:
         MllpReader(client).read_frame(timeout=2)
     assert caught.value.partial is True
+
+
+def test_reader_reports_a_reset_as_connection_closed(server):
+    def reset(conn):
+        # SO_LINGER with a zero timeout makes close() send a TCP reset (RST), not an orderly FIN.
+        conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+
+    client = server(reset)
+    with client:
+        time.sleep(0.1)  # let the reset arrive before we read
+        with pytest.raises(MllpConnectionClosed) as caught:
+            MllpReader(client).read_frame(timeout=2)
+    assert caught.value.reason  # set only on the socket-error path, not on an orderly close
+
+
+def test_reader_deadline_covers_the_whole_frame_not_each_read(server):
+    stop = threading.Event()
+
+    def trickle(conn):
+        conn.sendall(b"\x0b")
+        while not stop.wait(0.05):  # one byte every 50 ms, never the end bytes
+            try:
+                conn.sendall(b"M")
+            except OSError:
+                return
+
+    client = server(trickle)
+    with client:
+        started = time.monotonic()
+        with pytest.raises(MllpTimeout):
+            MllpReader(client).read_frame(timeout=0.3)
+        elapsed = time.monotonic() - started
+        stop.set()
+    assert elapsed < 1.0, f"timed out after {elapsed:.2f} s, not about 0.3 s"
+
+
+# --- frame size limit and scanning cost -------------------------------------------------------
+
+
+def test_default_frame_limit_is_one_mebibyte():
+    assert DEFAULT_MAX_FRAME_BYTES == 1024 * 1024
+    assert MllpDecoder().max_frame_bytes == DEFAULT_MAX_FRAME_BYTES
+
+
+def test_frame_at_the_limit_is_accepted():
+    assert MllpDecoder(max_frame_bytes=10).feed(frame(b"0123456789")) == [b"0123456789"]
+
+
+def test_unfinished_frame_past_the_limit_raises_and_the_decoder_recovers():
+    decoder = MllpDecoder(max_frame_bytes=10)
+    assert decoder.feed(b"\x0b0123456789") == []  # 10 bytes so far: still allowed
+    with pytest.raises(MllpFrameTooLarge):
+        decoder.feed(b"A")
+    assert not decoder.has_partial_frame
+    assert decoder.feed(frame(b"ok")) == [b"ok"]
+
+
+def test_complete_frame_past_the_limit_in_one_chunk_raises():
+    with pytest.raises(MllpFrameTooLarge):
+        MllpDecoder(max_frame_bytes=10).feed(frame(b"0123456789A"))
+
+
+def test_reader_passes_the_limit_to_its_decoder(server):
+    done = threading.Event()
+
+    def big(conn):
+        conn.sendall(frame(b"X" * 100))
+        done.wait(2)
+
+    client = server(big)
+    with client:
+        with pytest.raises(MllpFrameTooLarge):
+            MllpReader(client, max_frame_bytes=50).read_frame(timeout=2)
+        done.set()
+
+
+class CountingDecoder(MllpDecoder):
+    """Counts how many buffered bytes the end-byte search looks at (the real search runs)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.bytes_searched = 0
+
+    def _find_end(self, start):
+        self.bytes_searched += len(self._buffer) - start
+        return super()._find_end(start)
+
+
+def test_end_byte_search_resumes_instead_of_rescanning():
+    # 1 MiB arriving in 1 KiB chunks. Rescanning from the start on every chunk would look at
+    # about 512 MiB; resuming looks at each byte about once.
+    decoder = CountingDecoder(max_frame_bytes=4 * 1024 * 1024)
+    total = 0
+    decoder.feed(b"\x0b")
+    for _ in range(1024):
+        decoder.feed(b"M" * 1024)
+        total += 1024
+    assert decoder.feed(b"\x1c\r") == [b"M" * total]
+    assert decoder.bytes_searched <= 2 * total + 4096

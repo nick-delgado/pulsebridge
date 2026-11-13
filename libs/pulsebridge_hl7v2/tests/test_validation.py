@@ -108,3 +108,62 @@ def test_other_message_type_is_rejected_with_clear_reason():
 def test_unparseable_input_gives_a_clear_reason_not_an_hl7apy_traceback(payload, fragment):
     (problem,) = problems_for(payload)
     assert fragment in problem
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["NaN", "inf", "1e3", "1_000", "120 ", " 120", "١٢٠", "0x78", "--1"],
+    ids=[
+        "NaN",
+        "inf",
+        "exponent",
+        "underscore",
+        "trailing-space",
+        "leading-space",
+        "arabic-indic-digits",
+        "hex",
+        "double-sign",
+    ],
+)
+def test_nm_values_python_accepts_but_hl7_does_not_are_refused(value):
+    payload = replace_once(b"^LN||120|", b"^LN||" + value.encode("utf-8") + b"|")
+    (problem,) = problems_for(payload)
+    assert problem.startswith(f"OBX #1: OBX-5 value {value!r} is not a valid NM")
+
+
+@pytest.mark.parametrize("value", ["120", "+120", "-3", "120.5", "120.", ".5", "007"])
+def test_nm_values_hl7_allows_pass(value):
+    validate_oru_r01(replace_once(b"^LN||120|", b"^LN||" + value.encode() + b"|"))
+
+
+def test_every_obx5_repetition_is_checked_not_only_the_first():
+    (problem,) = problems_for(replace_once(b"^LN||120|", b"^LN||120~HIGH|"))
+    assert "'HIGH'" in problem
+
+
+def test_composite_obx2_value_type_is_reported_as_unsupported():
+    payload = replace_once(b"OBX|1|NM|", b"OBX|1|CE|")
+    (problem,) = problems_for(payload)
+    assert problem == (
+        "OBX #1: OBX-2 value type 'CE' is not a simple HL7 data type this library can check"
+    )
+
+
+def test_non_utf8_bytes_raise_validation_error_not_parse_error():
+    (problem,) = problems_for(VALID.replace(b"TESTPATIENT", b"TEST\xffPATIENT"))
+    assert "not valid UTF-8" in problem
+
+
+def test_hl7apy_failing_inside_its_validator_becomes_a_problem(monkeypatch):
+    # hl7apy can raise something other than ValidationError before writing its report (for
+    # example when it cannot load a structure). Simulate that to check our handling of it.
+    import pulsebridge_hl7v2.validation as validation
+    from hl7apy.exceptions import ChildNotFound
+
+    def failing_validate(*_args, **_kwargs):
+        raise ChildNotFound("XYZ")
+
+    monkeypatch.setattr(validation.Validator, "validate", staticmethod(failing_validate))
+    (problem,) = problems_for(VALID)
+    assert problem.startswith("hl7apy could not validate the message:")
+    assert "XYZ" in problem

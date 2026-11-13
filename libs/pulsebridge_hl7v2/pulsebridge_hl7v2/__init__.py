@@ -4,6 +4,7 @@ from .ack import Ack, AckCode, AckParseError, parse_ack
 from .mllp import (
     MllpConnectionClosed,
     MllpDecoder,
+    MllpFrameTooLarge,
     MllpReader,
     MllpTimeout,
     frame,
@@ -33,6 +34,7 @@ __all__ = [
     "HL7ValidationError",
     "MllpConnectionClosed",
     "MllpDecoder",
+    "MllpFrameTooLarge",
     "MllpReader",
     "MllpTimeout",
     "Patient",

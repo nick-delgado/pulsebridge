@@ -141,3 +141,39 @@ def test_ack_with_custom_field_separator():
 def test_non_acks_are_refused_with_a_reason(payload, fragment):
     with pytest.raises(AckParseError, match=fragment):
         parse_ack(payload)
+
+
+@pytest.mark.parametrize(
+    ("code", "accepted"),
+    [("CA", True), ("CE", False), ("CR", False), ("AA", True), ("AE", False), ("AR", False)],
+)
+def test_enhanced_mode_codes_and_which_count_as_accepted(code, accepted):
+    # Enhanced acknowledgment mode uses CA/CE/CR for the commit level; the store never sends them
+    # (S4), but D7 models our labels on them, so the parser must read them correctly.
+    ack = parse_ack(
+        f"MSH|^~\\&|R|F|S|F|20261113205330||ACK|A9|P|2.5.1\rMSA|{code}|SYN-9\r".encode()
+    )
+    assert ack.code is AckCode(code)
+    assert ack.accepted is accepted
+
+
+def test_hl7_2_3_ack_with_trigger_event_is_read_by_its_first_msh9_component():
+    # In 2.3 MSH-9 is a CM_MSG whose first component hl7apy names CM_MSG_1, not MSG_1.
+    ack = parse_ack(b"MSH|^~\\&|R|F|S|F|20261113205330||ACK^R01|A10|P|2.3\rMSA|AA|SYN-10\r")
+    assert (ack.code, ack.acknowledged_control_id, ack.version) == (AckCode.AA, "SYN-10", "2.3")
+
+
+def test_message_code_must_be_exactly_ack():
+    with pytest.raises(AckParseError, match="not ACK"):
+        parse_ack(b"MSH|^~\\&|R|F|S|F|20261113205330||ACKX^R01|A11|P|2.5.1\rMSA|AA|1\r")
+
+
+def test_ack_with_line_feed_separators_is_refused_with_the_reason():
+    with pytest.raises(AckParseError, match="line feeds"):
+        parse_ack(b"MSH|^~\\&|R|F|S|F|20261113205330||ACK|A12|P|2.5.1\nMSA|AA|SYN-12\n")
+
+
+def test_ack_preceded_by_whitespace_is_refused():
+    # hl7apy strips leading whitespace itself; our pre-check insists the bytes start with MSH.
+    with pytest.raises(AckParseError, match="does not start with an MSH segment"):
+        parse_ack(b"  MSH|^~\\&|R|F|S|F|20261113205330||ACK|A13|P|2.5.1\rMSA|AA|1\r")
