@@ -62,7 +62,7 @@ test: install ## Run pytest over tests/, libs/ and services/
 # bootstrap). `init -backend=false` downloads providers without touching remote state, so this
 # needs no cloud credentials. With no Terraform yet, it reports that and passes.
 tf-validate: ## terraform fmt -check and validate for every Terraform directory
-	@dirs=$$( [ -d "$(TF_ROOT)" ] && find "$(TF_ROOT)" -name '*.tf' -not -path '*/.terraform/*' -printf '%h\n' | sort -u || true ); \
+	@dirs=$$( [ -d "$(TF_ROOT)" ] && find "$(TF_ROOT)" -name '*.tf' -not -path '*/.terraform/*' -exec dirname {} \; | sort -u || true ); \
 	if [ -z "$$dirs" ]; then echo "tf-validate: no Terraform directories under $(TF_ROOT)/; nothing to validate"; exit 0; fi; \
 	terraform fmt -check -recursive -diff "$(TF_ROOT)"; \
 	for d in $$dirs; do \
