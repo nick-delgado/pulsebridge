@@ -161,8 +161,8 @@ def heart_rate_transaction(
     """Google roll-up JSON items to one transaction Bundle.
 
     The Bundle holds the Patient, the Device, and an Observation plus Provenance per window, all
-    written with ``PUT`` so that sending it twice creates no duplicates. Patient and Device are included
-    every time so the Bundle is self-contained: the Observations refer to them by ``urn:uuid``.
+    written with ``PUT`` so that sending it twice creates no duplicates. Patient and Device are
+    included every time so the Bundle is self-contained: the Observations refer to them by ``urn:uuid``.
 
     ``tz`` is the user's time zone (a ``zoneinfo.ZoneInfo`` follows daylight saving per window) or
     the fixed offset from :func:`parse_google_utc_offset`.
