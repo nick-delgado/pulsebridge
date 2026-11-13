@@ -25,6 +25,7 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D2 | Connecting Google Health | A CLI script runs the OAuth flow. Three values live in Secret Manager: OAuth client ID, OAuth client secret, refresh token. |
 | D3 | HL7v2 parsing | Use `hl7apy` to parse, build and validate messages. "Own parser" in the brief means the v2-to-FHIR mapping is ours (no Whistle or Dataflow). The mapping is the code a reviewer should read. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
+| D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
 ## Open decisions (need the user)
 
@@ -32,7 +33,22 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | --- | --- | --- |
 | D4 | Dashboard hosting: bucket + Cloud CDN, or Firebase Hosting. | Decide in T22; bucket + load balancer has an hourly forwarding-rule cost, Firebase Hosting does not. |
 | D5 | Dashboard framework. | Vite + TypeScript with a small chart library, no heavy framework. |
-| D7 | Where the `AE` for a malformed message comes from. The HL7v2 store returns the ACK at ingest, before `v2-to-fhir` runs, so the mapper cannot change the ACK the simulator receives. | Simulator validates before sending; the store rejects what it cannot parse; `v2-to-fhir` records a mapping error (an `AE` outcome in the messages log) for messages that ingest but cannot be mapped. Confirm in S5. |
+
+## Malformed message handling (D7)
+
+Each layer rejects a different class of bad message, and the tests cover each class.
+
+| Class | Example | Caught by | What the user sees |
+| --- | --- | --- | --- |
+| Structurally invalid | missing required segment or field, wrong data type | Cuff simulator, `hl7apy` validation, before sending | Validation error; nothing is sent |
+| Unparseable | broken MSH, bad framing or separators | MLLP adapter / HL7v2 store at ingest | The NACK from the store, shown as the commit-level acknowledgment |
+| Parses but cannot be mapped | unknown OBX-3 code, missing OBX-14, non-numeric OBX-5 | `v2-to-fhir` mapping | Commit-level `AA`, application-level outcome `error` with a reason |
+
+- The mapper records `application_outcome: accepted | error` plus a `reason` for every message.
+- Optional: `v2-to-fhir` also writes an `ACK^R01` with `MSA-1 = AE` back into the HL7v2 store.
+- A mapping failure never crashes or stalls the Pub/Sub subscription.
+- The simulator has a "send malformed" checkbox that bypasses validation so the later layers'
+  error paths can be demonstrated.
 
 ## Wave 0: spikes (not started; on hold until the user says go)
 
@@ -45,7 +61,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 | S2 | OpenEMR + MariaDB + MLLP adapter in 1 GB plus swap: measure page load and FHIR API latency. | none | a temporary e2-micro | todo |
 | S3 | Google Health API: register OAuth app, get a token, pull one day of heart-rate points, record exact field names and webhook payload shape. | none | the user (console) | todo |
 | S4 | Google's mllp-adapter image on e2-micro next to MariaDB. Fallback: small Python MLLP listener. | none | a temporary e2-micro | todo |
-| S5 | HL7v2 store: confirm `ingest` publishes to Pub/Sub and record the push message body. | none | temporary dataset | todo |
+| S5 | HL7v2 store: confirm `ingest` publishes to Pub/Sub and record the push message body. Also record what the store and the MLLP adapter return for an unparseable message (D7). | none | temporary dataset | todo |
 | S6 | Reviewer auth: Identity Platform or a static password in the proxy. | none | none (desk research) | todo |
 
 ## Wave 1: foundations (all parallel after T01)
@@ -109,7 +125,8 @@ heart-rate `Observation` (LOINC 8867-4, UCUM `/min`), blood-pressure panel `Obse
 **T07 HL7v2 library.** Thin, shared helpers over `hl7apy` (see D3); no hand-written ER7 parser.
 ORU^R01 builder for a blood-pressure reading (two OBX: LOINC 8480-6 and 8462-4), validation of a
 message before it is sent, ACK parsing, MLLP framing for the client side, and a small set of sample
-messages (valid, and malformed in different ways) reused by T12 and T13.
+messages reused by T12 and T13: valid ones, and at least one per malformed class in D7
+(structurally invalid, unparseable, and each parses-but-cannot-map case).
 - AC: the builder produces an ORU^R01 that passes `hl7apy` validation; a message with a missing
   required field or a wrong OBX value type fails validation with a clear error.
 - AC: a built message parses back to the same patient identifier, LOINC codes, values, units and
@@ -168,19 +185,30 @@ GCP calls, so it can be read and tested on its own. Input is either the raw ER7 
 - AC: a `Provenance` points back to the HL7v2 store message name.
 - AC: the write is a conditional update keyed on the message control ID, so a redelivered push
   does not create a second Observation.
-- AC: malformed input gives an `AE` outcome and an error record; the push is acknowledged and the
-  subscription never stalls (see D7).
-- AC: unit tests run the mapping against the T07 sample messages, including a malformed one.
+- AC: every message gets `application_outcome: accepted | error` plus a `reason`, stored where
+  the proxy can read it (suggested: labels on the HL7v2 store message; state the choice in the README).
+- AC: unknown OBX-3 code, missing OBX-14 and non-numeric OBX-5 each give outcome `error` with a
+  distinct reason and write no Observation.
+- AC: on any mapping error the push is still acknowledged; the handler never raises to Pub/Sub
+  and the subscription never stalls (see D7).
+- AC: unit tests run the mapping against the T07 sample messages, with at least one fixture per
+  malformed class.
+- Optional: write an `ACK^R01` with `MSA-1 = AE` back into the HL7v2 store on error.
 
 **T13 Cuff simulator backend.** Builds an ORU^R01 with the T07 builder from bounded systolic and
 diastolic values, validates it with `hl7apy` before sending, and sends it by MLLP (default) or
 HTTPS ingest; returns the ACK.
-- AC: a message that fails validation is never sent.
+- AC: a message that fails validation is never sent, unless "send malformed" is set.
+- AC: a `send_malformed` option bypasses validation and sends a chosen malformed sample from T07
+  (never free text); it is still rate-limited.
+- AC: a NACK from the store or adapter is returned to the caller as the commit-level
+  acknowledgment, not turned into a generic error.
 - AC: inputs outside bounds are rejected; no free text reaches the message.
 - AC: rate-limited; both transports covered by tests against a fake listener.
 
 **T14 FHIR proxy: read API.** Narrow read API for the dashboard: Observation search by patient,
-code and date; trace lookups (v2 message, ACK, source JSON); status strip data; messages log;
+code and date; trace lookups (v2 message, commit-level ACK, application-level outcome and reason,
+source JSON); status strip data; messages log;
 reviewer auth; `CapabilityStatement`.
 - AC: unsupported search parameters return a FHIR `OperationOutcome`, not a pass-through.
 - AC: the `CapabilityStatement` lists exactly what is implemented (test compares the two).
@@ -211,7 +239,11 @@ and right panels, share button placeholder, collapsible messages log, a typed AP
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief.
 - AC (T17): 24 h, 7 d and 30 d windows; min, mean and max; selecting a point fills the trace panel.
-- AC (T18): bounded inputs, transport toggle, readings list with ACK code, three trace tabs.
+- AC (T18): bounded inputs, transport toggle, "send malformed" checkbox, readings list with ACK
+  code, three trace tabs; the trace shows the commit-level acknowledgment and the application-level
+  outcome as two separately labelled items.
+- AC (T19): each v2 row in the messages log shows the commit-level acknowledgment and the
+  application-level outcome with its reason.
 - AC (T19): share acts on the current selection and shows its trace; messages log lists v2 messages
   and FHIR transactions.
 

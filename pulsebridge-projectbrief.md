@@ -74,6 +74,7 @@ One page, no navigation. A line-art silhouette of the patient sits in the centre
 
 - [ ] Systolic and diastolic inputs with sensible bounds; no free text reaches the message
 - [ ] Transport toggle: MLLP through the adapter (default) or HTTPS direct to the HL7v2 store's ingest endpoint
+- [ ] "Send malformed" checkbox that bypasses validation, so the error path is demonstrable
 - [ ] Take reading sends an ORU^R01 with two OBX segments (LOINC 8480-6, 8462-4); rate-limited
 - [ ] Readings list below the form: time, value, ACK code; selecting a row fills the left trace panel
 - [ ] Each reading lands in the FHIR store as one panel Observation (LOINC 85354-9) with two components
@@ -86,15 +87,15 @@ One page, no navigation. A line-art silhouette of the patient sits in the centre
 
 **Trace panels, share action, messages log**
 
-- [ ] Left panel tabs: HL7v2 as sent, ACK as received, FHIR as stored
+- [ ] Left panel tabs: HL7v2 as sent, ACK as received (commit-level acknowledgment) with the application-level outcome, FHIR as stored
 - [ ] Right panel tabs: FHIR as stored, Google Health JSON it came from
 - [ ] Share with clinic acts on whatever is selected on either side; its own trace (token request, Bundle sent, 201 Created responses, link to the OpenEMR chart) appears under the button
-- [ ] Messages log as a collapsible strip at the bottom: one row per HL7v2 message (type, ACK, store id, resulting Observation) and per FHIR transaction (Bundle, HTTP status, resource ids)
+- [ ] Messages log as a collapsible strip at the bottom: one row per HL7v2 message (type, commit-level acknowledgment, application-level outcome and reason, store id, resulting Observation) and per FHIR transaction (Bundle, HTTP status, resource ids)
 
 **Ingestion**
 
 - [ ] `health-sync` is idempotent (conditional update on Google data-point id); backfill command for the last N days
-- [ ] `v2-to-fhir` handles a malformed message by writing an error record and acking AE, never crashing the subscription
+- [ ] Malformed messages are handled per layer, following HL7 enhanced acknowledgment mode (MSH-15/16): the simulator rejects structurally invalid messages before sending (`hl7apy` validation); the store or adapter rejects unparseable messages and the simulator shows the NACK (commit-level acknowledgment); `v2-to-fhir` records `application_outcome: accepted|error` plus a reason for messages that parse but cannot be mapped (unknown code, missing OBX-14, non-numeric OBX-5), and never crashes the subscription. Optionally it also writes an `ACK^R01` with MSA-1=AE back into the HL7v2 store
 - [ ] Every Observation carries `device` and a `Provenance` naming the source system
 
 **Standards conformance**
