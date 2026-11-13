@@ -27,7 +27,9 @@ concurrency:
 env:
   PYTHON_VERSION: "3.13"
   TERRAFORM_VERSION: "1.17.2"
-  GO_VERSION: "1.24.7"
+  # gitleaks v8.30.1 needs Go 1.24.11 or newer; setup-go sets GOTOOLCHAIN=local, so Go will not
+  # download a newer toolchain by itself and this version must satisfy it.
+  GO_VERSION: "1.24.11"
 
 jobs:
   lint-and-test:
