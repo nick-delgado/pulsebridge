@@ -244,6 +244,9 @@ Bundle endpoint and ignores conditional create.
 - AC: the assertion's audience comes from configuration (OpenEMR's `site_addr_oath` value).
 - AC: the trace returned to the dashboard never contains the private key, the signed assertion
   or the full token.
+- AC: the access token is cached for its lifetime (300 seconds), not fetched per share.
+- AC: TLS verification of OpenEMR's certificate is never disabled; the trusted certificate or CA
+  is configuration.
 
 **T16 Dashboard shell.** Single page: login, header status strip, line-art silhouette, empty left
 and right panels, share button placeholder, collapsible messages log, a typed API client with mock data.
@@ -286,6 +289,12 @@ MariaDB containers, firewall rule limited to the Cloud Run egress address.
   if it is crash-looping.
 - AC: the VM runs as a dedicated service account whose only Healthcare permission is HL7v2
   ingest on the store (not the default Compute Engine account, which has project-wide Editor).
+- AC: 2 GB swap file that survives a reboot; the compose file and low-memory settings from
+  `docs/spikes/s2.md` are reused; containers restart unattended after a reboot.
+- AC: the startup script is safe to run on every boot.
+- AC: the database and OpenEMR site data live on a separate persistent disk, so replacing the VM
+  does not destroy the clinic data; `terraform destroy` still removes that disk.
+- AC: anything that waits for the stack on first apply tolerates about 15 minutes.
 
 **T22 Module `phr`.** Dashboard hosting, `fhir-proxy` and cuff simulator Cloud Run services.
 - AC: hosting choice (D4) recorded with its idle cost.
@@ -300,6 +309,13 @@ registration script.
 - AC: the registration script follows the recipe in `docs/spikes/s1.md`, including enabling the
   newly registered client, and is safe to run twice.
 - AC: the OpenEMR image is pinned by digest.
+- AC: Apache is capped at four worker processes (required, per spike S2).
+- AC: readiness is checked by polling OpenEMR's `/meta/health/readyz`, allowing about 15 minutes
+  on first boot.
+- AC: confirm on the VM that the `OPENEMR_SETTING_*` variables take effect (spike S1 verified
+  them; spike S2 used database writes instead); fall back to database writes if they do not.
+- AC: `site_addr_oath` is the URL the FHIR proxy actually calls, and the README states how the
+  proxy verifies OpenEMR's certificate (it is self-signed by default).
 
 **T24 Container build pipeline.** Dockerfiles and a Cloud Build config that builds on tag and
 reports image digests.

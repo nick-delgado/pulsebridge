@@ -56,7 +56,7 @@ Fourteen pieces, all on GCP, all created by Terraform except the Google Health O
 | Secrets | Secret Manager | Google Health OAuth client ID, client secret and refresh token, OpenEMR client private key, DB password | \~$0 |
 | Identity | Service accounts, IAM bindings, Identity Platform (reviewer login) | Least-privilege per service; password-protected demo | $0 |
 
-The e2-micro is the only always-on piece and the only one that costs money if it leaves the free tier. It carries three jobs, OpenEMR, MariaDB and MLLP termination, because each needs a long-lived process or persistent local state and none fits Cloud Run cleanly. Add a 2 GB swap file and a low-memory MariaDB config; if page loads are unacceptable, move to e2-small, which leaves the free tier.
+The e2-micro is the only always-on piece and the only one that costs money if it leaves the free tier. It carries three jobs, OpenEMR, MariaDB and MLLP termination, because each needs a long-lived process or persistent local state and none fits Cloud Run cleanly. Add a 2 GB swap file, cap Apache at four worker processes and keep a low-memory MariaDB config. Spike S2 (`docs/spikes/s2.md`) measured 216 to 330 MB of RAM still available at idle and no out-of-memory kills. The real limit is the shared CPU: after about 20 seconds of sustained load, responses slow roughly eightfold until the VM rests, and first boot takes about 15 minutes. That is acceptable for one reviewer at a time. If it is not, move to e2-small, which leaves the free tier.
 
 ## Product requirements (MVP)
 
@@ -186,7 +186,7 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 Run these before building; each is a half-day and any one of them can change the design.
 
 - [x] **OpenEMR FHIR write support.** Resolved by spike S1 (`docs/spikes/s1.md`): on OpenEMR 8.5.0, `POST /apis/default/fhir/Observation` is accepted for heart rate and the blood-pressure panel and lands in the Vitals form. No REST fallback is needed. An Encounter is required, Patient conditional create is ignored, and there is no Bundle endpoint.
-- [ ] **OpenEMR on the e2-micro.** Prove OpenEMR, MariaDB and the mllp-adapter run together in 1 GB plus swap; measure page load and the FHIR API's response time. Fallback: e2-small.
+- [x] **OpenEMR on the e2-micro.** Resolved by spike S2 (`docs/spikes/s2.md`): OpenEMR, MariaDB and the mllp-adapter run together on the e2-micro with no out-of-memory kills; warm responses are well under a second. Acceptable for one reviewer at a time, with Apache capped at four workers. e2-small was not tested.
 - [ ] **Google Health API registration.** Register the OAuth app, obtain a token, pull one day of `heart-rate` data points; confirm the exact field names and whether webhook payloads carry samples or only notifications.
 - [x] **mllp-adapter on e2-micro.** Resolved by spike S4 (`docs/spikes/s4.md`): Google's adapter runs next to MariaDB in about 27 MiB and relays the store's ACK in a median of 75 ms. No Python listener is needed. Memory with OpenEMR also running is spike S2's question.
 - [ ] **HL7v2 store notification.** Confirm `ingest` (not `import`) publishes to Pub/Sub, and the message body format the push subscription delivers.
