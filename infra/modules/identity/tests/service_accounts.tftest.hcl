@@ -136,17 +136,22 @@ run "pubsub_token_creator_on_by_default_and_scoped_to_push_account" {
   command = apply
 
   assert {
-    condition     = google_service_account_iam_member.pubsub_token_creator[0].service_account_id == google_service_account.this["pubsub-push"].name
+    condition     = length(google_service_account_iam_member.pubsub_token_creator) == 1
+    error_message = "The Pub/Sub Token Creator grant must exist by default (this module is its single owner)."
+  }
+
+  assert {
+    condition     = try(google_service_account_iam_member.pubsub_token_creator[0].service_account_id, "") == google_service_account.this["pubsub-push"].name
     error_message = "Token Creator must be granted on the pubsub-push account only."
   }
 
   assert {
-    condition     = google_service_account_iam_member.pubsub_token_creator[0].member == "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    condition     = try(google_service_account_iam_member.pubsub_token_creator[0].member, "") == "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
     error_message = "Token Creator must go to this project's Pub/Sub service agent."
   }
 
   assert {
-    condition     = google_service_account_iam_member.pubsub_token_creator[0].role == "roles/iam.serviceAccountTokenCreator"
+    condition     = try(google_service_account_iam_member.pubsub_token_creator[0].role, "") == "roles/iam.serviceAccountTokenCreator"
     error_message = "The Pub/Sub service agent needs roles/iam.serviceAccountTokenCreator, nothing broader."
   }
 }
