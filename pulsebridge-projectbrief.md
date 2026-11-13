@@ -37,11 +37,11 @@ The top row is the wearable path, the middle row the device path; both end in th
 
 ## Components
 
-Twelve pieces, all on GCP, all created by Terraform except the Google Health OAuth app, which is registered by hand in the Google Cloud console.
+Fourteen pieces, all on GCP, all created by Terraform except the Google Health OAuth app, which is registered by hand in the Google Cloud console.
 
 | Component | GCP service | Role | Idle cost |
 | --- | --- | --- | --- |
-| Google Health API client | OAuth consent screen + client (manual) | Authorizes `health-sync` to read the author's heart-rate samples | $0 |
+| Google Health API client | OAuth consent screen + client (manual, one per deployment) | Authorizes `health-sync` to read the deployer's own heart-rate samples; the deployer connects their account through an OAuth flow, so no client ID, secret or token is hardcoded | $0 |
 | health-sync | Cloud Run service (Python) | Pulls Google Health JSON, maps to FHIR, writes Bundle | $0 (scale to zero) |
 | Sync trigger | Cloud Scheduler | Invokes `health-sync` every 15 min with an OIDC token | \~$0 |
 | FHIR R4 store | Cloud Healthcare API dataset + FHIR store | System of record for Patient, Device, Observation, Provenance | cents (storage + ops) |
@@ -108,6 +108,7 @@ One page, no navigation. A line-art silhouette of the patient sits in the centre
 - [ ] `terraform apply` from a clean project to a working stack in one quick-start path
 - [ ] `terraform destroy` leaves nothing billable behind
 - [ ] README: pitch, GIF, architecture, standards map, deploy, what this is not
+- [ ] Setup guide for a new user (`docs/setup.md`): prerequisites, creating or adopting a GCP project, linking billing, running bootstrap, registering their own Google Health OAuth app, connecting their own Google Health account, deploy, destroy. No step depends on the author's accounts or credentials
 
 ## Terraform structure
 
@@ -121,12 +122,12 @@ infra/
     healthcare/        # Healthcare dataset, FHIR R4 store, HL7v2 store, Pub/Sub topic + subscription, store notification config
     ingestion/         # Cloud Run: health-sync, v2-to-fhir; Cloud Scheduler job; OIDC invoker bindings
     edge-vm/           # e2-micro, startup script, mllp-adapter + MariaDB containers, persistent disk, firewall rule for MLLP from Cloud Run NAT IP only
-    phr/               # bucket + CDN (or Firebase Hosting), fhir-proxy Cloud Run, monitor-sim Cloud Run
-    openemr/           # OpenEMR Cloud Run service, DB connection, registered OAuth2 client (via provisioning script)
+    phr/               # bucket + CDN (or Firebase Hosting), fhir-proxy Cloud Run, cuff simulator Cloud Run
+    openemr/           # OpenEMR container on the edge VM, DB connection, registered OAuth2 client (via provisioning script)
   envs/
     dev/               # main.tf wires the modules; terraform.tfvars; backend.tf (GCS state bucket, prefix dev)
     prod/
-  bootstrap/           # one-time: project, billing link, state bucket; run once, never again
+  bootstrap/           # one-time: create a project and link billing, or adopt an existing project; state bucket; deployer service account; Workload Identity Federation for CI
 ```
 
 Conventions that make it read as mature work:
@@ -137,6 +138,9 @@ Conventions that make it read as mature work:
 - CI on pull request: `terraform fmt -check`, `validate`, `tflint`, `checkov` or `trivy config`, then `plan` for each env posted as a PR comment. `apply` on merge to `main` for dev; manual approval gate for prod.
 - Secrets never in state as plain values where avoidable: Secret Manager secrets are created by Terraform, versions are added by a script after apply.
 - Container images built by Cloud Build on tag and referenced by digest in `tfvars`, so an apply is reproducible.
+- `*.tfvars` files are git-ignored; each env commits a `terraform.tfvars.example` with placeholders.
+- GitHub Actions authenticates to GCP with Workload Identity Federation; no service account keys are stored in GitHub.
+- Bootstrap is run once by a human with their own Google credentials. It either creates a new project (the user needs a billing account, and an organization is not required) or adopts an existing project ID.
 - `terraform destroy` tested in CI nightly against dev to prove the stack tears down clean.
 
 The modules are provider-specific by nature (see Decisions log); the portability claim is at the module interface, not the resources.
@@ -172,6 +176,8 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 | Wearable source | Google Health API (cloud) | Legacy Fitbit Web API turned off Nov 2, 2026; Health API has \~5 s heart-rate samples by default and webhook subscriptions | Health Connect (on-device, needs an Android app) |
 | Compute for the VM | Fresh e2-micro via Terraform, hosting OpenEMR, MariaDB and the MLLP adapter | Clean lifecycle, reproducible, free tier; the existing instance stays untouched | Reuse existing e2-micro (rejected: mixed workloads) |
 | Environments | dev + prod roots, dev is the quick-start | Shows enterprise structure without making a cloner learn it | Single env; workspaces |
+| Wearable account | Per deployment: each deployer registers their own OAuth app and connects their own Google Health account | Keeps the PHR single-patient and the repo free of the author's credentials | Hosted multi-user connect (rejected: strangers' PHI, scope verification) |
+| CI authentication | Workload Identity Federation | No long-lived keys in GitHub | Service account key secret |
 | Product name | PulseBridge | PulseBridge; repo slug pulsebridge; demo at pulsebridge.tinkeringnick.com |  |
 
 ## Open questions and spikes

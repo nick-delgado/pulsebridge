@@ -54,3 +54,7 @@ terraform.rc
 *service-account*.json
 *sa-key*.json
 client_secret*.json
+
+# Agent worktrees
+.worktrees/
+.claude/worktrees/

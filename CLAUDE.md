@@ -55,3 +55,19 @@ The repo must work for a stranger who clones it and connects their own Google He
 - FHIR: R4. Observations carry LOINC codes, UCUM units, the vital-signs category, a `device`
   reference and a `Provenance`. Writes are idempotent (conditional create or update).
 - HL7v2: version and segment usage follow the brief (ORU^R01, PID/OBR/OBX, ACK AA/AE).
+
+## How work is organised
+
+- `docs/workplan.md` is the task list. Each task has an ID, dependencies, acceptance criteria and
+  the paths it owns. Only the orchestrating session edits it.
+- Each task is built in its own git worktree: branch `task/<id>-<slug>`, worktree
+  `.worktrees/<id>-<slug>` (git-ignored). Never work on a task in the main checkout.
+- Build with the `feature-builder` agent, which follows the `feature-dev` skill: build, test with
+  break-checks, self-review, then an explained summary published as an artifact (not committed).
+- Review with the `review-work` skill (`/review-work <task-id> <base-branch>`), which runs the
+  `work-reviewer` agent. A task is `done` only after it passes review and is merged.
+- Tests must be able to fail. Every test is break-checked: break the implementation, see the test
+  fail, restore.
+- Run independent tasks in parallel only when their owned paths do not overlap.
+- The user is new to FHIR, HL7v2 and Terraform. When explaining work in these areas, define terms
+  and say why, not only what.
