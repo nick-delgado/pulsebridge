@@ -37,6 +37,8 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | --- | --- | --- |
 | D4 | Dashboard hosting: bucket + Cloud CDN, or Firebase Hosting. | Decide in T22; bucket + load balancer has an hourly forwarding-rule cost, Firebase Hosting does not. |
 | D5 | Dashboard framework. | Vite + TypeScript with a small chart library, no heavy framework. |
+| D12 | Where send attempts are recorded. The HL7v2 store keeps only accepted messages, so rejected (`AE`) and unacknowledged sends, and the original ACK bytes, are not retrievable from it. | `fhir-proxy` records each cuff send attempt (it forwards every one, D10) with its transport, result and raw ACK, somewhere durable, so the messages log can list them. Alternative: the log shows stored messages only. |
+| D13 | How reviewers reach the OpenEMR chart. Nothing exposes OpenEMR publicly (T03), but the share trace links to the chart. | Route chart access through `fhir-proxy` to keep one front door; alternative is a public HTTPS rule for OpenEMR, a second entry point with its own login. |
 
 ## Malformed message handling (D7)
 
@@ -49,8 +51,15 @@ Each layer rejects a different class of bad message, and the tests cover each cl
 | No acknowledgment | bad MLLP framing (adapter waits silently); Healthcare API error such as a missing store or denied permission (adapter closes the connection) | MLLP adapter | "No acknowledgment received", with timeout or connection closed as the reason |
 | Parses but cannot be mapped | unknown OBX-3 code, missing OBX-14, non-numeric OBX-5, empty or unknown MSH-9 or MSH-12, MSH-only message | `v2-to-fhir` mapping | Commit-level `AA`, application-level outcome `error` with a reason |
 
-- The mapper records `application_outcome: accepted | error` plus a `reason` for every message.
-- Optional: `v2-to-fhir` also writes an `ACK^R01` with `MSA-1 = AE` back into the HL7v2 store.
+- The mapper records `application_outcome: accepted | error` plus a `reason` for every message,
+  as labels on the stored HL7v2 message (spike S5: updating labels publishes no notification, so
+  there is no loop, and messages can be listed by label).
+- A third state exists: stored with `AA` but no outcome label yet (mapper not run, failed, or
+  dead-lettered). The log shows it as "pending".
+- Writing an `ACK^R01` back into the store is not built: labels carry the same information, and
+  a stored ACK publishes a notification that would re-trigger the mapper.
+- The store keeps neither the commit-level ACK bytes nor rejected messages; they exist only in
+  the ingest response or on the MLLP socket (see open decision D12).
 - A mapping failure never crashes or stalls the Pub/Sub subscription.
 - Found in spike S4: the store accepts almost anything with a readable header (even a lone
   `MSH|^~\&`) with `AA`, never returns `AR`, and ignores MSH-15/16. It replies in the original
@@ -225,8 +234,11 @@ Bundle.
 
 **T12 `v2-to-fhir` service.** Pub/Sub push handler plus the v2-to-FHIR mapping, which is the
 showcase code. The mapping lives in a single module (`services/v2-to-fhir/mapping.py`) with no
-GCP calls, so it can be read and tested on its own. Input is either the raw ER7 parsed with
-`hl7apy` or the HL7v2 store's `parsedData`; pick one and explain why in the service README.
+GCP calls, so it can be read and tested on its own. Input is the raw ER7, fetched with
+`view=RAW_ONLY` and parsed with `hl7apy` (spike S5: the store's `parsedData` numbers MSH fields
+one lower than HL7, changes key shape when a field repeats, and cannot be produced without GCP);
+the service README says why. Handler steps: read the message name from the notification; fetch;
+parse; map; write to FHIR; patch the outcome labels; acknowledge.
 - AC: OBX-3 LOINC codes map to `Observation.code` (panel 85354-9) and `component` (8480-6, 8462-4);
   OBX-5 and OBX-6 map to the component value and UCUM unit.
 - AC: OBX-14 maps to `effectiveDateTime`, with the time zone handled explicitly.
@@ -234,15 +246,20 @@ GCP calls, so it can be read and tested on its own. Input is either the raw ER7 
 - AC: a `Provenance` points back to the HL7v2 store message name.
 - AC: the write is a conditional update keyed on the message control ID, so a redelivered push
   does not create a second Observation.
-- AC: every message gets `application_outcome: accepted | error` plus a `reason`, stored where
-  the proxy can read it (suggested: labels on the HL7v2 store message; state the choice in the README).
+- AC: every message gets the labels `application_outcome` (`accepted` or `error`) and `reason`
+  (a short lowercase code such as `missing-obx-14`) on the stored HL7v2 message, patched with
+  `updateMask=labels`. Both keys are written in one patch so a stale reason cannot remain, and
+  other labels are left alone. Values stay inside the documented label limits.
+- AC: a notification whose `msgType` attribute is `ACK` is acknowledged and ignored.
+- AC: every `hl7apy` exception, including an unsupported version, becomes an `error` outcome, and
+  a message that no longer exists (404) is acknowledged, not retried.
+- AC: the `Provenance` target is the message name from the notification.
 - AC: unknown OBX-3 code, missing OBX-14 and non-numeric OBX-5 each give outcome `error` with a
   distinct reason and write no Observation.
 - AC: on any mapping error the push is still acknowledged; the handler never raises to Pub/Sub
   and the subscription never stalls (see D7).
 - AC: unit tests run the mapping against the T07 sample messages, with at least one fixture per
   malformed class.
-- Optional: write an `ACK^R01` with `MSA-1 = AE` back into the HL7v2 store on error.
 
 **T13 Cuff simulator backend.** Not publicly invocable: only `fhir-proxy` calls it (D10). Builds an ORU^R01 with the T07 builder from bounded systolic and
 diastolic values, validates it with `hl7apy` before sending, and sends it by MLLP (default) or
@@ -250,6 +267,14 @@ HTTPS ingest; returns the ACK.
 - AC: a message that fails validation is never sent, unless "send malformed" is set.
 - AC: a `send_malformed` option bypasses validation and sends a chosen malformed sample from T07
   (never free text); it is still rate-limited.
+- AC: both transports return one result shape: acknowledged with code, control ID, reason and
+  raw ACK, or not acknowledged with why. Over HTTPS, a 200 with `hl7Ack` is `AA`; a 400 or 409
+  carrying `hl7Nack` is a NACK (`AE`), not a transport failure; any other error, or a network
+  error, is "no acknowledgment received" with the HTTP status. The ACK bytes over HTTPS have no
+  MLLP frame and no trailing carriage return.
+- AC: the stored message's name from the ingest response is returned to the caller, and HTTPS
+  sends carry a `transport` label; "send malformed" over HTTPS offers only the samples that apply
+  (there is no HTTPS equivalent of bad framing).
 - AC: a NACK from the store is returned to the caller as the commit-level acknowledgment with
   the reason from MSA-3, not turned into a generic error. MSA-2 is not required to match on a NACK
   (it is empty when the header could not be read), and the reply type `ACK` is accepted.
@@ -266,6 +291,10 @@ source JSON); status strip data; messages log; `CapabilityStatement`; and the re
 D9 (`docs/spikes/s6.md`): a login endpoint that checks the shared password and issues a signed
 bearer token, the token check on every other route, CORS for the dashboard's origin, and a login
 rate limit. It also forwards cuff requests to the cuff simulator (D10).
+- AC: the messages log lists stored HL7v2 messages newest first by send time and filters by the
+  outcome labels; a message with no outcome label is reported as "pending". For a stored message
+  the commit-level acknowledgment is `AA` by definition. Where rejected and unacknowledged sends
+  come from depends on D12.
 - AC: unsupported search parameters return a FHIR `OperationOutcome`, not a pass-through.
 - AC: the `CapabilityStatement` lists exactly what is implemented (test compares the two).
 - AC: unauthenticated requests are rejected.
@@ -326,7 +355,8 @@ and right panels, share button placeholder, collapsible messages log, a typed AP
   code, three trace tabs; the trace shows the commit-level acknowledgment and the application-level
   outcome as two separately labelled items.
 - AC (T19): each v2 row in the messages log shows the commit-level acknowledgment and the
-  application-level outcome with its reason.
+  application-level outcome with its reason, with "pending" for a message not yet mapped; reason
+  codes are shown as readable text.
 - AC (T19): share acts on the current selection and shows its trace; messages log lists v2 messages
   and FHIR transactions.
 
