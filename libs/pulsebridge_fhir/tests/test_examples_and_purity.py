@@ -14,8 +14,10 @@ EXPECTED = {
     "observation-heart-rate.json",
     "observation-blood-pressure.json",
     "provenance-heart-rate.json",
-    "bundle-heart-rate-transaction.json",
-    "bundle-blood-pressure-transaction.json",
+    "provenance-blood-pressure.json",
+    "bundle-patient-setup.json",
+    "bundle-heart-rate-ingest.json",
+    "bundle-blood-pressure-ingest.json",
 }
 
 

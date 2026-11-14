@@ -17,6 +17,7 @@ PROVENANCE_PARTICIPANT_TYPE: Final = (
     "http://terminology.hl7.org/CodeSystem/provenance-participant-type"
 )
 PROVENANCE_ENTITY_ROLE: Final = "http://hl7.org/fhir/provenance-entity-role"
+V3_DATA_OPERATION: Final = "http://terminology.hl7.org/CodeSystem/v3-DataOperation"
 DEVICE_NAME_TYPE: Final = "http://hl7.org/fhir/device-nametype"
 
 # --- Profiles claimed in Observation.meta.profile -------------------------------------------------
@@ -94,6 +95,11 @@ IDENTIFIER_TYPE_PT: Final = coding(V2_IDENTIFIER_TYPE, "PT", "Patient external i
 AGENT_PERFORMER: Final = coding(PROVENANCE_PARTICIPANT_TYPE, "performer", "Performer")
 AGENT_CUSTODIAN: Final = coding(PROVENANCE_PARTICIPANT_TYPE, "custodian", "Custodian")
 AGENT_ASSEMBLER: Final = coding(PROVENANCE_PARTICIPANT_TYPE, "assembler", "Assembler")
+
+# Provenance.activity, bound extensible to ProvenanceActivityType, which includes v3 DataOperation.
+# CREATE ("bringing an object into existence"): the activity this Provenance describes is
+# PulseBridge deriving the FHIR record from the source record.
+ACTIVITY_CREATE: Final = coding(V3_DATA_OPERATION, "CREATE", "create")
 
 # Device.deviceName.type
 DEVICE_NAME_USER_FRIENDLY: Final = "user-friendly-name"

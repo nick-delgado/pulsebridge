@@ -1,4 +1,4 @@
-"""Patient, Device and Provenance (T06 AC 5), including what OpenEMR needs (spike S1)."""
+"""Patient, Device and Provenance (T06 AC 5, review fixes 4 and 7)."""
 
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -8,6 +8,7 @@ from pulsebridge_fhir import (
     DeviceInput,
     FhirInputError,
     GoogleDataSource,
+    build_blood_pressure_observation,
     build_device,
     build_heart_rate_observation,
     build_patient,
@@ -16,7 +17,10 @@ from pulsebridge_fhir import (
     window_from_rollup,
 )
 from pulsebridge_fhir.examples import (
+    SYNTHETIC_BP,
     SYNTHETIC_BP_SOURCE,
+    SYNTHETIC_CUFF,
+    SYNTHETIC_DATA_SOURCE,
     SYNTHETIC_PATIENT,
     SYNTHETIC_RECORDED,
     SYNTHETIC_ROLLUP,
@@ -28,11 +32,12 @@ PT = {
     "code": "PT",
     "display": "Patient external identifier",
 }
+PARTICIPANT_TYPE = "http://terminology.hl7.org/CodeSystem/provenance-participant-type"
 
 # --- Patient -------------------------------------------------------------------------------------
 
 
-def test_patient_meets_openemr_requirements():
+def test_full_patient_meets_openemr_requirements():
     """S1: PT-typed identifier, name with use official, gender, birth date."""
     patient = build_patient(SYNTHETIC_PATIENT).resource
     pt = [i for i in patient["identifier"] if PT in i.get("type", {}).get("coding", [])]
@@ -61,11 +66,8 @@ def test_google_id_is_optional_and_not_the_key():
     without = build_patient(replace(SYNTHETIC_PATIENT, google_health_user_id=None))
     with_id = build_patient(SYNTHETIC_PATIENT)
     assert len(without.resource["identifier"]) == 1
-    assert (
-        without.request_url
-        == with_id.request_url
-        == ("Patient?identifier=urn:pulsebridge:patient|PB-SYN-0001")
-    )
+    assert without.update == with_id.update
+    assert without.create_if_absent == with_id.create_if_absent
 
 
 # --- Device --------------------------------------------------------------------------------------
@@ -77,9 +79,20 @@ def test_device_identifier_is_derived_and_stable():
     b = build_device(DeviceInput(display_name="Pixel Watch 4"), patient=patient)
     assert a.key == b.key
     assert a.resource["identifier"] == [{"system": "urn:pulsebridge:device", "value": a.key}]
-    assert a.request_url == f"Device?identifier=urn:pulsebridge:device|{a.key}"
     assert a.resource["deviceName"] == [{"name": "Pixel Watch 4", "type": "user-friendly-name"}]
     assert a.resource["patient"] == {"reference": patient.full_url}
+    assert "manufacturer" not in a.resource
+
+
+def test_device_with_manufacturer():
+    patient = build_patient(SYNTHETIC_PATIENT)
+    plain = build_device(SYNTHETIC_WATCH, patient=patient)
+    made = build_device(
+        DeviceInput(display_name="Pixel Watch 4", manufacturer="Example Devices Inc"),
+        patient=patient,
+    )
+    assert made.resource["manufacturer"] == "Example Devices Inc"
+    assert made.key == plain.key  # the manufacturer is not part of the identity
 
 
 def test_device_identifier_differs_by_patient_and_name():
@@ -93,8 +106,7 @@ def test_device_identifier_differs_by_patient_and_name():
 # --- Provenance ----------------------------------------------------------------------------------
 
 
-@pytest.fixture
-def hr_and_provenance():
+def hr_provenance(data_source=SYNTHETIC_DATA_SOURCE):
     patient = build_patient(SYNTHETIC_PATIENT)
     watch = build_device(SYNTHETIC_WATCH, patient=patient)
     window = window_from_rollup(SYNTHETIC_ROLLUP[0])
@@ -102,46 +114,76 @@ def hr_and_provenance():
     prov = build_provenance(
         target=obs,
         device=watch,
-        source=rollup_source(window, GoogleDataSource()),
+        source=rollup_source(window, data_source),
         recorded=SYNTHETIC_RECORDED,
         assembler="PulseBridge health-sync",
     )
     return watch, obs, prov
 
 
-def agent(prov, type_code):
+def agents(prov, type_code):
     found = [a for a in prov["agent"] if a["type"]["coding"][0]["code"] == type_code]
-    assert len(found) == 1, f"expected one {type_code} agent"
-    assert found[0]["type"]["coding"][0]["system"] == (
-        "http://terminology.hl7.org/CodeSystem/provenance-participant-type"
-    )
-    return found[0]
+    for a in found:
+        assert a["type"]["coding"][0]["system"] == PARTICIPANT_TYPE
+    return found
 
 
-def test_provenance_targets_observation_and_names_device(hr_and_provenance):
-    watch, obs, prov = hr_and_provenance
+def test_provenance_targets_observation_and_names_device():
+    watch, obs, prov = hr_provenance()
     p = prov.resource
     assert p["target"] == [{"reference": obs.full_url}]
-    assert agent(p, "performer")["who"] == {"reference": watch.full_url}
-    assert agent(p, "assembler")["who"] == {"display": "PulseBridge health-sync"}
+    [performer] = agents(p, "performer")
+    assert performer["who"] == {"reference": watch.full_url}
+    [assembler] = agents(p, "assembler")
+    assert assembler["who"] == {"display": "PulseBridge health-sync"}
     assert p["recorded"] == "2026-01-01T14:20:03+00:00"
 
 
-def test_provenance_records_platform_and_recording_method(hr_and_provenance):
-    _, _, prov = hr_and_provenance
-    p = prov.resource
-    custodian = agent(p, "custodian")["who"]
-    assert custodian["identifier"] == {
-        "system": "urn:pulsebridge:source-platform",
-        "value": "FITBIT",
-    }
-    assert p["activity"]["coding"] == [
-        {"system": "urn:pulsebridge:recording-method", "code": "PASSIVELY_MEASURED"}
+def test_provenance_activity_is_dataoperation_create():
+    """ProvenanceActivityType includes v3 DataOperation; CREATE is the derivation of the record."""
+    _, _, prov = hr_provenance()
+    assert prov.resource["activity"]["coding"] == [
+        {
+            "system": "http://terminology.hl7.org/CodeSystem/v3-DataOperation",
+            "code": "CREATE",
+            "display": "create",
+        }
     ]
 
 
-def test_provenance_entity_points_at_source_record(hr_and_provenance):
-    _, _, prov = hr_and_provenance
+def test_provenance_records_platform_and_recording_method():
+    _, _, prov = hr_provenance()
+    p = prov.resource
+    [custodian] = agents(p, "custodian")
+    assert custodian["who"]["identifier"] == {
+        "system": "urn:pulsebridge:source-platform",
+        "value": "FITBIT",
+    }
+    [performer] = agents(p, "performer")
+    assert performer["role"][0]["coding"] == [
+        {"system": "urn:pulsebridge:recording-method", "code": "PASSIVELY_MEASURED"}
+    ]
+    # The recording method is not the activity.
+    assert "PASSIVELY_MEASURED" not in str(p["activity"])
+
+
+def test_unknown_data_source_asserts_nothing():
+    _, _, prov = hr_provenance(GoogleDataSource(platform=None, recording_method=None))
+    p = prov.resource
+    assert agents(p, "custodian") == []
+    [performer] = agents(p, "performer")
+    assert "role" not in performer
+    assert "FITBIT" not in str(p)
+    assert "PASSIVELY_MEASURED" not in str(p)
+
+
+def test_google_data_source_has_no_defaults():
+    with pytest.raises(TypeError):
+        GoogleDataSource()  # the roll-up response has no dataSource; the caller must say
+
+
+def test_provenance_entity_points_at_source_record():
+    _, _, prov = hr_provenance()
     entity = prov.resource["entity"]
     assert len(entity) == 1
     assert entity[0]["role"] == "source"
@@ -152,9 +194,6 @@ def test_provenance_entity_points_at_source_record(hr_and_provenance):
 
 
 def test_provenance_for_hl7v2_points_at_store_message():
-    from pulsebridge_fhir import build_blood_pressure_observation
-    from pulsebridge_fhir.examples import SYNTHETIC_BP, SYNTHETIC_CUFF
-
     patient = build_patient(SYNTHETIC_PATIENT)
     cuff = build_device(SYNTHETIC_CUFF, patient=patient)
     obs = build_blood_pressure_observation(SYNTHETIC_BP, patient=patient, device=cuff)
@@ -168,23 +207,12 @@ def test_provenance_for_hl7v2_points_at_store_message():
     assert prov["entity"][0]["what"]["identifier"]["value"] == (
         "hl7V2Stores/example-store/messages/synthetic-message-0001"
     )
-    assert agent(prov, "custodian")["who"]["identifier"]["value"] == "HL7V2_STORE"
+    [custodian] = agents(prov, "custodian")
+    assert custodian["who"]["identifier"]["value"] == "HL7V2_STORE"
 
 
-def test_provenance_without_recording_method_has_no_activity(hr_and_provenance):
-    watch, obs, _ = hr_and_provenance
-    prov = build_provenance(
-        target=obs,
-        device=watch,
-        source=replace(SYNTHETIC_BP_SOURCE, recording_method=None),
-        recorded=SYNTHETIC_RECORDED,
-        assembler="x",
-    ).resource
-    assert "activity" not in prov
-
-
-def test_provenance_id_is_deterministic_and_written_by_id(hr_and_provenance):
-    watch, obs, prov = hr_and_provenance
+def test_provenance_id_is_deterministic_and_written_by_id():
+    watch, obs, prov = hr_provenance()
     again = build_provenance(
         target=obs,
         device=watch,
@@ -195,12 +223,12 @@ def test_provenance_id_is_deterministic_and_written_by_id(hr_and_provenance):
     assert again.key == prov.key
     assert prov.resource["id"] == prov.key
     assert prov.full_url == f"urn:uuid:{prov.key}"
-    assert prov.request_url == f"Provenance/{prov.key}"
+    assert prov.update == {"method": "PUT", "url": f"Provenance/{prov.key}"}
     assert prov.key != obs.key
 
 
-def test_provenance_rejects_wrong_target_and_naive_time(hr_and_provenance):
-    watch, obs, _ = hr_and_provenance
+def test_provenance_rejects_wrong_target_and_naive_time():
+    watch, obs, _ = hr_provenance()
     with pytest.raises(FhirInputError, match="target must be an Observation"):
         build_provenance(
             target=watch, device=watch, source=SYNTHETIC_BP_SOURCE,

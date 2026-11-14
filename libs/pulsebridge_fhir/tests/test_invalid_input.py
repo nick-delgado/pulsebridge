@@ -45,11 +45,25 @@ def test_missing_window_time(field):
 
 @pytest.mark.parametrize(
     "value",
-    ["2026-01-01T14:05:00", "2026-01-01T14:05:00+01:00", "2026-01-01", "14:05", 1767276300],
+    [
+        "2026-01-01T14:05:00",
+        "2026-01-01T14:05:00+01:00",
+        "2026-01-01",
+        "14:05",
+        1767276300,
+        "2026-01-01T14:05:00.5Z",  # fractional seconds: two windows could share a key
+        "\u0662026-01-01T14:05:00Z",  # Arabic-Indic digit two
+    ],
 )
 def test_window_time_not_utc(value):
     with pytest.raises(FhirInputError, match="startTime .* is not a UTC time"):
         window_from_rollup(dict(GOOD, startTime=value))
+
+
+def test_fractional_seconds_rejected_in_dataclass():
+    start = datetime(2026, 1, 1, 14, 5, 0, 500000, tzinfo=UTC)
+    with pytest.raises(FhirInputError, match="start .* must be a whole second"):
+        HeartRateWindow(start, datetime(2026, 1, 1, 14, 10, tzinfo=UTC), 60, 65, 70)
 
 
 def test_window_time_impossible_date():
@@ -106,6 +120,32 @@ def test_heart_rate_value_missing(field):
         ("beatsPerMinuteAvg", float("nan"), "average must be a finite number"),
         # True == 1 in Python and 1 is in range, so only an explicit bool check rejects it.
         ("beatsPerMinuteMin", True, "beatsPerMinuteMin must be a number, got bool"),
+        # Strings Python's int() would accept but that are not plain ASCII decimals.
+        ("beatsPerMinuteAvg", "1_00", "beatsPerMinuteAvg '1_00' is not a number"),
+        ("beatsPerMinuteAvg", "+72", r"beatsPerMinuteAvg '\+72' is not a number"),
+        ("beatsPerMinuteAvg", "\u0667\u0662", "beatsPerMinuteAvg '\u0667\u0662' is not a number"),
+        ("beatsPerMinuteAvg", " 72", "beatsPerMinuteAvg ' 72' is not a number"),
+        ("beatsPerMinuteAvg", "7e1", "beatsPerMinuteAvg '7e1' is not a number"),
+        pytest.param(
+            "beatsPerMinuteMax",
+            "9" * 5000,
+            "beatsPerMinuteMax '9999.* \\(5000 chars\\) is not",
+            id="5000-digit-string",
+        ),
+        # A huge JSON integer: must be a clear range error, not OverflowError or ValueError.
+        pytest.param(
+            "beatsPerMinuteMax",
+            10**400,
+            "maximum \\(a number of 20 or more digits\\) is outside",
+            id="int-10e400",
+        ),
+        pytest.param(
+            "beatsPerMinuteMax",
+            10**5000,
+            "maximum \\(a number of 20 or more digits\\) is outside",
+            id="int-10e5000",
+        ),
+        ("beatsPerMinuteMax", float("inf"), "maximum must be a finite number"),
     ],
 )
 def test_heart_rate_not_a_number(field, value, message):
@@ -185,10 +225,10 @@ def test_bad_google_offset(value, message):
         ({"patient_id": ""}, "patient_id is missing"),
         ({"patient_id": " PB-1"}, "whitespace"),
         ({"family": ""}, "family is missing"),
-        ({"given": ()}, "given must be"),
         ({"given": "Avery"}, "given must be"),
         ({"gender": "F"}, "gender 'F' is not one of"),
         ({"birth_date": "1980-04-12"}, "birth_date must be a date"),
+        ({"given": ("Avery", "")}, "given name is missing"),
     ],
 )
 def test_bad_patient(changes, message):
@@ -218,7 +258,10 @@ def test_bad_device_name():
 )
 def test_bad_source(changes, message):
     base = SourceInfo(
-        platform="FITBIT", record_type="google-health-heart-rate-rollup", record_id="x"
+        platform="FITBIT",
+        recording_method=None,
+        record_type="google-health-heart-rate-rollup",
+        record_id="x",
     )
     with pytest.raises(FhirInputError, match=message):
         replace(base, **changes)

@@ -1,22 +1,25 @@
 """Builders for Patient, Device, Observation (heart rate, blood pressure) and Provenance.
 
-Each builder returns a :class:`BuiltResource`: the resource as a plain dict, plus what a
-transaction Bundle needs to write it idempotently (the bundle-local ``fullUrl`` and the request
-URL). See README.md for the design; the comments below name the rule each element follows.
+Each builder returns a :class:`BuiltResource`: the resource as a plain dict, plus the requests a
+transaction Bundle can use to write it idempotently. The builders never choose how a Patient or
+Device is written; the two bundle functions in ``bundle.py`` do (see README.md, "Who owns the
+Patient record").
 
 Write strategy, per resource:
 
-==============  ====================================================  ===========================
-Resource        Request                                               Key
-==============  ====================================================  ===========================
-Patient         ``PUT Patient?identifier=urn:pulsebridge:patient|…``  the configured patient id
-Device          ``PUT Device?identifier=urn:pulsebridge:device|…``    UUIDv5(patient, device name)
-Observation HR  ``PUT Observation?identifier=…|<uuid>``               UUIDv5(patient, 8867-4,
-                                                                      window start in UTC)
-Observation BP  ``PUT Observation?identifier=…|<uuid>``               UUIDv5(patient, 85354-9,
-                                                                      source key)
-Provenance      ``PUT Provenance/<uuid>`` (update-as-create)          UUIDv5(target Observation)
-==============  ====================================================  ===========================
+==============  ==========================================================  ======================
+Resource        Request                                                     Key
+==============  ==========================================================  ======================
+Patient         ingest: ``POST Patient`` + ``ifNoneExist: identifier=…``    configured patient id
+                setup:  ``PUT Patient?identifier=urn:pulsebridge:patient|…``
+Device          ingest: ``POST Device`` + ``ifNoneExist: identifier=…``     UUIDv5(patient, name)
+                setup:  ``PUT Device?identifier=urn:pulsebridge:device|…``
+Observation HR  ``PUT Observation?identifier=…|<uuid>``                     UUIDv5(patient,
+                                                                            8867-4, start UTC)
+Observation BP  ``PUT Observation?identifier=…|<uuid>``                     UUIDv5(patient,
+                                                                            85354-9, source key)
+Provenance      ``PUT Provenance/<uuid>`` (update-as-create)                UUIDv5(Observation)
+==============  ==========================================================  ======================
 
 R4 Provenance has no ``identifier`` element and the Cloud Healthcare API's conditional update
 matches on identifier only, so Provenance alone is written by id; that needs the FHIR store's
@@ -24,12 +27,15 @@ matches on identifier only, so Provenance alone is written by id; that needs the
 """
 
 import copy
+import re
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
+from enum import StrEnum
 
 from pulsebridge_fhir import codes
 from pulsebridge_fhir.errors import FhirInputError
 from pulsebridge_fhir.inputs import (
+    GENDERS,
     OBSERVATION_STATUSES,
     BloodPressureReading,
     DeviceInput,
@@ -37,24 +43,40 @@ from pulsebridge_fhir.inputs import (
     PatientInput,
     SourceInfo,
 )
-from pulsebridge_fhir.keys import conditional_url, deterministic_uuid, urn_uuid
+from pulsebridge_fhir.keys import conditional_url, deterministic_uuid, identifier_query, urn_uuid
+
+
+class Write(StrEnum):
+    """How a Bundle entry writes its resource.
+
+    - ``UPDATE``: ``PUT``. A conditional update (``PUT Type?identifier=…``) or an update by id
+      (``PUT Type/<id>``). Replaces the whole stored resource, or creates it if absent.
+    - ``CREATE_IF_ABSENT``: ``POST`` with ``ifNoneExist``, a conditional create. Creates the
+      resource only if no resource matches; an existing one is left exactly as it is.
+    """
+
+    UPDATE = "update"
+    CREATE_IF_ABSENT = "create-if-absent"
 
 
 @dataclass(frozen=True)
 class BuiltResource:
-    """A resource plus the information needed to write it in a transaction Bundle.
+    """A resource plus the requests that can write it in a transaction Bundle.
 
     - ``full_url``: ``urn:uuid:…``, the resource's identity inside one Bundle. Other entries refer
       to it by this value; the server replaces it with the real ``Type/id`` when it commits
       (R4 bundle.html, "Resolving references in Bundles").
-    - ``request_url``: the ``Bundle.entry.request.url`` of the ``PUT``.
-    - ``key``: the deterministic key the request matches on (identifier value or resource id).
+    - ``update``: the ``Bundle.entry.request`` for a ``PUT``.
+    - ``create_if_absent``: the ``Bundle.entry.request`` for a conditional create, or ``None`` for
+      resources that are only ever updated (Observation, Provenance).
+    - ``key``: the deterministic key the requests match on (identifier value or resource id).
     """
 
     resource: dict
     full_url: str
-    request_url: str
     key: str
+    update: dict
+    create_if_absent: dict | None = None
 
     @property
     def resource_type(self) -> str:
@@ -64,13 +86,38 @@ class BuiltResource:
         """A FHIR Reference to this resource, valid inside the same transaction Bundle."""
         return {"reference": self.full_url}
 
-    def bundle_entry(self) -> dict:
-        """The ``Bundle.entry`` for this resource; a deep copy, so the source stays unchanged."""
+    def request(self, write: Write) -> dict:
+        if write is Write.UPDATE:
+            return dict(self.update)
+        if self.create_if_absent is None:
+            raise FhirInputError(f"{self.resource_type} has no conditional-create request")
+        return dict(self.create_if_absent)
+
+    def bundle_entry(self, write: Write) -> dict:
+        """The ``Bundle.entry``; the resource is deep-copied, so the source stays unchanged."""
         return {
             "fullUrl": self.full_url,
             "resource": copy.deepcopy(self.resource),
-            "request": {"method": "PUT", "url": self.request_url},
+            "request": self.request(write),
         }
+
+
+def _requests_by_identifier(resource_type: str, system: str, value: str) -> tuple[dict, dict]:
+    """The conditional-update and conditional-create requests for one identifier.
+
+    Both use the same escaped query, so they always match the same resource:
+
+    - update: ``{"method": "PUT", "url": "Patient?identifier=<system>|<value>"}``
+    - create: ``{"method": "POST", "url": "Patient", "ifNoneExist": "identifier=<system>|<value>"}``
+      (R4 Bundle.entry.request.ifNoneExist: the query only, without the ``?``).
+    """
+    update = {"method": "PUT", "url": conditional_url(resource_type, system, value)}
+    create = {
+        "method": "POST",
+        "url": resource_type,
+        "ifNoneExist": identifier_query(system, value),
+    }
+    return update, create
 
 
 def _patient_key(patient: BuiltResource) -> str:
@@ -131,10 +178,11 @@ def _observation_identifier(key: str) -> list[dict]:
 
 
 def build_patient(patient: PatientInput) -> BuiltResource:
-    """Patient: the person. Usable as-is for the FHIR store and for OpenEMR.
+    """Patient: the person, with whatever demographics the caller has.
 
-    OpenEMR (spike S1) keeps an identifier only if it is ``PT``-typed, and needs a name with
-    ``use: official``, a gender and a birth date; the Cloud Healthcare store accepts the same shape.
+    Always carries the ``PT``-typed identifier (OpenEMR keeps an identifier only with that type,
+    spike S1). Name, gender and birth date appear only when given. Use
+    :func:`check_complete_patient` where the full record is required.
     """
     identifiers = [
         {
@@ -155,19 +203,70 @@ def build_patient(patient: PatientInput) -> BuiltResource:
                 "value": patient.google_health_user_id,
             }
         )
-    resource = {
-        "resourceType": "Patient",
-        "identifier": identifiers,
-        "name": [{"use": "official", "family": patient.family, "given": list(patient.given)}],
-        "gender": patient.gender,
-        "birthDate": patient.birth_date.isoformat(),
-    }
+    resource: dict = {"resourceType": "Patient", "identifier": identifiers}
+    if patient.family is not None or patient.given:
+        # use "official": the person's legal name as the source gives it (PID-5 or
+        # configuration). OpenEMR reads only an official name (spike S1).
+        name: dict = {"use": "official"}
+        if patient.family is not None:
+            name["family"] = patient.family
+        if patient.given:
+            name["given"] = list(patient.given)
+        resource["name"] = [name]
+    if patient.gender is not None:
+        resource["gender"] = patient.gender
+    if patient.birth_date is not None:
+        resource["birthDate"] = patient.birth_date.isoformat()
+    update, create = _requests_by_identifier("Patient", codes.PB_PATIENT_ID, patient.patient_id)
     return BuiltResource(
         resource=resource,
         full_url=urn_uuid(deterministic_uuid("Patient", codes.PB_PATIENT_ID, patient.patient_id)),
-        request_url=conditional_url("Patient", codes.PB_PATIENT_ID, patient.patient_id),
         key=patient.patient_id,
+        update=update,
+        create_if_absent=create,
     )
+
+
+_FULL_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def check_complete_patient(patient: dict) -> None:
+    """Raise ``FhirInputError`` unless ``patient`` is a complete Patient record.
+
+    Complete means what the setup upsert and the share to OpenEMR need (spike S1): a ``PT``-typed
+    identifier with a value, a name with ``use: official`` that has a family name and a given
+    name, a gender from administrative-gender, and a full birth date (YYYY-MM-DD). It takes the
+    resource dict, not the input, so T15 can check a Patient read back from the FHIR store.
+    All missing parts are named in one message.
+    """
+    if not isinstance(patient, dict) or patient.get("resourceType") != "Patient":
+        raise FhirInputError("complete patient: expected a Patient resource")
+    problems = []
+    pt_values = [
+        ident.get("value")
+        for ident in patient.get("identifier", [])
+        if any(
+            c.get("system") == codes.V2_IDENTIFIER_TYPE and c.get("code") == "PT"
+            for c in ident.get("type", {}).get("coding", [])
+        )
+    ]
+    if not any(isinstance(v, str) and v.strip() for v in pt_values):
+        problems.append("a PT-typed identifier")
+    official = [n for n in patient.get("name", []) if n.get("use") == "official"]
+    if not official:
+        problems.append("a name with use 'official'")
+    else:
+        if not any(n.get("family") for n in official):
+            problems.append("an official family name")
+        if not any(n.get("given") for n in official):
+            problems.append("an official given name")
+    if patient.get("gender") not in GENDERS:
+        problems.append("gender")
+    birth_date = patient.get("birthDate")
+    if not isinstance(birth_date, str) or not _FULL_DATE.match(birth_date):
+        problems.append("birthDate (YYYY-MM-DD)")
+    if problems:
+        raise FhirInputError(f"complete patient: missing {', '.join(problems)}")
 
 
 def build_device(device: DeviceInput, *, patient: BuiltResource) -> BuiltResource:
@@ -189,11 +288,13 @@ def build_device(device: DeviceInput, *, patient: BuiltResource) -> BuiltResourc
         resource["manufacturer"] = device.manufacturer
     # Device.patient: the person the device is attached to (a personal wearable).
     resource["patient"] = patient.reference()
+    update, create = _requests_by_identifier("Device", codes.PB_DEVICE_ID, key)
     return BuiltResource(
         resource=resource,
         full_url=urn_uuid(key),
-        request_url=conditional_url("Device", codes.PB_DEVICE_ID, key),
         key=key,
+        update=update,
+        create_if_absent=create,
     )
 
 
@@ -227,6 +328,18 @@ def _check_status(status: str) -> None:
         )
 
 
+def _observation(key: str, resource: dict) -> BuiltResource:
+    return BuiltResource(
+        resource=resource,
+        full_url=urn_uuid(key),
+        key=key,
+        update={
+            "method": "PUT",
+            "url": conditional_url("Observation", codes.PB_OBSERVATION_ID, key),
+        },
+    )
+
+
 def build_heart_rate_observation(
     window: HeartRateWindow,
     *,
@@ -242,7 +355,11 @@ def build_heart_rate_observation(
     - ``valueQuantity``: the window average. The heartrate profile fixes the code to 8867-4 and the
       unit to ``/min``; ``method`` states that the value is a mean.
     - ``component``: the minimum and maximum, each with its own LOINC code, in ``/min``.
-    - ``tz``: the user's zone or fixed offset; times are written in it (see ``fhir_datetime``).
+    - ``tz``: the user's time zone; times are written in it (see ``fhir_datetime``). Prefer a
+      ``zoneinfo.ZoneInfo`` such as ``ZoneInfo("America/New_York")``: it applies the offset in force
+      at each window. A fixed offset is right only for windows that do not cross a daylight-saving
+      change.
+    - ``status``: ``final`` for a complete window, ``preliminary`` for one that may still change.
     """
     _require_type(device, "Device", "device")
     _check_status(status)
@@ -278,12 +395,7 @@ def build_heart_rate_observation(
             },
         ],
     }
-    return BuiltResource(
-        resource=resource,
-        full_url=urn_uuid(key),
-        request_url=conditional_url("Observation", codes.PB_OBSERVATION_ID, key),
-        key=key,
-    )
+    return _observation(key, resource)
 
 
 def build_blood_pressure_observation(
@@ -324,12 +436,7 @@ def build_blood_pressure_observation(
             },
         ],
     }
-    return BuiltResource(
-        resource=resource,
-        full_url=urn_uuid(key),
-        request_url=conditional_url("Observation", codes.PB_OBSERVATION_ID, key),
-        key=key,
-    )
+    return _observation(key, resource)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -345,18 +452,21 @@ def build_provenance(
     recorded: datetime,
     assembler: str,
 ) -> BuiltResource:
-    """Provenance: who and what produced ``target``, and from which source record.
+    """Provenance: what activity produced ``target``, who took part, and from which record.
 
     - ``target``: the Observation this Provenance is about.
     - ``recorded``: when PulseBridge wrote it (an instant; the caller passes the current time,
       so the builder stays deterministic).
+    - ``activity``: v3 DataOperation ``CREATE``. The activity is PulseBridge creating the FHIR
+      record from the source record (ProvenanceActivityType, the value set R4 binds here).
     - ``agent`` (who took part, each with a ``type``):
-        - ``performer``: the Device that measured;
-        - ``custodian``: the source platform that holds the original record (``FITBIT``,
-          ``HL7V2_STORE``), as a logical reference by identifier;
+        - ``performer``: the Device that measured. When the source states its recording method
+          (``PASSIVELY_MEASURED``), it goes in this agent's ``role``: how the device took part.
+        - ``custodian``: the source platform that holds the original (``FITBIT``,
+          ``HL7V2_STORE``), as a logical reference by identifier. Left out when the caller does
+          not know the platform, rather than guessed.
         - ``assembler``: the PulseBridge service that mapped it, for example
           ``"PulseBridge health-sync"`` (by display only; it has no FHIR resource).
-    - ``activity``: the source's recording method (``PASSIVELY_MEASURED``), when known.
     - ``entity`` with role ``source``: the original record (HL7v2 store message name, Google
       roll-up window), as a logical reference by identifier.
 
@@ -374,6 +484,31 @@ def build_provenance(
         raise FhirInputError("provenance: recorded must be a datetime with a time zone")
 
     key = deterministic_uuid("Provenance", target.key)
+    performer: dict = {"type": {"coding": [dict(codes.AGENT_PERFORMER)]}}
+    if source.recording_method is not None:
+        # Provenance.agent.role: "the function of the agent with respect to the activity"; its
+        # binding is an example, so a local code system is allowed without a validator warning.
+        performer["role"] = [
+            {
+                "coding": [codes.coding(codes.PB_RECORDING_METHOD, source.recording_method)],
+                "text": f"Recording method reported by the source: {source.recording_method}",
+            }
+        ]
+    performer["who"] = device.reference()
+    agents = [performer]
+    if source.platform is not None:
+        agents.append(
+            {
+                "type": {"coding": [dict(codes.AGENT_CUSTODIAN)]},
+                "who": {
+                    "identifier": {"system": codes.PB_SOURCE_PLATFORM, "value": source.platform},
+                    "display": f"Source platform {source.platform}",
+                },
+            }
+        )
+    agents.append(
+        {"type": {"coding": [dict(codes.AGENT_ASSEMBLER)]}, "who": {"display": assembler}}
+    )
     resource: dict = {
         "resourceType": "Provenance",
         # The id equals the bundle-local uuid, so fullUrl and id agree.
@@ -381,38 +516,24 @@ def build_provenance(
         "target": [target.reference()],
         # instant: seconds and an offset are required (R4 datatypes.html#instant).
         "recorded": fhir_datetime(recorded),
-    }
-    if source.recording_method is not None:
-        resource["activity"] = {
-            "coding": [codes.coding(codes.PB_RECORDING_METHOD, source.recording_method)],
-            "text": f"Recording method reported by the source: {source.recording_method}",
-        }
-    resource["agent"] = [
-        {"type": {"coding": [dict(codes.AGENT_PERFORMER)]}, "who": device.reference()},
-        {
-            "type": {"coding": [dict(codes.AGENT_CUSTODIAN)]},
-            "who": {
-                "identifier": {"system": codes.PB_SOURCE_PLATFORM, "value": source.platform},
-                "display": f"Source platform {source.platform}",
-            },
-        },
-        {"type": {"coding": [dict(codes.AGENT_ASSEMBLER)]}, "who": {"display": assembler}},
-    ]
-    resource["entity"] = [
-        {
-            "role": "source",
-            "what": {
-                "identifier": {
-                    "system": codes.PB_SOURCE_RECORD_PREFIX + source.record_type,
-                    "value": source.record_id,
+        "activity": {"coding": [dict(codes.ACTIVITY_CREATE)], "text": "FHIR record created"},
+        "agent": agents,
+        "entity": [
+            {
+                "role": "source",
+                "what": {
+                    "identifier": {
+                        "system": codes.PB_SOURCE_RECORD_PREFIX + source.record_type,
+                        "value": source.record_id,
+                    },
+                    "display": f"{source.record_type} {source.record_id}",
                 },
-                "display": f"{source.record_type} {source.record_id}",
-            },
-        }
-    ]
+            }
+        ],
+    }
     return BuiltResource(
         resource=resource,
         full_url=urn_uuid(key),
-        request_url=f"Provenance/{key}",
         key=key,
+        update={"method": "PUT", "url": f"Provenance/{key}"},
     )

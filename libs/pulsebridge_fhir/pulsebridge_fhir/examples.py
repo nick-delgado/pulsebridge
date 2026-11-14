@@ -12,7 +12,7 @@ import sys
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from pulsebridge_fhir.bundle import build_transaction_bundle
+from pulsebridge_fhir.bundle import blood_pressure_transaction, patient_setup_transaction
 from pulsebridge_fhir.google_health import (
     GoogleDataSource,
     heart_rate_transaction,
@@ -31,6 +31,7 @@ from pulsebridge_fhir.resources import (
 
 DEFAULT_DIR = Path(__file__).resolve().parent.parent / "examples"
 
+# The full record, written once by the setup step (connect script T11 or seeder T09).
 SYNTHETIC_PATIENT = PatientInput(
     patient_id="PB-SYN-0001",
     family="Example",
@@ -38,6 +39,12 @@ SYNTHETIC_PATIENT = PatientInput(
     gender="female",
     birth_date=date(1980, 4, 12),
     google_health_user_id="synthetic-health-user-0001",
+)
+# What health-sync knows: only the identifier, from configuration.
+SYNTHETIC_PATIENT_REF = PatientInput(patient_id="PB-SYN-0001")
+# What v2-to-fhir knows from the cuff message: PID-3 (identifier) and PID-5 (name).
+SYNTHETIC_PATIENT_FROM_PID = PatientInput(
+    patient_id="PB-SYN-0001", family="Example", given=("Avery",)
 )
 SYNTHETIC_WATCH = DeviceInput(display_name="Pixel Watch 4")
 SYNTHETIC_CUFF = DeviceInput(display_name="PulseBridge cuff simulator")
@@ -55,8 +62,12 @@ SYNTHETIC_ROLLUP = [
         "heartRate": {"beatsPerMinuteMin": 66, "beatsPerMinuteAvg": 71.6, "beatsPerMinuteMax": 82},
     },
 ]
-SYNTHETIC_TZ = parse_google_utc_offset("-18000s")  # UTC-05:00
+SYNTHETIC_TZ = parse_google_utc_offset("-18000s")  # UTC-05:00; no DST change in these windows
+# As stated by a listed data point (spike S3); the roll-up response itself has no dataSource.
+SYNTHETIC_DATA_SOURCE = GoogleDataSource(platform="FITBIT", recording_method="PASSIVELY_MEASURED")
 SYNTHETIC_RECORDED = datetime(2026, 1, 1, 14, 20, 3, tzinfo=UTC)
+# The start of the overlap the next sync re-requests: the second window is written preliminary.
+SYNTHETIC_COMPLETE_BEFORE = datetime(2026, 1, 1, 14, 10, tzinfo=UTC)
 
 SYNTHETIC_BP = BloodPressureReading(
     effective=datetime.fromisoformat("2026-01-01T09:30:00-05:00"),
@@ -65,10 +76,10 @@ SYNTHETIC_BP = BloodPressureReading(
     source_key="PULSEBRIDGE_CUFF/MSG-SYN-0001",
 )
 SYNTHETIC_BP_SOURCE = SourceInfo(
-    platform="HL7V2_STORE",
-    recording_method="ACTIVELY_MEASURED",
     record_type="hl7v2-message",
     record_id="hl7V2Stores/example-store/messages/synthetic-message-0001",
+    platform="HL7V2_STORE",
+    recording_method="ACTIVELY_MEASURED",
 )
 
 
@@ -84,7 +95,7 @@ def build_examples() -> dict[str, dict]:
     hr_provenance = build_provenance(
         target=heart_rate,
         device=watch,
-        source=rollup_source(window, GoogleDataSource()),
+        source=rollup_source(window, SYNTHETIC_DATA_SOURCE),
         recorded=SYNTHETIC_RECORDED,
         assembler="PulseBridge health-sync",
     )
@@ -102,16 +113,25 @@ def build_examples() -> dict[str, dict]:
         "observation-heart-rate.json": heart_rate.resource,
         "observation-blood-pressure.json": blood_pressure.resource,
         "provenance-heart-rate.json": hr_provenance.resource,
-        "bundle-heart-rate-transaction.json": heart_rate_transaction(
+        "provenance-blood-pressure.json": bp_provenance.resource,
+        "bundle-patient-setup.json": patient_setup_transaction(
+            SYNTHETIC_PATIENT, devices=[SYNTHETIC_WATCH]
+        ),
+        "bundle-heart-rate-ingest.json": heart_rate_transaction(
             SYNTHETIC_ROLLUP,
-            patient=SYNTHETIC_PATIENT,
+            patient=SYNTHETIC_PATIENT_REF,
             device=SYNTHETIC_WATCH,
-            data_source=GoogleDataSource(),
+            data_source=SYNTHETIC_DATA_SOURCE,
             tz=SYNTHETIC_TZ,
             recorded=SYNTHETIC_RECORDED,
+            complete_before=SYNTHETIC_COMPLETE_BEFORE,
         ),
-        "bundle-blood-pressure-transaction.json": build_transaction_bundle(
-            [patient, cuff, blood_pressure, bp_provenance]
+        "bundle-blood-pressure-ingest.json": blood_pressure_transaction(
+            SYNTHETIC_BP,
+            patient=SYNTHETIC_PATIENT_FROM_PID,
+            device=SYNTHETIC_CUFF,
+            source=SYNTHETIC_BP_SOURCE,
+            recorded=SYNTHETIC_RECORDED,
         ),
     }
 
@@ -123,6 +143,10 @@ def render(resource: dict) -> str:
 def main(argv: list[str]) -> int:
     out_dir = Path(argv[1]) if len(argv) > 1 else DEFAULT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
+    for stale in out_dir.glob("*.json"):
+        if stale.name not in build_examples():
+            stale.unlink()
+            print(f"removed {stale}")
     for name, resource in build_examples().items():
         (out_dir / name).write_text(render(resource), encoding="utf-8")
         print(f"wrote {out_dir / name}")
