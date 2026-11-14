@@ -48,7 +48,9 @@ def test_runs_on_pull_requests(workflow: dict) -> None:
     assert not (on["pull_request"] or {}), "pull_request trigger must not be filtered"
 
 
-@pytest.mark.parametrize("command", ["make lint", "make test", "make secret-scan"])
+@pytest.mark.parametrize(
+    "command", ["make lint", "make test", "make tf-validate", "make tf-test", "make secret-scan"]
+)
 def test_required_command_runs_as_a_step(workflow: dict, command: str) -> None:
     steps = steps_running(workflow, command)
     assert steps, f"no CI step runs `{command}`"

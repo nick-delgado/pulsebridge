@@ -20,7 +20,7 @@ TF_ROOT ?= infra
 # Every library and service with its own pyproject.toml is installed editable into the venv.
 PACKAGE_PYPROJECTS := $(wildcard libs/*/pyproject.toml services/*/pyproject.toml)
 
-.PHONY: help install hooks lint fmt test tf-validate secret-scan pre-commit check clean
+.PHONY: help install hooks lint fmt test tf-validate tf-test secret-scan pre-commit check clean
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
@@ -71,6 +71,42 @@ tf-validate: ## terraform fmt -check and validate for every Terraform directory
 		terraform -chdir="$$d" validate -no-color; \
 	done
 
+# Terraform tests for every directory under $(TF_ROOT) that has a tests/ folder:
+#   - `terraform test` (the *.tftest.hcl files, which plan against a mocked provider),
+#   - every tests/*.sh static check (things `terraform test` cannot assert, such as "no key
+#     resources are declared" or "this depends_on edge exists"),
+#   - every tests/*.py check (for example the scan proving a password never reaches state).
+# Everything runs with Google credentials removed from the environment and the metadata server
+# pointed at a closed port: a mocked provider is not a guarantee, and with no credentials the real
+# provider cannot reach a real project even if a mock fails to apply.
+TF_NO_CREDS := env -u GOOGLE_APPLICATION_CREDENTIALS -u GOOGLE_CREDENTIALS \
+	-u GOOGLE_OAUTH_ACCESS_TOKEN -u GOOGLE_IMPERSONATE_SERVICE_ACCOUNT -u GCP_SA_KEY_B64 \
+	-u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT -u GOOGLE_PROJECT \
+	CLOUDSDK_CONFIG=/nonexistent GCE_METADATA_HOST=127.0.0.1:9
+
+tf-test: ## terraform test plus static checks for every Terraform directory with tests/
+	@dirs=$$( [ -d "$(TF_ROOT)" ] && find "$(TF_ROOT)" -path '*/.terraform' -prune -o -type d -name tests -print | sort || true ); \
+	if [ -z "$$dirs" ]; then echo "tf-test: no tests/ directories under $(TF_ROOT)/; nothing to test"; exit 0; fi; \
+	for t in $$dirs; do \
+		d=$$(dirname "$$t"); \
+		ls "$$d"/*.tf > /dev/null 2>&1 || continue; \
+		echo "== terraform test $$d"; \
+		$(TF_NO_CREDS) terraform -chdir="$$d" init -backend=false -input=false -no-color > /dev/null || exit 1; \
+		if ls "$$t"/*.tftest.hcl > /dev/null 2>&1; then \
+			$(TF_NO_CREDS) terraform -chdir="$$d" test -no-color || exit 1; \
+		fi; \
+		for s in "$$t"/*.sh; do \
+			[ -e "$$s" ] || continue; \
+			echo "== $$s"; \
+			$(TF_NO_CREDS) bash "$$s" || exit 1; \
+		done; \
+		for s in "$$t"/*.py; do \
+			[ -e "$$s" ] || continue; \
+			echo "== $$s"; \
+			$(TF_NO_CREDS) python3 "$$s" || exit 1; \
+		done; \
+	done
+
 # Secret scan of committed history. The pre-commit gitleaks hook only sees *staged* changes, so it
 # protects a commit made on a machine with hooks installed, but not a commit made with
 # `--no-verify` or from a clone without hooks. This target scans commits instead; CI runs it on
@@ -94,7 +130,7 @@ secret-scan: $(VENV)/.gitleaks-$(GITLEAKS_VERSION) ## gitleaks over git history 
 pre-commit: install ## Run every pre-commit hook against all files
 	$(BIN)/pre-commit run --all-files --show-diff-on-failure
 
-check: lint test tf-validate ## lint + test + tf-validate (what CI runs)
+check: lint test tf-validate tf-test ## lint + test + tf-validate + tf-test (what CI runs)
 
 clean: ## Remove the venv and tool caches
 	rm -rf $(VENV) .pytest_cache .ruff_cache
