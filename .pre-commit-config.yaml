@@ -1,0 +1,55 @@
+# Git hooks run by pre-commit (https://pre-commit.com) before every commit.
+# Install them once per clone with `make hooks`. Run them on demand with `make pre-commit`.
+#
+# Every remote hook is pinned to a release tag; pre-commit builds each one in its own isolated
+# environment, so a hook's version does not depend on what is installed on the machine.
+
+minimum_pre_commit_version: "4.0.0"
+default_install_hook_types: [pre-commit]
+
+repos:
+  # Secret scanning (CLAUDE.md "Credentials and secrets"). Two independent scanners on purpose:
+  # gitleaks knows hundreds of credential formats (private keys, API keys, tokens), and
+  # detect-private-key is a simple, dependency-free backstop for PEM private keys, which is what
+  # a service account key JSON carries in its "private_key" field.
+  # These hooks only see staged changes on a machine with hooks installed. Committed history is
+  # scanned separately by `make secret-scan`, which CI runs on every pull request. Keep this rev in
+  # step with GITLEAKS_VERSION in the Makefile.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks # scans the staged changes; --redact keeps the secret out of the output
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  # Python: the same ruff version as pyproject.toml, so the hook and `make lint` agree.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.5
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  # GitHub Actions workflow linter: catches YAML and expression mistakes before CI runs.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  # Terraform formatting, using the terraform binary on the machine (CI installs a pinned one).
+  - repo: local
+    hooks:
+      - id: terraform-fmt
+        name: terraform fmt
+        entry: terraform fmt -check -diff
+        language: system
+        files: \.(tf|tftest\.hcl)$
