@@ -28,6 +28,9 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D9 | Reviewer login | A shared password in Secret Manager, checked by `fhir-proxy`, which issues an 8-hour signed bearer token. No Identity Platform. See `docs/spikes/s6.md`. |
 | D10 | One front door | `fhir-proxy` is the only public service the page calls. The cuff simulator is not publicly invocable; the proxy forwards cuff requests to it, so it sits behind the reviewer login. |
 | D11 | Who owns the Patient record | A setup step (the connect script or the seeder) writes the full Patient once with a conditional update. Ingest Bundles from `health-sync` and `v2-to-fhir` include Patient and Device as conditional creates (`POST` with `ifNoneExist`), so they never overwrite. Fallback if the store does not resolve in-Bundle references to the existing resource: a fixed Patient ID with direct references. |
+| D12 | Send attempts | Every cuff send attempt is recorded as a FHIR `AuditEvent` in the FHIR store, written by the cuff simulator (it holds the raw ACK and is not public; `fhir-proxy` stays read-only). The messages log lists attempts, including rejected and unacknowledged ones. |
+| D13 | OpenEMR chart view | The dashboard shows an "As stored in OpenEMR" panel, filled by `fhir-proxy` reading the Patient, Encounter and Observations back from OpenEMR's FHIR API. OpenEMR's screens are not exposed to the internet; the README carries a screenshot of the real chart. |
+| D14 | Cloud Run to the VM | Direct VPC egress into a dedicated subnet (built in T03). The firewall rule for MLLP and OpenEMR HTTPS lives in `project-base`, sourced from that subnet; `edge-vm` adds no rule and needs no public port. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
 | D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
@@ -37,8 +40,6 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | --- | --- | --- |
 | D4 | Dashboard hosting: bucket + Cloud CDN, or Firebase Hosting. | Decide in T22; bucket + load balancer has an hourly forwarding-rule cost, Firebase Hosting does not. |
 | D5 | Dashboard framework. | Vite + TypeScript with a small chart library, no heavy framework. |
-| D12 | Where send attempts are recorded. The HL7v2 store keeps only accepted messages, so rejected (`AE`) and unacknowledged sends, and the original ACK bytes, are not retrievable from it. | `fhir-proxy` records each cuff send attempt (it forwards every one, D10) with its transport, result and raw ACK, somewhere durable, so the messages log can list them. Alternative: the log shows stored messages only. |
-| D13 | How reviewers reach the OpenEMR chart. Nothing exposes OpenEMR publicly (T03), but the share trace links to the chart. | Route chart access through `fhir-proxy` to keep one front door; alternative is a public HTTPS rule for OpenEMR, a second entry point with its own login. |
 
 ## Malformed message handling (D7)
 
@@ -59,7 +60,8 @@ Each layer rejects a different class of bad message, and the tests cover each cl
 - Writing an `ACK^R01` back into the store is not built: labels carry the same information, and
   a stored ACK publishes a notification that would re-trigger the mapper.
 - The store keeps neither the commit-level ACK bytes nor rejected messages; they exist only in
-  the ingest response or on the MLLP socket (see open decision D12).
+  the ingest response or on the MLLP socket. So the cuff simulator records every send attempt as
+  an `AuditEvent` (D12).
 - A mapping failure never crashes or stalls the Pub/Sub subscription.
 - Found in spike S4: the store accepts almost anything with a readable header (even a lone
   `MSH|^~\&`) with `AA`, never returns `AR`, and ignores MSH-15/16. It replies in the original
@@ -188,10 +190,12 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | todo |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/` | todo |
-| T13 | Cuff simulator backend | T07 | `services/cuff-sim/` | todo |
+| T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | todo |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6 | `services/fhir-proxy/` (except `share/`) | todo |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
 | T16 | Dashboard shell | none | `web/` | todo |
+| T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | todo |
+| T32 | FHIR store write access for the cuff simulator | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | todo |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
@@ -299,6 +303,9 @@ HTTPS ingest; returns the ACK.
   connection closed with no data, and timeout. The last two are "no acknowledgment received".
 - AC: segments end with a carriage return all the way to the wire; nothing converts them to line feeds.
 - AC: inputs outside bounds are rejected; no free text reaches the message.
+- AC: every send attempt, including a rejected or unacknowledged one and a "send malformed"
+  one, is recorded as an `AuditEvent` built with T31 and written to the FHIR store (D12). A
+  failure to record is logged and reported in the response, but never hides the send's result.
 - AC: rate-limited; both transports covered by tests against a fake listener.
 - AC: it has no login of its own and relies on Cloud Run's invoker check; the README says so.
 
@@ -310,8 +317,11 @@ bearer token, the token check on every other route, CORS for the dashboard's ori
 rate limit. It also forwards cuff requests to the cuff simulator (D10).
 - AC: the messages log lists stored HL7v2 messages newest first by send time and filters by the
   outcome labels; a message with no outcome label is reported as "pending". For a stored message
-  the commit-level acknowledgment is `AA` by definition. Where rejected and unacknowledged sends
-  come from depends on D12.
+  the commit-level acknowledgment is `AA` by definition.
+- AC: the messages log is built from the send-attempt `AuditEvent`s (D12), newest first, joined
+  to the stored message and its outcome labels where the send was accepted. Rejected and
+  unacknowledged attempts appear with their reason and raw ACK; a stored message with no
+  AuditEvent (for example one sent straight to the adapter) is still listed.
 - AC: unsupported search parameters return a FHIR `OperationOutcome`, not a pass-through.
 - AC: the `CapabilityStatement` lists exactly what is implemented (test compares the two).
 - AC: unauthenticated requests are rejected.
@@ -340,7 +350,11 @@ Bundle endpoint and ignores conditional create.
   missing. Only `final` Observations are shared.
 - AC: OpenEMR's "already exists" `400` for a repeated reading is reported as already shared, not
   as a failure.
-- AC: the chart link is built from the numeric patient id in the Encounter-create response.
+- AC: after a share, the proxy reads the Patient, the Encounter and each shared Observation
+  back from OpenEMR's FHIR API by id and returns them for the "As stored in OpenEMR" panel
+  (D13). It reads by id, not by search: spike S1 found the patient-and-category search returns
+  placeholder Observations. The client's scopes include the reads this needs and nothing more.
+- AC: no link to OpenEMR's screens is returned; they are not reachable from the internet.
 - AC: the assertion's audience comes from configuration (OpenEMR's `site_addr_oath` value).
 - AC: the trace returned to the dashboard never contains the private key, the signed assertion
   or the full token.
@@ -354,6 +368,27 @@ and right panels, share button placeholder, collapsible messages log, a typed AP
 - AC: login is a password-only form; the token is kept in `sessionStorage`; the API client adds
   it to every request and returns to the login form on `401`. No Firebase SDK.
 - AC: the page calls one backend only, `fhir-proxy` (D10).
+
+**T31 AuditEvent builder for send attempts.** Adds to the T06 library a builder for the FHIR R4
+`AuditEvent` that records one cuff send attempt (D12), and a function that wraps it in a write
+the simulator can send. Pure Python, no GCP calls.
+- AC: the AuditEvent has the R4 required elements (`type`, `recorded`, at least one `agent` with
+  `requestor`, `source.observer`) with codes from the standard value sets, chosen and explained.
+- AC: it records the transport (MLLP or HTTPS), the outcome (accepted, rejected with the reason
+  from MSA-3, or no acknowledgment with why), the message control ID, the stored message name
+  when there is one, the sample name when "send malformed" was used, and the raw ACK bytes when
+  one was received. The R4 `outcome` code is set consistently with that result.
+- AC: it never contains free text from the caller, and the raw message is included only for
+  the synthetic malformed samples.
+- AC: writing the same attempt twice does not create two AuditEvents (deterministic ID).
+- AC: a function reads an AuditEvent back into the fields the messages log needs.
+- AC: an example is added to `libs/pulsebridge_fhir/examples/` for the validator (T08).
+
+**T32 FHIR store write access for the cuff simulator.** The simulator writes AuditEvents (D12),
+so its service account needs to create resources in the FHIR store.
+- AC: `cuff-sim` gets the narrowest predefined role that allows it on the FHIR store only, and
+  nothing on any other resource; the module READMEs' tables are updated.
+- AC: `fhir-proxy` remains read-only on the FHIR store; a test asserts both.
 
 ## Wave 3: dashboard features and infrastructure for services
 
@@ -377,16 +412,25 @@ and right panels, share button placeholder, collapsible messages log, a typed AP
 - AC (T19): each v2 row in the messages log shows the commit-level acknowledgment and the
   application-level outcome with its reason, with "pending" for a message not yet mapped; reason
   codes are shown as readable text.
-- AC (T19): share acts on the current selection and shows its trace; messages log lists v2 messages
-  and FHIR transactions.
+- AC (T19): share acts on the current selection and shows its trace, followed by an "As stored
+  in OpenEMR" panel with what was read back (D13); messages log lists cuff send attempts,
+  including rejected and unacknowledged ones (D12), and FHIR transactions.
 
 **T20 Module `ingestion`.** Cloud Run services `health-sync` and `v2-to-fhir`, Scheduler job,
 OIDC invoker bindings.
 - AC: services scale to zero and are not publicly invocable; images are referenced by digest.
 
 **T21 Module `edge-vm`.** e2-micro, startup script, swap file, persistent disk, MLLP adapter and
-MariaDB containers, firewall rule limited to the Cloud Run egress address.
-- AC: no public MLLP port; machine type is a variable defaulting to the free-tier size.
+MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in `project-base`
+(D14); this module adds none.
+- AC: no public ports and no external IP (D13, D14); machine type is a variable defaulting to the
+  free-tier size.
+- AC: the VM has no route to the internet, so Docker and the images cannot come from it. Use
+  an image with Docker preinstalled (Container-Optimized OS is the first choice) and pull the
+  OpenEMR and MariaDB images through the Docker Hub mirror from T03. First confirm that
+  Artifact Registry is reachable over Private Google Access; if it is not, the fallback is
+  Cloud NAT (about $4.70 a month), stated in the README.
+- AC: the VM's service account can read from the Docker Hub mirror repository.
 - AC: the adapter image is pinned by digest and started with the flags recorded in
   `docs/spikes/s4.md` (binary path as the command, `--hl7_v2_store_id`, `--export_stats=false`,
   content logging off, `--restart unless-stopped`).
@@ -413,6 +457,8 @@ MariaDB containers, firewall rule limited to the Cloud Run egress address.
 registration script.
 - AC: the OAuth2 client's private key goes to Secret Manager, not to state or logs; the client
   ID is plain configuration.
+- AC: no reviewer account is created in OpenEMR and its screens are not exposed (D13); the
+  registered client's scopes cover the writes and the read-back and nothing else.
 - AC: OpenEMR is configured without a browser: `rest_fhir_api`, `rest_system_scopes_api` and
   `site_addr_oath` set through `OPENEMR_SETTING_*` variables; the standard `rest_api` stays off.
 - AC: OpenEMR starts only after MariaDB is healthy (it exits if the database is not ready).
@@ -463,6 +509,8 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
 bootstrap, register a Google Health OAuth app, connect an account, deploy, destroy. README: pitch,
 GIF, architecture, standards map, deploy, what this is not.
 - AC: no step relies on the author's accounts; every command uses a placeholder or a variable.
+- AC: the README shows a screenshot or GIF of a shared reading in the real OpenEMR chart,
+  taken with synthetic data, since reviewers cannot open OpenEMR themselves (D13).
 - AC: the guide explains the OAuth app's Testing status (test users only, refresh token expires
   after 7 days) and how to move it to "In production".
 

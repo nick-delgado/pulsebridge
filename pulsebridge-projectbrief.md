@@ -18,7 +18,7 @@ A reviewer should leave with one sentence: he can take consumer and device healt
 | FHIR R4 | Observation, Patient and Device resources written to a Cloud Healthcare FHIR store; conditional creates; validator pass |
 | HL7v2 | ORU^R01 messages from the device simulator, ingested over MLLP and mapped to FHIR with our own mapping code (parsing by `hl7apy`) |
 | SMART on FHIR / OAuth2 | Registered OAuth2 client against OpenEMR; scoped token flow visible in the trace panel |
-| EHR integration | Vitals written into OpenEMR (ONC-certified) and visible in the patient chart |
+| EHR integration | Vitals written into OpenEMR (ONC-certified) and read back from its FHIR API into an "As stored in OpenEMR" panel |
 | Serverless / cost | Cloud Run scale-to-zero, Scheduler, pay-per-use Healthcare API; idle cost near $0 apart from the VM |
 | Security / PHI | Private networking, Secret Manager, least-privilege service accounts, documented data classification (real PHI: the author's own) |
 
@@ -52,7 +52,7 @@ Fourteen pieces, all on GCP, all created by Terraform except the Google Health O
 | Cuff simulator | Cloud Run service | Backend for the left side of the page: builds an ORU^R01 (two OBX) from entered BP values, sends it over MLLP to the VM, returns the ACK. Not public: the page reaches it only through the FHIR proxy, so it sits behind the reviewer login | $0 |
 | PHR dashboard | Cloud Storage bucket + Cloud CDN (or Firebase Hosting) | Static SPA: chart, trace panel, share button | cents |
 | FHIR proxy | Cloud Run service | The single public entry point for the SPA: checks the reviewer password and issues a short-lived signed token; holds service-account credentials; exposes a narrow read API; forwards cuff readings to the cuff simulator; executes the share action against OpenEMR | $0 |
-| OpenEMR | Docker on the e2-micro (official OpenEMR image + MariaDB) | The clinic. Receives shared vitals via its FHIR API; reviewer account for chart view | rides the VM |
+| OpenEMR | Docker on the e2-micro (official OpenEMR image + MariaDB) | The clinic. Receives shared vitals via its FHIR API. Its screens are not exposed to the internet; the dashboard shows what it stored by reading it back | rides the VM |
 | Secrets | Secret Manager | Google Health OAuth client ID, client secret and refresh token, OpenEMR client private key, reviewer password, DB password | \~$0 |
 | Identity | Service accounts, IAM bindings, reviewer password in Secret Manager checked by `fhir-proxy` | Least-privilege per service; password-protected demo | $0 |
 
@@ -89,8 +89,8 @@ One page, no navigation. A line-art silhouette of the patient sits in the centre
 
 - [ ] Left panel tabs: HL7v2 as sent, ACK as received (commit-level acknowledgment) with the application-level outcome, FHIR as stored
 - [ ] Right panel tabs: FHIR as stored, Google Health JSON it came from (the roll-up window)
-- [ ] Share with clinic acts on whatever is selected on either side; its own trace (token request, each request sent, 201 Created responses, link to the OpenEMR chart; OpenEMR accepts no transaction Bundle) appears under the button
-- [ ] Messages log as a collapsible strip at the bottom: one row per HL7v2 message (type, commit-level acknowledgment, application-level outcome and reason, store id, resulting Observation) and per FHIR transaction (Bundle, HTTP status, resource ids)
+- [ ] Share with clinic acts on whatever is selected on either side; its own trace (token request, each request sent, 201 Created responses, and an "As stored in OpenEMR" panel filled by reading the Patient, Encounter and Observations back from OpenEMR's FHIR API; OpenEMR accepts no transaction Bundle) appears under the button
+- [ ] Messages log as a collapsible strip at the bottom: one row per cuff send attempt, including rejected and unacknowledged ones (transport, commit-level acknowledgment or "no acknowledgment", application-level outcome and reason, store id, resulting Observation) and per FHIR transaction (Bundle, HTTP status, resource ids)
 
 **Ingestion**
 
@@ -123,7 +123,7 @@ infra/
     identity/          # service accounts, IAM bindings, Secret Manager secrets including the reviewer password (values set out of band)
     healthcare/        # Healthcare dataset, FHIR R4 store, HL7v2 store, Pub/Sub topic + subscription, store notification config
     ingestion/         # Cloud Run: health-sync, v2-to-fhir; Cloud Scheduler job; OIDC invoker bindings
-    edge-vm/           # e2-micro, startup script, mllp-adapter + MariaDB containers, persistent disk, firewall rule for MLLP from Cloud Run NAT IP only
+    edge-vm/           # e2-micro, startup script, mllp-adapter + MariaDB containers, persistent disk; no public ports (Cloud Run reaches the VM privately; the firewall rule lives in project-base)
     phr/               # bucket + CDN (or Firebase Hosting), fhir-proxy Cloud Run, cuff simulator Cloud Run
     openemr/           # OpenEMR container on the edge VM, DB connection, registered OAuth2 client (via provisioning script)
   envs/
@@ -179,6 +179,9 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 | Compute for the VM | Fresh e2-micro via Terraform, hosting OpenEMR, MariaDB and the MLLP adapter | Clean lifecycle, reproducible, free tier; the existing instance stays untouched | Reuse existing e2-micro (rejected: mixed workloads) |
 | Environments | dev + prod roots, dev is the quick-start | Shows enterprise structure without making a cloner learn it | Single env; workspaces |
 | Heart-rate granularity | Five-minute roll-ups (about 288 Observations a day) | Raw samples would be over a million Observations a month; five minutes keeps the store and the chart small while still showing the day's shape | Every sample; one-minute or fifteen-minute roll-ups; FHIR `SampledData` (samples are unevenly spaced) |
+| Send attempts | Each cuff send is recorded as a FHIR `AuditEvent` in the FHIR store, written by the cuff simulator | The HL7v2 store keeps only accepted messages, so rejected and unacknowledged sends and the raw ACK would otherwise be lost on reload; the simulator holds the raw ACK and is not public, so the public proxy stays read-only | Stored messages only (the error path would not show in the log); keeping attempts in the browser (per tab, lost on close) |
+| OpenEMR chart view | A read-back panel in the dashboard; OpenEMR's screens are not exposed | One front door; the author's data stays behind one login; the small VM is not exposed to bots | Proxying OpenEMR's screens (fragile, heavy on the VM); opening OpenEMR's HTTPS port (a second public entry point and credential) |
+| Cloud Run to VM | Direct VPC egress into a dedicated subnet; the VM firewall admits only that subnet | No always-on connector, no NAT or static IP, no public MLLP port | Serverless VPC Access connector (always-on VMs); public IP limited to a NAT address (NAT cost, public port) |
 | Reviewer login | Shared password in Secret Manager checked by the proxy, which issues an 8-hour signed bearer token | One shared credential needs no user directory; fully created and destroyed by Terraform; rotating the password revokes every session | Identity Platform (its config cannot be destroyed by Terraform and a user cannot be created in Terraform); Identity-Aware Proxy on Cloud Run (needs a Google account per reviewer) |
 | Wearable account | Per deployment: each deployer registers their own OAuth app and connects their own Google Health account | Keeps the PHR single-patient and the repo free of the author's credentials | Hosted multi-user connect (rejected: strangers' PHI, scope verification) |
 | CI authentication | Workload Identity Federation | No long-lived keys in GitHub | Service account key secret |
