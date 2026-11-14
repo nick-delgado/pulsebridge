@@ -1,0 +1,19 @@
+{
+  "resourceType": "Device",
+  "identifier": [
+    {
+      "system": "urn:pulsebridge:device",
+      "value": "1ce5b303-b8ab-57de-837e-76d881dd2db3"
+    }
+  ],
+  "status": "active",
+  "deviceName": [
+    {
+      "name": "Pixel Watch 4",
+      "type": "user-friendly-name"
+    }
+  ],
+  "patient": {
+    "reference": "urn:uuid:7ac99545-f2c3-5140-9f42-d66791921a54"
+  }
+}
