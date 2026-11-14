@@ -43,6 +43,8 @@ from pulsebridge_fhir.resources import (
     check_complete_patient,
     fhir_datetime,
     heart_rate_key,
+    patient_for_sharing,
+    request_for,
 )
 
 __all__ = [
@@ -70,7 +72,9 @@ __all__ = [
     "heart_rate_resources",
     "heart_rate_transaction",
     "parse_google_utc_offset",
+    "patient_for_sharing",
     "patient_setup_transaction",
+    "request_for",
     "rollup_source",
     "window_from_rollup",
     "window_status",

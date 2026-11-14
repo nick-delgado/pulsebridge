@@ -97,8 +97,9 @@ AGENT_CUSTODIAN: Final = coding(PROVENANCE_PARTICIPANT_TYPE, "custodian", "Custo
 AGENT_ASSEMBLER: Final = coding(PROVENANCE_PARTICIPANT_TYPE, "assembler", "Assembler")
 
 # Provenance.activity, bound extensible to ProvenanceActivityType, which includes v3 DataOperation.
-# CREATE ("bringing an object into existence"): the activity this Provenance describes is
-# PulseBridge deriving the FHIR record from the source record.
+# CREATE, as v3 defines it: "the act of bringing an object into existence". The object is the
+# observation data: the device measured it (the performer agent) and PulseBridge assembled it into
+# the FHIR record (the assembler agent).
 ACTIVITY_CREATE: Final = coding(V3_DATA_OPERATION, "CREATE", "create")
 
 # Device.deviceName.type

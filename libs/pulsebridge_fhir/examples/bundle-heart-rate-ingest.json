@@ -177,7 +177,7 @@
               "display": "create"
             }
           ],
-          "text": "FHIR record created"
+          "text": "Observation data brought into existence: measured by the device, assembled by PulseBridge"
         },
         "agent": [
           {
@@ -377,7 +377,7 @@
               "display": "create"
             }
           ],
-          "text": "FHIR record created"
+          "text": "Observation data brought into existence: measured by the device, assembled by PulseBridge"
         },
         "agent": [
           {

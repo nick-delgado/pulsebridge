@@ -29,7 +29,7 @@ matches on identifier only, so Provenance alone is written by id; that needs the
 import copy
 import re
 from dataclasses import dataclass
-from datetime import datetime, tzinfo
+from datetime import date, datetime, tzinfo
 from enum import StrEnum
 
 from pulsebridge_fhir import codes
@@ -59,65 +59,118 @@ class Write(StrEnum):
     CREATE_IF_ABSENT = "create-if-absent"
 
 
+# The identifier each conditionally written resource type is matched on.
+_IDENTITY_SYSTEMS = {
+    "Patient": codes.PB_PATIENT_ID,
+    "Device": codes.PB_DEVICE_ID,
+    "Observation": codes.PB_OBSERVATION_ID,
+}
+# Only these may be written with a conditional create (ingest); the rest are only ever updated.
+CREATE_IF_ABSENT_TYPES = ("Patient", "Device")
+# R4 id datatype: [A-Za-z0-9\-\.]{1,64}
+_FHIR_ID = re.compile(r"^[A-Za-z0-9\-.]{1,64}$")
+
+
+def _own_identifier_value(resource: dict, system: str) -> str:
+    """The value of the resource's one identifier in ``system``; an error if there is not one."""
+    rt = resource.get("resourceType")
+    identifiers = resource.get("identifier", [])
+    if not isinstance(identifiers, list):
+        raise FhirInputError(f"{rt}: identifier must be a list")
+    matches = [i for i in identifiers if isinstance(i, dict) and i.get("system") == system]
+    if len(matches) != 1:
+        raise FhirInputError(
+            f"{rt}: expected exactly one identifier with system {system}, found {len(matches)}"
+        )
+    value = matches[0].get("value")
+    if not isinstance(value, str) or not value.strip():
+        raise FhirInputError(f"{rt}: the {system} identifier has no value")
+    return value
+
+
+def request_for(resource: dict, write: Write) -> dict:
+    """The ``Bundle.entry.request`` that writes ``resource``, derived from the resource itself.
+
+    The request is never stored, so it cannot disagree with the resource it writes:
+
+    - Patient, Device, Observation, update: ``PUT <Type>?identifier=<system>|<value>`` on the
+      resource's own identifier in that type's PulseBridge system.
+    - Patient, Device, create if absent: ``POST <Type>`` with
+      ``ifNoneExist: identifier=<system>|<value>`` (R4 Bundle.entry.request.ifNoneExist: "just
+      the query portion of the URL - what follows the '?' (not including the '?')"). Same query
+      as the update, so both always match the same resource.
+    - Provenance, update only: ``PUT Provenance/<its id>``.
+    """
+    if not isinstance(resource, dict):
+        raise FhirInputError(f"expected a resource dict, got {type(resource).__name__}")
+    if not isinstance(write, Write):
+        raise FhirInputError(f"expected a Write mode, got {write!r}")
+    rt = resource.get("resourceType")
+    if rt == "Provenance":
+        if write is not Write.UPDATE:
+            raise FhirInputError("Provenance has no conditional-create request")
+        rid = resource.get("id")
+        if not isinstance(rid, str) or not _FHIR_ID.match(rid):
+            raise FhirInputError(f"Provenance: id {rid!r} is not a valid FHIR id")
+        return {"method": "PUT", "url": f"Provenance/{rid}"}
+    system = _IDENTITY_SYSTEMS.get(rt)
+    if system is None:
+        raise FhirInputError(f"no write rule for resourceType {rt!r}")
+    value = _own_identifier_value(resource, system)
+    if write is Write.UPDATE:
+        return {"method": "PUT", "url": conditional_url(rt, system, value)}
+    if rt not in CREATE_IF_ABSENT_TYPES:
+        raise FhirInputError(f"{rt} has no conditional-create request")
+    return {"method": "POST", "url": rt, "ifNoneExist": identifier_query(system, value)}
+
+
 @dataclass(frozen=True)
 class BuiltResource:
-    """A resource plus the requests that can write it in a transaction Bundle.
+    """A resource plus its bundle-local identity.
 
     - ``full_url``: ``urn:uuid:…``, the resource's identity inside one Bundle. Other entries refer
       to it by this value; the server replaces it with the real ``Type/id`` when it commits
       (R4 bundle.html, "Resolving references in Bundles").
-    - ``update``: the ``Bundle.entry.request`` for a ``PUT``.
-    - ``create_if_absent``: the ``Bundle.entry.request`` for a conditional create, or ``None`` for
-      resources that are only ever updated (Observation, Provenance).
-    - ``key``: the deterministic key the requests match on (identifier value or resource id).
+    - ``key``: the deterministic key (identifier value or resource id), used to derive the keys of
+      dependent resources.
+    - ``update`` and ``create_if_absent``: the requests that would write it, computed on demand
+      from ``resource`` by :func:`request_for` (``create_if_absent`` is ``None`` for Observation
+      and Provenance, which are only ever updated). They are fresh dicts each time, so changing
+      one changes nothing, and the bundle functions derive them again themselves.
     """
 
     resource: dict
     full_url: str
     key: str
-    update: dict
-    create_if_absent: dict | None = None
 
     @property
     def resource_type(self) -> str:
         return self.resource["resourceType"]
+
+    @property
+    def update(self) -> dict:
+        return request_for(self.resource, Write.UPDATE)
+
+    @property
+    def create_if_absent(self) -> dict | None:
+        if self.resource_type not in CREATE_IF_ABSENT_TYPES:
+            return None
+        return request_for(self.resource, Write.CREATE_IF_ABSENT)
 
     def reference(self) -> dict:
         """A FHIR Reference to this resource, valid inside the same transaction Bundle."""
         return {"reference": self.full_url}
 
     def request(self, write: Write) -> dict:
-        if write is Write.UPDATE:
-            return dict(self.update)
-        if self.create_if_absent is None:
-            raise FhirInputError(f"{self.resource_type} has no conditional-create request")
-        return dict(self.create_if_absent)
+        return request_for(self.resource, write)
 
     def bundle_entry(self, write: Write) -> dict:
         """The ``Bundle.entry``; the resource is deep-copied, so the source stays unchanged."""
         return {
             "fullUrl": self.full_url,
             "resource": copy.deepcopy(self.resource),
-            "request": self.request(write),
+            "request": request_for(self.resource, write),
         }
-
-
-def _requests_by_identifier(resource_type: str, system: str, value: str) -> tuple[dict, dict]:
-    """The conditional-update and conditional-create requests for one identifier.
-
-    Both use the same escaped query, so they always match the same resource:
-
-    - update: ``{"method": "PUT", "url": "Patient?identifier=<system>|<value>"}``
-    - create: ``{"method": "POST", "url": "Patient", "ifNoneExist": "identifier=<system>|<value>"}``
-      (R4 Bundle.entry.request.ifNoneExist: the query only, without the ``?``).
-    """
-    update = {"method": "PUT", "url": conditional_url(resource_type, system, value)}
-    create = {
-        "method": "POST",
-        "url": resource_type,
-        "ifNoneExist": identifier_query(system, value),
-    }
-    return update, create
 
 
 def _patient_key(patient: BuiltResource) -> str:
@@ -217,56 +270,115 @@ def build_patient(patient: PatientInput) -> BuiltResource:
         resource["gender"] = patient.gender
     if patient.birth_date is not None:
         resource["birthDate"] = patient.birth_date.isoformat()
-    update, create = _requests_by_identifier("Patient", codes.PB_PATIENT_ID, patient.patient_id)
     return BuiltResource(
         resource=resource,
         full_url=urn_uuid(deterministic_uuid("Patient", codes.PB_PATIENT_ID, patient.patient_id)),
         key=patient.patient_id,
-        update=update,
-        create_if_absent=create,
     )
 
 
-_FULL_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# [0-9], not \d: \d also matches non-ASCII digits, which FHIR's date type does not allow.
+_FULL_DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
+def _nonblank(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _pt_identifiers(patient: dict) -> list[dict]:
+    """Identifiers typed v2-0203 ``PT`` (Patient external identifier) that have a value."""
+    return [
+        ident
+        for ident in patient.get("identifier", [])
+        if isinstance(ident, dict)
+        and _nonblank(ident.get("value"))
+        and any(
+            isinstance(c, dict)
+            and c.get("system") == codes.V2_IDENTIFIER_TYPE
+            and c.get("code") == "PT"
+            for c in ident.get("type", {}).get("coding", [])
+        )
+    ]
+
+
+def _complete_official_names(patient: dict) -> list[dict]:
+    """Official names that have both a family name and at least one non-blank given name.
+
+    Both parts must be on the same name: OpenEMR needs a first and a last name (spike S1), and a
+    family name on one name with a given name on another is not one person's name.
+    """
+    return [
+        name
+        for name in patient.get("name", [])
+        if isinstance(name, dict)
+        and name.get("use") == "official"
+        and _nonblank(name.get("family"))
+        and isinstance(name.get("given"), list)
+        and any(_nonblank(g) for g in name["given"])
+    ]
+
+
+def _is_full_date(value: object) -> bool:
+    if not isinstance(value, str) or not _FULL_DATE.match(value):
+        return False
+    try:
+        date.fromisoformat(value)  # rejects 1980-13-45
+    except ValueError:
+        return False
+    return True
 
 
 def check_complete_patient(patient: dict) -> None:
     """Raise ``FhirInputError`` unless ``patient`` is a complete Patient record.
 
     Complete means what the setup upsert and the share to OpenEMR need (spike S1): a ``PT``-typed
-    identifier with a value, a name with ``use: official`` that has a family name and a given
-    name, a gender from administrative-gender, and a full birth date (YYYY-MM-DD). It takes the
-    resource dict, not the input, so T15 can check a Patient read back from the FHIR store.
-    All missing parts are named in one message.
+    identifier with a value; one name with ``use: official`` that has both a family name and a
+    given name; a gender from administrative-gender; and a real calendar birth date written
+    ``YYYY-MM-DD`` in ASCII digits. It takes the resource dict, not the input, so T15 can check a
+    Patient read back from the FHIR store. All missing parts are named in one message.
     """
     if not isinstance(patient, dict) or patient.get("resourceType") != "Patient":
         raise FhirInputError("complete patient: expected a Patient resource")
     problems = []
-    pt_values = [
-        ident.get("value")
-        for ident in patient.get("identifier", [])
-        if any(
-            c.get("system") == codes.V2_IDENTIFIER_TYPE and c.get("code") == "PT"
-            for c in ident.get("type", {}).get("coding", [])
-        )
-    ]
-    if not any(isinstance(v, str) and v.strip() for v in pt_values):
+    if not _pt_identifiers(patient):
         problems.append("a PT-typed identifier")
-    official = [n for n in patient.get("name", []) if n.get("use") == "official"]
+    official = [
+        n for n in patient.get("name", []) if isinstance(n, dict) and n.get("use") == "official"
+    ]
     if not official:
         problems.append("a name with use 'official'")
-    else:
-        if not any(n.get("family") for n in official):
-            problems.append("an official family name")
-        if not any(n.get("given") for n in official):
-            problems.append("an official given name")
+    elif not _complete_official_names(patient):
+        problems.append("an official name with both a family and a given name")
     if patient.get("gender") not in GENDERS:
         problems.append("gender")
-    birth_date = patient.get("birthDate")
-    if not isinstance(birth_date, str) or not _FULL_DATE.match(birth_date):
-        problems.append("birthDate (YYYY-MM-DD)")
+    if not _is_full_date(patient.get("birthDate")):
+        problems.append("birthDate (a real date, YYYY-MM-DD)")
     if problems:
         raise FhirInputError(f"complete patient: missing {', '.join(problems)}")
+
+
+def patient_for_sharing(stored: dict) -> dict:
+    """The Patient to send to the clinic (T15), built from the Patient stored in PulseBridge.
+
+    Minimum necessary: only what OpenEMR needs to file the reading (spike S1). Kept: the ``PT``
+    identifier, the official name, gender and birth date. Left out: the Google Health user id
+    (an identifier at another company the clinic has no use for), ``id`` and ``meta`` (our store's
+    bookkeeping), and anything else the stored record carries. Raises ``FhirInputError`` if the
+    stored Patient is not complete (for example, the setup step has not run yet).
+    """
+    check_complete_patient(stored)
+    pt = _pt_identifiers(stored)[0]
+    name = _complete_official_names(stored)[0]
+    identifier = {k: copy.deepcopy(pt[k]) for k in ("use", "type", "system", "value") if k in pt}
+    shared_name = {"use": "official", "family": name["family"]}
+    shared_name["given"] = [g for g in name["given"] if _nonblank(g)]
+    return {
+        "resourceType": "Patient",
+        "identifier": [identifier],
+        "name": [shared_name],
+        "gender": stored["gender"],
+        "birthDate": stored["birthDate"],
+    }
 
 
 def build_device(device: DeviceInput, *, patient: BuiltResource) -> BuiltResource:
@@ -288,14 +400,7 @@ def build_device(device: DeviceInput, *, patient: BuiltResource) -> BuiltResourc
         resource["manufacturer"] = device.manufacturer
     # Device.patient: the person the device is attached to (a personal wearable).
     resource["patient"] = patient.reference()
-    update, create = _requests_by_identifier("Device", codes.PB_DEVICE_ID, key)
-    return BuiltResource(
-        resource=resource,
-        full_url=urn_uuid(key),
-        key=key,
-        update=update,
-        create_if_absent=create,
-    )
+    return BuiltResource(resource=resource, full_url=urn_uuid(key), key=key)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -329,15 +434,7 @@ def _check_status(status: str) -> None:
 
 
 def _observation(key: str, resource: dict) -> BuiltResource:
-    return BuiltResource(
-        resource=resource,
-        full_url=urn_uuid(key),
-        key=key,
-        update={
-            "method": "PUT",
-            "url": conditional_url("Observation", codes.PB_OBSERVATION_ID, key),
-        },
-    )
+    return BuiltResource(resource=resource, full_url=urn_uuid(key), key=key)
 
 
 def build_heart_rate_observation(
@@ -457,11 +554,14 @@ def build_provenance(
     - ``target``: the Observation this Provenance is about.
     - ``recorded``: when PulseBridge wrote it (an instant; the caller passes the current time,
       so the builder stays deterministic).
-    - ``activity``: v3 DataOperation ``CREATE``. The activity is PulseBridge creating the FHIR
-      record from the source record (ProvenanceActivityType, the value set R4 binds here).
+    - ``activity``: v3 DataOperation ``CREATE``, "the act of bringing an object into existence"
+      (ProvenanceActivityType, the value set R4 binds here). The object is the observation data:
+      the device measured it and PulseBridge assembled it into this FHIR record.
     - ``agent`` (who took part, each with a ``type``):
-        - ``performer``: the Device that measured. When the source states its recording method
-          (``PASSIVELY_MEASURED``), it goes in this agent's ``role``: how the device took part.
+        - ``performer``: the Device. R4 defines performer as the one "who actually and
+          principally carries out the activity"; the device took the measurement. When the source
+          states its recording method (``PASSIVELY_MEASURED``), it goes in this agent's ``role``:
+          how the device took part.
         - ``custodian``: the source platform that holds the original (``FITBIT``,
           ``HL7V2_STORE``), as a logical reference by identifier. Left out when the caller does
           not know the platform, rather than guessed.
@@ -486,8 +586,9 @@ def build_provenance(
     key = deterministic_uuid("Provenance", target.key)
     performer: dict = {"type": {"coding": [dict(codes.AGENT_PERFORMER)]}}
     if source.recording_method is not None:
-        # Provenance.agent.role: "the function of the agent with respect to the activity"; its
-        # binding is an example, so a local code system is allowed without a validator warning.
+        # Provenance.agent.role: "the function of the agent with respect to the activity" (here,
+        # how the device measured). Its binding is an example, so a local code system is allowed
+        # without a validator warning.
         performer["role"] = [
             {
                 "coding": [codes.coding(codes.PB_RECORDING_METHOD, source.recording_method)],
@@ -516,7 +617,11 @@ def build_provenance(
         "target": [target.reference()],
         # instant: seconds and an offset are required (R4 datatypes.html#instant).
         "recorded": fhir_datetime(recorded),
-        "activity": {"coding": [dict(codes.ACTIVITY_CREATE)], "text": "FHIR record created"},
+        "activity": {
+            "coding": [dict(codes.ACTIVITY_CREATE)],
+            "text": "Observation data brought into existence: measured by the device, "
+            "assembled by PulseBridge",
+        },
         "agent": agents,
         "entity": [
             {
@@ -531,9 +636,4 @@ def build_provenance(
             }
         ],
     }
-    return BuiltResource(
-        resource=resource,
-        full_url=urn_uuid(key),
-        key=key,
-        update={"method": "PUT", "url": f"Provenance/{key}"},
-    )
+    return BuiltResource(resource=resource, full_url=urn_uuid(key), key=key)

@@ -79,7 +79,8 @@ SYNTHETIC_BP_SOURCE = SourceInfo(
     record_type="hl7v2-message",
     record_id="hl7V2Stores/example-store/messages/synthetic-message-0001",
     platform="HL7V2_STORE",
-    recording_method="ACTIVELY_MEASURED",
+    # The ORU^R01 message does not say how the reading was taken, so nothing is asserted.
+    recording_method=None,
 )
 
 

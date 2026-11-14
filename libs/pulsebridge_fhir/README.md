@@ -10,14 +10,16 @@ the input and the field.
 
 ## Who owns the Patient record
 
-Two kinds of caller touch the Patient, and they must not fight over it.
+Two kinds of caller touch the Patient, and they must not fight over it. **The setup step must
+run before the ingest services (`health-sync`, `v2-to-fhir`) are enabled**: it writes the one
+Patient record, and ingest only links new readings to it.
 
 | Caller | Knows | Writes the Patient with |
 | --- | --- | --- |
 | Setup: connect script (T11) or seeder (T09) | everything: identifier, name, gender, birth date, Google `healthUserId` | **conditional update**, `PUT`: the full record, once |
 | `health-sync` (T10) | the identifier only (configuration) | **conditional create**: only if absent |
 | `v2-to-fhir` (T12) | PID-3 (identifier) and PID-5 (name); no birth date or sex | **conditional create**: only if absent |
-| Share to OpenEMR (T15) | reads the stored Patient | nothing in our store; checks it is complete before sending |
+| Share to OpenEMR (T15) | reads the stored Patient | nothing in our store; sends `patient_for_sharing(stored)` |
 
 ### Conditional update and conditional create
 
@@ -54,15 +56,17 @@ found.
   `PUT Patient` with only an identifier and a name, the stored gender, birth date and Google
   identifier would have been deleted; the next `health-sync` run would then have put its own
   version back. Two writers with different knowledge would overwrite each other forever.
-- So ingest Bundles use conditional create: the Patient is created on first contact (a minimal
-  record), and once the setup step has written the full record, ingest never changes it.
+- So ingest Bundles use conditional create. In normal operation the setup step has already
+  written the Patient, the create matches it, and ingest never changes it. The create is a
+  safety net: if setup has not run, ingest writes a minimal Patient (identifier, perhaps a name)
+  rather than failing, and the setup upsert later replaces it with the full record.
 - `ifNoneExist` is, per R4 `Bundle.entry.request.ifNoneExist`, "just the query portion of the
   URL - what follows the '?' (not including the '?')". It is built by the same function as the
   conditional-update URL, so the escaping is identical.
 - References: the Observations in the same Bundle refer to the Patient entry by its `urn:uuid`
-  `fullUrl`. The R4 transaction rules (http.html, "Transaction Processing Rules") have references
-  to an entry whose conditional create matched resolve to the existing resource. That page could
-  not be read from the build environment (hl7.org was blocked); see the next section.
+  `fullUrl`. When the conditional create matches an existing Patient, those references are
+  **expected** to resolve to it (common servers implement this; the R4 text could not be
+  consulted from the build environment, because hl7.org was blocked). See the next section.
 
 ### How the API enforces it
 
@@ -71,19 +75,47 @@ found.
   there is rejected. There is no argument that makes it upsert a Patient.
 - **`build_setup_bundle(patient=, devices=())`** is the only function that writes a Patient or
   Device with `PUT`, and it first calls `check_complete_patient`.
+- **Requests are never taken from the caller.** Both functions derive every `request` from the
+  entry's own resource (`request_for`): an ingest Patient or Device is always `POST <its type>`
+  with `ifNoneExist` on its own identifier; a record's URL always names its own type and its own
+  identifier (or id, for Provenance); a setup `PUT` URL always carries the Patient's own
+  identifier. `BuiltResource` stores no request, so there is nothing to swap or edit, and
+  anything that is not a `BuiltResource` is a `FhirInputError`.
 - The builders themselves (`build_patient`, `build_device`) never choose a write mode.
 
 ### Unverified server behaviour, and the fallback
 
 That the Cloud Healthcare API resolves `urn:uuid` references to an entry whose conditional create
-**matched** an existing resource is the R4 rule but has not been tested against the real store;
-it will be by the first real `executeBundle` in T10 or T12.
+**matched** an existing resource is expected (common servers implement it; the R4 text could not
+be consulted) but has not been tested against the real store. The first real `executeBundle` in
+T10 or T12 will show it.
 
-- **Symptom if it does not:** the transaction fails (referential integrity rejects a reference it
-  cannot resolve), or Observations point at a reference that does not exist.
-- **Fallback (not implemented):** give Patient and Device deterministic ids (UUIDv5 of the
-  identifier), write them as `PUT Patient/<id>` for setup and conditional create with that id for
-  ingest, and make every other entry refer to the literal `Patient/<id>` instead of `urn:uuid`.
+Symptoms to look for:
+
+- **References not resolved:** the transaction is rejected (referential integrity refuses a
+  reference it cannot resolve), or Observations point at a reference that does not exist.
+- **`412 Precondition Failed`:** a conditional create or conditional update whose search matches
+  **more than one** resource is refused (R4: multiple matches fail the precondition).
+- **Duplicate Patients:** if `health-sync` and `v2-to-fhir` both make first contact at the same
+  moment before setup has run, each conditional create can find nothing and create its own
+  Patient. From then on the identifier matches two Patients, so every ingest conditional create
+  and the setup upsert fail with `412` until the duplicate is removed by hand. This is why setup
+  must run before the ingest services are enabled.
+
+Fallback, matching decision D11 (not implemented):
+
+- **Setup** writes `PUT Patient/<uuidv5>` and `PUT Device/<uuidv5>`: a deterministic id derived
+  from the identifier, written as "update as create" (needs the store's `enableUpdateCreate`,
+  which Provenance already needs).
+- **Ingest Bundles leave Patient and Device out** and refer to them literally,
+  `"reference": "Patient/<uuidv5>"` and `"reference": "Device/<uuidv5>"`.
+- This works only if setup has run before any ingest; otherwise referential integrity rejects the
+  ingest Bundle. A conditional create cannot be used to place that id: R4 says that on create
+  "if an id is provided, the server SHALL ignore it", so the server would pick its own id and the
+  literal references would point at nothing.
+- A second candidate: R4 **conditional references** inside a transaction,
+  `"reference": "Patient?identifier=urn:pulsebridge:patient|<value>"`, which the server resolves by
+  search when it processes the Bundle. Also unverified on Cloud Healthcare.
 
 ## Public API
 
@@ -95,28 +127,36 @@ it will be by the first real `executeBundle` in T10 or T12.
 | `BloodPressureReading(effective, systolic, diastolic, source_key, unit="mm[Hg]")` | One cuff reading. `source_key` is its idempotency key, e.g. `"<MSH-3>/<MSH-10>"`. |
 | `SourceInfo(*, record_type, record_id, platform, recording_method)` | The source record, for Provenance. `platform` and `recording_method` may be `None`. |
 | `build_patient`, `build_device`, `build_heart_rate_observation`, `build_blood_pressure_observation`, `build_provenance` | Builders; each returns a `BuiltResource`. |
-| `check_complete_patient(resource)` | Raises unless the Patient has a PT identifier, official name, gender and full birth date. |
+| `check_complete_patient(resource)` | Raises unless the Patient has a PT identifier, one official name with family and given parts, a gender and a real birth date. |
+| `patient_for_sharing(stored)` | The Patient to send to OpenEMR: PT identifier, official name, gender, birth date only. |
 | `build_ingest_bundle`, `build_setup_bundle` | The only two ways to make a Bundle (see above). |
-| `heart_rate_transaction(points, *, patient, device, data_source, tz, recorded, complete_before)` | `health-sync`: roll-up JSON to an ingest Bundle. |
-| `blood_pressure_transaction(reading, *, patient, device, source, recorded)` | `v2-to-fhir`: one cuff reading to an ingest Bundle. |
+| `Write` (`UPDATE`, `CREATE_IF_ABSENT`), `request_for(resource, write)` | The two write modes, and the request each implies for a resource. |
+| `heart_rate_transaction(points, *, patient, device, data_source, tz, recorded, complete_before, assembler="PulseBridge health-sync")` | `health-sync`: roll-up JSON to an ingest Bundle. |
+| `heart_rate_resources(windows, *, patient, device, data_source, tz, recorded, complete_before, assembler=…)` | The same, as a list of built Observations and Provenance, for a caller assembling its own ingest Bundle. |
+| `blood_pressure_transaction(reading, *, patient, device, source, recorded, assembler="PulseBridge v2-to-fhir", status="final")` | `v2-to-fhir`: one cuff reading to an ingest Bundle. |
 | `patient_setup_transaction(patient, *, devices=())` | Setup: the full Patient as an upsert. |
 | `window_from_rollup(point)`, `parse_google_utc_offset("-18000s")`, `window_status(window, complete_before)` | Google helpers. |
 | `GoogleDataSource(*, platform, recording_method)`, `rollup_source(window, data_source)` | Provenance source for a roll-up window. No defaults. |
 | `heart_rate_key`, `blood_pressure_key` | The idempotency keys. |
 
-A `BuiltResource` has `.resource` (the dict), `.full_url` (`urn:uuid:…`), `.key`, `.update`
-(the `PUT` request), `.create_if_absent` (the conditional-create request, Patient and Device
-only) and `.reference()`.
+A `BuiltResource` has `.resource` (the dict), `.full_url` (`urn:uuid:…`), `.key` and
+`.reference()`. `.update` (the `PUT` request) and `.create_if_absent` (the conditional create,
+Patient and Device only) are computed from `.resource` each time they are read.
 
 ### Setup: connect script (T11) and seeder (T09)
 
 ```python
 bundle = patient_setup_transaction(
-    PatientInput("PB-0001", family="Doe", given=("Sam",), gender="female",
-                 birth_date=date(1980, 4, 12), google_health_user_id=health_user_id),
-    devices=[DeviceInput("Pixel Watch 4")],
+    PatientInput(configured_patient_id, family=family, given=(given,), gender=gender,
+                 birth_date=birth_date, google_health_user_id=health_user_id),
+    devices=[DeviceInput(google_display_name)],   # or devices=() to let health-sync create it
 )
 ```
+
+The Device key is derived from the patient id **and the display name**. If setup writes the watch,
+it must use exactly the `dataSource.device.displayName` Google reports, the same value
+`health-sync` will pass; a different spelling gives a second watch Device. If setup cannot read
+that name, pass no devices and let `health-sync` create the Device on first sync.
 
 ### `health-sync` (T10)
 
@@ -135,25 +175,41 @@ bundle = heart_rate_transaction(
 ### `v2-to-fhir` (T12), from PID-3 and PID-5 only
 
 ```python
+family, given = pid5_1_family_name, pid5_2_given_name      # either may be empty
 bundle = blood_pressure_transaction(
     BloodPressureReading(obx14_time, systolic, diastolic, source_key=f"{msh3}/{msh10}", unit=obx6),
-    patient=PatientInput(pid3_id, family=pid5_family, given=(pid5_given,)),
+    patient=PatientInput(pid3_1_id, family=family or None, given=(given,) if given else ()),
     device=DeviceInput(sending_application),
     source=SourceInfo(record_type="hl7v2-message", record_id=store_message_name,
-                      platform="HL7V2_STORE", recording_method=None),
+                      platform="HL7V2_STORE", recording_method=None),  # nothing asserted when unknown
     recorded=datetime.now(UTC),
 )
 ```
+
+- The identifier is **PID-3.1 only** (CX.1, the ID number; not the assigning authority in CX.4),
+  and it must equal the configured `patient_id` the setup step used, or the reading lands on a
+  different Patient.
+- An empty PID-5.1 or PID-5.2 must not fail a valid message: pass `None` and `()` as above. The
+  library accepts an identifier with a partial or absent name for ingest; it rejects an empty
+  string, so the conversion is the caller's.
+- `recording_method=None`: the ORU^R01 message does not say how the reading was taken, so the
+  Provenance asserts nothing about it.
 
 A `FhirInputError` from any of these is the application-level `error` reason (D7).
 
 ### Share to OpenEMR (T15)
 
-Read the Patient from the store, call `check_complete_patient(patient)` (a clear error if the
-setup step has not run yet), then send it: it already has the shape OpenEMR needs (spike S1). Before
-`POST`ing an Observation, replace `subject` with OpenEMR's Patient, add `encounter`, and drop
-`device`, `meta` and `identifier` if wanted (OpenEMR discards them). Units are already exactly
-`/min` and `mm[Hg]`.
+Read the Patient from the store and send `patient_for_sharing(stored)`, never the stored record
+itself. The stored Patient carries the Google Health user id (an identifier at another company,
+which the clinic has no need for: minimum necessary) plus our store's `id` and `meta`.
+`patient_for_sharing` runs `check_complete_patient` (a clear error if setup has not run) and
+returns only the `PT` identifier, the official name, gender and birth date: the shape OpenEMR
+needs (spike S1).
+
+Share only Observations with `status: final`. A `preliminary` window can still change in our
+store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observation, replace
+`subject` with OpenEMR's Patient, add `encounter`, and drop `device`, `meta` and `identifier`
+(OpenEMR discards them). Units are already exactly `/min` and `mm[Hg]`.
 
 ## Design decisions
 
@@ -253,8 +309,8 @@ no top-level value: the shape the R4 bp profile requires. `unit` must be exactly
 | --- | --- | --- |
 | `target` | the Observation | what this Provenance is about |
 | `recorded` | when PulseBridge wrote it | passed in by the caller, keeping builders deterministic |
-| `activity` | v3 DataOperation `CREATE` | the activity is PulseBridge creating the FHIR record from the source record; `ProvenanceActivityType` (the value set R4 binds here) includes DataOperation |
-| `agent` type `performer` | the Device; its `role` carries the recording method (`PASSIVELY_MEASURED`) when the source states one | `agent.role` is "the function of the agent with respect to the activity": how the device took part. Its binding is only an example, so a local code is allowed |
+| `activity` | v3 DataOperation `CREATE` | v3 defines CREATE as "the act of bringing an object into existence": here, the observation data. The device measured it and PulseBridge assembled it into the FHIR record. `ProvenanceActivityType` (the value set R4 binds here) includes DataOperation |
+| `agent` type `performer` | the Device; its `role` carries the recording method (`PASSIVELY_MEASURED`) when the source states one | R4: the performer "actually and principally carries out the activity"; the device took the measurement. `agent.role` is "the function of the agent with respect to the activity": how the device measured. Its binding is only an example, so a local code is allowed |
 | `agent` type `custodian` | source platform by identifier (`FITBIT`, `HL7V2_STORE`) | holds the original record. **Left out when the caller does not know it**: the roll-up response has no `dataSource`, so nothing is asserted by default |
 | `agent` type `assembler` | the PulseBridge service, by display | the software that derived the FHIR resource |
 | `entity` role `source` | the source record by identifier (HL7v2 store message name, roll-up window) | lets the trace panel find the original |

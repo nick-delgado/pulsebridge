@@ -174,7 +174,7 @@
               "display": "create"
             }
           ],
-          "text": "FHIR record created"
+          "text": "Observation data brought into existence: measured by the device, assembled by PulseBridge"
         },
         "agent": [
           {
@@ -187,17 +187,6 @@
                 }
               ]
             },
-            "role": [
-              {
-                "coding": [
-                  {
-                    "system": "urn:pulsebridge:recording-method",
-                    "code": "ACTIVELY_MEASURED"
-                  }
-                ],
-                "text": "Recording method reported by the source: ACTIVELY_MEASURED"
-              }
-            ],
             "who": {
               "reference": "urn:uuid:95eebf63-cf9c-5007-9bca-7c92e84c69fb"
             }

@@ -249,8 +249,8 @@ def test_complete_patient_passes_strict_check():
     [
         ({"gender": None}, "gender"),
         ({"birth_date": None}, "birthDate"),
-        ({"family": None}, "an official family name"),
-        ({"given": ()}, "an official given name"),
+        ({"family": None}, "an official name with both a family and a given name"),
+        ({"given": ()}, "an official name with both a family and a given name"),
         ({"family": None, "given": ()}, "a name with use 'official'"),
     ],
 )
