@@ -1,0 +1,28 @@
+# pulsebridge_hl7v2: HL7v2 helpers over hl7apy (task T07). See README.md for the public API.
+
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pulsebridge_hl7v2"
+version = "0.1.0"
+description = "Builds, validates and parses HL7v2 ORU^R01 and ACK messages with hl7apy; MLLP framing; shared sample messages."
+readme = "README.md"
+requires-python = ">=3.13"
+# Exact pin (CLAUDE.md, D3): hl7apy's validation behaviour is part of what the tests check, so an
+# upgrade must be a deliberate change that re-runs them.
+dependencies = ["hl7apy==1.3.5"]
+
+[tool.setuptools]
+# The sample messages live in libs/pulsebridge_hl7v2/samples/ (the T07 acceptance criterion names
+# that path) but are installed as the subpackage `pulsebridge_hl7v2.samples`, so services that
+# install this library (editable or as a wheel) can load them with importlib.resources.
+packages = ["pulsebridge_hl7v2", "pulsebridge_hl7v2.samples"]
+
+[tool.setuptools.package-dir]
+"pulsebridge_hl7v2" = "pulsebridge_hl7v2"
+"pulsebridge_hl7v2.samples" = "samples"
+
+[tool.setuptools.package-data]
+"pulsebridge_hl7v2.samples" = ["samples.json"]
