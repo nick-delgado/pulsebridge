@@ -191,7 +191,15 @@ def test_blank_given_name_is_incomplete():
 
 @pytest.mark.parametrize(
     "birth_date",
-    ["1980-13-45", "1980-02-30", "١٩٨٠-٠٤-١٢", "1980-4-12"],
+    [
+        "1980-13-45",
+        "1980-02-30",
+        "١٩٨٠-٠٤-١٢",  # Arabic-Indic digits
+        "1980-4-12",
+        # ISO 8601 forms Python's date.fromisoformat accepts but FHIR's date type does not.
+        "19800412",
+        "1980-W15-6",
+    ],
 )
 def test_birth_date_must_be_a_real_ascii_date(birth_date):
     patient = full_patient()
@@ -276,6 +284,14 @@ def test_patient_for_sharing_does_not_alias_the_stored_record():
     shared = patient_for_sharing(stored)
     shared["identifier"][0]["type"]["coding"][0]["code"] = "changed"
     assert stored["identifier"][0]["type"]["coding"][0]["code"] == "PT"
+
+
+def test_patient_for_sharing_drops_blank_given_names():
+    stored = stored_patient()
+    stored["name"][0]["given"] = ["Avery", "  "]
+    assert patient_for_sharing(stored)["name"] == [
+        {"use": "official", "family": "Example", "given": ["Avery"]}
+    ]
 
 
 def test_patient_for_sharing_refuses_an_incomplete_patient():
