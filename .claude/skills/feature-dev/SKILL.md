@@ -52,7 +52,11 @@ Write tests that check behaviour the AC describes, then prove they can fail.
 1. Every AC maps to at least one test (or, for Terraform, a `terraform validate` /
    `terraform test` check). If an AC cannot be tested automatically, say so and say how you
    verified it by hand.
-2. Run the full test suite for the code you touched and the linters (`make lint test` once it exists).
+2. Run the full test suite for the code you touched and the linters: `make lint`, `make test`,
+   and for Terraform `make tf-validate` and `make tf-test`. Before you finish also run
+   `make pre-commit` (the hooks, over all files) and `make secret-scan` (gitleaks over the
+   branch's commits); CI runs both, and they catch things lint and tests do not. Check each
+   command's exit code directly, never through a pipe.
 3. **Break-check.** For each behaviour under test, deliberately break the implementation (not the
    test): flip a condition, change a code or unit, remove a field, return early. Run the tests.
    - At least one test must fail, and for the right reason.

@@ -31,15 +31,14 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D12 | Send attempts | Every cuff send attempt is recorded as a FHIR `AuditEvent` in the FHIR store, written by the cuff simulator (it holds the raw ACK and is not public; `fhir-proxy` stays read-only). The messages log lists attempts, including rejected and unacknowledged ones. |
 | D13 | OpenEMR chart view | The dashboard shows an "As stored in OpenEMR" panel, filled by `fhir-proxy` reading the Patient, Encounter and Observations back from OpenEMR's FHIR API. OpenEMR's screens are not exposed to the internet; the README carries a screenshot of the real chart. |
 | D14 | Cloud Run to the VM | Direct VPC egress into a dedicated subnet (built in T03). The firewall rule for MLLP and OpenEMR HTTPS lives in `project-base`, sourced from that subnet; `edge-vm` adds no rule and needs no public port. |
+| D4 | Dashboard hosting | Firebase Hosting. It has no hourly charge, unlike a bucket behind a load balancer, and its rewrites can put the page and `fhir-proxy` on one origin. Consequences: T22 adds the Firebase Hosting API to `project-base`'s API list and a hosting role to the deployer's roles (both are variables). |
+| D5 | Dashboard framework | Vite and TypeScript with a small chart library; no heavy framework. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
 | D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
 ## Open decisions (need the user)
 
-| # | Decision | Recommendation |
-| --- | --- | --- |
-| D4 | Dashboard hosting: bucket + Cloud CDN, or Firebase Hosting. | Decide in T22; bucket + load balancer has an hourly forwarding-rule cost, Firebase Hosting does not. |
-| D5 | Dashboard framework. | Vite + TypeScript with a small chart library, no heavy framework. |
+None at present.
 
 ## Malformed message handling (D7)
 
@@ -189,13 +188,13 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T09 | Synthetic data seeder | T06 | `services/seed/` | todo |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | todo |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
-| T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/` | todo |
+| T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | in-progress |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | todo |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6 | `services/fhir-proxy/` (except `share/`) | todo |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
-| T16 | Dashboard shell | none | `web/` | todo |
-| T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | todo |
-| T32 | FHIR store write access for the cuff simulator | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | todo |
+| T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | in-progress |
+| T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | in-progress |
+| T32 | FHIR store write access for the cuff simulator | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | in-progress |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
@@ -250,7 +249,10 @@ Bundle.
 - AC: `health-sync` needs exactly these three secrets and nothing else from the deployer.
 - AC: documented in `docs/setup.md` terms a new user can follow.
 
-**T12 `v2-to-fhir` service.** Pub/Sub push handler plus the v2-to-FHIR mapping, which is the
+**T12 `v2-to-fhir` service.** Also creates `libs/pulsebridge_gcp/`, a thin shared client for the
+Cloud Healthcare API (FHIR `executeBundle` and resource reads and writes; HL7v2 message get,
+list, label patch and ingest) that later services reuse, and sets the layout later services
+follow. Pub/Sub push handler plus the v2-to-FHIR mapping, which is the
 showcase code. The mapping lives in a single module (`services/v2-to-fhir/mapping.py`) with no
 GCP calls, so it can be read and tested on its own. Input is the raw ER7, fetched with
 `view=RAW_ONLY` and parsed with `hl7apy` (spike S5: the store's `parsedData` numbers MSH fields
@@ -446,8 +448,10 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
 - AC: anything that waits for the stack on first apply tolerates about 15 minutes.
 
 **T22 Module `phr`.** Dashboard hosting, `fhir-proxy` and cuff simulator Cloud Run services.
-- AC: hosting choice (D4) recorded with its idle cost, including that Firebase Hosting rewrites
-  would put the page and the proxy on the same origin.
+- AC: the dashboard is served by Firebase Hosting (D4), with its idle cost stated; the README
+  says whether a rewrite puts the page and the proxy on one origin and what that changes for CORS.
+- AC: the Firebase Hosting API and the deployer's hosting role are added through the existing
+  variables of `project-base` and bootstrap, not hardcoded.
 - AC: `fhir-proxy` is publicly invocable, mounts the reviewer password secret as a file (so a
   new version takes effect without a redeploy), and is capped at two instances.
 - AC: the cuff simulator is invocable only by the proxy's service account.

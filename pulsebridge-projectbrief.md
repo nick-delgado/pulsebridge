@@ -50,7 +50,7 @@ Fourteen pieces, all on GCP, all created by Terraform except the Google Health O
 | v2-to-fhir | Cloud Run service (Python, hl7apy) | Reads the stored v2 message, parses OBX, writes Observation | $0 |
 | MLLP adapter | Compute Engine e2-micro (new, clean), container from Google's open-source mllp-adapter | Terminates MLLP (TCP) from the simulator and forwards to the HL7v2 store; also hosts OpenEMR and MariaDB | free tier |
 | Cuff simulator | Cloud Run service | Backend for the left side of the page: builds an ORU^R01 (two OBX) from entered BP values, sends it over MLLP to the VM, returns the ACK. Not public: the page reaches it only through the FHIR proxy, so it sits behind the reviewer login | $0 |
-| PHR dashboard | Cloud Storage bucket + Cloud CDN (or Firebase Hosting) | Static SPA: chart, trace panel, share button | cents |
+| PHR dashboard | Firebase Hosting | Static SPA: chart, trace panel, share button | cents |
 | FHIR proxy | Cloud Run service | The single public entry point for the SPA: checks the reviewer password and issues a short-lived signed token; holds service-account credentials; exposes a narrow read API; forwards cuff readings to the cuff simulator; executes the share action against OpenEMR | $0 |
 | OpenEMR | Docker on the e2-micro (official OpenEMR image + MariaDB) | The clinic. Receives shared vitals via its FHIR API. Its screens are not exposed to the internet; the dashboard shows what it stored by reading it back | rides the VM |
 | Secrets | Secret Manager | Google Health OAuth client ID, client secret and refresh token, OpenEMR client private key, reviewer password, DB password | \~$0 |
@@ -124,7 +124,7 @@ infra/
     healthcare/        # Healthcare dataset, FHIR R4 store, HL7v2 store, Pub/Sub topic + subscription, store notification config
     ingestion/         # Cloud Run: health-sync, v2-to-fhir; Cloud Scheduler job; OIDC invoker bindings
     edge-vm/           # e2-micro, startup script, mllp-adapter + MariaDB containers, persistent disk; no public ports (Cloud Run reaches the VM privately; the firewall rule lives in project-base)
-    phr/               # bucket + CDN (or Firebase Hosting), fhir-proxy Cloud Run, cuff simulator Cloud Run
+    phr/               # Firebase Hosting, fhir-proxy Cloud Run, cuff simulator Cloud Run
     openemr/           # OpenEMR container on the edge VM, DB connection, registered OAuth2 client (via provisioning script)
   envs/
     dev/               # main.tf wires the modules; terraform.tfvars; backend.tf (GCS state bucket, prefix dev)
@@ -182,6 +182,8 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 | Send attempts | Each cuff send is recorded as a FHIR `AuditEvent` in the FHIR store, written by the cuff simulator | The HL7v2 store keeps only accepted messages, so rejected and unacknowledged sends and the raw ACK would otherwise be lost on reload; the simulator holds the raw ACK and is not public, so the public proxy stays read-only | Stored messages only (the error path would not show in the log); keeping attempts in the browser (per tab, lost on close) |
 | OpenEMR chart view | A read-back panel in the dashboard; OpenEMR's screens are not exposed | One front door; the author's data stays behind one login; the small VM is not exposed to bots | Proxying OpenEMR's screens (fragile, heavy on the VM); opening OpenEMR's HTTPS port (a second public entry point and credential) |
 | Cloud Run to VM | Direct VPC egress into a dedicated subnet; the VM firewall admits only that subnet | No always-on connector, no NAT or static IP, no public MLLP port | Serverless VPC Access connector (always-on VMs); public IP limited to a NAT address (NAT cost, public port) |
+| Dashboard hosting | Firebase Hosting | No hourly charge; rewrites can serve the page and the proxy from one origin | Bucket behind a load balancer and Cloud CDN (hourly forwarding-rule charge) |
+| Dashboard framework | Vite and TypeScript with a small chart library | Small, readable, no heavy framework to explain | A full framework |
 | Reviewer login | Shared password in Secret Manager checked by the proxy, which issues an 8-hour signed bearer token | One shared credential needs no user directory; fully created and destroyed by Terraform; rotating the password revokes every session | Identity Platform (its config cannot be destroyed by Terraform and a user cannot be created in Terraform); Identity-Aware Proxy on Cloud Run (needs a Google account per reviewer) |
 | Wearable account | Per deployment: each deployer registers their own OAuth app and connects their own Google Health account | Keeps the PHR single-patient and the repo free of the author's credentials | Hosted multi-user connect (rejected: strangers' PHI, scope verification) |
 | CI authentication | Workload Identity Federation | No long-lived keys in GitHub | Service account key secret |
