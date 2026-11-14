@@ -91,7 +91,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 | T03 | Module `project-base` | T01 | `infra/modules/project-base/` | done |
 | T04 | Module `identity` | T01 | `infra/modules/identity/` | done |
 | T05 | Module `healthcare` | T01 | `infra/modules/healthcare/` | done |
-| T06 | FHIR mapping library | T01 | `libs/pulsebridge_fhir/` | in-progress |
+| T06 | FHIR mapping library | T01 | `libs/pulsebridge_fhir/` | done |
 | T07 | HL7v2 helpers (hl7apy) | T01 | `libs/pulsebridge_hl7v2/` | done |
 
 **T01 Repo scaffolding.** Python tooling (ruff, pytest), a Makefile with `lint`, `test`, `fmt`,
@@ -196,6 +196,9 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
 - AC: CI fails when an example resource is made invalid (demonstrated in the task summary).
+- The examples are the nine files in `libs/pulsebridge_fhir/examples/` (three Bundles: Patient
+  setup, heart-rate ingest, blood-pressure ingest). Expected validator warnings, not errors: the
+  heart-rate minimum and maximum component codes and the local `urn:pulsebridge:*` code systems.
 
 **T09 Synthetic data seeder.** Backs the `use_synthetic_data` flag: generates plausible heart-rate
 roll-up windows (the same five-minute shape the Google Health API returns) for a synthetic patient
@@ -207,6 +210,14 @@ and writes them through the T06 mapper.
 (`dataPoints:rollUp`, see D8 and `docs/spikes/s3.md`), maps them with T06, writes a transaction
 Bundle.
 - AC: idempotent on re-delivery (conditional update keyed on patient, code and window start).
+- AC: writes with `heart_rate_transaction` from T06 (an ingest Bundle: Patient and Device are
+  created only if absent, never overwritten, D11), passes an IANA time zone from configuration,
+  and passes a cutoff so windows inside the range it will re-request are `preliminary` and
+  become `final` on the next run.
+- AC: the first real write confirms that the store resolves in-Bundle references to a Patient
+  that already existed; if it does not, switch to the fixed-ID fallback described in the T06
+  README and record the result.
+- AC: a day of data is about 580 Bundle entries; the backfill batches its writes.
 - AC: each run re-requests a range that overlaps the previous run, and a window that was only
   partly synced is updated on the next run, not skipped.
 - AC: follows `nextPageToken`; handles results arriving newest first and windows with no data
@@ -229,6 +240,9 @@ Bundle.
   accepts a pasted redirect address when it cannot.
 - AC: reports when the refresh token will expire (7 days while the OAuth app is in Testing status).
 - AC: the scope requested is `googlehealth.health_metrics_and_measurements.readonly`, as a variable.
+- AC: after connecting, it writes the full Patient once with T06's setup Bundle (D11), using the
+  Google Health user ID from the identity call and demographics from configuration, and uses the
+  device name exactly as Google reports it or writes no Device.
 - AC: `health-sync` needs exactly these three secrets and nothing else from the deployer.
 - AC: documented in `docs/setup.md` terms a new user can follow.
 
@@ -243,6 +257,9 @@ parse; map; write to FHIR; patch the outcome labels; acknowledge.
   OBX-5 and OBX-6 map to the component value and UCUM unit.
 - AC: OBX-14 maps to `effectiveDateTime`, with the time zone handled explicitly.
 - AC: MSH and PID identifiers map to the `Patient` and `Device` references.
+- AC: writes with `blood_pressure_transaction` from T06 (an ingest Bundle, D11). The Patient is
+  built from PID-3.1 and PID-5 only, and an empty name part does not fail the message. A PID-3.1
+  that is not the configured patient is an application-level `error`.
 - AC: a `Provenance` points back to the HL7v2 store message name.
 - AC: the write is a conditional update keyed on the message control ID, so a redelivered push
   does not create a second Observation.
@@ -318,6 +335,9 @@ Bundle endpoint and ignores conditional create.
   assertion (`private_key_jwt`) with `system/*` scopes; no admin API key and no user login.
 - AC: sharing the same reading twice does not create a duplicate patient (search, then create).
 - AC: the Patient sent has a `PT`-typed identifier, a name with `use: official`, gender and birth date.
+- AC: the Patient sent is built with T06's `patient_for_sharing`, so the Google Health user ID,
+  `id` and `meta` never go to the clinic; a Patient that is not complete is refused with what is
+  missing. Only `final` Observations are shared.
 - AC: OpenEMR's "already exists" `400` for a repeated reading is reported as already shared, not
   as a failure.
 - AC: the chart link is built from the numeric patient id in the Encounter-create response.
@@ -426,6 +446,9 @@ reports image digests.
 `terraform.tfvars.example`; `use_synthetic_data` switches the wearable source.
 - AC: `terraform validate` passes in both; a clean project reaches a working stack from `dev`.
 - AC: `terraform destroy` leaves nothing billable.
+- AC: setup (writing the Patient, D11) runs before the ingest services are enabled: the Scheduler
+  job and the push subscription are switched on only after it, so two services cannot both
+  create the Patient at first contact.
 
 **T26 Terraform CI/CD.** `fmt -check`, `validate`, `tflint`, `trivy config`, plan posted on pull
 requests, apply to dev on merge, manual gate for prod, nightly destroy test for dev (see D1).

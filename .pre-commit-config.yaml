@@ -35,9 +35,13 @@ repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.17.5
     hooks:
+      # Python files only, like `make lint`. Without this, ruff also reformats Python snippets
+      # inside Markdown files, which `make lint` never checks, so the two would disagree.
       - id: ruff-check
         args: [--fix]
+        types_or: [python, pyi]
       - id: ruff-format
+        types_or: [python, pyi]
 
   # GitHub Actions workflow linter: catches YAML and expression mistakes before CI runs.
   - repo: https://github.com/rhysd/actionlint
