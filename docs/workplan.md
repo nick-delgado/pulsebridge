@@ -27,6 +27,7 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D8 | Heart-rate granularity | Five-minute roll-ups from the Google Health API's `rollUp` method (about 288 Observations a day), not raw samples (about 37,000 a day). See `docs/spikes/s3.md`. |
 | D9 | Reviewer login | A shared password in Secret Manager, checked by `fhir-proxy`, which issues an 8-hour signed bearer token. No Identity Platform. See `docs/spikes/s6.md`. |
 | D10 | One front door | `fhir-proxy` is the only public service the page calls. The cuff simulator is not publicly invocable; the proxy forwards cuff requests to it, so it sits behind the reviewer login. |
+| D11 | Who owns the Patient record | A setup step (the connect script or the seeder) writes the full Patient once with a conditional update. Ingest Bundles from `health-sync` and `v2-to-fhir` include Patient and Device as conditional creates (`POST` with `ifNoneExist`), so they never overwrite. Fallback if the store does not resolve in-Bundle references to the existing resource: a fixed Patient ID with direct references. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
 | D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
