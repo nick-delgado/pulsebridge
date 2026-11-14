@@ -82,7 +82,7 @@ design, a proposed edit to the brief. Spikes create no permanent resources.
 | T04 | Module `identity` | T01 | `infra/modules/identity/` | done |
 | T05 | Module `healthcare` | T01 | `infra/modules/healthcare/` | done |
 | T06 | FHIR mapping library | T01 | `libs/pulsebridge_fhir/` | in-progress |
-| T07 | HL7v2 helpers (hl7apy) | T01 | `libs/pulsebridge_hl7v2/` | in-progress |
+| T07 | HL7v2 helpers (hl7apy) | T01 | `libs/pulsebridge_hl7v2/` | done |
 
 **T01 Repo scaffolding.** Python tooling (ruff, pytest), a Makefile with `lint`, `test`, `fmt`,
 `tf-validate` targets, pre-commit hooks including a secret scanner, and a CI workflow that runs
