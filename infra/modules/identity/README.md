@@ -55,10 +55,11 @@ on exactly that resource, for the account `module.identity.service_account_email
 | `health-sync` | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T05) | Writes the heart-rate transaction Bundle with conditional updates. |
 | `v2-to-fhir` | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T05) | Writes Observation, Patient, Device, Provenance by conditional update. |
 | `v2-to-fhir` | `roles/healthcare.hl7V2Consumer` | the HL7v2 store | `healthcare` (T05) | Reads the ingested message and writes the `application_outcome` labels on it (T12, D7). **Unconfirmed:** that Consumer includes updating message labels comes only from search-result summaries of Google's roles page; confirm on first apply, else T05 moves to `hl7V2Editor`. |
-| `cuff-sim` | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T32) | D12: writes one `AuditEvent` per send attempt (`PUT AuditEvent/<id>`) because it holds the raw ACK and is not public, so `fhir-proxy` can stay read-only. Narrowest predefined role with create and update, but store-wide: it can write **any** resource type, not only AuditEvent. Accepted because `cuff-sim` is not publicly invocable (D10); a separate audit FHIR store is the real tightening (see the healthcare README). |
+| `cuff-sim` | `roles/healthcare.fhirResourceEditor` | the **audit** FHIR store only | `healthcare` (T32) | D12, D15: writes one `AuditEvent` per send attempt (`PUT AuditEvent/<id>`). The role also lets it read, search and delete audit records; it reaches no health data. `cuff-sim` has **no** binding on the main FHIR store. The audit store exists so that this write access does not extend to health data, which the editor role on the main store would have (read and delete included); see the healthcare README. |
 | `cuff-sim` | `roles/healthcare.hl7V2Ingest` | the HL7v2 store | `healthcare` (T05) | Only for the HTTPS-ingest transport (T13); the default MLLP transport needs no IAM, only the firewall rule in `edge-vm`. |
 | `fhir-proxy` | `roles/secretmanager.secretAccessor` | secrets `reviewer-password`, `openemr-client-private-key` (each) | **this module** | D9 login check; S1 `private_key_jwt` assertion for OpenEMR (T14, T15). |
-| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | the FHIR store | `healthcare` (T05) | Read API, trace lookups, share source data, and the messages log's AuditEvents (D12). Read only: the public service never writes to the FHIR store, tested in the healthcare module. |
+| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | the FHIR store | `healthcare` (T05) | Read API, trace lookups, share source data. Read and search only, no writes. |
+| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | the audit FHIR store | `healthcare` (T32) | D15: reads the send-attempt AuditEvents for the messages log (T14, T19). Read and search only. The healthcare module's tests and static check assert that its role table gives `fhir-proxy` only the reader role on both FHIR stores. |
 | `fhir-proxy` | `roles/healthcare.hl7V2Consumer` | the HL7v2 store | `healthcare` (T05) | Trace panel and messages log: original v2 message and its outcome labels. |
 | `fhir-proxy` | `roles/run.invoker` | Cloud Run service `cuff-sim` | `phr` (T22) | D10: the proxy forwards cuff requests with its own identity. |
 | `edge-vm` | `roles/secretmanager.secretAccessor` | secrets `db-root-password`, `openemr-db-password`, `openemr-admin-password` (each) | **this module** | The startup script writes them into the compose `.env` (S2). |
@@ -87,11 +88,13 @@ check if `viewer` turns out to be unsuitable.
 Role contents come from Google's documentation, not a live lookup (the project's IAM API is
 disabled, and `docs.cloud.google.com` is not reachable from the build session, so the latest
 checks used search-result summaries): `fhirResourceEditor` creates, reads, updates, deletes and
-searches FHIR resources; `fhirResourceReader` reads and searches; `hl7V2Consumer` reads and lists
-(and, per the summaries, updates labels); `hl7V2Ingest` only ingests; `secretVersionAdder` adds
-versions; `viewer` reads metadata of secrets and versions but not payloads. **To confirm on first
-apply:** `fhirResourceEditor` includes `healthcare.fhirStores.executeBundle`; `hl7V2Ingest` alone
-lets the MLLP adapter ingest (spike S4 ran with project Editor); `hl7V2Consumer` can update labels.
+searches FHIR resources in the store it is granted on; `fhirResourceReader` reads and searches;
+`hl7V2Consumer` reads and lists (and, per the summaries, updates labels); `hl7V2Ingest` only
+ingests; `secretVersionAdder` adds versions; `viewer` reads metadata of secrets and versions but
+not payloads. **To confirm on first apply:** `fhirResourceEditor` includes
+`healthcare.fhirStores.executeBundle` and allows a `PUT` that creates a resource
+(update-create); `hl7V2Ingest` alone lets the MLLP adapter ingest (spike S4 ran with project
+Editor); `hl7V2Consumer` can update labels.
 
 ### Not yet designed, may need grants
 
@@ -102,7 +105,8 @@ These are open in other tasks. Each may add a row to the table above; none is gr
   `fhir-proxy` read access to that one place.
 - **Where the FHIR transaction list is stored** (T14, T19): its writer and reader
   (`fhir-proxy`) need access to it. The messages log's send attempts are settled by D12: they
-  are AuditEvents in the FHIR store, written by `cuff-sim` and read by `fhir-proxy` (rows above).
+  are AuditEvents in a separate audit FHIR store (D15), written by `cuff-sim` and read by
+  `fhir-proxy` (rows above).
 - **Cloud Build's build identity** (T24): without a dedicated service account, builds run as the
   Compute Engine default account, which has project Editor in older projects. T24 should create
   a build account with only Artifact Registry write and log writing.
