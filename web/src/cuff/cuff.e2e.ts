@@ -146,8 +146,9 @@ test('out of the mapper range: stored with AA, then an application-level error i
   });
   await expect(row).toContainText('(reason code out-of-range)');
   await expect(share(page)).toBeDisabled();
-  // T16's share placeholder reports a missing Observation before any unshareableReason.
-  await expect(page.locator('#share-hint')).toContainText('no Observation was stored');
+  await expect(page.locator('#share-hint')).toContainText(
+    'the mapper could not turn it into an Observation: A value is outside the plausible range',
+  );
   expect(errors).toEqual([]);
 });
 

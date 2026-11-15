@@ -77,13 +77,44 @@ export function lastSyncRun(nowMs: number): number {
  *   clock to 2026-11-01 12:00 EST, eleven hours after the autumn change).
  */
 export const MOCK_DATA_SETS = {
-  utc: { id: 'utc', timeZone: null, label: 'UTC timestamps' },
+  utc: { id: 'utc', timeZone: null, label: 'UTC timestamps', hostile: false },
   'dst-new-york': {
     id: 'dst-new-york',
     timeZone: 'America/New_York',
     label: 'America/New_York timestamps, across daylight-saving changes',
+    hostile: false,
+  },
+  // UTC data plus markup in every text that comes from another system (see HOSTILE_MARKUP), so a
+  // browser test can prove the page shows it as text under the real Content-Security-Policy.
+  hostile: {
+    id: 'hostile',
+    timeZone: null,
+    label: 'Markup in text from other systems (MSA-3, sample text, diagnostics)',
+    hostile: true,
   },
 } as const;
+
+/**
+ * The markup the `hostile` data set puts into text from other systems: an MSA-3 reason (and so
+ * the raw ACK), each sample's description, a malformed sample's segment text (an extra NTE
+ * segment) and the diagnostics of a refusal. Rendered as markup it would run script or load an
+ * image, which the CSP would report; rendered as text it is just characters.
+ */
+export const HOSTILE_MARKUP =
+  `<img src="x" onerror="alert('pulsebridge-hostile-mock')">` +
+  `<script>alert('pulsebridge-hostile-mock')</script>`;
+
+/**
+ * In the `hostile` data set a built reading with this systolic value is refused with a 422 whose
+ * diagnostics hold `HOSTILE_MARKUP`: a refusal the form's own checks cannot catch.
+ */
+export const HOSTILE_REFUSED_SYSTOLIC = 333;
+
+/** The audit failure named by `?mock-audit=build|write` (MockClientOptions.auditFailure), or null. */
+export function mockAuditFailureFromSearch(search: string): 'build' | 'write' | null {
+  const value = new URLSearchParams(search).get('mock-audit');
+  return value === 'build' || value === 'write' ? value : null;
+}
 
 export type MockDataSetId = keyof typeof MOCK_DATA_SETS;
 export type MockDataSet = (typeof MOCK_DATA_SETS)[MockDataSetId];
