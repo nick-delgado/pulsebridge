@@ -23,25 +23,37 @@ LOINC `96935-2` / `55426-1` its minimum and maximum. One Observation becomes one
 
 - **the line** is the average, drawn at the middle of the window;
 - **the band** is the minimum-to-maximum range inside each window, so a spike that the average
-  smooths away is still visible;
+  smooths away is still visible. Its edges are thin lines in the muted text colour (at least 3:1
+  against the surface, WCAG 1.4.11); the fill between them is a light tint. The legend swatch is
+  drawn the same way;
 - **a gap** is drawn where the next window does not start where the previous one ended (the watch
   was off or charging): `data.ts` inserts a row with null values, and uPlot breaks the line and the
   band there instead of joining the two sides;
-- **provisional** windows (any `status` other than `final`; in practice `preliminary`, the newest
-  ones that may still receive late samples, T10) are a dashed line in the warning colour, with a
-  marker on each, and the legend, the readout and the details say "provisional".
+- **provisional** windows (`preliminary`, the newest ones that may still receive late samples
+  (T10), and `registered`) are a dashed line in the warning colour, with a marker on each, and the
+  legend, the readout and the details say "provisional". Other non-final statuses (`amended`,
+  `corrected`, `unknown`) are drawn on the solid line and described as "status amended: not
+  shared (only final is)". Only `final` windows are shareable.
 
-Observations with status `entered-in-error` or `cancelled` are not results (R4
-observation-status) and are left out; ones without a valid period or a `/min` value are not drawn
-on a wrong scale. The summary says how many of either were left out.
+What is left out, and counted in the summary:
+
+- `entered-in-error` and `cancelled` Observations: R4 says they are not results.
+- Unreadable ones: no id or valid period; a value, or a minimum/maximum component, that is not
+  UCUM `/min` (`system` http://unitsofmeasure.org and `code` `/min`; a bare number is refused); or
+  contradictory numbers (minimum above maximum, or the average outside minimum..maximum). The page
+  cannot know which of contradictory numbers is wrong, so it shows the problem as a count rather
+  than drawing a "repaired" band.
+- Duplicates: two Observations for the same window start (writes are idempotent, so this means an
+  upstream fault). The most recently updated (`meta.lastUpdated`) is kept.
 
 ### 30 days stay responsive
 
 Thirty days is about 8,600 windows. uPlot's line path builder already reduces the points to one
 minimum/maximum pair per pixel column while it builds the path, so drawing costs the plot width,
 not the number of points. We therefore do **not** aggregate the data for display: every window is
-still its own row, and a click (nearest window to the pointer, `nearestPoint`) or the keyboard
-cursor (one window per arrow key) always lands on exactly one stored Observation,
+still its own row, and a click (the window whose middle is nearest the pointer,
+`pointAtPosition`) or the keyboard cursor (one window per arrow key) always lands on exactly one
+stored Observation,
 `points[i].observation`, whose id goes into the selection and the trace call. Gap rows are never
 selectable because selection works on `points`, not on chart rows.
 
@@ -77,8 +89,20 @@ covered by unit tests with hand-made New York data.
 
 Click, tap, or Enter/Space on the keyboard cursor selects a window: the shared selection gets
 the Observation id, a short summary, and, for a window that is not `final`, an
-`unshareableReason`, so the Share button stays disabled and explains why. A refresh after a sync
-re-sets the selection from the new data, so a window that became `final` becomes shareable.
+`unshareableReason`, so the Share button stays disabled and explains why. uPlot's post-drag click
+filter is replaced, so a click whose pointer moves a pixel or two still selects.
+
+The selection is kept honest as data changes:
+
+- After a reload (range switch or sync) a selected window that is still there is re-set from the
+  new copy (a window that became `final` becomes shareable); if its status or `meta.versionId`
+  changed, the trace is reloaded too.
+- A selected window that is missing although its window overlaps the range just loaded (it came
+  back `entered-in-error` or was removed) is deselected, and the trace panel says why.
+- A selected window outside the range now shown stays selected but is re-checked through the
+  trace call.
+- The Observation the trace call returns is the freshest copy: it re-sets the selection, and a
+  withdrawn copy or a 404 deselects it.
 
 The trace panel (`trace.ts`, the shell's `createTabs`) shows:
 
@@ -89,7 +113,8 @@ The trace panel (`trace.ts`, the shell's `createTabs`) shows:
 ## Accessibility
 
 - The plot is a keyboard **slider** over the windows (`role="slider"`): Left/Right one window,
-  Page Up/Down one hour, Home/End; its `aria-valuetext` is the whole window in words. Moving only
+  Page Up/Down by one hour of time (to the window nearest that moment, so a gap does not make it
+  jump further), Home/End; its `aria-valuetext` is the whole window in words. Moving only
   previews; Enter or Space selects.
 - A text alternative is always on the page: the summary (range, number of windows, first and
   last window, latest value and its status) is the slider's description, and the statistics and

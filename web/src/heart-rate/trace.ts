@@ -24,6 +24,8 @@ export type TraceState =
   | { kind: 'empty' }
   | { kind: 'loading'; summary: string }
   | { kind: 'error'; summary: string; message: string }
+  /** The selected reading was withdrawn or is no longer stored, so it was deselected. */
+  | { kind: 'gone'; summary: string }
   | { kind: 'ready'; trace: HeartRateTrace };
 
 export interface TracePanel {
@@ -56,6 +58,17 @@ export function tracePanel(slot: HTMLElement, signal: AbortSignal): TracePanel {
           el('p', {
             class: 'placeholder',
             text: `Loading the trace for ${state.summary}…`,
+            attrs: { role: 'status' },
+          }),
+        );
+        return;
+      }
+      if (state.kind === 'gone') {
+        replaceChildren(
+          slot,
+          el('p', {
+            class: 'hr-message__text hr-message__text--warn',
+            text: `${state.summary} is no longer a stored result (it was withdrawn or removed), so it is no longer selected.`,
             attrs: { role: 'status' },
           }),
         );

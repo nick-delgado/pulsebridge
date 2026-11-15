@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { shareableObservation } from '../state/selection';
+import type { Observation } from '../api/fhir';
 import {
   chartSeries,
   describePoint,
   nearestPoint,
   prepareReadings,
   selectionFor,
+  statusText,
   toPoint,
+  unshareableReason,
   windowStats,
   type HeartRatePoint,
 } from './data';
@@ -35,12 +38,76 @@ describe('one Observation becomes one point', () => {
     expect(p.observation).toBe(obs);
   });
 
-  it('marks every status other than final as provisional', () => {
-    expect(point(hrObservation({ start: T0, avg: 60 })).provisional).toBe(false);
-    expect(point(hrObservation({ start: T0, avg: 60, status: 'preliminary' })).provisional).toBe(
-      true,
-    );
-    expect(point(hrObservation({ start: T0, avg: 60, status: 'amended' })).provisional).toBe(true);
+  it('calls only preliminary and registered windows provisional; shares only final ones', () => {
+    const at0 = (status: Observation['status']) =>
+      point(hrObservation({ start: T0, avg: 60, status }));
+    expect(at0('final')).toMatchObject({ provisional: false, shareable: true });
+    expect(at0('preliminary')).toMatchObject({ provisional: true, shareable: false });
+    expect(at0('registered')).toMatchObject({ provisional: true, shareable: false });
+    for (const status of ['amended', 'corrected', 'unknown'] as const) {
+      expect(at0(status)).toMatchObject({ provisional: false, shareable: false });
+      expect(statusText(at0(status))).toBe(`status ${status}: not shared (only final is)`);
+      expect(unshareableReason(at0(status))).toBe(
+        `this window's FHIR status is "${status}", not "final". Only final readings are shared.`,
+      );
+    }
+    expect(statusText(at0('preliminary'))).toBe('provisional (status preliminary)');
+    expect(statusText(at0('final'))).toBe('final');
+  });
+
+  it('requires UCUM /min on the value and on any min/max component', () => {
+    const bare = hrObservation({ start: T0, avg: 60 });
+    bare.valueQuantity = { value: 60 };
+    expect(toPoint(bare)).toBe('unreadable');
+    const unitOnly = hrObservation({ start: T0, avg: 60 });
+    unitOnly.valueQuantity = { value: 60, unit: 'beats/minute' };
+    expect(toPoint(unitOnly)).toBe('unreadable');
+    const badComponent = hrObservation({ start: T0, avg: 60, min: 55, max: 70 });
+    const minComp = badComponent.component?.[0];
+    if (minComp)
+      minComp.valueQuantity = { value: 55, system: 'http://unitsofmeasure.org', code: 'mm[Hg]' };
+    expect(toPoint(badComponent)).toBe('unreadable');
+    // No components at all is fine: the band then shows the average only.
+    expect(typeof toPoint(hrObservation({ start: T0, avg: 60 }))).toBe('object');
+  });
+
+  it('treats contradictory numbers as unreadable instead of repairing them', () => {
+    expect(toPoint(hrObservation({ start: T0, avg: 60, min: 70, max: 65 }))).toBe('unreadable');
+    expect(toPoint(hrObservation({ start: T0, avg: 80, min: 55, max: 70 }))).toBe('unreadable');
+    expect(toPoint(hrObservation({ start: T0, avg: 50, min: 55, max: 70 }))).toBe('unreadable');
+    expect(toPoint(hrObservation({ start: T0, avg: 50, min: 55 }))).toBe('unreadable');
+    expect(toPoint(hrObservation({ start: T0, avg: 80, max: 70 }))).toBe('unreadable');
+    expect(typeof toPoint(hrObservation({ start: T0, avg: 55, min: 55, max: 55 }))).toBe('object');
+    const r = prepareReadings([
+      hrObservation({ start: at(0), avg: 60, min: 70, max: 65 }),
+      hrObservation({ start: at(5), avg: 60, min: 55, max: 65 }),
+    ]);
+    expect(r.unreadable).toBe(1);
+    expect(r.points).toHaveLength(1);
+  });
+
+  it('keeps one window per start time: the most recently updated', () => {
+    const older = {
+      ...hrObservation({ start: at(0), avg: 60, id: 'old' }),
+      meta: { lastUpdated: '2026-01-01T15:00:00Z' },
+    };
+    const newer = {
+      ...hrObservation({ start: at(0), avg: 61, id: 'new' }),
+      meta: { lastUpdated: '2026-01-01T16:00:00Z' },
+    };
+    const other = hrObservation({ start: at(5), avg: 62, id: 'other' });
+    for (const order of [
+      [older, newer, other],
+      [newer, older, other],
+    ]) {
+      const r = prepareReadings(order);
+      expect(r.points.map((p) => p.id)).toEqual(['new', 'other']);
+      expect(r.duplicates).toBe(1);
+    }
+    // No lastUpdated on either: the later one in the list wins.
+    const a = hrObservation({ start: at(0), avg: 60, id: 'a' });
+    const b = hrObservation({ start: at(0), avg: 61, id: 'b' });
+    expect(prepareReadings([a, b]).points.map((p) => p.id)).toEqual(['b']);
   });
 
   it('leaves out withdrawn results and refuses what it cannot draw correctly', () => {
@@ -89,7 +156,7 @@ describe('chart series: gaps and provisional windows', () => {
       Date.parse('2026-01-01T14:15:00Z'), // end of the last window before the gap
       Date.parse('2026-01-01T14:47:30Z'),
     ]);
-    expect(s.averageFinal).toEqual([60, 61, 62, null, 70]);
+    expect(s.averageSettled).toEqual([60, 61, 62, null, 70]);
     expect(s.minimum).toEqual([58, 59, 60, null, 66]);
     expect(s.maximum).toEqual([63, 64, 65, null, 74]);
     expect(s.pointOfRow).toEqual([0, 1, 2, -1, 3]);
@@ -116,7 +183,7 @@ describe('chart series: gaps and provisional windows', () => {
         hrObservation({ start: at(15), avg: 67, status: 'preliminary' }),
       ]).points,
     );
-    expect(s.averageFinal).toEqual([60, 61, null, null]);
+    expect(s.averageSettled).toEqual([60, 61, null, null]);
     expect(s.averageProvisional).toEqual([null, 61, 66, 67]);
   });
 

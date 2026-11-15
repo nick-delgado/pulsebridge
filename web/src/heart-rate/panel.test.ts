@@ -67,6 +67,9 @@ function fakeClient() {
   }[] = [];
   const traces: { id: string; signal: AbortSignal; answer: Deferred<HeartRateTrace> }[] = [];
   let statusValue: StatusSummary = status();
+  /** When set, getStatus waits until the test resolves the Deferred it pushes here. */
+  let holdStatus = false;
+  const statuses: Deferred<StatusSummary>[] = [];
   const client = {
     mode: 'mock',
     searchObservations(query: ObservationQuery, options: CallOptions = {}) {
@@ -76,7 +79,10 @@ function fakeClient() {
       return answer.promise;
     },
     getStatus() {
-      return Promise.resolve(statusValue);
+      if (!holdStatus) return Promise.resolve(statusValue);
+      const answer = deferred<StatusSummary>();
+      statuses.push(answer);
+      return answer.promise;
     },
     getHeartRateTrace(id: string, options: CallOptions = {}) {
       const answer = deferred<HeartRateTrace>();
@@ -89,10 +95,19 @@ function fakeClient() {
     client,
     searches,
     traces,
+    statuses,
     setStatus(s: StatusSummary) {
       statusValue = s;
     },
+    holdStatus() {
+      holdStatus = true;
+    },
   };
+}
+
+/** A trace answer built around one Observation, the way the client returns it. */
+function traceOf(observation: Observation): HeartRateTrace {
+  return { observation, provenance: null, device: null, source: null };
 }
 
 /** Stands in for uPlot (jsdom has no canvas); it keeps what it was given so a test can click. */
@@ -126,8 +141,9 @@ afterEach(() => {
   document.body.replaceChildren();
 });
 
-function mount() {
+function mount(before?: (api: ReturnType<typeof fakeClient>) => void) {
   const api = fakeClient();
+  before?.(api);
   const chart = fakeChart();
   const selection = createSelectionStore();
   const bus = createDataChangeBus();
@@ -386,5 +402,188 @@ describe('after a sync', () => {
     await settle();
     expect(shareableObservation(m.selection.get())).toBe('Observation/w3');
     expect(m.slots.panel.querySelector('.hr-stats')?.textContent).toContain('none provisional');
+  });
+});
+
+describe('the selection after a reload (review M1)', () => {
+  it('is dropped when the selected window comes back entered-in-error', async () => {
+    const m = await loaded();
+    m.chart.state.callbacks?.onPick(1); // w2, final
+    expect(shareableObservation(m.selection.get())).toBe('Observation/w2');
+    m.bus.notify('sync');
+    const again = threeWindows();
+    again[1] = {
+      ...hrObservation({ start: plusMinutes(START, 5), avg: 70, id: 'w2' }),
+      status: 'entered-in-error',
+    };
+    m.searches[1]?.answer.resolve(again);
+    await settle();
+    expect(m.selection.get()).toBeNull();
+    expect(m.slots.panel.querySelector('.hr-details')?.textContent).toBe('');
+    expect(m.slots.trace.textContent).toContain('is no longer a stored result');
+    expect(m.traces[0]?.signal.aborted).toBe(true);
+  });
+
+  it('is dropped when the selected window is missing from a range that overlaps it', async () => {
+    const m = await loaded();
+    m.chart.state.callbacks?.onPick(1);
+    m.bus.notify('sync');
+    m.searches[1]?.answer.resolve(threeWindows().filter((o) => o.id !== 'w2'));
+    await settle();
+    expect(m.selection.get()).toBeNull();
+    expect(m.traces).toHaveLength(1); // no re-check: the search would have returned it
+  });
+
+  /** Selects a window from 28 Dec (inside 7 d, outside 24 h), then switches back to 24 h. */
+  async function selectOldThenShow24h() {
+    const old = hrObservation({
+      start: '2025-12-28T10:00:00-05:00',
+      avg: 64,
+      min: 60,
+      max: 70,
+      id: 'old',
+    });
+    const m = await loaded();
+    m.button('Show the last 7 days').click();
+    m.searches[1]?.answer.resolve([old, ...threeWindows()]);
+    await settle();
+    m.chart.state.callbacks?.onPick(0);
+    m.traces[0]?.answer.resolve(traceOf(old));
+    await settle();
+    expect(shareableObservation(m.selection.get())).toBe('Observation/old');
+    m.button('Show the last 24 hours').click();
+    m.searches[2]?.answer.resolve(threeWindows());
+    await settle();
+    return { m, old };
+  }
+
+  it('is kept but re-checked through the trace when it lies outside the range shown', async () => {
+    const { m, old } = await selectOldThenShow24h();
+    expect(m.traces.map((t) => t.id)).toEqual(['old', 'old']);
+    expect(shareableObservation(m.selection.get())).toBe('Observation/old');
+    m.traces[1]?.answer.resolve(traceOf(old));
+    await settle();
+    expect(shareableObservation(m.selection.get())).toBe('Observation/old');
+    expect(m.slots.trace.textContent).toContain('"id": "old"');
+  });
+
+  it('is dropped when that re-check finds it withdrawn', async () => {
+    const { m, old } = await selectOldThenShow24h();
+    m.traces[1]?.answer.resolve(traceOf({ ...old, status: 'entered-in-error' }));
+    await settle();
+    expect(m.selection.get()).toBeNull();
+    expect(m.slots.trace.textContent).toContain('is no longer a stored result');
+  });
+
+  it('is dropped when that re-check finds it gone (404)', async () => {
+    const { m } = await selectOldThenShow24h();
+    m.traces[1]?.answer.reject(new ApiError(404, 'Observation/old not found'));
+    await settle();
+    expect(m.selection.get()).toBeNull();
+  });
+});
+
+describe('the trace keeps the selection current', () => {
+  it('a trace newer than the chart (now final) makes the selection shareable', async () => {
+    const m = await loaded();
+    m.chart.state.callbacks?.onPick(2); // w3, preliminary on the chart
+    expect(shareableObservation(m.selection.get())).toBeNull();
+    const w3 = threeWindows()[2];
+    if (!w3) throw new Error('fixture');
+    m.traces[0]?.answer.resolve(traceOf({ ...w3, status: 'final' }));
+    await settle();
+    expect(shareableObservation(m.selection.get())).toBe('Observation/w3');
+    expect(m.slots.panel.querySelector('.hr-details')?.textContent).toContain('Statusfinal');
+  });
+
+  it('ignores a trace answer that arrives after a newer pick', async () => {
+    const m = await loaded();
+    m.chart.state.callbacks?.onPick(0);
+    m.chart.state.callbacks?.onPick(1);
+    const [w1, w2] = threeWindows();
+    if (!w1 || !w2) throw new Error('fixture');
+    m.traces[1]?.answer.resolve(traceOf(w2));
+    await settle();
+    m.traces[0]?.answer.resolve(traceOf(w1)); // late, for the older pick
+    await settle();
+    expect(m.selection.get()).toMatchObject({ observationId: 'w2' });
+    expect(m.slots.trace.textContent).toContain('"id": "w2"');
+    expect(m.slots.trace.textContent).not.toContain('"id": "w1"');
+  });
+
+  it('reloads the trace after a sync only when the selected window changed', async () => {
+    const m = await loaded();
+    m.chart.state.callbacks?.onPick(1);
+    expect(m.traces).toHaveLength(1);
+    m.bus.notify('sync');
+    m.searches[1]?.answer.resolve(threeWindows()); // unchanged
+    await settle();
+    expect(m.traces).toHaveLength(1);
+
+    m.bus.notify('sync');
+    const newVersion = threeWindows().map((o) =>
+      o.id === 'w2' ? { ...o, meta: { versionId: '2' } } : o,
+    );
+    m.searches[2]?.answer.resolve(newVersion);
+    await settle();
+    expect(m.traces.map((t) => t.id)).toEqual(['w2', 'w2']);
+
+    m.chart.state.callbacks?.onPick(2); // w3, preliminary
+    m.bus.notify('sync');
+    m.searches[3]?.answer.resolve(newVersion.map((o) => ({ ...o, status: 'final' as const })));
+    await settle();
+    expect(m.traces.map((t) => t.id)).toEqual(['w2', 'w2', 'w3', 'w3']);
+  });
+});
+
+describe('pointer and Page keys', () => {
+  it('a click moves the keyboard cursor too, so the slider value matches', async () => {
+    const m = await loaded();
+    m.chart.state.callbacks?.onPick(0);
+    expect(m.slider().getAttribute('aria-valuenow')).toBe('1');
+    expect(m.slider().getAttribute('aria-valuetext')).toMatch(/^Thu 1 Jan 2026, 09:00–09:05/);
+  });
+
+  it('Page Up and Page Down move by one hour of time, across gaps', async () => {
+    // 09:00 to 09:25 (6 windows), a gap, then 10:30 to 11:55 (18 windows).
+    const obs = [
+      ...[0, 5, 10, 15, 20, 25].map((min) =>
+        hrObservation({ start: plusMinutes(START, min), avg: 60 + min / 5, id: `a${String(min)}` }),
+      ),
+      ...Array.from({ length: 18 }, (_, k) =>
+        hrObservation({
+          start: plusMinutes(START, 90 + 5 * k),
+          avg: 70,
+          id: `b${String(90 + 5 * k)}`,
+        }),
+      ),
+    ];
+    const m = await loaded(obs);
+    m.slider().dispatchEvent(new FocusEvent('focus'));
+    m.key('Home');
+    m.key('PageUp'); // from 09:02:30 to 10:02:30: nearer 10:32:30 (b90) than 09:27:30 (a25)
+    expect(m.slider().getAttribute('aria-valuetext')).toMatch(/10:30–10:35/);
+    m.key('PageUp'); // 11:32:30: window b150 (11:30)
+    expect(m.slider().getAttribute('aria-valuetext')).toMatch(/11:30–11:35/);
+    m.key('PageDown'); // back to 10:32:30
+    expect(m.slider().getAttribute('aria-valuetext')).toMatch(/10:30–10:35/);
+    m.key('PageDown'); // 09:32:30: nearest is a25 (09:27:30)
+    expect(m.slider().getAttribute('aria-valuetext')).toMatch(/09:25–09:30/);
+  });
+});
+
+describe('the chart does not wait for the status (review minor 9)', () => {
+  it('draws when the search answers, and adds the reconnect note when the status arrives', async () => {
+    const m = mount((api) => {
+      api.holdStatus();
+    });
+    m.searches[0]?.answer.resolve(threeWindows());
+    await settle();
+    expect(m.chart.state.model?.points).toHaveLength(3);
+    expect(m.slots.panel.querySelector('.hr-message')?.textContent).toBe('');
+    m.statuses[0]?.resolve(status('reconnect-needed'));
+    await settle();
+    expect(m.slots.panel.querySelector('.hr-message')?.textContent).toContain('Reconnect needed');
+    expect(m.chart.state.model?.points).toHaveLength(3);
   });
 });

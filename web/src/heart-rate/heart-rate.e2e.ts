@@ -210,6 +210,7 @@ for (const scheme of ['light', 'dark'] as const) {
       return {
         line: ratio(swatch('line'), surface),
         provisional: ratio(swatch('provisional'), surface),
+        band: ratio(swatch('band'), surface),
         button: pressedStyle
           ? ratio(rgb(pressedStyle.color), rgb(pressedStyle.backgroundColor))
           : 0,
@@ -218,8 +219,91 @@ for (const scheme of ['light', 'dark'] as const) {
     });
     expect(ratios.line).toBeGreaterThanOrEqual(3);
     expect(ratios.provisional).toBeGreaterThanOrEqual(3);
+    expect(ratios.band).toBeGreaterThanOrEqual(3);
     expect(ratios.button).toBeGreaterThanOrEqual(4.5);
     expect(ratios.animations).toBe(0);
     expect(errors).toEqual([]);
   });
 }
+
+/** The effectivePeriod start of the Observation in the trace panel's "FHIR as stored" tab. */
+async function tracedStart(page: Page): Promise<string> {
+  const trace = page.getByRole('region', { name: 'Heart-rate trace' });
+  await expect(trace.getByRole('tabpanel')).toContainText('"effectivePeriod"');
+  const text = (await trace.getByRole('tabpanel').textContent()) ?? '';
+  return /"effectivePeriod": \{\s*"start": "([^"]+)"/.exec(text)?.[1] ?? '';
+}
+
+test('a click selects the window under the pointer', async ({ page }) => {
+  const errors = await watchErrors(page);
+  // Wide, so one pixel is little more than a minute and a click lands well inside one window.
+  await page.setViewportSize({ width: 1920, height: 1100 });
+  await logIn(page);
+  await expect(summary(page)).toContainText('last 24 hours');
+  const loadedAt = Date.now(); // the page's range ends at its own Date.now(), within a second
+  const over = watchSide(page).locator('.hr-chart .u-over');
+  const box = await over.boundingBox();
+  if (!box) throw new Error('no plot');
+
+  // Aim at the middle of a known window about six hours back (away from the mock's 12:00-12:40
+  // UTC charging gap).
+  const FIVE_MIN = 5 * 60_000;
+  let windowStart = Math.floor((loadedAt - 6 * 3600_000) / FIVE_MIN) * FIVE_MIN;
+  const hour = new Date(windowStart).getUTCHours();
+  if (hour >= 11 && hour <= 13) windowStart -= 3 * 3600_000;
+  const rangeStart = loadedAt - 24 * 3600_000;
+  const target = windowStart + FIVE_MIN / 2;
+  const pageX = Math.round(box.x + ((target - rangeStart) / (24 * 3600_000)) * box.width);
+  await page.mouse.click(pageX, box.y + box.height / 2);
+
+  expect(Date.parse(await tracedStart(page))).toBe(windowStart);
+  expect(errors).toEqual([]);
+});
+
+test('a click with a little pointer movement still selects (uPlot does not swallow it)', async ({
+  page,
+}) => {
+  const errors = await watchErrors(page);
+  await logIn(page);
+  await expect(summary(page)).toContainText('five-minute windows');
+  const box = await watchSide(page).locator('.hr-chart .u-over').boundingBox();
+  if (!box) throw new Error('no plot');
+  const x = box.x + box.width / 3;
+  const y = box.y + box.height / 2;
+  await page.mouse.move(x, y);
+  await page.mouse.down();
+  await page.mouse.move(x + 3, y + 2, { steps: 3 });
+  await page.mouse.up();
+  await expect(watchSide(page).getByRole('region', { name: 'Selected reading' })).toBeVisible();
+  await expect(page.locator('#share-hint')).toContainText('Heart rate');
+  expect(errors).toEqual([]);
+});
+
+test('a click on the left edge of the plot is not swallowed: it selects the window there', async ({
+  page,
+}) => {
+  const errors = await watchErrors(page);
+  await logIn(page);
+  await expect(summary(page)).toContainText('last 24 hours');
+  const loadedAt = Date.now();
+  const box = await watchSide(page).locator('.hr-chart .u-over').boundingBox();
+  if (!box) throw new Error('no plot');
+  const pageX = Math.ceil(box.x);
+  await page.mouse.click(pageX, box.y + box.height / 2);
+  // The time at the edge, and the window containing it (whose middle is the nearest). Allow
+  // for the page's clock differing from ours by up to three seconds.
+  const FIVE_MIN = 5 * 60_000;
+  const edge = loadedAt - 24 * 3600_000 + ((pageX - box.x) / box.width) * 24 * 3600_000;
+  const allowed = [edge - 3000, edge, edge + 3000].map((t) => Math.floor(t / FIVE_MIN) * FIVE_MIN);
+  expect(allowed).toContain(Date.parse(await tracedStart(page)));
+  expect(errors).toEqual([]);
+});
+
+test('uPlot draws no legend of its own (the page writes its own key and readout)', async ({
+  page,
+}) => {
+  await logIn(page);
+  await expect(watchSide(page).locator('.hr-chart canvas')).toBeVisible();
+  await expect(page.locator('.u-legend')).toHaveCount(0);
+  await expect(watchSide(page).getByRole('list', { name: 'Chart key' })).toBeVisible();
+});

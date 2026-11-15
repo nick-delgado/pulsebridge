@@ -4,12 +4,17 @@
  * the unit tests pass a stand-in chart and a fixed clock.
  *
  * Flow:
- *   load(range) ─ abort the previous load ─ searchObservations + getStatus ─▶ prepareReadings
+ *   load(range) ─ abort the previous load ─ searchObservations ─▶ prepareReadings
  *     ─▶ chart.update, statistics, summary; or the empty / error state
+ *     (getStatus runs alongside; when it answers, a "reconnect needed" note is added. The chart
+ *     never waits for it.)
  *   click, tap, or Enter on the keyboard cursor ─▶ selection.set(selectionFor(point))
- *     ─▶ details under the chart, and getHeartRateTrace ─▶ trace panel
- *   onDataChanged('sync') ─▶ load(range) again; a selected window is re-set from the new data, so
- *     a window that became `final` becomes shareable.
+ *     ─▶ details under the chart, and getHeartRateTrace ─▶ trace panel; the Observation the
+ *     trace returns re-checks the selection (it may be newer than the chart's copy).
+ *   onDataChanged('sync') ─▶ load(range) again, then reconcileSelection: a selected window is
+ *     re-set from the new data (a window that became `final` becomes shareable), dropped if it
+ *     was withdrawn or is gone from a range that should contain it, and re-checked through the
+ *     trace call if it lies outside the range now shown.
  *
  * Accessibility: the chart is never the only way in. The plot area is a keyboard "slider" over the
  * windows (Left/Right one window, Page Up/Down one hour, Home/End), whose value text is the whole
@@ -17,7 +22,7 @@
  * count and the latest value, and the statistics are plain text.
  */
 import type { PulseBridgeApi, StatusSummary } from '../api/contract';
-import { UnauthorizedError } from '../api/errors';
+import { ApiError, UnauthorizedError } from '../api/errors';
 import type { FeatureContext, HeartRateSlot } from '../shell/features';
 import type { Selection } from '../state/selection';
 import { append, el, replaceChildren } from '../ui/dom';
@@ -27,14 +32,17 @@ import {
   chartSeries,
   describePoint,
   HEART_RATE_CODE,
+  nearestPoint,
+  noReadings,
   prepareReadings,
   selectionFor,
   statusText,
+  toPoint,
   windowStats,
   type HeartRatePoint,
   type PreparedReadings,
 } from './data';
-import { DAY_MS, formatOffset, formatWindow } from './time';
+import { DAY_MS, formatOffset, formatWindow, HOUR_MS } from './time';
 import { tracePanel } from './trace';
 
 export const RANGES = [
@@ -44,8 +52,8 @@ export const RANGES = [
 ] as const;
 export type RangeId = (typeof RANGES)[number]['id'];
 
-/** Page Up / Page Down move this many windows: one hour of five-minute windows. */
-const PAGE_STEP = 12;
+/** Page Up / Page Down move by this much time, to the window nearest that moment. */
+const PAGE_STEP_MS = HOUR_MS;
 
 export interface HeartRateDeps {
   chart: ChartFactory;
@@ -169,11 +177,20 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
 
   // -- state -----------------------------------------------------------------------------------
   let range: RangeId = '24h';
-  let readings: PreparedReadings = { points: [], unreadable: 0, withdrawn: 0, segments: [] };
+  let readings: PreparedReadings = noReadings();
   /** Keyboard / hover cursor, as an index into readings.points. */
   let active: number | null = null;
   /** The selected point, while the page selection is one of ours and in the shown data. */
   let selectedIndex: number | null = null;
+  /**
+   * The point behind the page selection while it is ours, even when it is not in the range now
+   * shown (needed to tell "outside this range" from "gone"). Null otherwise.
+   */
+  let selectedPoint: HeartRatePoint | null = null;
+  /** The latest status answer for the current load, or null while none has arrived. */
+  let status: StatusSummary | null = null;
+  /** Whether the current load's observations have arrived. */
+  let loaded = false;
   let loadController: AbortController | null = null;
   let traceController: AbortController | null = null;
   let chart: ChartHandle | null = null;
@@ -188,7 +205,7 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
           showReadout(p ?? active);
         },
         onPick: (p) => {
-          active = p;
+          setActive(p);
           pick(p);
         },
       },
@@ -253,6 +270,19 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     );
   };
 
+  /** Clears the page selection because the selected reading is no longer a result, and says so. */
+  const dropSelection = (summaryText: string) => {
+    selectedPoint = null;
+    selection.set(null); // the subscriber clears the highlight, the details and the trace
+    trace.render({ kind: 'gone', summary: summaryText });
+  };
+
+  /** Re-sets the page selection from a (possibly newer) copy of the selected window. */
+  const refreshSelection = (p: HeartRatePoint) => {
+    selectedPoint = p;
+    selection.set(selectionFor(p));
+  };
+
   const loadTrace = (p: HeartRatePoint, sel: Selection) => {
     traceController?.abort();
     const controller = childController(signal);
@@ -260,13 +290,24 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     trace.render({ kind: 'loading', summary: sel.summary });
     client.getHeartRateTrace(p.id, { signal: controller.signal }).then(
       (result) => {
+        // A newer pick, a deselection or a logout replaced this request: its answer is stale.
         if (controller.signal.aborted) return;
+        // The trace's Observation is the freshest copy: re-check the selection against it.
+        const fresh = toPoint(result.observation);
+        if (typeof fresh === 'string') {
+          dropSelection(sel.summary);
+          return;
+        }
+        refreshSelection(fresh);
         trace.render({ kind: 'ready', trace: result });
-        const name = result.device?.deviceName?.[0]?.name;
-        if (selectedIndex !== null && points()[selectedIndex]?.id === p.id) renderDetails(p, name);
+        renderDetails(fresh, result.device?.deviceName?.[0]?.name);
       },
       (error: unknown) => {
         if (isAbort(error, controller.signal) || error instanceof UnauthorizedError) return;
+        if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
+          dropSelection(sel.summary);
+          return;
+        }
         trace.render({ kind: 'error', summary: sel.summary, message: errorMessage(error) });
       },
     );
@@ -277,6 +318,7 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     if (!p) return;
     const sel = selectionFor(p);
     selectedIndex = index;
+    selectedPoint = p;
     selection.set(sel);
     renderDetails(p);
     redrawMarks();
@@ -290,6 +332,7 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     } else {
       // The selection moved to the cuff side (or was cleared): drop our highlight and trace.
       selectedIndex = null;
+      selectedPoint = null;
       traceController?.abort();
       renderDetails(null);
       trace.render({ kind: 'empty' });
@@ -304,13 +347,16 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
       const n = points().length;
       if (n === 0) return;
       const from = active ?? selectedIndex ?? n - 1;
+      // Page Up / Down move by time, not by a count of windows, so a gap does not make "one
+      // hour" jump further.
+      const fromMid = points()[from]?.midMs ?? 0;
       const moves: Record<string, number> = {
         ArrowRight: from + 1,
         ArrowUp: from + 1,
         ArrowLeft: from - 1,
         ArrowDown: from - 1,
-        PageUp: from + PAGE_STEP,
-        PageDown: from - PAGE_STEP,
+        PageUp: nearestPoint(points(), fromMid + PAGE_STEP_MS),
+        PageDown: nearestPoint(points(), fromMid - PAGE_STEP_MS),
         Home: 0,
         End: n - 1,
       };
@@ -398,9 +444,11 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     const first = ps[0] ?? latest;
     let skipped = '';
     if (readings.unreadable > 0)
-      skipped += ` ${String(readings.unreadable)} stored readings could not be shown (no valid time or /min value).`;
+      skipped += ` ${count(readings.unreadable)} stored readings could not be shown (missing or inconsistent time or values).`;
     if (readings.withdrawn > 0)
-      skipped += ` ${String(readings.withdrawn)} withdrawn readings (entered in error or cancelled) are left out.`;
+      skipped += ` ${count(readings.withdrawn)} withdrawn readings (entered in error or cancelled) are left out.`;
+    if (readings.duplicates > 0)
+      skipped += ` ${count(readings.duplicates)} duplicate readings for the same window were dropped (the most recently updated is shown).`;
     summary.textContent =
       `Heart rate, ${spec.name}: ${count(ps.length)} five-minute windows from ` +
       `${formatWindow(first.startMs, first.endMs, first.offsetMinutes)} to ${formatWindow(latest.startMs, latest.endMs, latest.offsetMinutes)}. ` +
@@ -431,27 +479,35 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     );
   };
 
-  const showData = (status: StatusSummary | null, startMs: number, endMs: number) => {
+  /** The message above the chart once data is in: empty range, and the watch-sync state if known. */
+  const renderNotice = () => {
     const reconnect = status?.watchSync.state === 'reconnect-needed';
-    renderZone();
     if (points().length === 0) {
-      chartArea.hidden = true;
-      replaceChildren(stats);
-      summary.textContent = '';
       let text = 'No heart-rate data in this range.';
       if (reconnect)
         text +=
           ' Reconnect needed: the Google Health connection has expired, so no new readings arrive until the watch is reconnected.';
       else if (status?.watchSync.state === 'never-synced') text += ' The watch has not synced yet.';
       renderMessage(text, reconnect ? 'warn' : 'info');
-      return;
-    }
-    if (reconnect)
+    } else if (reconnect) {
       renderMessage(
         'Reconnect needed: the Google Health connection has expired, so newer readings are missing until the watch is reconnected.',
         'warn',
       );
-    else replaceChildren(message);
+    } else {
+      replaceChildren(message);
+    }
+  };
+
+  const showData = (startMs: number, endMs: number) => {
+    renderZone();
+    renderNotice();
+    if (points().length === 0) {
+      chartArea.hidden = true;
+      replaceChildren(stats);
+      summary.textContent = '';
+      return;
+    }
     chartArea.hidden = false;
     ensureChart().update({
       points: points(),
@@ -464,8 +520,16 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     renderSummary();
   };
 
-  /** After new data: find the selected Observation again, and re-set it if its status changed. */
-  const reconcileSelection = () => {
+  /**
+   * After new data, check the selected window against it:
+   *   - found: re-set it from the new copy (a window that became `final` becomes shareable); if
+   *     its status or version changed, reload the trace so it shows the same version;
+   *   - missing although its window overlaps the range just loaded (it was withdrawn, so left out
+   *     of the points, or removed): drop the selection;
+   *   - missing because its window lies outside the range now shown: keep it, but re-check it
+   *     through the trace call, which drops or updates it from the stored Observation.
+   */
+  const reconcileSelection = (startMs: number, endMs: number) => {
     const current = selection.get();
     if (current?.source !== 'watch') {
       selectedIndex = null;
@@ -474,10 +538,27 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     const i = points().findIndex((p) => p.id === current.observationId);
     selectedIndex = i < 0 ? null : i;
     const p = i < 0 ? undefined : points()[i];
+    const before = selectedPoint;
     if (p) {
-      selection.set(selectionFor(p));
+      refreshSelection(p);
       renderDetails(p);
+      const changed =
+        before !== null &&
+        (before.status !== p.status ||
+          before.observation.meta?.versionId !== p.observation.meta?.versionId);
+      if (changed) loadTrace(p, selectionFor(p));
+      return;
     }
+    // Same overlap rule as the search (date=gt<start>&date=lt<end> on a Period): the search
+    // would have returned the window, so it is gone. This also covers a window that came back
+    // `entered-in-error` or `cancelled`: the search returns those only inside the range, and
+    // prepareReadings leaves them out of the points.
+    const inRange = before !== null && before.endMs > startMs && before.startMs < endMs;
+    if (inRange || before === null) {
+      dropSelection(current.summary);
+      return;
+    }
+    loadTrace(before, current);
   };
 
   // -- loading ---------------------------------------------------------------------------------
@@ -491,33 +572,43 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     const startMs = endMs - rangeSpec(next).ms;
     slots.panel.setAttribute('aria-busy', 'true');
     renderMessage(`Loading the ${rangeSpec(next).name}…`, 'info');
+    status = null;
+    loaded = false;
 
-    const observations = client.searchObservations(
-      { code: HEART_RATE_CODE, range: { start: new Date(startMs), end: new Date(endMs) } },
-      { signal: controller.signal },
-    );
-    // The status tells an empty range apart from "reconnect needed"; its failure is not ours.
-    const status = getStatusQuietly(client, controller.signal);
-    Promise.all([observations, status]).then(
-      ([obs, st]) => {
-        if (controller.signal.aborted) return;
-        slots.panel.removeAttribute('aria-busy');
-        readings = prepareReadings(obs);
-        active = null;
-        reconcileSelection();
-        showData(st, startMs, endMs);
-        setActive(null);
-      },
-      (error: unknown) => {
-        if (isAbort(error, controller.signal) || error instanceof UnauthorizedError) return;
-        slots.panel.removeAttribute('aria-busy');
-        readings = { points: [], unreadable: 0, withdrawn: 0, segments: [] };
-        chartArea.hidden = true;
-        replaceChildren(stats);
-        summary.textContent = '';
-        renderMessage(`Could not load heart-rate data: ${errorMessage(error)}`, 'error', true);
-      },
-    );
+    // The status tells an empty range apart from "reconnect needed". The chart does not wait for
+    // it: the note is added when it answers. Its failure is the status strip's to report.
+    getStatusQuietly(client, controller.signal).then((st) => {
+      if (controller.signal.aborted || st === null) return;
+      status = st;
+      if (loaded) renderNotice();
+    }, ignore);
+
+    client
+      .searchObservations(
+        { code: HEART_RATE_CODE, range: { start: new Date(startMs), end: new Date(endMs) } },
+        { signal: controller.signal },
+      )
+      .then(
+        (obs) => {
+          if (controller.signal.aborted) return;
+          slots.panel.removeAttribute('aria-busy');
+          readings = prepareReadings(obs);
+          loaded = true;
+          active = null;
+          showData(startMs, endMs);
+          reconcileSelection(startMs, endMs);
+          setActive(null);
+        },
+        (error: unknown) => {
+          if (isAbort(error, controller.signal) || error instanceof UnauthorizedError) return;
+          slots.panel.removeAttribute('aria-busy');
+          readings = noReadings();
+          chartArea.hidden = true;
+          replaceChildren(stats);
+          summary.textContent = '';
+          renderMessage(`Could not load heart-rate data: ${errorMessage(error)}`, 'error', true);
+        },
+      );
   }
 
   context.onDataChanged((kind) => {
@@ -526,6 +617,10 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
 
   chartArea.hidden = true;
   load(range);
+}
+
+function ignore(): void {
+  /* nothing to do */
 }
 
 function getStatusQuietly(

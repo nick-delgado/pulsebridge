@@ -76,6 +76,24 @@ export function withAlpha(color: string, alpha: number): string {
   return `rgba(${String(r)}, ${String(g)}, ${String(b)}, ${String(alpha)})`;
 }
 
+/**
+ * The point under a horizontal position in the plot (CSS pixels from its left edge): the window
+ * whose middle is nearest to the time at that position, or null when there are none. It searches
+ * the points, not the chart rows (which include gap rows), so the answer is always one real
+ * Observation. `posToVal` is uPlot's pixel-to-time conversion.
+ */
+export function pointAtPosition(
+  points: readonly HeartRatePoint[],
+  posToVal: (left: number) => number,
+  left: number,
+): number | null {
+  if (points.length === 0) return null;
+  const p = nearestPoint(points, posToVal(left));
+  return p < 0 ? null : p;
+}
+
+/** Opacity of the band's tint; the legend swatch uses the same value (heart-rate.css). */
+const BAND_ALPHA = 0.3;
 const HEIGHT_WIDE = 240;
 const HEIGHT_NARROW = 200;
 /** Leave about this much room per x label. */
@@ -124,19 +142,14 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
 
   const data = (m: ChartModel): uPlot.AlignedData => [
     m.series.x,
-    m.series.averageFinal,
+    m.series.averageSettled,
     m.series.averageProvisional,
     m.series.maximum,
     m.series.minimum,
   ];
 
-  const pointAt = (u: uPlot, left: number): number | null => {
-    if (!model || model.points.length === 0) return null;
-    // Search the points (not the chart rows, which include gap rows), so the answer is always
-    // one real Observation.
-    const p = nearestPoint(model.points, u.posToVal(left, 'x'));
-    return p < 0 ? null : p;
-  };
+  const pointAt = (u: uPlot, left: number): number | null =>
+    model ? pointAtPosition(model.points, (px) => u.posToVal(px, 'x'), left) : null;
 
   const drawMarkers = (u: uPlot) => {
     if (!model) return;
@@ -183,7 +196,10 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
         x: false,
         y: false,
         points: { show: false },
-        drag: { x: false, y: false, setScale: false },
+        // No drag-to-zoom. `click` replaces uPlot's default post-drag handler, which stops the
+        // click event whenever the pointer moved at all between press and release (even 1 px),
+        // so an ordinary slightly-moving click or tap would select nothing.
+        drag: { x: false, y: false, setScale: false, click: () => undefined },
       },
       select: { show: false, left: 0, top: 0, width: 0, height: 0 },
       scales: {
@@ -220,21 +236,23 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
           },
         },
         {
+          // The band's edges: thin lines in the muted text colour, which has at least 3:1
+          // contrast with the surface (WCAG 1.4.11); the fill between them is only a tint.
           label: 'Maximum',
-          stroke: 'transparent',
-          width: 0,
+          stroke: color.muted,
+          width: 1,
           spanGaps: false,
           points: { show: false },
         },
         {
           label: 'Minimum',
-          stroke: 'transparent',
-          width: 0,
+          stroke: color.muted,
+          width: 1,
           spanGaps: false,
           points: { show: false },
         },
       ],
-      bands: [{ series: [3, 4], fill: () => withAlpha(color.line(), 0.2) }],
+      bands: [{ series: [3, 4], fill: () => withAlpha(color.line(), BAND_ALPHA) }],
       axes: [
         {
           stroke: color.muted,

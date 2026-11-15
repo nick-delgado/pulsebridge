@@ -115,9 +115,19 @@
   border-top: 2px solid var(--color-continuous);
 }
 
+/* Matches the canvas band: muted edge lines at full strength, a 0.3 tint of the line colour. */
 .hr-swatch--band {
+  position: relative;
+  border-top: 1px solid var(--color-text-muted);
+  border-bottom: 1px solid var(--color-text-muted);
+}
+
+.hr-swatch--band::before {
+  content: '';
+  position: absolute;
+  inset: 0;
   background: var(--color-continuous);
-  opacity: 0.25;
+  opacity: 0.3;
 }
 
 .hr-swatch--provisional {
