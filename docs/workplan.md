@@ -666,9 +666,9 @@ needed before T18 and T19 start.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (offline part merged; deploy part open) |
-| T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml`, `.tflint.hcl` | todo |
-| T27 | Secret version scripts | T04, T25 | `scripts/secrets/` | todo |
-| T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md` | todo |
+| T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml`, `.tflint.hcl`, and what its ACs need in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/` and `infra/envs/` (not `infra/envs/README.md` steps about secrets, which follow T27) | in-progress (offline part) |
+| T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths` if needed | in-progress |
+| T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | in-progress (offline part; the OpenEMR screenshot needs a deploy) |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
 
