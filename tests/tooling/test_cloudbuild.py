@@ -2,14 +2,16 @@
 
 The build script is the `script` of the one step. Cloud Build runs it with every substitution as
 an environment variable (options.automapSubstitutions), so these tests run the same text with
-bash, the same variables and a fake `docker` on PATH that records every call and answers the
-digest query. That checks what the build does (which images it builds, how it tags and pushes
-them, what it prints for tfvars, when it stops) without Docker, Cloud Build or a GCP project.
+bash, the same variables and a fake `docker` on PATH. The fake records every call and keeps a
+small registry in a state file that behaves like the services repository: tags are immutable (a
+second push of a tag is refused), a rebuilt image gets a new digest, and a tag can be added to an
+existing image without changing its digest. That checks what the build does (which images it
+builds, in which order it builds and pushes, what it prints for tfvars, when it stops, how a
+re-run recovers) without Docker, Cloud Build or a GCP project.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -49,31 +51,71 @@ def script() -> str:
     return steps[0]["script"]
 
 
-def fake_digest(ref: str) -> str:
-    return "sha256:" + hashlib.sha256(ref.encode()).hexdigest()
-
-
 FAKE_DOCKER = """#!{python}
-# Fake docker CLI for tests/tooling/test_cloudbuild.py: records each call, answers the digest query.
+# Fake docker CLI for tests/tooling/test_cloudbuild.py. State (local images, registry tags,
+# build count) lives in FAKE_DOCKER_STATE so it survives between runs of the build.
 import hashlib, json, os, sys
 args = sys.argv[1:]
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
     log.write(json.dumps(args) + "\\n")
-fail = os.environ.get("FAKE_DOCKER_FAIL_BUILD")
-if args[:1] == ["build"] and fail and any(fail in a for a in args):
-    sys.exit(1)
-if args[:3] == ["buildx", "imagetools", "inspect"]:
-    if os.environ.get("FAKE_DOCKER_BAD_DIGEST"):
-        print("not-a-digest")
-    else:
-        print("sha256:" + hashlib.sha256(args[3].encode()).hexdigest())
+state_path = os.environ["FAKE_DOCKER_STATE"]
+state = json.load(open(state_path)) if os.path.exists(state_path) else {{}}
+local = state.setdefault("local", {{}})
+registry = state.setdefault("registry", {{}})
+
+def save():
+    json.dump(state, open(state_path, "w"))
+
+def flag(name):
+    return [args[i + 1] for i, a in enumerate(args) if a == name]
+
+if args[:1] == ["build"]:
+    fail = os.environ.get("FAKE_DOCKER_FAIL_BUILD")
+    if fail and any(fail in a for a in args):
+        sys.exit(1)
+    state["builds"] = state.get("builds", 0) + 1
+    # Every build makes a new image, so a rebuild has a different digest.
+    digest = "sha256:" + hashlib.sha256(f"build-{{state['builds']}}".encode()).hexdigest()
+    for tag in flag("--tag"):
+        local[tag] = digest
+elif args[:1] == ["push"]:
+    ref = args[1]
+    if ref == os.environ.get("FAKE_DOCKER_FAIL_PUSH"):
+        sys.exit(1)
+    if ref in registry:
+        print(f"{{ref}}: tag is immutable", file=sys.stderr)
+        sys.exit(1)
+    if ref not in local:
+        sys.exit(1)
+    registry[ref] = local[ref]
+elif args[:3] == ["buildx", "imagetools", "inspect"]:
+    ref = args[3]
+    if ref not in registry:
+        sys.exit(1)
+    print("not-a-digest" if os.environ.get("FAKE_DOCKER_BAD_DIGEST") else registry[ref])
+elif args[:3] == ["buildx", "imagetools", "create"]:
+    assert "--prefer-index=false" in args, "a carbon copy keeps the digest"
+    (tag,) = flag("--tag")
+    source = args[-1]
+    if tag in registry:
+        sys.exit(1)
+    digest = source.split("@", 1)[1]
+    if digest not in registry.values():
+        sys.exit(1)
+    registry[tag] = digest
+else:
+    sys.exit(2)
+save()
 """
 
 
 def run_build(
     workdir: Path, tmp_path: Path, **overrides: str
 ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
-    """Run the step's script in `workdir` (Cloud Build's /workspace) with a fake docker."""
+    """Run the step's script in `workdir` (Cloud Build's /workspace) with the fake docker.
+
+    The fake registry persists in tmp_path, so a second call is a re-run against what the first
+    one pushed."""
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     docker = bindir / "docker"
@@ -86,6 +128,7 @@ def run_build(
     env = {
         "PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
         "FAKE_DOCKER_LOG": str(log),
+        "FAKE_DOCKER_STATE": str(tmp_path / "docker-state.json"),
         **BUILD_ENV,
         **overrides,
     }
@@ -99,6 +142,15 @@ def run_build(
     )
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     return result, calls
+
+
+def registry_state(tmp_path: Path) -> dict[str, str]:
+    path = tmp_path / "docker-state.json"
+    return json.loads(path.read_text()).get("registry", {}) if path.exists() else {}
+
+
+def seed_registry(tmp_path: Path, tags: dict[str, str]) -> None:
+    (tmp_path / "docker-state.json").write_text(json.dumps({"registry": tags, "local": {}}))
 
 
 def make_tree(root: Path, services: dict[str, bool]) -> Path:
@@ -118,8 +170,16 @@ def tfvars_block(stdout: str) -> list[str]:
     return match.group(1).splitlines()
 
 
+def tfvars_digests(stdout: str) -> dict[str, str]:
+    return {line.split(" = ")[0]: line.split("@")[1].rstrip('"') for line in tfvars_block(stdout)}
+
+
 def builds(calls: list[list[str]]) -> list[list[str]]:
     return [c for c in calls if c[:1] == ["build"]]
+
+
+def pushes(calls: list[list[str]]) -> list[str]:
+    return [c[1] for c in calls if c[:1] == ["push"]]
 
 
 def flag_values(call: list[str], flag: str) -> list[str]:
@@ -186,38 +246,41 @@ def test_builds_tags_and_pushes_every_dockerfile(tmp_path: Path) -> None:
     ]
     for call, service in zip(built, ["alpha", "beta-svc"], strict=True):
         assert call[-1] == ".", "the context is the repository root"
-        assert flag_values(call, "--tag") == [
+        assert set(flag_values(call, "--tag")) == {
             f"{REGISTRY}/{service}:v1.2.3",
             f"{REGISTRY}/{service}:{COMMIT}",
-        ]
+        }
         assert flag_values(call, "--platform") == ["linux/amd64"]
+        assert "--provenance=false" in call, "a plain image manifest, no attestation index"
         assert flag_values(call, "--build-arg") == [
             "PYTHON_REGISTRY=europe-west1-docker.pkg.dev/example-project/hub-mirror"
         ]
         assert f"org.opencontainers.image.revision={COMMIT}" in flag_values(call, "--label")
 
-    pushes = [c[1] for c in calls if c[:1] == ["push"]]
-    assert pushes == [
-        f"{REGISTRY}/alpha:v1.2.3",
+    # The commit tag goes first: a re-run finds an image by its commit tag.
+    assert pushes(calls) == [
         f"{REGISTRY}/alpha:{COMMIT}",
-        f"{REGISTRY}/beta-svc:v1.2.3",
+        f"{REGISTRY}/alpha:v1.2.3",
         f"{REGISTRY}/beta-svc:{COMMIT}",
+        f"{REGISTRY}/beta-svc:v1.2.3",
     ]
-    # Each image is built before it is pushed, and its digest is read after the push.
-    order = [c[0] if c[0] != "buildx" else "digest" for c in calls]
-    assert order == ["build", "push", "push", "digest"] * 2
+    # Every image is built before anything is pushed.
+    kinds = [c[0] for c in calls]
+    assert max(i for i, k in enumerate(kinds) if k == "build") < kinds.index("push")
 
 
 def test_prints_the_digests_ready_for_tfvars(tmp_path: Path) -> None:
     tree = make_tree(tmp_path / "repo", {"alpha": True, "beta-svc": True})
     result, _ = run_build(tree, tmp_path)
     assert result.returncode == 0, result.stdout + result.stderr
+    stored = registry_state(tmp_path)
     # Variable names: the service name with hyphens as underscores, plus `_image`. The value is
-    # the image by digest (no tag), which is what Cloud Run should deploy.
+    # the image by digest (no tag), as the registry stores it: what Cloud Run should deploy.
     assert tfvars_block(result.stdout) == [
-        f'alpha_image = "{REGISTRY}/alpha@{fake_digest(f"{REGISTRY}/alpha:v1.2.3")}"',
-        f'beta_svc_image = "{REGISTRY}/beta-svc@{fake_digest(f"{REGISTRY}/beta-svc:v1.2.3")}"',
+        f'alpha_image = "{REGISTRY}/alpha@{stored[f"{REGISTRY}/alpha:v1.2.3"]}"',
+        f'beta_svc_image = "{REGISTRY}/beta-svc@{stored[f"{REGISTRY}/beta-svc:v1.2.3"]}"',
     ]
+    assert stored[f"{REGISTRY}/alpha:v1.2.3"] != stored[f"{REGISTRY}/beta-svc:v1.2.3"]
 
 
 def test_builds_exactly_the_repository_dockerfiles(tmp_path: Path) -> None:
@@ -257,18 +320,98 @@ def test_refuses_bad_inputs_before_building(
     result, calls = run_build(tree, tmp_path, **overrides)
     assert result.returncode != 0
     assert message in result.stderr
-    assert calls == [], "nothing is built or pushed"
+    assert calls == [], "nothing is looked up, built or pushed"
 
 
-def test_a_failed_build_fails_the_build_and_prints_no_tfvars(tmp_path: Path) -> None:
-    tree = make_tree(tmp_path / "repo", {"alpha": True, "beta": True})
-    result, calls = run_build(tree, tmp_path, FAKE_DOCKER_FAIL_BUILD="services/beta/")
+@pytest.mark.parametrize("bad", ["Beta", "beta_svc", "beta--svc", "-beta", "beta.svc"])
+def test_a_bad_service_name_fails_before_any_build(tmp_path: Path, bad: str) -> None:
+    # The name becomes an image name and a tfvars variable name (`-` as `_`).
+    tree = make_tree(tmp_path / "repo", {"alpha": True, bad: True})
+    result, calls = run_build(tree, tmp_path)
     assert result.returncode != 0
-    assert "BEGIN tfvars" not in result.stdout, "a partial set of digests is never printed"
-    assert [c[1] for c in calls if c[:1] == ["push"]] == [
-        f"{REGISTRY}/alpha:v1.2.3",
-        f"{REGISTRY}/alpha:{COMMIT}",
-    ]
+    assert bad in result.stderr
+    assert calls == []
+
+
+def test_a_failed_build_of_the_last_service_pushes_nothing(tmp_path: Path) -> None:
+    tree = make_tree(tmp_path / "repo", {"alpha": True, "beta": True, "gamma": True})
+    result, calls = run_build(tree, tmp_path, FAKE_DOCKER_FAIL_BUILD="services/gamma/")
+    assert result.returncode != 0
+    assert len(builds(calls)) == 3
+    assert pushes(calls) == [], "nothing is pushed, so the same tag can be built again"
+    assert registry_state(tmp_path) == {}
+    assert "BEGIN tfvars" not in result.stdout
+
+    again, _ = run_build(tree, tmp_path)
+    assert again.returncode == 0, again.stdout + again.stderr
+
+
+def test_a_push_failure_midway_is_finished_by_a_re_run(tmp_path: Path) -> None:
+    tree = make_tree(tmp_path / "repo", {"alpha": True, "beta": True})
+    first, _ = run_build(tree, tmp_path, FAKE_DOCKER_FAIL_PUSH=f"{REGISTRY}/beta:{COMMIT}")
+    assert first.returncode != 0
+    assert "BEGIN tfvars" not in first.stdout
+    alpha_digest = registry_state(tmp_path)[f"{REGISTRY}/alpha:{COMMIT}"]
+    assert f"{REGISTRY}/beta:{COMMIT}" not in registry_state(tmp_path)
+
+    # The same tag again: alpha is not rebuilt (its tags could not be pushed again), beta is.
+    second, calls = run_build(tree, tmp_path)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert [flag_values(c, "--file") for c in builds(calls)] == [["services/beta/Dockerfile"]]
+    assert pushes(calls) == [f"{REGISTRY}/beta:{COMMIT}", f"{REGISTRY}/beta:v1.2.3"]
+    assert "alpha" in second.stdout and "reusing" in second.stdout
+    digests = tfvars_digests(second.stdout)
+    assert digests["alpha_image"] == alpha_digest
+    assert digests["beta_image"] == registry_state(tmp_path)[f"{REGISTRY}/beta:v1.2.3"]
+
+
+def test_a_failure_between_the_two_pushes_is_finished_by_a_re_run(tmp_path: Path) -> None:
+    tree = make_tree(tmp_path / "repo", {"alpha": True})
+    first, _ = run_build(tree, tmp_path, FAKE_DOCKER_FAIL_PUSH=f"{REGISTRY}/alpha:v1.2.3")
+    assert first.returncode != 0
+    commit_digest = registry_state(tmp_path)[f"{REGISTRY}/alpha:{COMMIT}"]
+
+    second, calls = run_build(tree, tmp_path)
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert builds(calls) == [] and pushes(calls) == []
+    assert registry_state(tmp_path)[f"{REGISTRY}/alpha:v1.2.3"] == commit_digest
+    assert tfvars_digests(second.stdout) == {"alpha_image": commit_digest}
+
+
+def test_a_new_tag_on_a_released_commit_reuses_its_images(tmp_path: Path) -> None:
+    tree = make_tree(tmp_path / "repo", {"alpha": True, "beta": True})
+    first, _ = run_build(tree, tmp_path)
+    assert first.returncode == 0, first.stdout + first.stderr
+    second, calls = run_build(tree, tmp_path, TAG_NAME="v1.2.4")
+    assert second.returncode == 0, second.stdout + second.stderr
+    assert builds(calls) == [], "the commit's images already exist"
+    assert tfvars_digests(second.stdout) == tfvars_digests(first.stdout)
+    stored = registry_state(tmp_path)
+    assert stored[f"{REGISTRY}/beta:v1.2.4"] == stored[f"{REGISTRY}/beta:v1.2.3"]
+
+
+def test_a_release_tag_without_its_commit_tag_is_refused(tmp_path: Path) -> None:
+    # The commit tag is always pushed first, so this tag was made by something else.
+    seed_registry(tmp_path, {f"{REGISTRY}/alpha:v1.2.3": "sha256:" + "a" * 64})
+    tree = make_tree(tmp_path / "repo", {"alpha": True})
+    result, calls = run_build(tree, tmp_path)
+    assert result.returncode != 0
+    assert builds(calls) == [] and pushes(calls) == []
+
+
+def test_tags_naming_different_images_are_refused(tmp_path: Path) -> None:
+    seed_registry(
+        tmp_path,
+        {
+            f"{REGISTRY}/alpha:v1.2.3": "sha256:" + "a" * 64,
+            f"{REGISTRY}/alpha:{COMMIT}": "sha256:" + "b" * 64,
+        },
+    )
+    tree = make_tree(tmp_path / "repo", {"alpha": True})
+    result, calls = run_build(tree, tmp_path)
+    assert result.returncode != 0
+    assert "different images" in result.stderr
+    assert builds(calls) == []
 
 
 def test_an_unreadable_digest_fails_the_build(tmp_path: Path) -> None:
