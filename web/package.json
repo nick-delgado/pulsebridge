@@ -1,0 +1,35 @@
+{
+  "name": "pulsebridge-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PulseBridge single-page dashboard (Vite + TypeScript, no UI framework).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite --mode mock",
+    "dev:http": "vite",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build && node scripts/check-bundle.mjs dist http",
+    "build:mock": "vite build --mode mock --outDir dist-mock && node scripts/check-bundle.mjs dist-mock mock",
+    "preview:mock": "vite preview --outDir dist-mock --port 4173 --strictPort",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:browser": "npm run build:mock && playwright test --trace off",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
+    "eslint": "10.14.0",
+    "eslint-plugin-no-unsanitized": "4.1.5",
+    "jsdom": "30.1.3",
+    "prettier": "3.9.10",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1",
+    "vite": "8.3.5",
+    "vitest": "5.0.5"
+  }
+}
