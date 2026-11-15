@@ -56,6 +56,7 @@ from connect_google_health.patient import (
     setup_bundle,
     write_patient,
 )
+from connect_google_health.sdk_logging import quiet_sdk_logging
 from connect_google_health.secret_store import (
     DEFAULT_PREFIX,
     SecretStore,
@@ -109,6 +110,7 @@ class Config:
     timeout_seconds: int
     reset_client: bool
     disable_previous: bool
+    accept_unlisted_scope: bool
     fhir: FhirTarget | None  # None with --skip-patient
     demographics: Demographics | None = field(default=None, repr=False)
 
@@ -175,6 +177,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--disable-previous",
         action="store_true",
         help="disable (never destroy) older refresh-token versions after storing the new one",
+    )
+    parser.add_argument(
+        "--accept-unlisted-scope",
+        action="store_true",
+        help="store the refresh token even if Google's answer does not list the requested scope",
     )
     parser.add_argument(
         "--skip-patient", action="store_true", help="do not write the Patient record"
@@ -262,6 +269,7 @@ def load_config(argv: list[str], env: Mapping[str, str]) -> Config:
         timeout_seconds=args.timeout,
         reset_client=args.reset_client,
         disable_previous=args.disable_previous,
+        accept_unlisted_scope=args.accept_unlisted_scope,
         fhir=fhir,
         demographics=demographics,
     )
@@ -286,6 +294,11 @@ class Dependencies:
 
 
 def real_dependencies() -> Dependencies:
+    """The real Secret Manager, Google and FHIR clients. Switches off the Google libraries'
+    payload logging first (see :mod:`connect_google_health.sdk_logging`), before any of them is
+    imported."""
+    quiet_sdk_logging()
+
     def secret_store(project: str) -> SecretStore:
         from connect_google_health.secret_store import SecretManagerStore
 
@@ -370,6 +383,14 @@ def receive_code(
                 port=config.port,
             )
         except OSError:
+            if config.port:
+                # Never fall back to pasting on this port: the redirect, with its code, would
+                # go to whatever program holds it.
+                raise Abort(
+                    f"Port {config.port} on 127.0.0.1 is in use (or not allowed). Choose another "
+                    "--port, or leave it out to use a random free port.",
+                    EXIT_USAGE,
+                ) from None
             _say(deps, "  Could not listen on 127.0.0.1; switching to paste mode.")
         else:
             with listener:
@@ -423,8 +444,10 @@ def describe_expiry(tokens: oauth.Tokens, now: datetime) -> list[str]:
         "  Google did not say when this refresh token expires, and this script cannot see your "
         "OAuth app's publishing status.",
         f'  If the status is "Testing", it expires in {TESTING_REFRESH_TOKEN_DAYS} days, around '
-        f'{when:%Y-%m-%d %H:%M} UTC. If it is "In production", it lasts until access is '
-        "revoked or it goes unused for six months.",
+        f'{when:%Y-%m-%d %H:%M} UTC. If it is "In production", it has no fixed expiry, but '
+        "stops working if access is revoked, it is unused for six months, or for the other "
+        "reasons Google lists (more than 100 refresh tokens for this account and client, an "
+        "admin restriction, a session-length control).",
         "  " + PUBLISH_HELP,
     ]
 
@@ -466,17 +489,22 @@ def run(config: Config, deps: Dependencies) -> int:
         )
     except oauth.OAuthError as exc:
         raise Abort(str(exc), EXIT_NOT_CONNECTED) from None
-    missing = [
-        s for s in config.scope.split() if tokens.scopes is not None and s not in tokens.scopes
-    ]
     if tokens.scopes is None:
         _say(deps, "  Note: Google did not list the granted scopes; continuing.")
-    if missing:
-        raise Abort(
-            "Access was granted without the requested scope (its box on the consent screen was "
-            "left unticked), so health-sync could read nothing. Nothing was stored. Run the "
-            "script again and tick every box.",
-            EXIT_NOT_CONNECTED,
+    elif oauth.missing_scopes(config.scope, tokens.scopes):
+        if not config.accept_unlisted_scope:
+            raise Abort(
+                "Google's answer does not list the requested scope: its box on the consent "
+                "screen was probably left unticked, and health-sync could then read nothing. "
+                "Nothing was stored. Run the script again and tick every box. If you are sure "
+                "access was granted, run again with --accept-unlisted-scope.",
+                EXIT_NOT_CONNECTED,
+            )
+        _say(
+            deps,
+            "  Warning: Google's answer does not list the requested scope; storing the token "
+            "anyway (--accept-unlisted-scope). If health-sync reports scope-not-granted, "
+            "reconnect and tick every box.",
         )
 
     _say(deps, "[3/4] Refresh token")

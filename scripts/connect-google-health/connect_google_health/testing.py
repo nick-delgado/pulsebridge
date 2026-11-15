@@ -81,6 +81,7 @@ def config(**overrides: object) -> Config:
         "timeout_seconds": 20,
         "reset_client": False,
         "disable_previous": False,
+        "accept_unlisted_scope": False,
         "fhir": FHIR,
         "demographics": DEMOGRAPHICS,
     }

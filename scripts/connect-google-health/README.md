@@ -15,7 +15,9 @@ It does three things:
 `health-sync` needs exactly these three secrets from you and nothing else:
 `<prefix>-google-health-client-id`, `<prefix>-google-health-client-secret`,
 `<prefix>-google-health-refresh-token` (prefix `pb` unless you changed the identity module's
-`name_prefix`). The script writes to no other secret (a test checks this).
+`name_prefix`). The script writes to no other secret (a test checks this). If you created your
+Google Health secrets by hand under other names, rename them to these three (or let the identity
+module create them): the script and `health-sync` know no other names.
 
 ## Before you run it
 
@@ -36,21 +38,36 @@ It does three things:
 
 ## Run it
 
+Your name, gender and birth date are personal data. Keep them in a small file **outside the
+repository** (or in a git-ignored one; `.env` and `.env.*` are ignored by this repository's
+`.gitignore`), and source it, rather than typing them on the command line, where they stay in
+your shell history:
+
 ```bash
+# ~/pulsebridge-connect.env   (not committed anywhere)
 export GCP_PROJECT_ID=<your project id>
 export HEALTHCARE_LOCATION=<dataset region> HEALTHCARE_DATASET_ID=<dataset id> FHIR_STORE_ID=<main FHIR store id>
 export PATIENT_ID=<the same patient id health-sync is configured with>
 export PATIENT_FAMILY_NAME=<family name> PATIENT_GIVEN_NAME=<given name>
 export PATIENT_GENDER=<male|female|other|unknown> PATIENT_BIRTH_DATE=<YYYY-MM-DD>
+```
 
+```bash
+source ~/pulsebridge-connect.env
 scripts/connect-google-health/connect.sh
 ```
 
-`connect.sh` is the one command: on first use (and after any change to this tool or the two
-libraries) it creates a private virtual environment in `~/.cache/pulsebridge/connect-google-health`
-(override with `CONNECT_VENV`; choose the Python with `PYTHON`), installs this tool together with
-`libs/pulsebridge_fhir` and `libs/pulsebridge_gcp` into it, and runs `connect-google-health` with
-your flags. Values can be given as flags instead of variables (`--help` lists them).
+Prefer these environment variables over the matching flags: a flag's value is visible to other
+users of the machine in the process list (`ps`) while the script runs. If you do type values in
+the shell, bash's `HISTCONTROL=ignorespace` keeps a line that starts with a space out of the
+history.
+
+`connect.sh` is the one command: on first use (and after any change to this tool, its lock file
+or the two libraries) it creates a private virtual environment in
+`~/.cache/pulsebridge/connect-google-health` (override with `CONNECT_VENV`; choose the Python
+with `PYTHON`), installs this tool together with `libs/pulsebridge_fhir` and
+`libs/pulsebridge_gcp` into it (see "Installing with hashes"), and runs `connect-google-health`
+with your flags. `--help` lists every flag.
 
 What you see (a first run; synthetic project name):
 
@@ -87,8 +104,10 @@ On a remote machine (SSH, a cloud shell), nothing on your computer can reach the
 listener. Use `--paste`: the script prints Google's address; open it in your browser, approve,
 and the browser then fails to load `http://127.0.0.1:<port>/?...`. That is expected: copy the
 whole address from the address bar and paste it at the hidden prompt. It holds the one-time code,
-which is why the input is hidden. The script falls back to this mode by itself if it cannot
-listen on 127.0.0.1.
+which is why the input is hidden. One pair of quotes around the pasted address is removed. The
+script falls back to this mode by itself if it cannot listen on 127.0.0.1 at all; with a fixed
+`--port` that is busy it stops instead (exit 2), because the redirect, with its code, would go to
+whatever program holds that port.
 
 In paste mode the printed address contains your OAuth **client ID**. A client ID is a public
 identifier in OAuth (RFC 6749 section 2.2: "The client identifier is not a secret") and it is in
@@ -116,13 +135,14 @@ client ID never appears in the terminal.
 | `--timeout` | | `300` | seconds to wait for the redirect (10 to 3600) |
 | `--reset-client` | | off | ask for the client ID and secret again even if stored |
 | `--disable-previous` | | off | disable (never destroy) older refresh-token versions |
+| `--accept-unlisted-scope` | | off | store the refresh token even if Google's answer does not list the requested scope (prints a warning) |
 | `--skip-patient` | | off | do not write the Patient; *not required then |
 
 A flag wins over its variable. Everything is checked before anything is stored or any browser
 opens; an error names the flag or variable, never the value.
 
 Exit codes: `0` connected (and Patient written unless skipped); `1` not connected, no refresh
-token stored; `2` bad arguments or configuration; `3` connected (refresh token stored) but the
+token stored; `2` bad arguments or configuration, or a busy `--port`; `3` connected (refresh token stored) but the
 Patient write failed; `130` interrupted.
 
 ## What happens, step by step
@@ -134,8 +154,8 @@ The code reads in the same order (`connect_google_health/cli.py`, function `run`
 | 1 | Read the latest version of the client ID and client secret. A secret with no version, or whose latest version is disabled or destroyed, counts as absent: prompt with `getpass` (no echo), check it is one printable value with no spaces (the rule `health-sync` applies to its mounted files), store it as a new version. | `secret_store.py`, `cli.client_credentials` |
 | 2 | PKCE: a 43-character random **code verifier** and its **S256 challenge**; a random `state`. | `pkce.py` |
 | 3 | Google's authorization address: `client_id`, `redirect_uri=http://127.0.0.1:<port>`, `response_type=code`, `scope`, `code_challenge`, `code_challenge_method=S256`, `state`, `access_type=offline`, `prompt=consent`. | `oauth.authorization_url` |
-| 4 | A listener on 127.0.0.1 only. `/start` redirects to Google; `/?state=...&code=...` is the redirect. `state` is checked first; `error=` (for example `access_denied`), no code, a repeated parameter, a wrong path or `Host`, a second redirect and a timeout are each handled. The page shown holds no code, token or state; http.server's request log (which would hold the code) is switched off. | `loopback.py` |
-| 5 | `POST https://oauth2.googleapis.com/token` with `client_id`, `client_secret`, `code`, `code_verifier`, `grant_type=authorization_code`, `redirect_uri`. A response without `refresh_token`, or whose `scope` list lacks the requested scope (its box was unticked), stores nothing and says what to do. | `oauth.exchange_code` |
+| 4 | A listener on 127.0.0.1 only. `/start` (single-use) redirects to Google; `/?state=<this run's state>&...` is the redirect. A request without this run's `state` (missing, wrong, repeated, malformed: any web page can make the browser send one) is answered `400` and ignored, and the wait goes on. With the right `state`: `error=` (for example `access_denied`) or a missing code ends the connect with a message; a code is taken. A wrong path or `Host`, a second redirect and a timeout are each handled. The page shown holds no code, token or state, and is sent before the wait ends; http.server's request log (which would hold the code) is switched off. | `loopback.py` |
+| 5 | `POST https://oauth2.googleapis.com/token` with `client_id`, `client_secret`, `code`, `code_verifier`, `grant_type=authorization_code`, `redirect_uri`. A response without `refresh_token` stores nothing and says what to do. If the response's `scope` list lacks the requested scope (compared without the `https://www.googleapis.com/auth/` prefix, so either spelling matches), the box was probably unticked: nothing is stored unless you pass `--accept-unlisted-scope`. No `scope` field at all: a note, and it continues. | `oauth.exchange_code`, `cli.run` |
 | 6 | The refresh token becomes a new version of `<prefix>-google-health-refresh-token`. Only the secret name and version number are printed. | `cli.run` |
 | 7 | Expiry: Google's `refresh_token_expires_in` when given; otherwise an explicit "cannot know" (below). | `cli.describe_expiry` |
 | 8 | `GET https://health.googleapis.com/v4/users/me/identity` with the new access token gives `healthUserId`; T06's `patient_setup_transaction` builds the setup Bundle; `pulsebridge_gcp.HealthcareClient.execute_bundle` writes it with your Application Default Credentials. | `patient.py` |
@@ -181,7 +201,9 @@ grants time-based access". So:
 - **When Google does not**, the script says it cannot see your app's publishing status: if
   "Testing", the token expires 7 days from now (Google Identity, "Refresh token expiration": an
   External app in Testing "is issued a refresh token expiring in 7 days"); if "In production", it
-  lasts until access is revoked or it is unused for six months.
+  has no fixed expiry, but stops working if access is revoked, it is unused for six months, or
+  for the other reasons Google lists (more than 100 refresh tokens for this account and client,
+  an admin restriction on the scope, a session-length control).
 
 To stop the weekly reconnect, publish the app (Google Auth Platform > Audience > "Publish app").
 Whether Google then asks for verification for these health scopes was not tested.
@@ -205,6 +227,53 @@ stronger role than the rest of the script, and in Testing status the older token
 copies you no longer need is good hygiene there. Google also keeps at most 100 refresh tokens per
 account per client and silently invalidates the oldest beyond that.
 
+## Google SDK logging is switched off
+
+The Google client libraries can print what they send. `google-api-core` reads
+`GOOGLE_SDK_PYTHON_LOGGING_SCOPE` when the first client is created and, if it is set, logs every
+Secret Manager request and response to stderr, including the secret payload (base64-encoded) of
+each new version and of each read. gRPC's `GRPC_TRACE` / `GRPC_VERBOSITY` can trace transport
+details, and `http.client`'s debug level prints request headers (the `Authorization` header).
+
+Before any Google client is created, the script (`connect_google_health/sdk_logging.py`, called
+by `real_dependencies()`):
+
+- removes `GOOGLE_SDK_PYTHON_LOGGING_SCOPE` and `GRPC_TRACE` from its own environment and sets
+  `GRPC_VERBOSITY=NONE` (gRPC reads them when it is first imported, which happens later);
+- gives the `google`, `grpc`, `urllib3` and `requests` loggers a do-nothing handler, no
+  propagation and the CRITICAL level, so `google-api-core` treats them as configured and leaves
+  them alone;
+- sets `http.client`'s debug level to 0;
+- switches logging off for the whole process (`logging.disable(CRITICAL)`): the script itself
+  never logs, and this also silences a logger below `google` that the variable could have
+  named (api-core configures such a child logger directly, which a setting on `google` alone
+  would not stop).
+
+`tests/test_real_dependencies.py` checks each of these; where `google-cloud-secret-manager` is
+installed it also drives the real client against a dead 127.0.0.1 endpoint with the variable set,
+and checks that the payload is printed without the protection (the control) and not with it.
+
+## Installing with hashes
+
+`connect.sh` installs every third-party package from `requirements.lock`, which pins each one
+(direct and transitive, 27 in all) to an exact version with its SHA-256 hashes, with
+`pip install --require-hashes --only-binary :all: --no-deps`; then the two libraries and this
+tool with `--no-deps --no-build-isolation`, so their build backend is the hashed `hatchling` from
+the lock. It uses the virtual environment's own pip (24.2 or newer, what Python 3.13 ships) and
+does not upgrade it, since an upgrade would fetch an unhashed pip.
+
+The lock is made from `requirements.in` with uv 0.13.7, for every platform and Python 3.13, from
+releases at least two weeks old:
+
+```bash
+uv pip compile --universal --python-version 3.13 --generate-hashes \
+    --exclude-newer <date two weeks ago> requirements.in -o requirements.lock
+```
+
+To update a dependency: change its pin in `pyproject.toml` and `requirements.in` together, run
+the command above in `scripts/connect-google-health/`, and run `make test`
+(`tests/test_packaging.py` checks every line has a hash and the direct pins match).
+
 ## IAM the deployer needs
 
 On the three secrets (or a project role that includes these, such as Owner):
@@ -224,12 +293,18 @@ the deployer's own project roles.
 
 - **T25 (env roots):** the setup write must happen before the Scheduler job and the push
   subscription are enabled (T25 AC). This script is that setup write when the real watch is used
-  (`use_synthetic_data = false`); the seeder (T09) is it otherwise. `PATIENT_ID` here must equal
-  the `PATIENT_ID` given to `health-sync` and `v2-to-fhir`. Output the FHIR location, dataset
-  and store id (and the secret prefix) so the deployer can set the variables above from
-  `terraform output`.
+  (`use_synthetic_data = false`); the seeder (T09) is it otherwise. Because it is a manual step
+  run between applies, T25 needs an "ingest enabled" switch (a variable, default off, that
+  creates or un-pauses the Scheduler job and the push subscription) or a documented second
+  apply after the script has run. `PATIENT_ID` here must equal the `PATIENT_ID` given to
+  `health-sync` and `v2-to-fhir`. Output the FHIR location, dataset and store id (and the secret
+  prefix) so the deployer can set the variables above from `terraform output`.
 - **T27 (secret scripts):** the three Google Health secrets are written here, not by
-  `scripts/secrets`. The same rules apply (prompted without echo, never on disk).
+  `scripts/secrets`. The same rules apply (prompted without echo, never on disk). If T27 uses
+  the Python Secret Manager client, it must apply the same protection against SDK payload
+  logging (see "Google SDK logging is switched off"; `sdk_logging.quiet_sdk_logging` can be
+  reused); `gcloud secrets versions add --data-file=-` does not have this problem in the same way
+  but has its own `--log-http` flag, which must not be used.
 - **T28 (setup guide):** the "Before you run it", "Run it", "When the browser is on another
   machine", "Expiry, honestly" and "IAM" sections are written for a new user and can be carried
   into `docs/setup.md` as they are. The guide must say: client type "Desktop app"; add yourself
@@ -243,11 +318,14 @@ the deployer's own project roles.
 | --- | --- |
 | PKCE S256 per RFC 7636 (Appendix B vector) | `tests/test_pkce.py` |
 | Authorization address has exactly the documented parameters | `tests/test_oauth.py::test_authorization_url_has_exactly_the_documented_parameters` |
-| `state` checked before an error or code is acted on | `tests/test_oauth.py::test_state_mismatch_is_refused`, `tests/test_cli.py::test_state_mismatch_stores_nothing` |
-| Listener binds 127.0.0.1 only, answers one redirect, then stops; its page holds no code or state; no request log | `tests/test_loopback.py` |
+| `state` checked before an error or code is acted on; a request without this run's `state` is ignored | `tests/test_oauth.py::test_state_mismatch_is_refused`, `tests/test_loopback.py::test_a_request_without_this_runs_state_is_ignored_and_the_wait_goes_on`, `tests/test_cli.py::test_a_forged_request_is_ignored_and_the_real_redirect_still_connects` |
+| Listener binds 127.0.0.1 only, answers one redirect, then stops; `/start` single-use; its page holds no code or state; no request log | `tests/test_loopback.py` |
+| A busy `--port` is never used for paste mode | `tests/test_cli.py::test_a_busy_fixed_port_exits_2_and_never_falls_back_to_paste` |
+| Google SDK payload logging switched off; TLS verified; Google's endpoints fixed | `tests/test_real_dependencies.py` |
+| Every installed package hashed; pins agree | `tests/test_packaging.py` |
 | Token request body, literally; failures (`invalid_grant`, `invalid_client`, network, non-JSON, 5xx) reported without leaking | `tests/test_oauth.py`, `tests/test_local_token_endpoint.py` (real HTTP on 127.0.0.1) |
 | No refresh token, or scope not granted: nothing stored | `tests/test_cli.py::test_token_failures_store_no_refresh_token` |
-| Nothing secret or private in stdout, stderr, logs, pages or exception text, on every path | `tests/test_no_leaks.py` (19 scenarios, fd-level capture) |
+| Nothing secret or private in stdout, stderr, logs, pages or exception text, on every path | `tests/test_no_leaks.py` (20 scenarios, fd-level capture) |
 | Only the three secrets are written; nothing is destroyed | `tests/test_cli.py::test_writes_to_exactly_the_three_secrets`, `tests/test_secret_store.py` |
 | Identity call and the setup Bundle (method, URL, identifiers, no Device) | `tests/test_cli.py::test_connects_stores_the_refresh_token_and_writes_the_patient` |
 | Partial failure after the token is stored; re-run | `tests/test_cli.py` |
@@ -255,7 +333,18 @@ the deployer's own project roles.
 ## Tests
 
 `make test` runs `tests/` (the repository's `pyproject.toml` lists this directory in pytest's
-`testpaths`). No network except 127.0.0.1, no credentials, no GCP: Secret Manager is a fake
+`testpaths`).
+
+This package is deliberately **not** installed by `make install` (its list covers `libs/` and
+`services/` only): installing it would pull `google-cloud-secret-manager` and grpc into the
+shared dev environment for one adapter the tests replace with a fake. Instead
+`tests/conftest.py` puts the package's source directory on `sys.path`; `pulsebridge_fhir`,
+`pulsebridge_gcp` and `requests` come from the shared environment. One test imports
+`health_sync.config` (installed there by `make install`) to check both use the same default
+scope. The real-client test in `test_real_dependencies.py` is skipped in the dev environment and
+runs where the library is installed.
+
+No network except 127.0.0.1, no credentials, no GCP: Secret Manager is a fake
 behind the `SecretStore` interface (and the real adapter is tested against a fake client and a
 fake exceptions module, so `google-cloud-secret-manager` is not needed in the dev environment);
 Google's token endpoint, the identity call and the FHIR store are `pulsebridge_gcp.testing.FakeTransport`;
@@ -281,9 +370,9 @@ store. To confirm on the first real run:
 2. Google accepts `access_type=offline` and `prompt=consent` together with PKCE for a Desktop
    client, and the token response carries `refresh_token` (and, in Testing,
    `refresh_token_expires_in`).
-3. The token response's `scope` is the requested scope string exactly; if Google ever lists it
-   differently, the script refuses to store (it could be relaxed to a warning, as `health-sync`
-   does).
+3. The token response's `scope` lists the requested scope (with or without the
+   `https://www.googleapis.com/auth/` prefix). If Google spells it differently again, the script
+   refuses to store; `--accept-unlisted-scope` is the escape hatch.
 4. `access_secret_version` on `versions/latest` answers `NOT_FOUND` for a secret with no versions
    and `FAILED_PRECONDITION` when the latest is disabled (both treated as "absent"), and the
    deployer's ADC works with Secret Manager without extra quota-project setup.
@@ -291,6 +380,7 @@ store. To confirm on the first real run:
 6. The FHIR store accepts the setup Bundle with the deployer's credentials, and its
    transaction-response entry status starts with `201` (created) or `200` (updated).
 7. `connect.sh` on a deployer's macOS or Linux machine. In the build container (Linux, Python
-   3.13) it created its environment, installed the pinned packages from PyPI and ran `--help`;
-   no connect was attempted.
+   3.13, pip 26) it created its environment, installed every package from the hashed lock with
+   wheels only and ran `--help`; no connect was attempted. Wheels for other platforms are in the
+   lock's hashes (universal resolution) but were not installed.
 8. Whether publishing the app requires verification for the health scope.

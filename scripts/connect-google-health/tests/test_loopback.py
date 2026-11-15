@@ -4,6 +4,7 @@ import html
 import http.client
 import socket
 import threading
+import time
 
 import pytest
 from connect_google_health.loopback import SUCCESS_TEXT, LoopbackListener
@@ -129,16 +130,62 @@ def test_other_requests_are_refused_and_it_keeps_waiting(path, host, method, sta
         assert result["code"].value == AUTH_CODE
 
 
-def test_state_mismatch_ends_the_wait_with_an_error_page():
+@pytest.mark.parametrize(
+    "query",
+    [
+        f"state=forged&code={AUTH_CODE}",
+        f"code={AUTH_CODE}",  # no state
+        f"state={STATE}&state={STATE}&code={AUTH_CODE}",  # repeated
+        "error=access_denied",  # an error without this run's state is not acted on
+        "&".join(f"f{i}=x" for i in range(30)) + f"&state={STATE}",  # too many fields
+    ],
+)
+def test_a_request_without_this_runs_state_is_ignored_and_the_wait_goes_on(query):
+    """Any web page can make the browser send a request to 127.0.0.1; it must not end the
+    connect. Only a redirect with this run's state counts."""
     with _listener() as listener:
         thread, result = _serve(listener)
-        status, _h, body = _get(listener.port, f"/?state=forged&code={AUTH_CODE}")
+        status, _h, body = _get(listener.port, "/?" + query)
+        assert status == 400
+        assert leaked(body, (AUTH_CODE, STATE, "forged")) == []
+        assert thread.is_alive() and not result
+        _get(listener.port, f"/?state={STATE}&code={AUTH_CODE}")
+        thread.join(5)
+        assert result["code"].value == AUTH_CODE
+
+
+def test_this_runs_state_with_no_code_ends_the_wait_with_missing_code():
+    with _listener() as listener:
+        thread, result = _serve(listener)
+        status, _h, body = _get(listener.port, f"/?state={STATE}")
         thread.join(5)
         assert status == 400
-        assert "state-mismatch" in body
-        assert leaked(body, (AUTH_CODE, STATE, "forged")) == []
-        assert result["error"].code == "state-mismatch"
+        assert "missing-code" in body
+        assert result["error"].code == "missing-code"
         _refused(listener.port)
+
+
+def test_start_is_single_use():
+    with _listener() as listener:
+        thread, result = _serve(listener)
+        assert _get(listener.port, "/start")[0] == 302
+        status, headers, body = _get(listener.port, "/start")
+        assert status == 410
+        assert "Location" not in headers and STATE not in body
+        _get(listener.port, f"/?state={STATE}&code={AUTH_CODE}")
+        thread.join(5)
+
+
+def test_wait_returns_promptly_after_the_page_is_sent():
+    with _listener() as listener:
+        thread, result = _serve(listener)
+        time.sleep(0.2)  # the listener is idle and serving
+        sent = time.monotonic()
+        status, _h, _b = _get(listener.port, f"/?state={STATE}&code={AUTH_CODE}")
+        thread.join(5)
+        assert status == 200  # the browser got its page
+        assert time.monotonic() - sent < 0.5
+        assert result["code"].value == AUTH_CODE
 
 
 def test_error_access_denied_ends_the_wait():
@@ -186,9 +233,34 @@ def test_a_second_redirect_racing_the_first_changes_nothing():
         _serve_one.join(5)
         second_thread = threading.Thread(target=listener._server.handle_request, daemon=True)
         second_thread.start()
-        second = _get(listener.port, "/?state=forged&code=other")
+        second = _get(listener.port, f"/?state={STATE}&code=other")
         second_thread.join(5)
         assert first[0] == 200
         assert second[0] == 409
         assert listener._outcome.code.value == AUTH_CODE
         assert listener._outcome.error is None
+
+
+def test_the_page_is_fully_sent_before_wait_returns():
+    """The script may exit right after wait() (an error, say); the browser must already have
+    its page, not a reset connection."""
+    with _listener() as listener:
+        base = listener._server.RequestHandlerClass
+        sent = threading.Event()
+
+        class SlowPage(base):
+            def _send(self, status, body, extra=None):
+                time.sleep(0.3)
+                super()._send(status, body, extra)
+                sent.set()
+
+        listener._server.RequestHandlerClass = SlowPage
+        thread, result = _serve(listener)
+        client = threading.Thread(
+            target=_get, args=(listener.port, f"/?state={STATE}&code={AUTH_CODE}"), daemon=True
+        )
+        client.start()
+        thread.join(5)
+        assert result["code"].value == AUTH_CODE
+        assert sent.is_set(), "wait() returned before the page was sent"
+        client.join(5)

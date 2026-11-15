@@ -68,8 +68,11 @@ SCENARIOS = {
         store=FakeSecretStore.empty(), prompts=[CLIENT_ID, CLIENT_SECRET]
     ),
     "browser-not-opened": lambda: Harness(browser=FakeBrowser(opens=False)),
-    "state-mismatch": lambda: Harness(
+    "state-mismatch": lambda: Harness(  # ignored by the listener; ends in a timeout
         browser=FakeBrowser(answer=lambda s: f"state=x{AUTH_CODE}&code={AUTH_CODE}")
+    ),
+    "forged-then-real": lambda: Harness(
+        browser=FakeBrowser(before=[(f"/?state={CLIENT_SECRET}&code={AUTH_CODE}", None)])
     ),
     "access-denied": lambda: Harness(
         browser=FakeBrowser(answer=lambda s: f"state={s}&error=access_denied")
@@ -131,7 +134,7 @@ def test_nothing_private_is_output(name, capfd, caplog):
     caplog.set_level(logging.DEBUG)
     harness = SCENARIOS[name]()
     try:
-        code = cli.main_with_config(config(paste=name in PASTE), harness.deps())
+        code = cli.main_with_config(config(paste=name in PASTE, timeout_seconds=1), harness.deps())
     finally:
         harness.browser.join()
     assert isinstance(code, int)
@@ -154,12 +157,15 @@ def test_the_failure_scenarios_really_fail():
     """So the search above covers the error paths, not just the happy one."""
     expected = {
         "success": 0, "success-prompted-client": 0, "browser-not-opened": 0, "paste-mode": 0,
+        "forged-then-real": 0,
         "identity-fails": 3, "fhir-refuses": 3, "fhir-unreachable": 3,
     }  # fmt: skip
     for name, make in SCENARIOS.items():
         harness = make()
         try:
-            code = cli.main_with_config(config(paste=name in PASTE), harness.deps())
+            code = cli.main_with_config(
+                config(paste=name in PASTE, timeout_seconds=1), harness.deps()
+            )
         finally:
             harness.browser.join()
         assert code == expected.get(name, cli.EXIT_NOT_CONNECTED), name

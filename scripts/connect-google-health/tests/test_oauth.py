@@ -289,3 +289,65 @@ def test_absent_optional_fields_are_none():
     tokens, _ = _exchange(token_response(scope=None, refresh_token_expires_in=None))
     assert tokens.scopes is None
     assert tokens.refresh_token_expires_in is None
+
+
+# ---- review follow-ups ----------------------------------------------------------------------
+
+TOO_MANY = "&".join(f"f{i}=x" for i in range(30))
+
+
+def test_too_many_fields_is_a_malformed_redirect_on_both_paths():
+    with pytest.raises(oauth.OAuthError) as caught:
+        oauth.parse_redirect_query(f"state={STATE}&{TOO_MANY}", expected_state=STATE)
+    assert caught.value.code == "malformed-redirect"
+    with pytest.raises(oauth.OAuthError) as caught:
+        oauth.parse_pasted_redirect(
+            f"{REDIRECT}/?state={STATE}&{TOO_MANY}", redirect_uri=REDIRECT, expected_state=STATE
+        )
+    assert caught.value.code == "malformed-redirect"
+
+
+@pytest.mark.parametrize(
+    ("query", "matches"),
+    [
+        (f"state={STATE}&code=x", True),
+        (f"state={STATE}&error=access_denied", True),
+        ("state=other&code=x", False),
+        ("code=x", False),
+        (f"state={STATE}&state={STATE}", False),
+        (f"state={STATE}&{TOO_MANY}", False),
+    ],
+)
+def test_redirect_state_matches(query, matches):
+    assert oauth.redirect_state_matches(query, expected_state=STATE) is matches
+
+
+@pytest.mark.parametrize("quote", ['"', "'"])
+def test_one_pair_of_quotes_around_a_pasted_address_is_removed(quote):
+    pasted = f"{quote}{REDIRECT}/?state={STATE}&code={AUTH_CODE}{quote}"
+    code = oauth.parse_pasted_redirect(pasted, redirect_uri=REDIRECT, expected_state=STATE)
+    assert code.value == AUTH_CODE
+
+
+def test_mismatched_quotes_are_not_removed():
+    with pytest.raises(oauth.OAuthError):
+        oauth.parse_pasted_redirect(
+            f"\"{REDIRECT}/?state={STATE}&code={AUTH_CODE}'", redirect_uri=REDIRECT,
+            expected_state=STATE,
+        )  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("granted", "missing"),
+    [
+        ((oauth.DEFAULT_SCOPE,), []),
+        (("googlehealth.health_metrics_and_measurements.readonly",), []),  # short form
+        (("openid", oauth.DEFAULT_SCOPE), []),
+        (("https://www.googleapis.com/auth/other",), [oauth.DEFAULT_SCOPE]),
+        ((), [oauth.DEFAULT_SCOPE]),
+    ],
+)
+def test_missing_scopes_compares_without_the_google_prefix(granted, missing):
+    assert oauth.missing_scopes(oauth.DEFAULT_SCOPE, granted) == missing
+    short = "googlehealth.health_metrics_and_measurements.readonly"
+    assert oauth.missing_scopes(short, granted) == ([short] if missing else [])

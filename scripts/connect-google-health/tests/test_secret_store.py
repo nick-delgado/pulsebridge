@@ -19,7 +19,15 @@ REPO = Path(__file__).resolve().parents[3]
 
 
 # A stand-in for google.api_core.exceptions with the same class hierarchy.
-class GoogleAPICallError(Exception):
+class GoogleAPIError(Exception):
+    pass
+
+
+class GoogleAPICallError(GoogleAPIError):
+    pass
+
+
+class RetryError(GoogleAPIError):
     pass
 
 
@@ -40,6 +48,7 @@ class ServiceUnavailable(GoogleAPICallError):
 
 
 ERRORS = SimpleNamespace(
+    GoogleAPIError=GoogleAPIError,
     GoogleAPICallError=GoogleAPICallError,
     NotFound=NotFound,
     PermissionDenied=PermissionDenied,
@@ -56,27 +65,32 @@ class FakeClient:
         self.version_name = version_name
         self.versions = versions
         self.requests = []
+        self.timeouts = []
 
     def _maybe_raise(self):
         if self.raises is not None:
             raise self.raises
 
-    def access_secret_version(self, request):
+    def access_secret_version(self, request, timeout=None):
+        self.timeouts.append(timeout)
         self.requests.append(("access", request))
         self._maybe_raise()
         return SimpleNamespace(payload=SimpleNamespace(data=self.data))
 
-    def add_secret_version(self, request):
+    def add_secret_version(self, request, timeout=None):
+        self.timeouts.append(timeout)
         self.requests.append(("add", request))
         self._maybe_raise()
         return SimpleNamespace(name=self.version_name)
 
-    def list_secret_versions(self, request):
+    def list_secret_versions(self, request, timeout=None):
+        self.timeouts.append(timeout)
         self.requests.append(("list", request))
         self._maybe_raise()
         return [SimpleNamespace(name=f"{PARENT}/versions/{n}") for n in self.versions]
 
-    def disable_secret_version(self, request):
+    def disable_secret_version(self, request, timeout=None):
+        self.timeouts.append(timeout)
         self.requests.append(("disable", request))
 
 
@@ -175,3 +189,19 @@ def test_disable_permission_denied_names_the_role():
     with pytest.raises(SecretStoreError) as caught:
         store(FakeClient(raises=PermissionDenied("x"))).disable_versions_before(SECRET, 2)
     assert "roles/secretmanager.secretVersionManager" in str(caught.value)
+
+
+def test_every_call_has_a_timeout():
+    client = FakeClient(data=b"x", version_name=f"{PARENT}/versions/2", versions=(1,))
+    s = store(client)
+    s.access_latest(SECRET)
+    s.add_version(SECRET, REFRESH_TOKEN)
+    s.disable_versions_before(SECRET, 2)
+    assert client.timeouts == [30.0, 30.0, 30.0, 30.0]
+
+
+def test_a_retry_timeout_is_reported_by_type():
+    with pytest.raises(SecretStoreError) as caught:
+        store(FakeClient(raises=RetryError(CLIENT_SECRET))).access_latest(SECRET)
+    assert "RetryError" in str(caught.value)
+    assert CLIENT_SECRET not in str(caught.value)

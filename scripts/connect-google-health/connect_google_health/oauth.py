@@ -82,6 +82,21 @@ KNOWN_OAUTH_ERRORS = frozenset(
 )
 
 
+GOOGLE_SCOPE_PREFIX = "https://www.googleapis.com/auth/"
+
+
+def scope_name(scope: str) -> str:
+    """A Google scope without the ``https://www.googleapis.com/auth/`` prefix, so the long and
+    the short spelling of the same scope compare equal."""
+    return scope[len(GOOGLE_SCOPE_PREFIX) :] if scope.startswith(GOOGLE_SCOPE_PREFIX) else scope
+
+
+def missing_scopes(requested: str, granted: tuple[str, ...]) -> list[str]:
+    """Requested scopes absent from the granted list, compared by :func:`scope_name`."""
+    have = {scope_name(s) for s in granted}
+    return [s for s in requested.split() if scope_name(s) not in have]
+
+
 def is_credential_shaped(value: str) -> bool:
     """One token of printable ASCII, no spaces, not too long (health-sync's own rule)."""
     return 0 < len(value) <= MAX_CREDENTIAL_LENGTH and bool(_CREDENTIAL.fullmatch(value))
@@ -149,13 +164,35 @@ def _single(params: dict[str, list[str]], name: str) -> str | None:
     return values[0]
 
 
+def _parse_query(query: str) -> dict[str, list[str]]:
+    """``parse_qs`` with a cap on the number of fields; too many is a malformed redirect."""
+    try:
+        return parse_qs(query, keep_blank_values=True, max_num_fields=20)
+    except ValueError:
+        raise OAuthError("malformed-redirect", "The redirect address is malformed.") from None
+
+
+def redirect_state_matches(query: str, *, expected_state: str) -> bool:
+    """Whether a request to the listener carries this run's ``state``, exactly once.
+
+    The listener uses this to tell the real redirect from anything else that reaches
+    127.0.0.1: any web page the user has open can make the browser send a request there, so a
+    request without the right ``state`` is answered and ignored; it does not end the wait.
+    """
+    try:
+        state = _single(_parse_query(query), "state")
+    except OAuthError:
+        return False
+    return state_matches(expected_state, state)
+
+
 def parse_redirect_query(query: str, *, expected_state: str) -> AuthorizationCode:
     """Check one redirect's query string and return the code.
 
     Order matters: ``state`` is checked first, so neither an error nor a code from a redirect
     this run did not ask for is acted on (RFC 6749 10.12, cross-site request forgery).
     """
-    params = parse_qs(query, keep_blank_values=True, max_num_fields=20)
+    params = _parse_query(query)
     state = _single(params, "state")
     if not state_matches(expected_state, state):
         raise OAuthError(
@@ -195,6 +232,9 @@ def parse_pasted_redirect(
     saw everything in the query). The pasted text is never echoed, in success or error.
     """
     text = pasted.strip()
+    # Some terminals and copy tools wrap a copied address in one pair of quotes.
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "'\"":
+        text = text[1:-1].strip()
     try:
         parts = urlsplit(text)
         port = parts.port

@@ -140,6 +140,8 @@ def test_without_an_expiry_it_says_it_cannot_know_the_status():
     out = h.out.getvalue()
     assert "cannot see your OAuth app's publishing status" in out
     assert 'If the status is "Testing", it expires in 7 days, around 2026-01-22 12:00 UTC' in out
+    assert 'If it is "In production", it has no fixed expiry, but stops working if' in out
+    assert "more than 100 refresh tokens" in out
 
 
 def test_describe_expiry_long_lived_token_does_not_claim_testing():
@@ -203,10 +205,19 @@ def test_missing_secret_container_says_apply_terraform():
 # ---- the redirect ---------------------------------------------------------------------------
 
 
-def test_state_mismatch_stores_nothing():
+def test_a_forged_request_is_ignored_and_the_real_redirect_still_connects():
+    forged = [(f"/?state=forged&code={AUTH_CODE}", None), ("/?error=access_denied", None)]
+    h = Harness(browser=FakeBrowser(before=forged))
+    assert run(h) == cli.EXIT_OK
+    assert [status for status, _b in h.browser.pages[:2]] == [400, 400]
+    assert token_form(h)["code"] == AUTH_CODE
+    assert h.store.values(REFRESH) == [REFRESH_TOKEN]
+
+
+def test_only_a_wrong_state_times_out_and_stores_nothing():
     h = Harness(browser=FakeBrowser(answer=lambda state: f"state=forged&code={AUTH_CODE}"))
-    assert run(h) == cli.EXIT_NOT_CONNECTED
-    assert "'state' did not match" in h.err.getvalue()
+    assert run(h, timeout_seconds=1) == cli.EXIT_NOT_CONNECTED
+    assert "No redirect arrived within 1 seconds" in h.err.getvalue()
     assert h.google.requests == []
     assert h.store.values(REFRESH) == []
 
@@ -291,7 +302,7 @@ def _with_token_response(response) -> Harness:
         (token_response(refresh_token=None), "Google returned no refresh token"),
         (json_response(400, {"error": "invalid_grant"}), "invalid_grant"),
         (json_response(401, {"error": "invalid_client"}), "--reset-client"),
-        (token_response(scope="https://www.googleapis.com/auth/other"), "without the requested"),
+        (token_response(scope="https://www.googleapis.com/auth/other"), "--accept-unlisted-scope"),
     ],
 )
 def test_token_failures_store_no_refresh_token(response, expected):
@@ -398,3 +409,44 @@ def test_interrupt_at_a_prompt():
     h = Harness(store=FakeSecretStore.empty())
     h.prompts = [KeyboardInterrupt()]
     assert run(h) == cli.EXIT_INTERRUPTED
+
+
+def test_the_short_spelling_of_the_scope_is_accepted():
+    h = Harness()
+    h.google = type(h.google)()
+    h.google.add(
+        "POST",
+        "/token",
+        token_response(scope="googlehealth.health_metrics_and_measurements.readonly"),
+    )
+    h.google.add("GET", "/v4/users/me/identity", json_response(200, {"healthUserId": "u1"}))
+    assert run(h) == cli.EXIT_OK
+    assert h.store.values(REFRESH) == [REFRESH_TOKEN]
+
+
+def test_accept_unlisted_scope_stores_with_a_warning():
+    h = Harness()
+    h.google = type(h.google)()
+    h.google.add("POST", "/token", token_response(scope="https://www.googleapis.com/auth/other"))
+    h.google.add("GET", "/v4/users/me/identity", json_response(200, {"healthUserId": "u1"}))
+    assert run(h, accept_unlisted_scope=True) == cli.EXIT_OK
+    assert "Warning: Google's answer does not list the requested scope" in h.out.getvalue()
+    assert h.store.values(REFRESH) == [REFRESH_TOKEN]
+
+
+def test_a_busy_fixed_port_exits_2_and_never_falls_back_to_paste():
+    import socket
+
+    busy = socket.socket()
+    busy.bind(("127.0.0.1", 0))
+    busy.listen()
+    port = busy.getsockname()[1]
+    try:
+        h = Harness()
+        assert run(h, port=port) == cli.EXIT_USAGE
+    finally:
+        busy.close()
+    assert f"Port {port} on 127.0.0.1 is in use" in h.err.getvalue()
+    assert h.prompt_labels == []  # no paste prompt
+    assert "accounts.google.com" not in h.out.getvalue()
+    assert h.google.requests == []

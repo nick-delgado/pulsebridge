@@ -6,36 +6,43 @@ close the browser and return to your app".
 
 What it answers:
 
-- ``GET /start``: a ``302`` to Google's authorization address. The browser is opened at this
-  local address, not at Google's, so the OAuth client ID (which is in Google's address) is never
-  printed to the terminal, even when the user has to open the link by hand.
-- ``GET /?…``: **the redirect**. Its query is checked by :func:`oauth.parse_redirect_query`
-  (``state`` first), the browser gets a short page that holds no code, token or state, and the
-  listener stops. It answers exactly one redirect: the next connection is refused.
+- ``GET /start``, once: a ``302`` to Google's authorization address. The browser is opened at
+  this local address, not at Google's, so the OAuth client ID (which is in Google's address) is
+  never printed to the terminal, even when the user has to open the link by hand. A second
+  ``/start`` gets ``410``: the address carries this run's ``state``, so it is handed out once.
+- ``GET /?state=<this run's state>&…``: **the redirect**. Its ``error`` or ``code`` is checked by
+  :func:`oauth.parse_redirect_query`, the browser gets a short page that holds no code, token or
+  state, and then the wait ends. Exactly one redirect counts; a later one gets ``409``.
+- ``GET /?…`` **without this run's state** (missing, wrong, repeated or malformed): ``400``, and
+  the wait goes on. Any web page the user has open can make the browser send a request to
+  127.0.0.1, so such a request must neither end the connect nor be acted on.
 - Anything else (``/favicon.ico``, ``/`` with no query, another method, a ``Host`` that is not
-  ``127.0.0.1:<port>``): ``404`` / ``400`` and it keeps waiting. The ``Host`` check stops a web
-  page using DNS rebinding to talk to the listener under its own name.
+  ``127.0.0.1:<port>``): ``404`` / ``405`` / ``400`` and the wait goes on. The ``Host`` check stops
+  a web page using DNS rebinding to talk to the listener under its own name.
 
-It binds ``127.0.0.1`` only, never ``0.0.0.0``, so other machines cannot reach it.
+It binds ``127.0.0.1`` only, never ``0.0.0.0``, so other machines cannot reach it. Each
+connection has its own thread, so a browser's silent pre-connect cannot hold up the redirect.
 ``BaseHTTPRequestHandler`` normally writes every request line to stderr, which would print the
-authorization code; that logging is switched off.
+authorization code; that logging, and socketserver's traceback printing, are switched off.
 """
 
 from __future__ import annotations
 
 import html
 import threading
-import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from connect_google_health.oauth import AuthorizationCode, OAuthError, parse_redirect_query
+from connect_google_health.oauth import (
+    AuthorizationCode,
+    OAuthError,
+    parse_redirect_query,
+    redirect_state_matches,
+)
 
 LOOPBACK_HOST = "127.0.0.1"
-# Each connection gets its own thread, so one that never sends a request (a browser's
-# speculative pre-connect) cannot hold up the redirect; it is dropped after this long.
+# A connection that never sends a request is dropped after this long.
 _CONNECTION_TIMEOUT_SECONDS = 5.0
 
 _PAGE = """<!doctype html>
@@ -63,40 +70,40 @@ class _QuietServer(ThreadingHTTPServer):
 
 @dataclass
 class _Outcome:
+    """What the one counted redirect said. ``claimed`` is set (under the lock) by the handler
+    that takes the redirect; ``done`` once its page has been sent and the result stored."""
+
     code: AuthorizationCode | None = None
     error: OAuthError | None = None
+    claimed: bool = False
+    start_served: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
-
-    @property
-    def decided(self) -> bool:
-        return self.code is not None or self.error is not None
+    done: threading.Event = field(default_factory=threading.Event)
 
 
 class LoopbackListener:
     """Bound and listening as soon as it is constructed, so the browser cannot arrive first."""
 
-    def __init__(
-        self,
-        *,
-        expected_state: str,
-        port: int = 0,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
+    def __init__(self, *, expected_state: str, port: int = 0) -> None:
         self._expected_state = expected_state
-        # Google's authorization address, which /start redirects to. It holds the redirect
-        # address, which holds this listener's port, so the caller sets it once bound.
-        self.authorization_url = ""
-        self._clock = clock
         self._outcome = _Outcome()
         self._server = _QuietServer((LOOPBACK_HOST, port), self._handler_class())
         self.port: int = self._server.server_address[1]
         self.address = self._server.server_address
+        # Google's authorization address, which /start redirects to. It holds the redirect
+        # address, which holds this listener's port, so the caller sets it once bound.
+        self.authorization_url = ""
+        self._thread: threading.Thread | None = None
 
     @property
     def start_url(self) -> str:
         return f"http://{LOOPBACK_HOST}:{self.port}/start"
 
     def close(self) -> None:
+        if self._thread is not None:
+            self._server.shutdown()
+            self._thread.join(timeout=5)
+            self._thread = None
         self._server.server_close()
 
     def __enter__(self) -> LoopbackListener:
@@ -106,25 +113,24 @@ class LoopbackListener:
         self.close()
 
     def wait(self, timeout_seconds: float) -> AuthorizationCode:
-        """Serve requests until one redirect arrives or the time is up, then stop listening.
+        """Serve until the redirect has been answered or the time is up, then stop listening.
         Raises :class:`OAuthError` for a refused redirect or the timeout."""
-        deadline = self._clock() + timeout_seconds
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
+        self._thread.start()
         try:
-            while not self._outcome.decided:
-                left = deadline - self._clock()
-                if left <= 0:
-                    raise OAuthError(
-                        "timeout",
-                        f"No redirect arrived within {int(timeout_seconds)} seconds. Run the "
-                        "script again (or with --paste if the browser is on another machine).",
-                    )
-                self._server.timeout = min(left, 1.0)
-                self._server.handle_request()
+            if not self._outcome.done.wait(timeout_seconds):
+                raise OAuthError(
+                    "timeout",
+                    f"No redirect arrived within {int(timeout_seconds)} seconds. Run the "
+                    "script again (or with --paste if the browser is on another machine).",
+                )
         finally:
             self.close()
         if self._outcome.error is not None:
             raise self._outcome.error
-        if self._outcome.code is None:  # pragma: no cover - the loop only ends when decided
+        if self._outcome.code is None:  # pragma: no cover - done is set only with one of them
             raise OAuthError("no-code", "No authorization code was received.")
         return self._outcome.code
 
@@ -160,7 +166,14 @@ class LoopbackListener:
                     self._send(400, page("Wrong address", "Open the link the script printed."))
                     return
                 parts = urlsplit(self.path)
+                outcome = listener._outcome
                 if parts.path == "/start" and not parts.query and listener.authorization_url:
+                    with outcome.lock:
+                        first = not outcome.start_served
+                        outcome.start_served = True
+                    if not first:
+                        self._send(410, page("Link used", "Run the script again for a new one."))
+                        return
                     self._send(
                         302,
                         page("Redirecting", "Continuing to Google."),
@@ -170,32 +183,40 @@ class LoopbackListener:
                 if parts.path != "/" or not parts.query:
                     self._send(404, page("Not found", "Return to the terminal."))
                     return
-                outcome = listener._outcome
+                if not redirect_state_matches(parts.query, expected_state=listener._expected_state):
+                    # Not this run's redirect: answer, ignore, keep waiting.
+                    self._send(400, page("Not this request", "Return to the terminal."))
+                    return
                 with outcome.lock:
-                    # Only the first redirect counts; a second one (a reload, another tab)
-                    # changes nothing.
-                    if outcome.decided:
+                    if outcome.claimed:
                         self._send(409, page("Already answered", "Return to the terminal."))
                         return
-                    try:
-                        outcome.code = parse_redirect_query(
-                            parts.query, expected_state=listener._expected_state
-                        )
-                        failure = None
-                    except OAuthError as exc:
-                        outcome.error = failure = exc
-                if failure is not None:
-                    # Only the fixed code, never the received text.
-                    self._send(
-                        400,
-                        page(
-                            "Not connected",
-                            f"PulseBridge could not use this answer ({failure.code}). "
-                            "See the terminal for what to do.",
-                        ),
+                    outcome.claimed = True
+                code = failure = None
+                try:
+                    code = parse_redirect_query(
+                        parts.query, expected_state=listener._expected_state
                     )
-                    return
-                self._send(200, page("Connected", SUCCESS_TEXT))
+                except OAuthError as exc:
+                    failure = exc
+                # The page goes out first, so the browser has it before the script moves on and
+                # the listener closes.
+                try:
+                    if failure is not None:
+                        # Only the fixed code, never the received text.
+                        self._send(
+                            400,
+                            page(
+                                "Not connected",
+                                f"PulseBridge could not use this answer ({failure.code}). "
+                                "See the terminal for what to do.",
+                            ),
+                        )
+                    else:
+                        self._send(200, page("Connected", SUCCESS_TEXT))
+                finally:
+                    outcome.code, outcome.error = code, failure
+                    outcome.done.set()
 
             def _refuse(self) -> None:
                 self._send(405, page("Not allowed", "Return to the terminal."), {"Allow": "GET"})

@@ -21,6 +21,8 @@ from types import ModuleType
 from typing import Protocol
 
 SECRET_KEYS = ("client-id", "client-secret", "refresh-token")
+# Each Secret Manager call, retries included, ends within this many seconds.
+TIMEOUT_SECONDS = 30.0
 DEFAULT_PREFIX = "pb"  # the identity module's name_prefix default
 
 # The identity module's name_prefix validation, exactly.
@@ -101,7 +103,8 @@ class SecretManagerStore:
         errors = self._errors
         try:
             response = self._client.access_secret_version(  # type: ignore[attr-defined]
-                request={"name": f"{self._secret_path(secret)}/versions/latest"}
+                request={"name": f"{self._secret_path(secret)}/versions/latest"},
+                timeout=TIMEOUT_SECONDS,
             )
         except errors.NotFound:
             # No version yet (the state right after `terraform apply`), or no such secret; a
@@ -113,7 +116,7 @@ class SecretManagerStore:
             return None
         except errors.PermissionDenied:
             raise self._denied(secret, "roles/secretmanager.secretAccessor") from None
-        except errors.GoogleAPICallError as exc:
+        except errors.GoogleAPIError as exc:  # API errors and RetryError (timeout)
             raise SecretStoreError(
                 f"Reading secret {secret} failed ({type(exc).__name__})."
             ) from None
@@ -129,13 +132,14 @@ class SecretManagerStore:
                 request={
                     "parent": self._secret_path(secret),
                     "payload": {"data": value.encode("utf-8")},
-                }
+                },
+                timeout=TIMEOUT_SECONDS,
             )
         except errors.NotFound:
             raise self._missing(secret) from None
         except errors.PermissionDenied:
             raise self._denied(secret, "roles/secretmanager.secretVersionAdder") from None
-        except errors.GoogleAPICallError as exc:
+        except errors.GoogleAPIError as exc:  # API errors and RetryError (timeout)
             raise SecretStoreError(
                 f"Storing a version of secret {secret} failed ({type(exc).__name__})."
             ) from None
@@ -149,18 +153,19 @@ class SecretManagerStore:
         disabled = 0
         try:
             listed = self._client.list_secret_versions(  # type: ignore[attr-defined]
-                request={"parent": self._secret_path(secret), "filter": "state:ENABLED"}
+                request={"parent": self._secret_path(secret), "filter": "state:ENABLED"},
+                timeout=TIMEOUT_SECONDS,
             )
             for item in listed:
                 match = _VERSION_NAME.fullmatch(getattr(item, "name", ""))
                 if match and int(match.group(1)) < version:
                     self._client.disable_secret_version(  # type: ignore[attr-defined]
-                        request={"name": item.name}
+                        request={"name": item.name}, timeout=TIMEOUT_SECONDS
                     )
                     disabled += 1
         except errors.PermissionDenied:
             raise self._denied(secret, "roles/secretmanager.secretVersionManager") from None
-        except errors.GoogleAPICallError as exc:
+        except errors.GoogleAPIError as exc:  # API errors and RetryError (timeout)
             raise SecretStoreError(
                 f"Disabling older versions of {secret} failed ({type(exc).__name__}) after "
                 f"{disabled} were disabled."
