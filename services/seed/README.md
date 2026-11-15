@@ -247,9 +247,10 @@ before any ingest Bundle's conditional create looks for it (D11).
   `["--hours", "3"]` (36 windows, one Bundle). Three hours covers the 60-minute `final` delay
   plus a missed run: a window written `preliminary` is rewritten `final` by a later run. Every
   15 minutes (like `health-sync`) also works but quadruples the writes for no visible gain.
-  Scheduler needs permission to run the job (`roles/run.invoker` on the job, or
-  `run.jobs.run`, for the scheduler's service account) and calls the Cloud Run Admin API
-  `jobs.run` with OAuth (not OIDC).
+  Scheduler calls the Cloud Run Admin API's `jobs.run` with an OAuth token (a Google API, so
+  OAuth rather than OIDC), and its service account needs permission to run this job
+  (`run.jobs.run`; which predefined role to grant on the job is for T20 to confirm against the
+  Cloud Run documentation, not verified here).
 - **Cost.** Nothing always-on: a job execution is billed for its seconds (a top-up takes a few
   seconds), Scheduler's first three jobs are free. Store writes: about 24 × 36 × 2 ≈ 1,700
   resources a day, about 2.6 MB of version history a day at about 1.5 KB each.

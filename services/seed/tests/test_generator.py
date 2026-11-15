@@ -143,13 +143,20 @@ def test_gaps_exist_are_realistic_and_stable():
     assert 0.01 * first.slots < first.absent < 0.10 * first.slots
     # At least one gap is a run of several consecutive windows (charging), not only drops.
     present = {s.start for s in slots(6, NY, START, START + timedelta(days=30)) if s.item}
-    longest = run = 0
+    runs, run = [], 0
     t = START
     while t < START + timedelta(days=30):
-        run = 0 if t in present else run + 1
-        longest = max(longest, run)
+        if t in present:
+            if run:
+                runs.append(run)
+            run = 0
+        else:
+            run += 1
         t += timedelta(minutes=5)
-    assert longest >= 4
+    # Both kinds of gap: off-wrist stretches (charging, 20 to 75 minutes) on most days...
+    assert sum(1 for r in runs if r >= 4) >= 15
+    # ...and single missing windows scattered through the day (about 1%).
+    assert sum(1 for r in runs if r == 1) >= 20
 
 
 def test_a_day_is_about_288_windows_minus_gaps():
