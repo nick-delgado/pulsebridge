@@ -441,8 +441,14 @@ OBR_2 = OBR.replace("OBR|1|", "OBR|2|")
     [
         ([MSH, PID, SYS, DIA], "missing-obr"),
         ([MSH, PID, SYS, OBR, DIA], "missing-obr"),  # an OBX before its OBR
+        ([MSH, PID, SYS, DIA, OBR], "missing-obr"),  # OBR after its OBX
+        ([MSH, SYS, DIA], "missing-patient-identifier"),  # OBX only: the PID check comes first
         ([MSH, PID, OBR, SYS, OBR_2, DIA], "multiple-orders"),
         ([MSH, PID, OBR, SYS, DIA, OBR_2], "multiple-orders"),
+        ([MSH, PID, OBR, OBR_2, SYS, DIA], "multiple-orders"),  # two OBR in a row
+        ([MSH, PID, SYS, OBR, OBR_2, DIA], "multiple-orders"),
+        ([MSH, SYS, PID, OBR, DIA], "multiple-orders"),  # an OBX before the PID: its own order
+        ([MSH, PID, OBR, SYS, "ZZZ|1", DIA], "multiple-orders"),  # a Z segment splits the order
         ([MSH, PID, OBR.replace("85354-9", "55284-4"), SYS, DIA], "unknown-obr-4-code"),
         ([MSH, PID, OBR.replace("^LN|", "^L|"), SYS, DIA], "unknown-obr-4-code"),
         (

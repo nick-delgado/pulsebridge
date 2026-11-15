@@ -162,7 +162,7 @@ def map_message(
         if not observations:
             raise _Rejected(Reason.NO_OBSERVATIONS)
         patient = _read_patient(message, config)
-        observations = _read_order(message, observations)
+        observations = _read_order(message)
         reading = _read_reading(observations, header)
         bundle = _build_bundle(header, patient, reading, message_name, recorded)
     except _Rejected as rejected:
@@ -387,33 +387,29 @@ def _read_patient(message: Message, config: MappingConfig) -> PatientInput:
 # ----------------------------------------------------------------------------------------------
 
 
-def _read_order(message: Message, observations: list) -> list:
+def _read_order(message: Message) -> list:
     """Check the ORU^R01 order structure the cuff builder (T07) emits, and return its OBX.
 
     In ORU^R01 every OBX belongs to an order: an OBR (observation request) segment followed by
     its OBX segments, which hl7apy groups as ``ORU_R01_ORDER_OBSERVATION``. The OBR says which
     test the results answer (OBR-4); without it the OBX codes have no context. We accept
-    exactly one order, opened by its OBR, naming LOINC 85354-9, with every OBX inside it.
+    exactly one order, opened by its OBR, naming LOINC 85354-9.
     """
+    # hl7apy's grouping (tested in test_order_structure_problems): every OBX is placed in an
+    # order group, and every further OBR opens a new one. So one order group means every OBX
+    # is in it and it holds at most one OBR. An OBX that comes before its OBR is placed in the
+    # group ahead of the OBR, so the OBR must be the group's first child.
     orders = _groups(message, "ORU_R01_ORDER_OBSERVATION")
     if len(orders) > 1:
         raise _Rejected(Reason.MULTIPLE_ORDERS)
-    order_children = list(orders[0].children) if orders else []
-    obrs = [child for child in order_children if child.name == "OBR"]
-    if len(obrs) > 1:
-        raise _Rejected(Reason.MULTIPLE_ORDERS)
-    # hl7apy's tolerant parse puts an OBX that comes before its OBR into the order group ahead
-    # of the OBR; the OBR must open the group.
-    if not obrs or order_children[0].name != "OBR":
+    order_children = list(orders[0].children)  # observations exist, so a group does
+    obr = order_children[0]
+    if obr.name != "OBR":
         raise _Rejected(Reason.MISSING_OBR)
-    order_observations = _segments(orders[0], "OBX")
-    if len(order_observations) != len(observations):
-        raise _Rejected(Reason.MISSING_OBR)  # an OBX outside the order has no OBR of its own
     # OBR-4 universal service identifier (CE): OBR-4.1 code, OBR-4.3 coding system.
-    obr = obrs[0]
     if (_component(obr, "obr_4", 1), _component(obr, "obr_4", 3)) != (PANEL, LOINC_CODING_SYSTEM):
         raise _Rejected(Reason.UNKNOWN_OBR_4_CODE)
-    return order_observations
+    return _segments(orders[0], "OBX")
 
 
 # ----------------------------------------------------------------------------------------------

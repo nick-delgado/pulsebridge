@@ -48,7 +48,7 @@ same library builds and validates the messages in T07 and T13.
 | MSH-12 | none | must be `2.5.1` (what the cuff sends; other versions have other group and field rules) |
 | MSH-3.1, MSH-4.1 | `Device.deviceName` `"CUFFSIM (PULSEBRIDGE)"` (escape sequences decoded); `Observation.device` | conditional create (D11) |
 | MSH-10 | `Observation.identifier` = UUIDv5(patient, `85354-9`, JSON list of raw MSH-3.1, MSH-4.1, MSH-10) | conditional update on that identifier, so a redelivery rewrites the same Observation; at most 199 characters |
-| OBR, OBR-4 | none | exactly one order (`ORU_R01_ORDER_OBSERVATION`), opened by its OBR, every OBX inside it; OBR-4 is `85354-9^…^LN` |
+| OBR, OBR-4 | none | exactly one order (`ORU_R01_ORDER_OBSERVATION`), opened by its OBR; OBR-4 is `85354-9^…^LN` |
 | PID-3.1 | `Patient.identifier` (`urn:pulsebridge:patient`) | must equal `PATIENT_ID`; any PID-3 repetition may carry it |
 | PID-5.1.1, PID-5.2 | `Patient.name` family, given | either may be empty or `""`; control characters are refused; only used if the Patient does not exist yet (conditional create) |
 | OBX-3 `8480-6^…^LN` / `8462-4^…^LN` | `component[].code` (LOINC); `Observation.code` is the panel `85354-9` | any other code or coding system is refused |
@@ -75,7 +75,9 @@ Device `POST` with `ifNoneExist`, the Observation `PUT Observation?identifier=�
 - **The order must be a blood-pressure panel.** In ORU^R01 every OBX belongs to an order: an
   OBR saying which test the results answer (OBR-4), followed by its OBX. The mapper reads this
   through hl7apy's `ORU_R01_ORDER_OBSERVATION` group, not by segment position, and requires
-  exactly one order, opened by its OBR, naming LOINC 85354-9, with every OBX inside it.
+  exactly one order, opened by its OBR, naming LOINC 85354-9. hl7apy places every OBX in an
+  order group and starts a new group at every OBR, so one group means every OBX belongs to that
+  OBR.
 
 - **No OBR-7 fallback for OBX-14.** D7 lists a missing OBX-14 as a malformed class and T07's
   `unmappable_missing_obx14` sample has OBR-7 set; the cuff always writes OBX-14, so an empty one
@@ -122,8 +124,8 @@ there is no loop. Codes keep to the documented label limits. The sentence for ea
 | `missing-patient-identifier` | error | no PID, or no PID-3.1 |
 | `unknown-patient` | error | no PID-3 repetition is the configured patient |
 | `invalid-patient-name` | error | PID-5 contains control characters (NUL, ESC, DEL, ...) |
-| `missing-obr` | error | no OBR opens the order, or an OBX lies outside it |
-| `multiple-orders` | error | more than one order (OBR) |
+| `missing-obr` | error | no OBR opens the order (there is none, or it comes after an OBX) |
+| `multiple-orders` | error | more than one order: a second OBR, or OBX that hl7apy groups apart (before the PID, split by an unknown Z segment) |
 | `unknown-obr-4-code` | error | OBR-4 is not LOINC 85354-9 with coding system LN |
 | `unknown-obx-3-code` | error | an OBX-3 that is not LOINC 8480-6 or 8462-4 |
 | `duplicate-obx-3-code` | error | the same OBX-3 twice |
