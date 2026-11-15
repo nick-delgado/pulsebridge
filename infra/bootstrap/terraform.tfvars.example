@@ -28,18 +28,18 @@ github_repository_id = "123456789"
 # Optional: only these refs may get deployer tokens (also blocks plan-on-PR; see README.md).
 # github_allowed_refs = ["refs/heads/main"]
 # --- CI identities (T26; infra/envs/README.md, "CI/CD") -------------------------------------------
-# Create the two GitHub Environments BEFORE applying these settings (the README says why).
-# dev (plans on pull requests):
+# Create the GitHub Environments BEFORE applying these settings (the README says why).
+# dev (plans on pull requests; the page deployer in the dev-page Environment):
 # create_planner       = true
 # create_page_deployer = true
-# prod (only from the protected Environments, on main):
+# prod (only from the protected Environments, on main; dev's defaults are refused here):
 # github_allowed_refs        = ["refs/heads/main"]
-# github_environments        = ["prod-plan", "prod"]
+# github_environments        = ["prod-plan", "prod", "prod-page"]
 # deployer_wif_contexts      = ["env-prod-main"]
 # create_planner             = true
 # planner_wif_contexts       = ["env-prod-plan-main"]
 # create_page_deployer       = true
-# page_deployer_wif_contexts = ["env-prod-main"]
+# page_deployer_wif_contexts = ["env-prod-page-main"]
 # Only if an env root sets build_trigger_repository:
 # allow_build_trigger = true
 

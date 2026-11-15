@@ -255,5 +255,5 @@ MLLP services before the build.
 must confirm, in order (bootstrap and WIF, the image build, the VM's first boot, OpenEMR's OAuth
 client, the front door, ingestion, the alerts, teardown, and CI/CD's first run). The Terraform
 CI/CD workflows exist but stay switched off until their repository variables are set
-([CI/CD](infra/envs/README.md#cicd-t26)); the secret scripts (T27), the end-to-end smoke test (T29) and a custom domain for the demo (T30) are in
+([CI/CD](infra/envs/README.md#cicd-t26)); the end-to-end smoke test (T29) and a custom domain for the demo (T30) are in
 progress or planned ([`docs/workplan.md`](docs/workplan.md)), as is the OpenEMR screenshot above.

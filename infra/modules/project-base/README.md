@@ -313,6 +313,7 @@ No modules.
 | Name | Description |
 |------|-------------|
 | <a name="output_build_account_registry_grants"></a> [build\_account\_registry\_grants](#output\_build\_account\_registry\_grants) | The build account's repository grants (T26), as "<repository>=<role>": empty without grant\_build\_account\_registry\_access. |
+| <a name="output_build_trigger_approval_required"></a> [build\_trigger\_approval\_required](#output\_build\_trigger\_approval\_required) | Whether the image build trigger's builds wait for an approval (T26), or null without a trigger. |
 | <a name="output_build_trigger_name"></a> [build\_trigger\_name](#output\_build\_trigger\_name) | Name of the Cloud Build trigger that builds the images on a release tag, or null when build\_trigger\_repository is not set (T26). |
 | <a name="output_cloud_nat_enabled"></a> [cloud\_nat\_enabled](#output\_cloud\_nat\_enabled) | Whether Cloud NAT exists. When false, the edge VM has no internet access unless it gets an external IP. |
 | <a name="output_docker_repository_url"></a> [docker\_repository\_url](#output\_docker\_repository\_url) | Registry path for service images: <region>-docker.pkg.dev/<project>/<repository>. |

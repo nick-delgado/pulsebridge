@@ -500,8 +500,7 @@ plan or in Terraform state. You now add one **version** to each of `db-root-pass
 into password files), and the reviewer password needs **at least 16 characters** (24 or more is
 better).
 
-With the scripts **added by T27** (being reviewed; follow `scripts/secrets/README.md` once it
-merges, since the details below may still change), values come from a hidden prompt (typed
+With the scripts in `scripts/secrets/` (their README has the details), values come from a hidden prompt (typed
 twice), from standard input when it is not a terminal, or are generated; they are never echoed,
 never passed as an argument and never written to disk. Values must be 16 to 128 printable ASCII
 characters. The project comes from `CLOUDSDK_CORE_PROJECT` (or `--project`) and the prefix from
@@ -525,10 +524,8 @@ scripts/secrets/set-reviewer-password.sh --generate             # prints the new
 - `openemr-admin-password` is OpenEMR's `admin` login, which you only need to look at OpenEMR's
   own screens through IAP; if you generate it, nobody can read it except through Secret Manager.
 
-Until T27 merges, the runbook's [step 5](../infra/envs/README.md#5-secret-versions-deployer-t27s-scripts)
-has a safe by-hand command (`IFS= read -rs`, then `printf '%s'` piped to `gcloud secrets versions
-add --data-file=-`, then `unset`). Never type a secret on a command line, where it would stay in
-your shell history.
+The runbook's [step 5](../infra/envs/README.md#5-secret-versions-deployer-scriptssecrets) has the
+exact commands. Never type a secret on a command line, where it would stay in your shell history.
 
 **Worked when:** `gcloud secrets versions list <prefix>-db-root-password --project <project-id>`
 shows version 1 `enabled`, and the same for each secret you set. *Not yet verified on a real
@@ -740,7 +737,7 @@ oldest failure is a minute old.
 
 Set the password one of two ways, **never both** in one environment:
 
-- **Recommended, prod and dev:** `scripts/secrets/set-reviewer-password.sh` (added by T27; 3.4
+- **Recommended, prod and dev:** `scripts/secrets/set-reviewer-password.sh` (3.4
   above), with `reviewer_password_wo_version` left at its default `0`. Until a version exists the
   login page answers "Reviewer login is not configured" (HTTP 503).
 - **dev only, through Terraform** (more work, see the note below): set `reviewer_password_wo_version = 1` in `terraform.tfvars`
@@ -830,7 +827,7 @@ Rotating ends every session at once, because the session tokens are signed with 
 from the password.
 
 - **prod (and dev without a tfvars password):** run `scripts/secrets/set-reviewer-password.sh`
-  (added by T27) again. `fhir-proxy` reads the newest version within about 30 seconds.
+  again. `fhir-proxy` reads the newest version within about 30 seconds.
 - **dev with a tfvars password:** raise `reviewer_password_wo_version` by one and apply with the
   new `TF_VAR_reviewer_password` (read and unset as in [Step 4](#step-4-log-in-as-a-reviewer)).
   There may be a moment with no enabled version, when login answers 503. As in Step 4, every

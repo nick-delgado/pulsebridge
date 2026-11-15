@@ -182,7 +182,7 @@ secret value.
 | `fhir_proxy_url` | step 12's hop measurement only (never for the page) |
 | `healthcare` | project, location, dataset, FHIR store, audit store, HL7v2 store (short IDs), FHIR base URL, ingest topic and subscriptions (replay commands) |
 | `setup_env` (sensitive) | `export` lines for the connect script: `GCP_PROJECT_ID`, `HEALTHCARE_LOCATION`, `HEALTHCARE_DATASET_ID`, `FHIR_STORE_ID`, `PATIENT_ID`, `PULSEBRIDGE_NAME_PREFIX`. Sensitive because it carries the patient ID (see "What a plan shows"). Your name, gender and birth date are never in it |
-| `secret_name_prefix`, `secret_ids` | secret names (never values) for T27's scripts and the connect script |
+| `secret_name_prefix`, `secret_ids` | secret names (never values) for the secret scripts (scripts/secrets/) and the connect script |
 | `seed_job_name`, `region` | step 9's first seeding |
 | `health_sync_service_name`, `v2_to_fhir_service_name` | logs and checks |
 | `ingest_enabled`, `push_enabled`, `scheduler_job_names` | where the ingest switch stands |
@@ -248,27 +248,38 @@ written here too (write-only).
 
 Worked when: `gcloud secrets list --project <project>` shows eight `<prefix>-...` secrets.
 
-### 5. Secret versions (deployer; T27's scripts)
+### 5. Secret versions (deployer; scripts/secrets)
 
-Add a version to each of `<prefix>-db-root-password`, `<prefix>-openemr-db-password`,
-`<prefix>-openemr-admin-password` and `<prefix>-reviewer-password` (prod; in dev it may come
-from tfvars instead, never both). Values are read from a prompt, never echoed, and stored
-**without a trailing newline** (the VM reads them into password files). The reviewer password
-needs at least 16 characters. Never write `<prefix>-openemr-client-private-key`: the VM does,
-and never the three Google Health secrets: the connect script does (step 9).
+Add a version to the three edge-VM passwords before the VM's first boot (step 6), and in prod to
+the reviewer password (in dev it may come from tfvars instead, never both). The scripts read the
+value from a hidden prompt (typed twice) or from standard input, or generate it; store it without
+a trailing newline; and refuse the secrets that something else writes
+(`<prefix>-openemr-client-private-key`: the VM; the three Google Health secrets: the connect
+script, step 9). Details: scripts/secrets/README.md.
 
-T27 builds `scripts/secrets/`. Until then, the same rules by hand (no echo, no trailing newline,
-nothing on disk or in history; `IFS=` keeps leading and trailing spaces, `-r` keeps
-backslashes, and the variable is removed whether or not gcloud succeeds):
+From the repository root:
 
 ```bash
-IFS= read -rs value
-printf '%s' "$value" | gcloud secrets versions add <prefix>-db-root-password \
-  --data-file=- --project <project>; rc=$?; unset value; echo "gcloud exit code: $rc"
+export CLOUDSDK_CORE_PROJECT=<project-id>
+export SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/<env> output -raw secret_name_prefix)"
+# or pass --project <project-id> --prefix <identity_name_prefix> to each command ("pb" by default)
+scripts/secrets/set-secret.sh --generate db-root-password
+scripts/secrets/set-secret.sh --generate openemr-db-password
+scripts/secrets/set-secret.sh openemr-admin-password      # typed twice; or --generate (not shown)
+scripts/secrets/set-reviewer-password.sh --generate        # prod; shows it once, after storing
 ```
 
-Worked when: `gcloud secrets versions list <secret> --project <project>` shows version 1
-`enabled` for each.
+Typed edge-VM passwords: 16 to 128 letters, digits and `!#$%&()*+,-./:;<>?@[]^_{|}~`, not
+starting with `-` (OpenEMR's first-time setup splits on spaces, cuts at `=`, and writes the
+database password unescaped into `sqlconf.php`). The reviewer password: 16 to 128 printable ASCII
+characters. A generated admin password is never shown; it is the only OpenEMR admin login, and
+root on the VM can read it from `/mnt/disks/edge/secrets/openemr-admin-password`
+(scripts/secrets/README.md, "Reading a generated admin password back").
+
+Worked when: `gcloud secrets versions list <secret> --project <project-id>` shows version 1
+`enabled` for each, and
+`gcloud secrets versions access latest --secret <secret> --project <project-id> | wc -c`
+prints the value's length (no extra byte for a newline).
 
 ### 6. Targeted apply of the edge VM, and its first boot (deployer, with a shell on the VM)
 
@@ -479,7 +490,7 @@ whenever the COS release notes announce a security fix. Check with `terraform ou
 
 ### Rotating the reviewer password
 
-prod (and dev if not set from tfvars): `scripts/secrets/set-reviewer-password.sh` (T27) adds a new
+prod (and dev if not set from tfvars): `scripts/secrets/set-reviewer-password.sh` adds a new
 version; fhir-proxy reads `latest` within about 30 seconds and every session ends at once (its
 token key derives from the password). dev from tfvars: raise `reviewer_password_wo_version` and
 apply with the new `TF_VAR_reviewer_password` (read with `IFS= read -rs`, unset after the apply
@@ -591,15 +602,18 @@ here has run against a real project or a real GitHub repository yet (it was buil
 
 | Account (bootstrap) | Can do | Used by |
 | --- | --- | --- |
-| **planner** (`create_planner`) | read every resource and IAM policy, secret metadata (never values), the state and the CI tfvars; no write anywhere, not even the state lock | the pull-request plan (dev), `prod-plan` |
+| **planner** (`create_planner`) | read the resources' configuration and IAM policies, secret metadata, the **state and the CI tfvars** (which hold the patient's identifier, in prod the patient's name, and the alert address, in clear); no FHIR resource, HL7v2 message, log entry or secret value; no write anywhere, not even the state lock (bootstrap README, "CI identities", lists its custom role) | the pull-request plan (dev), `prod-plan` |
 | **deployer** | everything an apply needs (bootstrap's "Deployer roles") | the dev apply, `prod-apply`, the nightly destroy |
 | **page deployer** (`create_page_deployer`) | `roles/firebasehosting.admin` only | the page deploy jobs |
 
-Each is reachable only from its contexts: dev's planner from `pull-request`, dev's deployer and
-page deployer from `main`; prod's planner from `env-prod-plan-main`, prod's deployer and page
-deployer from `env-prod-main`. The jobs that hold a deployer run no npm code (no `npm ci`, no
-Vite, no Firebase CLI): the page is built in a job with **no** cloud credential, and deployed by a
-job that can only touch Hosting.
+Each is reachable only from its contexts, and no two share one: dev's planner from
+`pull-request`, dev's deployer from `main`, dev's page deployer from `env-dev-page-main` (the
+`dev-page` Environment); prod's planner from `env-prod-plan-main`, prod's deployer from
+`env-prod-main`, prod's page deployer from `env-prod-page-main` (the `prod-page` Environment). The
+jobs that hold a deployer run no npm code (no `npm ci`, no Vite, no Firebase CLI); the page is
+built in a job with **no** cloud credential; and the page deploy job runs in its own Environment,
+so the npm packages there could ask GitHub for a token but could only become the page deployer,
+which can only touch Hosting (the truth table below).
 
 ### What runs when
 
@@ -607,7 +621,7 @@ job that can only touch Hosting.
 | --- | --- | --- | --- |
 | `terraform-checks.yml` | every pull request (forks too) and push to main | none | `make tf-validate`, `make tf-test` (mocked providers), `make tf-lint`, `make tf-scan` |
 | `terraform-plan.yml` | pull requests from branches of this repository | dev planner | plans dev (`-lock=false`); a second job without credentials posts the redacted plan as a comment |
-| `terraform-apply.yml` | push to main (a merge); or by hand from main (dev only, unless "prod" is ticked) | see below | builds the page (no credential); applies dev (deployer) and deploys its page (page deployer); checks prod's Environments; plans prod (planner, `prod-plan`); after approval applies prod (deployer, `prod`) and, after a second approval, deploys prod's page (page deployer, `prod`) |
+| `terraform-apply.yml` | push to main (a merge); or by hand from main (dev only, unless "prod" is ticked) | see below | builds the page (no credential); applies dev (deployer) and deploys its page (page deployer); checks prod's Environments; plans prod (planner, `prod-plan`); after approval applies prod (deployer, `prod`) and then deploys prod's page (page deployer, `prod-page`) |
 | `terraform-destroy-dev.yml` | 03:17 UTC and a retry at 06:17 UTC, if opted in; or by hand from main | dev deployer | destroys dev; the first run may leave the serverless subnet and the VPC, the retry nothing |
 | `ci.yml` (T01) | every pull request | none | Python, web and secret checks; its former Terraform job moved to `terraform-checks.yml` |
 
@@ -640,7 +654,8 @@ in git and not in GitHub. CI reads it from the environment's own state bucket, o
 `ci/<env>.tfvars`, with a 5-minute access token, writes it with mode 600, registers the
 sensitive values with the runner's log masking, and deletes it at the end of the job. The
 object's GCS **generation** (a number that changes on every write) is recorded with each plan;
-`prod-apply` fetches exactly that generation, so an edit after the review is refused. Upload or
+`prod-apply` fetches and applies exactly that generation, so an edit made after the review is not
+applied by that run: it waits for the next run's plan and review. Upload or
 update it yourself, as the owner or the deployer, for example after pasting new image digests:
 
 ```bash
@@ -668,39 +683,47 @@ the deployer.
    everything the deployer and `prod-plan` run, has been reviewed. With a single maintainer,
    GitHub does not let you approve your own pull request; another reviewer, or a temporary
    bypass for yourself, is needed.
-2. **The two GitHub Environments**, Settings, Environments, New environment, created **before**
-   step 3:
+2. **The GitHub Environments**, Settings, Environments, New environment, created **before**
+   step 3 (prod) and step 4 (dev):
    - `prod-plan`: Deployment branches and tags, **Selected branches and tags**, add the branch
      rule `main` (and nothing else). No reviewers (it only plans, as the read-only planner).
      Leave "Allow administrators to bypass configured protection rules" **off**.
    - `prod`: **Required reviewers**, add yourself (up to six; one approval is enough). Deployment
      branches: Selected branches and tags, `main` only. Administrator bypass off. "Prevent
      self-review" stays off if you are the only maintainer, or you could never approve.
+   - `prod-page` and `dev-page`: Selected branches and tags, `main` only; administrator bypass
+     off; **no reviewers**: the page job runs only after a successful, approved apply of the same
+     run (prod) or a successful apply (dev). Their own Environments give the page jobs a CI
+     context only the page deployer is bound to.
    - Not "Protected branches only": with no classic branch protection rule, GitHub lets every
-     branch deploy then. `prod-preflight` refuses anything but exactly the settings above
-     (custom policy, the single branch `main`, no admin bypass, reviewers on `prod`), and fails on
-     any API error.
+     branch deploy then. `prod-preflight` (for `prod-plan`, `prod`, `prod-page`) and
+     `dev-preflight` (for `dev-page`) refuse anything but exactly the settings above (custom
+     policy, the single branch `main`, no admin bypass, reviewers on `prod`), checked
+     type-exactly, and fail on any API error.
    - Required reviewers on Environments are available on GitHub Free, Pro and Team only for
      **public** repositories.
    - **Why first:** once prod's bootstrap (step 3) trusts these names, a workflow that names an
      environment that does not exist yet would create it, with no rules, and its job would get
-     prod tokens. Creating and configuring both first closes that window.
+     prod tokens. Creating and configuring them first closes that window.
 3. **prod's bootstrap** (the existing project, D1), as the owner, with:
 
    ```hcl
    github_allowed_refs        = ["refs/heads/main"]
-   github_environments        = ["prod-plan", "prod"]
+   github_environments        = ["prod-plan", "prod", "prod-page"]
    deployer_wif_contexts      = ["env-prod-main"]
    create_planner             = true
    planner_wif_contexts       = ["env-prod-plan-main"]
    create_page_deployer       = true
-   page_deployer_wif_contexts = ["env-prod-main"]
+   page_deployer_wif_contexts = ["env-prod-page-main"]
    ```
 
-   Read the plan: these are **real IAM changes** (listed under "IAM changes" below).
+   Read the plan: these are **real IAM changes** (listed under "IAM changes" below). The planner's
+   custom role needs `iam.roles.create`, which you have as the owner. The dev defaults of the
+   three context lists are refused here (a validation), so none can slip through.
 4. **dev** (when you want it): create and bootstrap the second project (`create_project =
-   true`) with `create_planner = true` and `create_page_deployer = true` and the default contexts,
-   then bring dev up by hand with steps 2 to 10.
+   true`) with `create_planner = true` and `create_page_deployer = true` and the default contexts
+   (deployer `main`, planner `pull-request`, page deployer `env-dev-page-main`; create the
+   `dev-page` Environment first), then bring dev up by hand with steps 2 to 10.
 5. **Upload each environment's tfvars** as above.
 6. **Repository variables** (Settings, Secrets and variables, Actions, Variables, Repository
    variables). Set an environment's variables last: setting them turns its jobs on.
@@ -727,9 +750,10 @@ the deployer.
 2. Merge it: dev is applied, then its page deployed. `Plan prod` runs; its job summary shows
    prod's redacted plan. The run waits at `Apply prod (after approval)`; open the run, read the
    plan, "Review deployments", approve (or reject: nothing is applied). The apply refuses if main
-   has moved on (a newer run applies the newer commit), if the tfvars changed, or if the plan
-   differs from the reviewed one. `Deploy prod's page` then waits for a second approval (the page
-   deployer is bound to the `prod` Environment too).
+   has moved on (a newer run applies the newer commit) or if the plan differs from the reviewed
+   one; it applies the reviewed tfvars generation, so a later edit waits for the next run. `Deploy
+   prod's page` then runs in `prod-page` without a further approval, after checking that main has
+   not moved on.
 3. A manual run (Actions, Terraform apply, Run workflow, from main) applies dev and deploys its
    page; tick "prod" to include prod.
 4. Nightly (if opted in), dev is destroyed with its images and secret values. CI then does nothing
@@ -744,12 +768,41 @@ After these settings, and assuming branch protection as in step 1:
 | Who | dev | prod |
 | --- | --- | --- |
 | Anyone (forks, the public) | nothing: fork pull requests get no OIDC token and the plan job does not run for them | nothing |
-| A collaborator with **write** access (or an agent that pushes `task/*` branches) | through a pull request, a token for dev's **read-only planner**: it can read dev's configuration, IAM, state and CI tfvars (synthetic data, but also dev's project ID and alert address); it cannot change anything. Pushing a branch alone gives nothing (`other` context). Reaching dev's deployer needs code on main, so an approved merge | nothing until a reviewed merge to main and, for any change, an approval in `prod` |
-| Code merged to main (reviewed) | the dev deployer (apply, destroy) | the prod planner in `prod-plan` without approval; the prod deployer and page deployer only after an approval |
+| A collaborator with **write** access (or an agent that pushes `task/*` branches) | through a pull request, a token for dev's **read-only planner**: the pull request's code can read dev's resource configuration, IAM policies, and **dev's state and CI tfvars** (a synthetic patient, but dev's project ID and the alert address in clear); it cannot change anything. Pushing a branch alone gives nothing (`other` context). Reaching dev's deployer needs code on main, so an approved merge | nothing until a reviewed merge to main |
+| Code merged to main (reviewed) | the dev deployer (apply, destroy) and dev's page deployer | **the prod planner in `prod-plan`, before any approval**: it can read prod's state and CI tfvars, which hold the **patient's real identifier and name** and the alert address in clear, and every resource configuration. What stands in front of it is the ruleset's approving review on main (setup step 1). Stricter option: add required reviewers to `prod-plan` too (then every prod plan waits for an approval, and `prod-preflight` still passes). The prod deployer only after an approval in `prod` |
 | A compromised npm package of the page build | nothing: the build job has no credential | nothing |
-| A compromised package of the Firebase CLI (locked, install scripts off) | dev's Hosting site | prod's Hosting site, only during an approved page deploy |
+| A compromised package of the Firebase CLI (locked, install scripts off) | dev's Hosting site: the page job's context is `env-dev-page-main`, bound only to the page deployer | prod's Hosting site, in the page job after an approved apply (`env-prod-page-main`) |
 | A compromised GitHub action (pinned by commit SHA) | whatever the job that uses it holds | the same |
-| Whoever can write `ci/<env>.tfvars` | the inputs of every dev apply | the inputs of the next prod plan (prod-apply pins the reviewed generation) |
+| Whoever can write `ci/<env>.tfvars` | the inputs of every dev apply | the inputs of the next prod plan (prod-apply applies the reviewed generation) |
+
+**Which job can become which account** (the truth table). Computed by evaluating bootstrap's real
+`ci_context` mapping, prod's pool condition and the bindings (from the mocked plans, with
+cel-python); `tests/tooling/test_wif_truth_table.py` checks, for dev and for prod, all 1,008 combinations of
+9 events, 7 refs, 8 environments and 2 repositories against an independently written expectation, and that no token ever
+reaches two accounts. Representative rows:
+
+| Job (token claims) | `ci_context` | dev: account | prod: pool condition | prod: account |
+| --- | --- | --- | --- | --- |
+| pull_request (same repository) | `pull-request` | planner | refused | none |
+| push to main | `main` | deployer | refused | none |
+| schedule / manual run on main | `main` | deployer | refused | none |
+| push to a branch | `other` | none | refused | none |
+| manual run on a branch | `other` | none | refused | none |
+| tag push | `other` | none | refused | none |
+| pull_request_target | `other` | none | refused | none |
+| merge queue (merge_group) | `other` | none | refused | none |
+| env dev-page, push to main | `env-dev-page-main` | page-deployer | refused | none |
+| env dev-page, push to a branch | `env-dev-page-other` | none | refused | none |
+| env prod-plan, push to main | `env-prod-plan-main` | none | admitted | planner |
+| env prod, push to main | `env-prod-main` | none | admitted | deployer |
+| env prod, push to a branch | `env-prod-other` | none | refused | none |
+| env prod, pull_request | `env-prod-other` | none | refused | none |
+| env prod-page, push to main | `env-prod-page-main` | none | admitted | page-deployer |
+| env prod-page, pull_request_target | `env-prod-page-other` | none | admitted | none |
+| env staging, push to main | `env-staging-main` | none | refused | none |
+| another repository, push to main | `other-repository` | none | refused | none |
+
+Google's CEL implementation is not cel-python; that they agree is checklist item CI4.
 
 **Billing in dev.** The dev deployer can create any billable resource the stack's roles allow,
 and `roles/resourcemanager.projectIamAdmin` lets it grant itself more. Set a **budget with an
@@ -772,10 +825,20 @@ and the redaction check refuses a plan that still shows one.
   kept one day. Files rather than step outputs, because the runner drops an output that contains
   a masked value, and a short masked name could appear inside the plan text.
 - **The prod plan is pinned three ways.** The digest is a SHA-256 of the plan's resource changes
-  and output changes (addresses, actions, before and after values) with every sensitive value
-  replaced by a placeholder, so it cannot be used to test guesses of the patient ID. A change in a
-  sensitive value alone does not change it; that comes from the tfvars, which are pinned by
-  generation. And the commit must be the tip of main.
+  and output changes (addresses, actions, and the values they will have afterwards, `after` and
+  `after_unknown`) with every sensitive value replaced by a placeholder, so it cannot be used to
+  test guesses of the patient ID. `before`, the refreshed current values, is left out: a value that
+  drifted between review and apply and that the plan sets back anyway would change the digest
+  without changing the reviewed outcome, while a change to what the apply will set still does. A
+  change in a sensitive value alone does not change it; that comes from the tfvars, which are
+  pinned by generation. And the commit must be the tip of main.
+- **If the digest never matches** (some resource reports a different planned value on every
+  plan, so every prod apply refuses with "the plan differs from the one reviewed" although nothing
+  changed): compare the `plan-prod` artifact's plan text with the apply job's plan in its log; the
+  resource whose values differ is the cause. Apply that run by hand as the deployer with the
+  runbook (`terraform plan`, read it, `terraform apply`), record the resource in CI9, and fix it in
+  code (for example `lifecycle { ignore_changes = [...] }` on the noisy attribute) rather than
+  loosening the digest.
 - **The redaction check is a backstop.** Terraform's `sensitive` is the protection. The check
   looks for each sensitive tfvars value as a whole word in the plan text; it misses a value
   changed in case, encoded (base64, URL encoding) or embedded in a longer identifier, and a short
@@ -847,8 +910,8 @@ accepts, these lower ones:
 | The deployer's WIF binding changes from "any workflow of the repository" to its contexts (`main`, or `env-prod-main` for prod) | deployer | bootstrap | **default**, at the next bootstrap apply in each project |
 | `roles/cloudbuild.builds.editor` | deployer | bootstrap `allow_build_trigger` | opt-in |
 | The pool's condition requires `ref` main and the two Environments | the pool | bootstrap `github_allowed_refs`, `github_environments` | opt-in (prod) |
-| The planner account, its 16 viewer-type roles (bootstrap README, "CI identities"), object viewer on the state bucket, its WIF binding | planner | bootstrap `create_planner` | opt-in |
-| The page deployer account, `roles/firebasehosting.admin`, its WIF binding | page deployer | bootstrap `create_page_deployer` | opt-in |
+| The planner account; its custom role `pulsebridgeTerraformPlanner` (get and getIamPolicy of the stack's resource types, `serviceusage.services.use`; bootstrap README, "CI identities"); object viewer on the state bucket; its WIF binding (`pull-request` in dev, `env-prod-plan-main` in prod) | planner | bootstrap `create_planner` | opt-in |
+| The page deployer account, `roles/firebasehosting.admin`, its WIF binding (`env-dev-page-main` in dev, `env-prod-page-main` in prod) | page deployer | bootstrap `create_page_deployer` | opt-in |
 | The build account: log writer (project), writer (services repository), reader (Docker Hub mirror) | build | env roots `create_build_service_account` | opt-in |
 
 ## Master checklist
@@ -1019,10 +1082,10 @@ In this order (each needs the ones before). "CI" is T26; "B" bootstrap; "PB" pro
 | --- | --- | --- | --- |
 | CI1 | prod's bootstrap plan shows exactly the listed changes: the condition (ref and environments), the `ci_context` mapping, the deployer binding moving to `env-prod-main`, the planner and page deployer with their roles and bindings | CI, B | |
 | CI2 | With the variables unset, every authenticating job shows as skipped and each workflow run is green | CI | |
-| CI3 | `prod-preflight` passes with the two Environments configured as in step 2, and fails with a clear error when `prod` has no reviewer or uses "Protected branches only" (try both once). The GET answer carries `can_admins_bypass` (GitHub's schema does not list it; without it the preflight always fails) and each branch policy's `type` | CI | |
+| CI3 | `prod-preflight` passes with the three prod Environments (and `dev-preflight` with `dev-page`) configured as in step 2, and fails with a clear error when `prod` has no reviewer or uses "Protected branches only" (try both once). The GET answer carries `can_admins_bypass` (GitHub's schema does not list it; without it the preflight always fails) and each branch policy's `type` | CI | |
 | CI4 | WIF: the `ci_context` mapping is accepted by Google (CEL `"environment" in assertion`, `in` lists, nested ternaries) and evaluates as documented: a pull request is `pull-request`, a push to main `main`, a `prod-plan` job on main `env-prod-plan-main`, a branch push `other`; the planner cannot be reached from `main`, the deployer not from `pull-request` | CI, B | |
 | CI5 | `fetch-tfvars`: the 5-minute access token reads `ci/<env>.tfvars`; the answer carries `x-goog-generation`; `&generation=` returns that version; the masked values do not appear in the log | CI | |
-| CI6 | The Firebase CLI deploys with the page deployer's external-account credentials, from `ci/deploy-tools` with `--config <checkout>/web/firebase.json` (an absolute path; `public: dist` must resolve next to firebase.json), and `roles/firebasehosting.admin` alone is enough with the Cloud Run rewrite (also P12) | CI, PHR | |
+| CI6 | The Firebase CLI deploys with the page deployer's external-account credentials, from `ci/deploy-tools` with `--config <checkout>/web/firebase.json` (an absolute path; `public: dist` must resolve next to firebase.json), and `roles/firebasehosting.admin` alone is enough with the Cloud Run rewrite (also P12). `npm ci --ignore-scripts` skips the install scripts of `protobufjs` and `re2` (optional), the two packages of the locked tree that have one: the CLI must still work without them | CI, PHR | |
 | CI7 | `terraform init` with `-backend-config=bucket=...` and the external-account credentials; the deployer's plan takes and releases the state lock; the planner's `-lock=false` plan works | CI | |
 | CI8 | The plan comment appears on the pull request and is updated, not duplicated, on the next push (`gh pr comment --edit-last --create-if-none`) | CI | |
 | CI9 | The prod plan's job summary is readable before approving; approving runs the apply; the digest matches when nothing changed (if refreshed attributes make it differ every time, record which); rejecting applies nothing; a second merge during the wait makes the first apply refuse (not tip) | CI | |
@@ -1032,8 +1095,8 @@ In this order (each needs the ones before). "CI" is T26; "B" bootstrap; "PB" pro
 | CI13 | Trigger: the deployer (with `allow_build_trigger`) can create it on a 2nd-gen repository (if refused on `cloudbuild.repositories.get`, add `roles/cloudbuild.connectionViewer`); a tag push starts a build that waits for approval, then runs as the build account; then C1 to C6 | CI, PB, SVC | |
 | CI14 | The cleanup policy is accepted with `older_than` in seconds and `keep_count`; the newest ten versions are never deleted; whether Cloud Run still starts instances of a revision whose image the policy deleted | CI, PB | |
 | CI15 | The auth action's `access_token_lifetime: 300s` is accepted, and `token_format: access_token` and the credential file work together in one step | CI | |
-| CI16 | The planner's 16 roles suffice for a full `terraform plan` of dev and of prod (if refused, the error names the permission: add the matching viewer role to `planner_roles`) | CI, B | |
-| CI17 | Artifacts: `web-dist`, `page-config-<env>` and `plan-<env>` upload and download within the run; the second approval for `prod-page` appears after `prod-apply` | CI | |
+| CI16 | The planner's custom role suffices for a full `terraform plan` of dev and of prod (if refused, the error names the permission: add it to `planner_extra_permissions` if it is a get or getIamPolicy that reads no data) | CI, B | |
+| CI17 | Artifacts: `web-dist`, `page-config-<env>` and `plan-<env>` upload and download within the run; `prod-page` starts without a further approval after `prod-apply`, in its own Environment, and its token reaches only the page deployer | CI | |
 
 ## Findings for the modules
 
@@ -1072,9 +1135,10 @@ make tf-scan       # T26: Trivy's Terraform checks over infra/; HIGH and CRITICA
 | `_stack/tests/stack.tftest.hcl` | the composition under mocked providers: four scenarios (real or synthetic, ingest off or on) and a prod one, applied in the mock with the service accounts' emails unknown at plan (as on a real first plan, so "Invalid count argument" would show); push and Scheduler follow `ingest_enabled`; the right workloads per mode; project-base gets the edge VM's account; the mirror stays on; edge-vm gets openemr's two hooks and 40 minutes; openemr gets the VM's reserved address; one patient for ingestion and phr; the `setup_env` and `next_steps` outputs; prod refuses a tfvars reviewer password; a full plan needs the images; each targeted step (3, 4, 6) plans without them; T26: an alert channel only with an address, image builds off by default, the build account's two grants and the trigger when enabled, the trigger refused without the account |
 | `_stack/tests/plan_scan.py` | the scenario runs' full state (every resource in every module), with the scenario table required to equal the state-producing runs: no `allUsers`/`allAuthenticatedUsers`, no key, no authoritative IAM, one project-level grant; exactly one public service; every Cloud Run service and the job run as their own account and get the literal project, location, dataset and store IDs they should (and not the ones they should not: cuff-sim has no `FHIR_STORE_ID`); Scheduler jobs and push config per `ingest_enabled`; `PATIENT_ID` and the authority equal everywhere; the synthetic name; firewall target, ports and the mirror grant; the VM's account, address, subnet, no external IP, hooks, hook limit, secret files and adapter flags; cuff-sim's MLLP host and port; fhir-proxy's settings and mounts; the alert channel; PREVENT, deletion protection and the 7-day snapshot schedule in prod only; and a human-readable plan shows no patient value and no alert address (T26; the alert channel's display name and its redacted `email_address` label are the positive controls) |
 | `_stack/tests/check_env_roots.py` | dev and prod differ only in `env.tf`, `backend.tf`, the example and the tests, and `env.tf` holds exactly the documented settings; git's file list is non-empty and holds the known files; no author-specific project (in a path or assigned to any `project*` key), number (also before a full stop), bucket, email or host (also inside a URL) in any file under `infra/envs` except the deploy tools' generated lockfile, which is checked instead for registry URLs, sha512 integrity hashes and the exact version of `package.json`; no secret-version data source or `secret_data`; `terraform.tfvars` and `backend.hcl` ignored, the examples and lock files not; the examples hold placeholders only, set every required variable, and plan; lock files consistent with the modules and with bootstrap's platforms; both roots' `versions.tf` constraints; provider settings; the `depends_on` edges (healthcare on project-base; ingestion on identity and project-base; phr on project-base and identity); the patient variables and `alert_email` declared sensitive |
-| `dev/tests`, `prod/tests` | T26 adds: the build trigger is refused without the build account |
-| `tests/tooling/test_tf_ci.py` (run by `make test`) | `ci/tf_ci.py` against fake `terraform`, `npm` and `npx` and in-process HTTP: tfvars parsing (heredoc and expressions refused), the redaction check (whole words; messages name the variable, never the value); the plan record (redacted text, digest, count, tfvars generation, commit; no binary plan in it or in the checkout; `-lock=false` for the planner); a leaking or empty plan records nothing; the digest (order-free, no-ops ignored, changes with a value, not with a sensitive value); apply with the reviewed record, refused for a changed value, another generation, another commit or a broken record; an unreadable state is an error; destroy (empty state, a bring-up in progress, leftovers until the retry, other leftovers, a failed destroy, prod refused); the page configuration and deploy (locked CLI, install scripts off, no Terraform); fetching the tfvars (URL, generation asked and checked, mode 600 also for an existing file, masking, errors without a traceback or the token); cleanup; the Environments preflight passing only the required settings and failing closed on eleven deviations; the tip-of-main check |
-| `tests/tooling/test_terraform_workflows.py` | the four `terraform-*.yml` workflows: SHA-pinned actions, no `${{ }}` in a script, minimal and separated permissions, no `secrets.*`, every authenticating job gated on its identity's variables and on main or a same-repository pull request, the narrowest identity per job (planner jobs only plan, deployer jobs run no npm, page jobs no Terraform), prod only from its Environments, prod-apply pinned to the reviewed plan, prod following a deployed dev, the preflight, manual runs dev-only by default, a shared non-cancelling group per environment, the page built without credentials and deployed after every apply, only the known artifacts, the tfvars deleted at the end, the opt-in nightly destroy and its retry, the checks job unconditional, tool versions and checksums pinned, the deploy tools' lockfile |
+| `dev/tests`, `prod/tests` | T26 adds: the build trigger is refused without the build account; triggered builds wait for an approval by default |
+| `tests/tooling/test_tf_ci.py` (run by `make test`) | `ci/tf_ci.py` against fake `terraform`, `npm` and `npx` and in-process HTTP: tfvars parsing (heredoc and expressions refused), the redaction check (whole words; messages name the variable, never the value); the plan record (redacted text, digest, count, tfvars generation, commit; no binary plan in it or in the checkout; `-lock=false` for the planner); a leaking or empty plan records nothing; the digest (order-free, no-ops ignored, changes with a value, not with a sensitive value); apply with the reviewed record, refused for a changed value, another generation, another commit or a broken record; an unreadable state is an error; destroy (empty state, a bring-up in progress, leftovers until the retry, other leftovers, a failed destroy, prod refused); the page configuration and deploy (locked CLI, install scripts off, no Terraform); fetching the tfvars (URL, generation asked and checked, mode 600 also for an existing file, masking, errors without a traceback or the token); cleanup; the Environments check for prod (`prod-plan`, `prod`, `prod-page`) and dev (`dev-page`), type-exact, failing closed on the review's fuzz cases (policy, admin bypass, protection rules and reviewers of the wrong type or shape, branch policy lists that are long, mislabelled, paginated or of the wrong type) for each Environment; the tip-of-main check; the digest ignoring drift in `before` |
+| `tests/tooling/test_terraform_workflows.py` | the four `terraform-*.yml` workflows: SHA-pinned actions, no `${{ }}` in a script, minimal and separated permissions, no `secrets.*`, every authenticating job gated on its identity's variables and on main or a same-repository pull request, the narrowest identity per job (planner jobs only plan, deployer jobs run no npm, page jobs no Terraform of any kind), each identity in its own Environment (none for dev's planner and deployer, `dev-page`, `prod-plan`, `prod`, `prod-page`), the dev and prod preflights, page deploys in their own concurrency groups with `prod-page` checking the tip of main, prod only from its Environments, prod-apply pinned to the reviewed plan, prod following a deployed dev, the preflight, manual runs dev-only by default, a shared non-cancelling group per environment, the page built without credentials and deployed after every apply, only the known artifacts, the tfvars deleted at the end, the opt-in nightly destroy and its retry, the checks job unconditional, tool versions and checksums pinned, the deploy tools' lockfile |
+| `tests/tooling/test_wif_truth_table.py` | bootstrap's real `ci_context` mapping, prod's pool condition and the bindings, from the mocked plans, evaluated with cel-python for 1,008 token combinations per project: each reaches exactly the expected account, none reaches two, page jobs only the page deployer, and every account is reachable (not vacuous) |
 | `tests/tooling/test_terraform_lint_scan.py` | `make tf-lint` passes clean code and fails on a missing `required_version`, an invalid machine type (Google ruleset) and a problem in a subdirectory; `make tf-scan` fails on SSH open to `0.0.0.0/0`; a download whose checksum does not match is refused and nothing is installed |
 | `dev/tests/root.tftest.hcl` | dev's defaults (synthetic, ingest off); the `SYN-` rules both ways; the name rules; the alert destination; zone in region; images by digest; the patient check fires (`override_module`) on a mismatch and on a missing authority |
 | `prod/tests/root.tftest.hcl` | prod's defaults (real data, ingest off); prod refuses a tfvars reviewer password, with or without a version, and a version alone; a `SYN-` patient with real data is refused; synthetic data still possible; the patient check |

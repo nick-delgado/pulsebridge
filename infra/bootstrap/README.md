@@ -234,7 +234,7 @@ What this root offers, and what T26's workflows use:
 
   | Context | A job that is |
   | --- | --- |
-  | `main` | on `refs/heads/<github_main_branch>`, run by `push`, `schedule` or `workflow_dispatch`, without an environment |
+  | `main` | on `refs/heads/main`, run by `push`, `schedule` or `workflow_dispatch`, without an environment (the branch name is fixed, as in the workflows) |
   | `pull-request` | a `pull_request` run without an environment |
   | `env-<name>-main` | in GitHub Environment `<name>`, on main, run by `push`, `schedule` or `workflow_dispatch` |
   | `env-<name>-other`, `other` | anything else: branch pushes, tags, `pull_request_target` (which runs on the base branch for fork events, hence the event check) |
@@ -242,10 +242,17 @@ What this root offers, and what T26's workflows use:
 
   Each account's `roles/iam.workloadIdentityUser` binding names its contexts
   (`principalSet://.../attribute.ci_context/<context>`), so the three CI identities are reachable
-  from different places: `deployer_wif_contexts` (default `["main"]`), `planner_wif_contexts`
-  (default `["pull-request"]`) and `page_deployer_wif_contexts` (default `["main"]`). "pull-request"
-  is refused for the deployer and the page deployer. Because the context starts with the repository
-  check, a binding is never weaker than the pool's condition.
+  from different places: `deployer_wif_contexts` (dev default `["main"]`), `planner_wif_contexts`
+  (dev default `["pull-request"]`) and `page_deployer_wif_contexts` (dev default
+  `["env-dev-page-main"]`: the page deployer always has its own GitHub Environment). Validations
+  keep them apart: the three lists may share no context (a page deploy job, which runs npm
+  packages, could otherwise ask for a token and become the deployer), "pull-request" is refused for
+  the deployer and the page deployer, "main" for the page deployer, and with `github_environments`
+  set (prod) every context must be one of those environments, so dev's defaults cannot pass there.
+  Because the context starts with the repository check, a binding is never weaker than the pool's
+  condition. `tests/tooling/test_wif_truth_table.py` evaluates the real mapping, condition and
+  bindings for every event, ref, environment and repository (the table is in
+  infra/envs/README.md, "Who can reach what").
 - `github_environments` (optional) adds `assertion.environment in [...]` to the pool's condition.
   GitHub puts the `environment` claim into a job's OIDC token only when the job references a
   **GitHub Environment**, and only after that environment's protection rules (required reviewers,
@@ -253,13 +260,14 @@ What this root offers, and what T26's workflows use:
   mapped (`attribute.environment`), because Google requires a mapping for every condition field.
 - `github_allowed_refs` (optional) adds `assertion.ref in [...]`. Both options together are ANDed:
   for **prod**, set `github_allowed_refs = ["refs/heads/main"]` and `github_environments =
-  ["prod-plan", "prod"]` (a test checks the combined condition). Pull-request workflows run on
+  ["prod-plan", "prod", "prod-page"]` (a test checks the combined condition). Pull-request workflows run on
   `refs/pull/<n>/merge`, so restricting refs blocks plan-on-PR, which prod does not do.
 - Values of these options are validated to contain no quotes or backslashes, so they cannot inject
   CEL.
-- **dev** keeps no pool-level ref or environment restriction (its plans run on pull requests); the
-  bindings do the narrowing: pull requests reach only the read-only planner, and only jobs on main
-  reach the deployer.
+- **dev** keeps no pool-level ref or environment restriction (its plans run on pull requests and its
+  applies without an environment, so a condition on either would refuse them); the bindings do the
+  narrowing: pull requests reach only the read-only planner, jobs on main only the deployer, and
+  jobs in the `dev-page` Environment on main only the page deployer.
 
 ### Limits and lifecycle
 
@@ -278,35 +286,52 @@ deploy jobs skip (they never fall back to the deployer).
 | Account | dev contexts | prod contexts | Roles |
 | --- | --- | --- | --- |
 | deployer (`terraform-deployer`) | `main` (apply on merge, nightly destroy) | `env-prod-main` (the `prod` Environment) | `deployer_roles` (above), object admin on the state bucket |
-| planner (`terraform-planner`) | `pull-request` | `env-prod-plan-main` (the `prod-plan` Environment) | read-only, below; object **viewer** on the state bucket |
-| page deployer (`page-deployer`) | `main` | `env-prod-main` | `roles/firebasehosting.admin` only |
+| planner (`terraform-planner`) | `pull-request` | `env-prod-plan-main` (the `prod-plan` Environment) | one custom role (below); object **viewer** on the state bucket |
+| page deployer (`page-deployer`) | `env-dev-page-main` (the `dev-page` Environment) | `env-prod-page-main` (the `prod-page` Environment) | `roles/firebasehosting.admin` only |
 
-The planner's default `planner_roles`, each for what `terraform plan` must read (refresh), and
-none of which writes or reads health data or secret values:
+**The planner's custom role** (`planner_role_id`, default `pulsebridgeTerraformPlanner`). Predefined
+viewer roles read data: `roles/iam.securityReviewer` includes `healthcare.hl7V2Messages.list` (whose
+full view returns message contents) and `logging.privateLogEntries.list`, `roles/compute.viewer`
+the VM's serial port output and screenshots, `roles/logging.viewer` log entries. So the planner
+gets exactly the read of each resource type the modules manage (what a `terraform plan` refresh
+calls) and the IAM-policy read of each type that has `*_iam_member` resources:
 
-| Role | Reads |
+| Permissions | For |
 | --- | --- |
-| `roles/iam.securityReviewer` | every IAM policy: the project's, the service accounts', the secrets', the Healthcare stores', the repositories', the topics' and subscriptions', Cloud Run's. Policies only, no data |
-| `roles/serviceusage.serviceUsageViewer` | which APIs are enabled (project-base) |
-| `roles/compute.viewer` | VPC, subnets, firewall rules, router and NAT, the VM, its disks and address, the snapshot schedule |
-| `roles/iam.serviceAccountViewer` | the service accounts (identity) |
-| `roles/secretmanager.viewer` | secret metadata and version state; it has no `secretmanager.versions.access` |
-| `roles/artifactregistry.reader` | the repositories and their cleanup policy (it can also pull images, which hold no secrets; there is no narrower predefined role) |
-| `roles/healthcare.datasetViewer`, `fhirStoreViewer`, `hl7V2StoreViewer` | the dataset and the stores' configuration; they hold no `fhirResources.*` or `hl7V2Messages.*` permission |
-| `roles/pubsub.viewer` | the topic and subscriptions (it cannot pull messages) |
-| `roles/run.viewer` | Cloud Run services and the job (including their environment variables, which the state holds anyway) |
-| `roles/cloudscheduler.viewer` | Scheduler jobs |
-| `roles/logging.viewer` | log-based metrics; no narrower role has `logging.logMetrics.get`. It also reads log entries |
-| `roles/monitoring.viewer` | alert policies and the notification channel |
-| `roles/firebasehosting.viewer` | the Hosting site |
-| `roles/cloudbuild.builds.viewer` | the build trigger, when there is one |
+| `resourcemanager.projects.get`, `.getIamPolicy` | `data "google_project"`, `google_project_iam_member` |
+| `serviceusage.services.get`, `serviceusage.services.use` | `google_project_service`; the beta provider bills its calls to the project (`user_project_override`) |
+| `iam.serviceAccounts.get`, `.getIamPolicy` | the service accounts and their bindings |
+| `secretmanager.secrets.get`, `.getIamPolicy`, `secretmanager.versions.get` | secrets' metadata, their bindings, the dev version's state; not `secretmanager.versions.access` |
+| `artifactregistry.repositories.get`, `.getIamPolicy` | the two repositories (with the cleanup policy) and their bindings; no image pull |
+| `compute.networks.get`, `subnetworks.get`, `firewalls.get`, `routers.get`, `addresses.get`, `disks.get`, `instances.get`, `resourcePolicies.get` | the network, the VM, its disks, address and snapshot schedule; not `getSerialPortOutput` or `getScreenshot` |
+| `healthcare.datasets.get`, `fhirStores.get`, `fhirStores.getIamPolicy`, `hl7V2Stores.get`, `hl7V2Stores.getIamPolicy` | the dataset and the stores' configuration and bindings; no `fhirResources.*` or `hl7V2Messages.*` |
+| `pubsub.topics.get`, `.getIamPolicy`, `pubsub.subscriptions.get`, `.getIamPolicy` | topic, subscriptions, bindings; no message pull |
+| `run.services.get`, `.getIamPolicy`, `run.jobs.get`, `.getIamPolicy` | Cloud Run services, the seeder job, their bindings |
+| `cloudscheduler.jobs.get` | the Scheduler job |
+| `logging.logMetrics.get` | the log-based metrics' definitions, not log entries |
+| `monitoring.alertPolicies.get`, `monitoring.notificationChannels.get` | alert policies and the email channel |
+| `firebasehosting.sites.get`, `firebase.projects.get` | the Hosting site (and Firebase, when phr manages it) |
+| `cloudbuild.builds.get` | the build trigger (`triggers.get` needs it) |
+
+**What the planner can still read, plainly:** the Terraform **state** and the CI tfvars (object
+viewer on the state bucket), which hold in clear the patient's identifier and, in prod, the
+patient's name, and the alert address; Cloud Run services' configuration (their environment holds
+the patient ID too); the alert channel's address; every IAM policy and resource configuration. It
+reads no FHIR resource, HL7v2 message, log entry or secret value. A test checks the role for the
+data-reading permissions (`healthcare.hl7V2Messages.*`, `healthcare.fhirResources.*`, `export`,
+`import`, `ingest`, `logging.privateLogEntries.*`, `logging.logEntries.*`,
+`secretmanager.versions.access`, `storage.objects.*`, `getSerialPortOutput`, `getScreenshot`), and a
+static check that the planner and the page deployer are granted nothing else through any resource.
+
+`planner_extra_permissions` adds to the role if a real plan is refused on one the list lacks; only
+`<service>.<resource>.get` or `.getIamPolicy` that read no data are accepted. Creating a custom
+role needs `iam.roles.create`, which the owner (who runs bootstrap) has; a deleted custom role
+keeps its ID reserved for about 37 days.
 
 The planner plans with `-lock=false`: taking the GCS backend's lock means writing and deleting a
 lock object, and read-only is the point. A plan made while an apply runs may be stale; nothing is
-applied from it (prod's apply plans again). The validation accepts only role names ending in
-`Viewer`, `viewer`, `reader` or `securityReviewer`. **Whether this set suffices for a full plan of
-the stack is not verified** (infra/envs/README.md, checklist CI16): if a plan is refused, the error
-names the permission; add the matching viewer role.
+applied from it (prod's apply plans again). **Whether this set suffices for a full plan of the
+stack is not verified** (infra/envs/README.md, checklist CI16).
 
 ## Teardown
 
@@ -389,6 +414,7 @@ No modules.
 | [google_iam_workload_identity_pool.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool) | resource |
 | [google_iam_workload_identity_pool_provider.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool_provider) | resource |
 | [google_project.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project) | resource |
+| [google_project_iam_custom_role.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_custom_role) | resource |
 | [google_project_iam_member.deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.page_deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
@@ -410,26 +436,26 @@ No modules.
 | <a name="input_allow_build_trigger"></a> [allow\_build\_trigger](#input\_allow\_build\_trigger) | Grant the deployer roles/cloudbuild.builds.editor, which creating project-base's Cloud Build trigger needs (T26). Default false: set it only together with build\_trigger\_repository in an env root. The role also lets the holder start builds. | `bool` | `false` | no |
 | <a name="input_auto_create_network"></a> [auto\_create\_network](#input\_auto\_create\_network) | Only for a newly created project: keep the 'default' VPC network GCP creates automatically. Default false, because that network ships with firewall rules open to the internet (SSH, RDP, ICMP) and the stack builds its own VPC (module project-base). With false, the provider enables the Compute Engine API to delete the default network. | `bool` | `false` | no |
 | <a name="input_billing_account"></a> [billing\_account](#input\_billing\_account) | Billing account ID (format XXXXXX-XXXXXX-XXXXXX) to link to a newly created project. Required when create\_project = true; must be unset when adopting, because bootstrap does not change an existing project's billing. | `string` | `null` | no |
-| <a name="input_create_page_deployer"></a> [create\_page\_deployer](#input\_create\_page\_deployer) | Create the page deployer service account (ci\_identities.tf, T26): roles/firebasehosting.admin only, used by CI's page deploy job. Default false. | `bool` | `false` | no |
+| <a name="input_create_page_deployer"></a> [create\_page\_deployer](#input\_create\_page\_deployer) | Create the page deployer service account (ci\_identities.tf, T26): roles/firebasehosting.admin only, used by CI's page deploy jobs. Default false. | `bool` | `false` | no |
 | <a name="input_create_planner"></a> [create\_planner](#input\_create\_planner) | Create the read-only planner service account (ci\_identities.tf, T26) that CI's terraform plan runs as. Default false. Opt in for CI. | `bool` | `false` | no |
 | <a name="input_create_project"></a> [create\_project](#input\_create\_project) | true: create a new GCP project with var.project\_id and link var.billing\_account to it. false: adopt an existing project with var.project\_id and create nothing at project level. No default, so the choice is always explicit. | `bool` | n/a | yes |
 | <a name="input_deployer_account_id"></a> [deployer\_account\_id](#input\_deployer\_account\_id) | account\_id (the part before @) of the deployer service account that env roots and CI run as. 6-30 characters. | `string` | `"terraform-deployer"` | no |
 | <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin"<br/>]</pre> | no |
-| <a name="input_deployer_wif_contexts"></a> [deployer\_wif\_contexts](#input\_deployer\_wif\_contexts) | The CI contexts (wif.tf) whose jobs may impersonate the deployer. Default ["main"]: jobs on the main branch run by push, schedule or workflow\_dispatch (dev's apply and nightly destroy). For prod use ["env-prod-main"]: only jobs in the prod GitHub Environment on main. Never "pull-request": a pull request's code would hold the deployer. | `list(string)` | <pre>[<br/>  "main"<br/>]</pre> | no |
+| <a name="input_deployer_wif_contexts"></a> [deployer\_wif\_contexts](#input\_deployer\_wif\_contexts) | The CI contexts (wif.tf) whose jobs may impersonate the deployer. Default ["main"] is dev's: jobs on main run by push, schedule or workflow\_dispatch (the dev apply and the nightly destroy). prod: ["env-prod-main"] (only jobs in the prod GitHub Environment on main); with github\_environments set, "main" is refused. Never "pull-request". | `list(string)` | <pre>[<br/>  "main"<br/>]</pre> | no |
 | <a name="input_folder_id"></a> [folder\_id](#input\_folder\_id) | Optional numeric folder ID to create the new project under. Leave unset for a personal account. Mutually exclusive with org\_id; only used when create\_project = true. | `string` | `null` | no |
 | <a name="input_github_allowed_refs"></a> [github\_allowed\_refs](#input\_github\_allowed\_refs) | Optional list of git refs (for example ["refs/heads/main"]) allowed to obtain deployer tokens. Empty (the default) allows every branch, tag and pull-request ref in the repository; see README.md ("What the condition does not restrict"). Note that pull-request workflows run on refs/pull/N/merge, so restricting refs also blocks plan-on-PR with this identity. | `list(string)` | `[]` | no |
 | <a name="input_github_environments"></a> [github\_environments](#input\_github\_environments) | Optional list of GitHub Environment names (for example ["prod-plan", "prod"]) whose jobs alone may obtain deployer tokens. Empty (the default) adds nothing. When set, the attribute condition also requires `assertion.environment in [...]`: only a job that references one of these environments gets a token, and GitHub applies the environment's protection rules (required reviewers, allowed branches) BEFORE such a job starts, so the gate is enforced by GitHub rather than by workflow YAML. Use it for the prod project (infra/envs/README.md, "CI/CD"). Pull-request plans reference no environment, so a project with this set cannot be planned from pull requests. | `list(string)` | `[]` | no |
-| <a name="input_github_main_branch"></a> [github\_main\_branch](#input\_github\_main\_branch) | The branch whose push, schedule and workflow\_dispatch runs count as the "main" CI context (wif.tf). Default "main". | `string` | `"main"` | no |
 | <a name="input_github_repository"></a> [github\_repository](#input\_github\_repository) | The ONE GitHub repository, as "owner/name", whose Actions workflows may impersonate the deployer service account. Matched exactly (case-sensitive) against the `repository` claim of GitHub's OIDC token. | `string` | n/a | yes |
 | <a name="input_github_repository_id"></a> [github\_repository\_id](#input\_github\_repository\_id) | Numeric ID of the same GitHub repository: the `id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .id`. Required. Names can be reused after a repository is deleted or renamed, or its owner account is renamed; the numeric ID never is. Both the attribute condition and the impersonation binding match on it. | `string` | n/a | yes |
 | <a name="input_github_repository_owner_id"></a> [github\_repository\_owner\_id](#input\_github\_repository\_owner\_id) | Optional numeric ID of the repository's owner (user or organization): the `owner.id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .owner.id`. When set, the attribute condition also requires `assertion.repository_owner_id` to match. | `string` | `null` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the project (when created) and the state bucket, for example { app = "pulsebridge" }. Keys and values: lowercase letters, digits, hyphens and underscores; keys start with a letter. | `map(string)` | `{}` | no |
 | <a name="input_org_id"></a> [org\_id](#input\_org\_id) | Optional numeric organization ID to create the new project under. Leave unset (the default) for a personal Google account with no organization. Mutually exclusive with folder\_id; only used when create\_project = true. | `string` | `null` | no |
 | <a name="input_page_deployer_account_id"></a> [page\_deployer\_account\_id](#input\_page\_deployer\_account\_id) | account\_id of the page deployer service account. | `string` | `"page-deployer"` | no |
-| <a name="input_page_deployer_wif_contexts"></a> [page\_deployer\_wif\_contexts](#input\_page\_deployer\_wif\_contexts) | The CI contexts whose jobs may impersonate the page deployer. dev: ["main"] (the default). prod: ["env-prod-main"]. | `list(string)` | <pre>[<br/>  "main"<br/>]</pre> | no |
+| <a name="input_page_deployer_wif_contexts"></a> [page\_deployer\_wif\_contexts](#input\_page\_deployer\_wif\_contexts) | The CI contexts whose jobs may impersonate the page deployer: its own GitHub Environment on main, never a context of the deployer or the planner (a page job runs npm packages, which could otherwise ask for their token). Default ["env-dev-page-main"] is dev's; prod: ["env-prod-page-main"]. | `list(string)` | <pre>[<br/>  "env-dev-page-main"<br/>]</pre> | no |
 | <a name="input_planner_account_id"></a> [planner\_account\_id](#input\_planner\_account\_id) | account\_id of the planner service account. | `string` | `"terraform-planner"` | no |
-| <a name="input_planner_roles"></a> [planner\_roles](#input\_planner\_roles) | Project roles of the planner: enough to READ every resource the stack manages for `terraform plan`, and nothing that writes or reads data. infra/bootstrap/README.md ("CI identities") gives each one's reason. Only viewer- and reader-type roles are accepted. Whether this set suffices for a full plan is not verified. | `list(string)` | <pre>[<br/>  "roles/iam.securityReviewer",<br/>  "roles/serviceusage.serviceUsageViewer",<br/>  "roles/compute.viewer",<br/>  "roles/iam.serviceAccountViewer",<br/>  "roles/secretmanager.viewer",<br/>  "roles/artifactregistry.reader",<br/>  "roles/healthcare.datasetViewer",<br/>  "roles/healthcare.fhirStoreViewer",<br/>  "roles/healthcare.hl7V2StoreViewer",<br/>  "roles/pubsub.viewer",<br/>  "roles/run.viewer",<br/>  "roles/cloudscheduler.viewer",<br/>  "roles/logging.viewer",<br/>  "roles/monitoring.viewer",<br/>  "roles/firebasehosting.viewer",<br/>  "roles/cloudbuild.builds.viewer"<br/>]</pre> | no |
-| <a name="input_planner_wif_contexts"></a> [planner\_wif\_contexts](#input\_planner\_wif\_contexts) | The CI contexts whose jobs may impersonate the planner. dev: ["pull-request"] (the default). prod: ["env-prod-plan-main"] (the prod-plan Environment on main). | `list(string)` | <pre>[<br/>  "pull-request"<br/>]</pre> | no |
+| <a name="input_planner_extra_permissions"></a> [planner\_extra\_permissions](#input\_planner\_extra\_permissions) | Permissions added to the planner's custom role (ci\_identities.tf), if a real plan is refused on one the built-in list lacks. Only `<service>.<resource>.get` or `.getIamPolicy` are accepted, and never one that reads data (FHIR resources, HL7v2 messages, log entries, secret values, objects). | `list(string)` | `[]` | no |
+| <a name="input_planner_role_id"></a> [planner\_role\_id](#input\_planner\_role\_id) | ID of the planner's custom project role. A deleted custom role keeps its ID reserved for about 37 days. | `string` | `"pulsebridgeTerraformPlanner"` | no |
+| <a name="input_planner_wif_contexts"></a> [planner\_wif\_contexts](#input\_planner\_wif\_contexts) | The CI contexts whose jobs may impersonate the planner. Default ["pull-request"] is dev's. prod: ["env-prod-plan-main"] (the prod-plan Environment on main); with github\_environments set, "pull-request" is refused. | `list(string)` | <pre>[<br/>  "pull-request"<br/>]</pre> | no |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the GCP project to create (create\_project = true) or adopt (create\_project = false). Project IDs are globally unique, 6 to 30 characters, lowercase letters, digits and hyphens, starting with a letter. | `string` | n/a | yes |
 | <a name="input_project_name"></a> [project\_name](#input\_project\_name) | Human-readable display name for a newly created project. Only used when create\_project = true. Defaults to project\_id. | `string` | `null` | no |
 | <a name="input_state_bucket_location"></a> [state\_bucket\_location](#input\_state\_bucket\_location) | Location of the state bucket. Default us-central1: a single region inside the Cloud Storage always-free tier (us-central1, us-east1, us-west1), which is plenty for a few kilobytes of state. | `string` | `"us-central1"` | no |
