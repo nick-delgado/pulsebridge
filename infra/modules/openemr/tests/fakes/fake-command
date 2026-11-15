@@ -1,0 +1,489 @@
+#!/usr/bin/env bash
+# Stand-in for the commands the OpenEMR hooks call, for tests/hooks.sh. The test links this one
+# file under each command's name (docker, curl, iptables, timeout, date, sleep, shred) in a sandbox
+# bin directory and runs the hooks with PATH set to that directory only, so no real container,
+# firewall rule or network call can happen. Same approach as edge-vm's tests/fakes/fake-command;
+# this fake models what the OpenEMR hooks need (docker exec into MariaDB, OpenEMR's HTTPS
+# endpoints, Secret Manager versions, iptables), which edge-vm's does not.
+#
+# Every call (except `date`) is appended to "$FAKE_STATE/calls.log" as "<command> <args>": that is
+# what a process list would show, so a secret found there is a secret on a command line.
+#
+# State a real machine would keep lives in files under $FAKE_STATE, so a second run sees what the
+# first did: containers/, images/, iptables.rules, db/ (OpenEMR's globals and oauth_clients
+# tables), sm/ (Secret Manager versions), registrations/ (request bodies OpenEMR received).
+#
+# Time is faked: `sleep N` and every simulated timeout advance a clock file that `date +%s` reads.
+#
+# Switches (environment variables set by a test case):
+#   FAKE_HANG="docker pull"   that command hangs: under `timeout` it times out (clock advances by
+#                             the limit); WITHOUT `timeout` it is logged as HANG and fails
+#   FAKE_CURL_HANG=1          every curl call hangs until its --max-time (HANG if it has none)
+#   FAKE_NEVER_READY=1        readyz answers 503 for ever
+#   FAKE_READY_AFTER=n        readyz answers 503 for the first n polls
+#   FAKE_SETTINGS_ENV=ignored OPENEMR_SETTING_* variables have no effect (spike S2's finding)
+#   FAKE_TLS_WRONG_CERT=1     OpenEMR serves a certificate other than the mounted one (curl exit 60)
+#   FAKE_UPLOAD_FAIL=<code>   Secret Manager answers <code> to addVersion
+#   FAKE_SM_GET=<code>        Secret Manager answers <code> to the versions/latest metadata read
+#   FAKE_IPTABLES_FAIL=1      iptables -I fails (for example: no DOCKER-USER chain)
+#   FAKE_DB_PASSWORD, FAKE_TOKEN, FAKE_CLIENT_SECRET, FAKE_REGISTRATION_TOKEN   sentinels
+#   REAL_DATE, REAL_PHP       paths of the real date and php
+
+set -uo pipefail
+
+: "${FAKE_STATE:?FAKE_STATE must point at the sandbox state directory}"
+cmd=$(basename "$0")
+if [ "$cmd" != date ]; then
+  {
+    printf '%s' "$cmd"
+    printf ' %s' "$@"
+    printf '\n'
+  } >> "$FAKE_STATE/calls.log"
+fi
+
+mkdir -p "$FAKE_STATE/containers" "$FAKE_STATE/images" "$FAKE_STATE/db" "$FAKE_STATE/sm" "$FAKE_STATE/registrations"
+touch "$FAKE_STATE/db/globals" "$FAKE_STATE/db/oauth_clients" "$FAKE_STATE/iptables.rules"
+containers="$FAKE_STATE/containers"
+
+clock_add() {
+  local now
+  now=$(cat "$FAKE_STATE/clock" 2> /dev/null || echo 0)
+  echo $((now + $1)) > "$FAKE_STATE/clock"
+}
+
+hang() {
+  echo "HANG: $* (no timeout around it)" >> "$FAKE_STATE/calls.log"
+  exit 99
+}
+
+# ---- OpenEMR's database (two tables, tab-separated files) ----------------------------------------
+
+global_value() { awk -F '\t' -v n="$1" '$1 == n { print $2 }' "$FAKE_STATE/db/globals"; }
+
+set_global() {
+  awk -F '\t' -v n="$1" '$1 != n' "$FAKE_STATE/db/globals" > "$FAKE_STATE/db/globals.tmp"
+  printf '%s\t%s\n' "$1" "$2" >> "$FAKE_STATE/db/globals.tmp"
+  mv "$FAKE_STATE/db/globals.tmp" "$FAKE_STATE/db/globals"
+}
+
+# Only the statement shapes the hooks send are understood; anything else is a syntax error, so a
+# change in the hooks' SQL is noticed.
+fake_sql() {
+  local line names name id cname
+  local q="'([^']*)'"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [[ "$line" =~ ^SELECT\ gl_name,\ gl_value\ FROM\ globals\ WHERE\ gl_index\ =\ 0\ AND\ gl_name\ IN\ \((.*)\)\;$ ]]; then
+      names=${BASH_REMATCH[1]}
+      while [[ "$names" =~ $q(.*) ]]; do
+        name=${BASH_REMATCH[1]}
+        names=${BASH_REMATCH[2]}
+        if awk -F '\t' -v n="$name" '$1 == n { found = 1 } END { exit !found }' "$FAKE_STATE/db/globals"; then
+          printf '%s\t%s\n' "$name" "$(global_value "$name")"
+        fi
+      done
+    elif [[ "$line" =~ ^REPLACE\ INTO\ globals\ \(gl_name,\ gl_index,\ gl_value\)\ VALUES\ \($q,\ 0,\ $q\)\;$ ]]; then
+      set_global "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    elif [[ "$line" =~ ^SELECT\ is_enabled\ FROM\ oauth_clients\ WHERE\ client_id\ =\ $q\;$ ]]; then
+      awk -F '\t' -v c="${BASH_REMATCH[1]}" '$1 == c { print $3 }' "$FAKE_STATE/db/oauth_clients"
+    elif [[ "$line" =~ ^UPDATE\ oauth_clients\ SET\ is_enabled\ =\ 1\ WHERE\ client_id\ =\ $q\;$ ]]; then
+      id=${BASH_REMATCH[1]}
+      awk -F '\t' -v OFS='\t' -v c="$id" '$1 == c { $3 = 1 } { print }' "$FAKE_STATE/db/oauth_clients" > "$FAKE_STATE/db/t" && mv "$FAKE_STATE/db/t" "$FAKE_STATE/db/oauth_clients"
+    elif [[ "$line" =~ ^UPDATE\ oauth_clients\ SET\ is_enabled\ =\ 0\ WHERE\ client_name\ =\ $q\ AND\ client_id\ \<\>\ $q\;$ ]]; then
+      cname=${BASH_REMATCH[1]}
+      id=${BASH_REMATCH[2]}
+      awk -F '\t' -v OFS='\t' -v n="$cname" -v c="$id" '$2 == n && $1 != c { $3 = 0 } { print }' "$FAKE_STATE/db/oauth_clients" > "$FAKE_STATE/db/t" && mv "$FAKE_STATE/db/t" "$FAKE_STATE/db/oauth_clients"
+    elif [[ "$line" =~ ^DELETE\ FROM\ oauth_clients\ WHERE\ client_id\ =\ $q\ AND\ is_enabled\ =\ 0\;$ ]]; then
+      id=${BASH_REMATCH[1]}
+      awk -F '\t' -v c="$id" '!($1 == c && $3 == 0)' "$FAKE_STATE/db/oauth_clients" > "$FAKE_STATE/db/t" && mv "$FAKE_STATE/db/t" "$FAKE_STATE/db/oauth_clients"
+    else
+      echo "ERROR 1064 (42000): fake database does not understand: $line" >&2
+      return 1
+    fi
+  done
+}
+
+# ---- docker ------------------------------------------------------------------------------------
+
+apply_setting_env() { # <container args file>: what the image's start script does with OPENEMR_SETTING_*
+  [ "${FAKE_SETTINGS_ENV:-works}" = works ] || return 0
+  local arg
+  while IFS= read -r arg; do
+    case "$arg" in
+      OPENEMR_SETTING_*=*)
+        arg=${arg#OPENEMR_SETTING_}
+        set_global "${arg%%=*}" "${arg#*=}"
+        ;;
+    esac
+  done < "$1"
+}
+
+# Map container paths in the arguments to the host paths of the --mount options.
+map_paths() {
+  local -n _mounts=$1
+  shift
+  local arg m target source out=()
+  for arg in "$@"; do
+    for m in "${_mounts[@]}"; do
+      target=${m%%|*}
+      source=${m#*|}
+      if [ "$arg" = "$target" ]; then
+        arg=$source
+      elif [[ "$arg" == "$target/"* ]]; then
+        arg="$source${arg#"$target"}"
+      fi
+    done
+    out+=("$arg")
+  done
+  printf '%s\n' "${out[@]}"
+}
+
+fake_docker_run() {
+  local name="" label="" rm=0 entrypoint="" image="" mounts=() args=("$@") spec src dst
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --name) name=$2; shift 2 ;;
+      --label)
+        [[ "$2" == pulsebridge.config=* ]] && label=${2#*=}
+        shift 2
+        ;;
+      --rm) rm=1; shift ;;
+      --detach) shift ;;
+      --entrypoint) entrypoint=$2; shift 2 ;;
+      --mount)
+        spec=$2
+        src=$(printf '%s' "$spec" | tr ',' '\n' | sed -n 's/^source=//p')
+        dst=$(printf '%s' "$spec" | tr ',' '\n' | sed -n 's/^target=//p')
+        if [ ! -e "$src" ]; then
+          echo "docker: Error response from daemon: invalid mount config for type \"bind\": bind source path does not exist: $src" >&2
+          return 125
+        fi
+        mounts+=("$dst|$src")
+        shift 2
+        ;;
+      --*) shift 2 ;;
+      *)
+        image=$1
+        shift
+        break
+        ;;
+    esac
+  done
+  [ -n "$image" ] || return 1
+  if [ ! -e "$FAKE_STATE/images/$(printf '%s' "$image" | sha256sum | cut -c1-32)" ]; then
+    echo "Unable to find image '$image' locally (the fake requires a pull first)" >&2
+    return 125
+  fi
+
+  if [ "$rm" = 1 ]; then
+    # A throwaway tool container. php: the hooks' helper, run with the real php on mapped paths.
+    case "$entrypoint" in
+      php)
+        [ -n "${REAL_PHP:-}" ] || {
+          echo "fake docker: REAL_PHP is not set" >&2
+          return 127
+        }
+        local mapped=()
+        mapfile -t mapped < <(map_paths mounts "$@")
+        "$REAL_PHP" "${mapped[@]}"
+        return $?
+        ;;
+      sh)
+        # The sites-directory seed: cp -a <image sites>/. /seed/
+        local seed
+        seed=$(map_paths mounts /seed)
+        mkdir -p "$seed/default"
+        echo "<?php \$config = 0; // fake image sites/default/sqlconf.php" > "$seed/default/sqlconf.php"
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  fi
+
+  [ -n "$name" ] || return 1
+  if [ -d "$containers/$name" ]; then
+    echo "docker: Error response from daemon: Conflict. The container name \"/$name\" is already in use." >&2
+    return 125
+  fi
+  mkdir -p "$containers/$name"
+  echo "$label" > "$containers/$name/label"
+  echo running > "$containers/$name/status"
+  printf '%s\n' "${args[@]}" > "$containers/$name/args"
+  printf '%s\n' "${mounts[@]}" > "$containers/$name/mounts"
+  # What the container received for the environment variables passed by name only (--env NAME):
+  # the test compares them with the secrets, proving the values arrived without being arguments.
+  {
+    printf 'MYSQL_ROOT_PASS=%s\n' "${MYSQL_ROOT_PASS-<unset>}"
+    printf 'MYSQL_PASS=%s\n' "${MYSQL_PASS-<unset>}"
+    printf 'OE_PASS=%s\n' "${OE_PASS-<unset>}"
+  } > "$containers/$name/env-values"
+  apply_setting_env "$containers/$name/args"
+  echo "fakecontainerid-$name"
+}
+
+fake_docker() {
+  local sub=${1:-}
+  shift || true
+  case "$sub" in
+    network)
+      [ "$1" = inspect ] || return 1
+      case "$3" in
+        *Options*) echo "<no value>" ;;
+        *Id*) echo "0123456789abcdef0123456789abcdef" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    image)
+      [ "$1" = inspect ] || return 1
+      [ -e "$FAKE_STATE/images/$(printf '%s' "$2" | sha256sum | cut -c1-32)" ]
+      ;;
+    pull)
+      if [ "${FAKE_HANG:-}" = "docker pull" ]; then hang docker pull "$@"; fi
+      touch "$FAKE_STATE/images/$(printf '%s' "${*: -1}" | sha256sum | cut -c1-32)"
+      ;;
+    container)
+      [ "$1" = inspect ] || return 1
+      shift
+      local format="" name
+      if [ "$1" = --format ]; then
+        format=$2
+        shift 2
+      fi
+      name=$1
+      [ -d "$containers/$name" ] || {
+        echo "Error: No such container: $name" >&2
+        return 1
+      }
+      case "$format" in
+        "") echo "[{}]" ;;
+        *Labels*) cat "$containers/$name/label" ;;
+        *Health*) cat "$containers/$name/health" 2> /dev/null || echo none ;;
+        *State.Status*) cat "$containers/$name/status" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    run) fake_docker_run "$@" ;;
+    start)
+      [ -d "$containers/$1" ] || return 1
+      echo running > "$containers/$1/status"
+      apply_setting_env "$containers/$1/args"
+      echo "$1"
+      ;;
+    stop)
+      local name=${*: -1}
+      [ -d "$containers/$name" ] || return 1
+      echo exited > "$containers/$name/status"
+      echo "$name"
+      ;;
+    rm)
+      local name=${*: -1}
+      [ "$1" = --force ] && echo "FORCED REMOVE" >> "$FAKE_STATE/calls.log"
+      [ -d "$containers/$name" ] || return 1
+      if [ "$(cat "$containers/$name/status")" = running ] && [ "$1" != --force ]; then
+        echo "Error response from daemon: cannot remove container \"/$name\": container is running" >&2
+        return 1
+      fi
+      rm -rf "${containers:?}/$name"
+      ;;
+    exec)
+      if [ "${FAKE_HANG:-}" = "docker exec" ]; then hang docker exec "$@"; fi
+      # docker exec -i --env MYSQL_PWD mariadb mariadb ... openemr  (SQL on stdin)
+      if [ "${MYSQL_PWD-}" != "$FAKE_DB_PASSWORD" ]; then
+        echo "ERROR 1045 (28000): Access denied for user (fake: MYSQL_PWD is not the openemr-db-password)" >&2
+        return 1
+      fi
+      fake_sql
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# ---- curl --------------------------------------------------------------------------------------
+
+# Highest Secret Manager version number stored so far (0 when none).
+latest_version() {
+  local f n max=0
+  for f in "$FAKE_STATE"/sm/v*; do
+    n=${f##*/v}
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    [ "$n" -gt "$max" ] && max=$n
+  done
+  echo "$max"
+}
+
+fake_curl() {
+  local output="" writeout="" url="" header_stdin=0 auth="" max_time="" cacert="" data=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --output) output=$2; shift 2 ;;
+      --write-out) writeout=$2; shift 2 ;;
+      --max-time) max_time=$2; shift 2 ;;
+      --connect-timeout) shift 2 ;;
+      --cacert) cacert=$2; shift 2 ;;
+      --request) shift 2 ;; # the endpoint decides; the hooks send POST where it matters
+      --data-binary) data=${2#@}; shift 2 ;;
+      --header)
+        [ "$2" = "@-" ] && header_stdin=1
+        shift 2
+        ;;
+      --insecure | -k)
+        echo "INSECURE TLS USED" >> "$FAKE_STATE/calls.log"
+        shift
+        ;;
+      --silent | --fail | --show-error) shift ;;
+      *) url=$1; shift ;;
+    esac
+  done
+  if [ "$header_stdin" = 1 ]; then
+    IFS= read -r auth || true
+  fi
+  if [ "${FAKE_CURL_HANG:-0}" = 1 ]; then
+    [ -n "$max_time" ] || hang curl "$url"
+    clock_add "$max_time"
+    [ -n "$writeout" ] && printf '000'
+    return 28
+  fi
+  # A response is written where --output points, like curl; /dev/null is fine.
+  local code=200 body=""
+
+  case "$url" in
+    */instance/service-accounts/default/token)
+      printf '{"access_token":"%s","expires_in":3599,"token_type":"Bearer"}' "$FAKE_TOKEN"
+      return 0
+      ;;
+    https://*secretmanager*/*)
+      if [ "$auth" != "Authorization: Bearer $FAKE_TOKEN" ]; then
+        code=401
+        body='{"error":{"code":401}}'
+      elif [[ "$url" == *":addVersion" ]]; then
+        if [ -n "${FAKE_UPLOAD_FAIL:-}" ]; then
+          code=$FAKE_UPLOAD_FAIL
+          body='{"error":{"code":'"$code"'}}'
+        else
+          local n
+          n=$(($(latest_version) + 1))
+          cp "$data" "$FAKE_STATE/sm/v$n"
+          echo ENABLED > "$FAKE_STATE/sm/v$n.state"
+          body='{"name":"projects/123456789012/secrets/x/versions/'"$n"'","createTime":"2026-11-15T00:00:00Z","state":"ENABLED"}'
+        fi
+      elif [[ "$url" == */versions/latest ]]; then
+        local n
+        n=$(latest_version)
+        if [ -n "${FAKE_SM_GET:-}" ]; then
+          code=$FAKE_SM_GET
+          body='{"error":{"code":'"$code"'}}'
+        elif [ "$n" -eq 0 ]; then
+          code=404
+          body='{"error":{"code":404,"status":"NOT_FOUND"}}'
+        else
+          body='{"name":"projects/123456789012/secrets/x/versions/'"$n"'","state":"'"$(cat "$FAKE_STATE/sm/v$n.state")"'"}'
+        fi
+      else
+        return 6
+      fi
+      ;;
+    https://*)
+      # OpenEMR, at the site address. Reachable only while its container runs; TLS is verified
+      # against --cacert, which must be the certificate mounted into the container.
+      local served=""
+      if [ "$(cat "$containers/openemr/status" 2> /dev/null)" != running ]; then
+        [ -n "$writeout" ] && printf '000'
+        return 7
+      fi
+      served=$(awk -F '|' -v t="$FAKE_TLS_TARGET" '$1 == t { print $2 }' "$containers/openemr/mounts")
+      if [ -z "$cacert" ] || [ "${FAKE_TLS_WRONG_CERT:-0}" = 1 ] || ! cmp -s "$cacert" "$served"; then
+        [ -n "$writeout" ] && printf '000'
+        return 60
+      fi
+      case "$url" in
+        */meta/health/readyz)
+          local polls
+          polls=$(($(cat "$FAKE_STATE/readyz_polls" 2> /dev/null || echo 0) + 1))
+          echo "$polls" > "$FAKE_STATE/readyz_polls"
+          if [ "${FAKE_NEVER_READY:-0}" = 1 ] || [ "$polls" -le "${FAKE_READY_AFTER:-0}" ]; then
+            code=503
+          fi
+          body='ok'
+          ;;
+        */apis/default/fhir/metadata)
+          if [ "$(global_value rest_fhir_api)" = 1 ]; then
+            body='{"resourceType":"CapabilityStatement","fhirVersion":"4.0.1"}'
+          else
+            code=404
+            body='{"message":"OpenEMR Error: API is disabled"}'
+          fi
+          ;;
+        */oauth2/default/registration)
+          if [ "$(global_value rest_fhir_api)" != 1 ]; then
+            code=404
+            body='{"message":"OpenEMR Error: API is disabled"}'
+          else
+            local count id cname
+            count=$(($(find "$FAKE_STATE/registrations" -maxdepth 1 -name '*.json' | wc -l) + 1))
+            cp "$data" "$FAKE_STATE/registrations/$count.json"
+            id="fakeclient$(printf '%04d' "$count")AbCdEfGhIjKlMnOpQrSt"
+            cname=$(sed -n 's/.*"client_name":"\([^"]*\)".*/\1/p' "$data")
+            printf '%s\t%s\t0\n' "$id" "$cname" >> "$FAKE_STATE/db/oauth_clients"
+            body='{"client_id":"'"$id"'","client_secret":"'"$FAKE_CLIENT_SECRET"'","registration_access_token":"'"$FAKE_REGISTRATION_TOKEN"'","client_name":"'"$cname"'"}'
+          fi
+          ;;
+        *) code=404 ;;
+      esac
+      ;;
+    *) return 6 ;;
+  esac
+  if [ -n "$output" ]; then printf '%s' "$body" > "$output"; else printf '%s' "$body"; fi
+  [ -n "$writeout" ] && printf '%s' "$code"
+  return 0
+}
+
+# ---- iptables (filter table, DOCKER-USER chain only) -------------------------------------------
+
+fake_iptables() {
+  [ "${1:-}" = -w ] && shift 2
+  local op=$1
+  shift
+  local rule="$*"
+  case "$op" in
+    -C) grep -qxF -- "$rule" "$FAKE_STATE/iptables.rules" ;;
+    -I)
+      if [ "${FAKE_IPTABLES_FAIL:-0}" = 1 ]; then
+        echo "iptables: No chain/target/match by that name." >&2
+        return 1
+      fi
+      echo "$rule" >> "$FAKE_STATE/iptables.rules"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+case "$cmd" in
+  docker) fake_docker "$@" ;;
+  curl) fake_curl "$@" ;;
+  iptables) fake_iptables "$@" ;;
+  timeout)
+    limit=$1
+    shift
+    if [ -n "${FAKE_HANG:-}" ] && [[ "$*" == "$FAKE_HANG"* ]]; then
+      clock_add "$limit"
+      exit 124
+    fi
+    exec "$@"
+    ;;
+  date)
+    if [ "${1:-}" = "+%s" ]; then
+      echo $((1700000000 + $(cat "$FAKE_STATE/clock" 2> /dev/null || echo 0)))
+    else
+      exec "$REAL_DATE" "$@"
+    fi
+    ;;
+  sleep) clock_add "${1%.*}" ;;
+  shred)
+    # shred -u <file>: the test only needs the file gone.
+    rm -f "${*: -1}"
+    ;;
+  *)
+    echo "fake-command: no fake for $cmd" >&2
+    exit 127
+    ;;
+esac

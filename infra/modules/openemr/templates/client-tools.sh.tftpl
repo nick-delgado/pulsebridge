@@ -1,0 +1,10 @@
+
+# Part 2: the PHP helper (scripts/client-tools.php), embedded unchanged. Container-Optimized OS has
+# no PHP and no package manager, and may have no openssl command, so key and certificate work runs
+# in a throwaway container of the OpenEMR image itself (`docker run --rm --network none`): it is
+# already pulled and pinned, and OpenEMR is a PHP application whose OAuth2 server needs PHP's
+# openssl extension. The quoted heredoc delimiter means the shell expands nothing inside.
+openemr_write_client_tools() {
+  cat > "$1" << 'PULSEBRIDGE_PHP_END'
+${php}PULSEBRIDGE_PHP_END
+}
