@@ -493,7 +493,7 @@ Every version is pinned exactly in `package.json` (`.npmrc` sets `save-exact`), 
 | -------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `uplot` 1.6.32 | The heart-rate chart (D5, chosen by T17; see `src/heart-rate/README.md`). MIT, no dependencies. | its own chunk, 50,990 B (22.24 kB gzip), loaded by `import()` on first draw; its stylesheet is in the page's CSS |
 
-For comparison, our own code is the main chunk, 124,521 B (40.68 kB gzip) after T19, and the CSS
+For comparison, our own code is the main chunk, 128,483 B (41.80 kB gzip) after T19, and the CSS
 is 24,678 B (5.02 kB gzip) including uPlot's. **uPlot must stay out of the main chunk**, so the login form
 never waits for it: `scripts/check-bundle.mjs` reads Vite's build manifest (`dist/.vite/manifest.json`,
 `build.manifest: true`) and fails the build if the entry chunk, or any chunk it imports statically,
