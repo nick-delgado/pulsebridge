@@ -51,7 +51,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
-trap 'exit 143' TERM # edge-vm's `timeout` sends TERM; exit so the EXIT trap removes the key
+# edge-vm's `timeout` sends TERM. Bash runs the EXIT trap when TERM ends it anyway; the explicit
+# trap makes that intent visible. Either way the EXIT trap removes the key (tested).
+trap 'exit 143' TERM
 
 check_prerequisites() {
   require_data_disk
