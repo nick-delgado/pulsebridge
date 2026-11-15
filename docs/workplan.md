@@ -466,7 +466,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
-| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | in-progress |
+| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | done |
 | T19 | Dashboard: share action and messages log | T16, T34 | `web/src/share/`, `web/src/messages/` | todo |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | done |
 | T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | in-progress |
