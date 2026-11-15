@@ -60,3 +60,38 @@ export function chartChunkProblems(manifest, contentOf, marker = CHART_MARKER) {
   }
   return problems;
 }
+
+/**
+ * Strings that exist only in the mock client and its data (src/api/mock-client.ts and
+ * src/api/mock-data.ts), including every `?mock-…` switch name, so an HTTP build that pulled
+ * in any of that code, even one switch parser, is caught.
+ */
+export const MOCK_MARKERS = [
+  'mock-session-',
+  'SYN-000123',
+  'Synthetic watch (mock mode)',
+  // The hostile data set and the page-URL switches (mock-data.ts).
+  'pulsebridge-hostile-mock',
+  'mock-audit',
+  'mock-lookup',
+  'mock-log',
+  'mock-status',
+  'mock-share',
+];
+
+/**
+ * Problems with the mock markers in a build's scripts (`bundle`, all scripts joined): an HTTP
+ * build must contain none of them; a mock build must contain all of them (otherwise the list is
+ * stale and the HTTP check proves nothing).
+ */
+export function mockMarkerProblems(bundle, mode, markers = MOCK_MARKERS) {
+  const problems = [];
+  for (const marker of markers) {
+    const found = bundle.includes(marker);
+    if (mode === 'http' && found) problems.push(`HTTP build contains mock code ("${marker}")`);
+    if (mode === 'mock' && !found) {
+      problems.push(`mock build is missing "${marker}"; is the check stale?`);
+    }
+  }
+  return problems;
+}

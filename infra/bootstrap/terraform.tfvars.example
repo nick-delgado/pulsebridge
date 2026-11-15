@@ -34,3 +34,9 @@ github_repository_id = "123456789"
 # state_bucket_location = "us-central1"             # default; a Cloud Storage free-tier region
 # labels                = { app = "pulsebridge" }
 # deployer_roles        = [ ... ]                   # see README.md "Deployer roles" before changing
+
+# --- Firebase (D4: the dashboard is served by Firebase Hosting) --------------------------------
+
+# Default true: adds Firebase to the project. It cannot be undone and costs nothing. With false,
+# module phr's Hosting site cannot be created (README.md, "Firebase").
+# add_firebase = false

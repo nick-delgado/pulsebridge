@@ -77,13 +77,122 @@ export function lastSyncRun(nowMs: number): number {
  *   clock to 2026-11-01 12:00 EST, eleven hours after the autumn change).
  */
 export const MOCK_DATA_SETS = {
-  utc: { id: 'utc', timeZone: null, label: 'UTC timestamps' },
+  utc: { id: 'utc', timeZone: null, label: 'UTC timestamps', hostile: false },
   'dst-new-york': {
     id: 'dst-new-york',
     timeZone: 'America/New_York',
     label: 'America/New_York timestamps, across daylight-saving changes',
+    hostile: false,
+  },
+  // UTC data plus markup in every text that comes from another system (see HOSTILE_MARKUP), so a
+  // browser test can prove the page shows it as text under the real Content-Security-Policy.
+  hostile: {
+    id: 'hostile',
+    timeZone: null,
+    label: 'Markup in text from other systems (MSA-3, sample text, diagnostics)',
+    hostile: true,
   },
 } as const;
+
+/**
+ * The markup the `hostile` data set puts into text from other systems: an MSA-3 reason (and so
+ * the raw ACK), each sample's description, a malformed sample's segment text (an extra NTE
+ * segment) and the diagnostics of a refusal. Rendered as markup it would run script or load an
+ * image, which the CSP would report; rendered as text it is just characters. It ends with one
+ * long unbroken token, which must wrap rather than widen the page.
+ */
+export const HOSTILE_MARKUP =
+  `<img src="x" onerror="alert('pulsebridge-hostile-mock')">` +
+  `<script>alert('pulsebridge-hostile-mock')</script> ` +
+  // One 612-character token with no break opportunity, to prove long text wraps on a phone.
+  'PULSEBRIDGEHOSTILE'.repeat(34);
+
+/**
+ * In the `hostile` data set a built reading with this systolic value is refused with a 422 whose
+ * diagnostics hold `HOSTILE_MARKUP`: a refusal the form's own checks cannot catch.
+ */
+export const HOSTILE_REFUSED_SYSTOLIC = 333;
+
+/** The audit failure named by `?mock-audit=build|write` (MockClientOptions.auditFailure), or null. */
+export function mockAuditFailureFromSearch(search: string): 'build' | 'write' | null {
+  const value = new URLSearchParams(search).get('mock-audit');
+  return value === 'build' || value === 'write' ? value : null;
+}
+
+/**
+ * The switches for states the built mock page cannot otherwise reach (browser tests only; mock
+ * builds only: this module is not in an HTTP build, which scripts/check-bundle.mjs proves
+ * through the markers this module holds):
+ * - `?mock-lookup=not-found|failed`: the HL7v2 store does not have (or cannot be asked for) the
+ *   message name of ANY accepted send, as when cuff-sim's derived MLLP name is wrong
+ *   (`messageLookup`, amendment 1). With `not-found`, an MLLP message nobody else claims is
+ *   listed as a store-only row with a `possibleDuplicateOf` hint (amendment 14).
+ * - `?mock-log=partial`: every messages-log page says `partial: true` (amendment 16).
+ * - `?mock-status=openemr-not-checked|counts-unknown|health-sync-timeout|not-configured`: the
+ *   status the proxy sends before T15 installs its OpenEMR probe (amendment 10), when the store
+ *   could not be counted (null counts, amendment 15), when health-sync did not answer (amendment
+ *   9), or when its password secret is missing, so every route but login answers 503 (amendment
+ *   11).
+ * - `?mock-share=<MockShareFailure>`: a share that stops or is refused at a given point.
+ */
+export type MockLookupFailure = 'not-found' | 'failed';
+export type MockStatusMode =
+  'openemr-not-checked' | 'counts-unknown' | 'health-sync-timeout' | 'not-configured';
+export type MockShareFailure =
+  /** 422 before OpenEMR is called: the stored Patient has no birth date. */
+  | 'patient-incomplete'
+  /** 503: the share is not configured on the server. */
+  | 'not-configured'
+  /** 502 at the first step: the token request gets no answer. */
+  | 'openemr-unreachable'
+  /** 502 part-way: OpenEMR refuses to create the Encounter. */
+  | 'encounter-refused'
+  /** 504 part-way: the Observation POST gets no answer in time. */
+  | 'observation-timeout'
+  /** 200, but reading the Observation back fails. */
+  | 'read-back'
+  /**
+   * The whole share happens at the clinic, but the hosting layer answers 504 with an HTML page
+   * (its 60 s limit) before the proxy's answer arrives: no steps, no OperationOutcome.
+   */
+  | 'hosting-timeout';
+
+export interface MockSwitches {
+  lookupFailure: MockLookupFailure | null;
+  partialLog: boolean;
+  statusMode: MockStatusMode | null;
+  shareFailure: MockShareFailure | null;
+}
+
+const LOOKUP_FAILURES: readonly MockLookupFailure[] = ['not-found', 'failed'];
+const STATUS_MODES: readonly MockStatusMode[] = [
+  'openemr-not-checked',
+  'counts-unknown',
+  'health-sync-timeout',
+  'not-configured',
+];
+const SHARE_FAILURES: readonly MockShareFailure[] = [
+  'patient-incomplete',
+  'not-configured',
+  'openemr-unreachable',
+  'encounter-refused',
+  'observation-timeout',
+  'read-back',
+  'hosting-timeout',
+];
+
+/** The switches named in a page URL's query string; each is off unless spelled exactly. */
+export function mockSwitchesFromSearch(search: string): MockSwitches {
+  const q = new URLSearchParams(search);
+  const pick = <T extends string>(allowed: readonly T[], name: string): T | null =>
+    allowed.find((v) => v === q.get(name)) ?? null;
+  return {
+    lookupFailure: pick(LOOKUP_FAILURES, 'mock-lookup'),
+    partialLog: q.get('mock-log') === 'partial',
+    statusMode: pick(STATUS_MODES, 'mock-status'),
+    shareFailure: pick(SHARE_FAILURES, 'mock-share'),
+  };
+}
 
 export type MockDataSetId = keyof typeof MOCK_DATA_SETS;
 export type MockDataSet = (typeof MOCK_DATA_SETS)[MockDataSetId];

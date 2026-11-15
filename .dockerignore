@@ -23,9 +23,15 @@
 !services/cuff-sim/pyproject.toml
 !services/cuff-sim/README.md
 !services/cuff-sim/cuff_sim/
+!services/fhir-proxy/pyproject.toml
+!services/fhir-proxy/README.md
+!services/fhir-proxy/fhir_proxy/
 !services/health-sync/pyproject.toml
 !services/health-sync/README.md
 !services/health-sync/health_sync/
+!services/seed/pyproject.toml
+!services/seed/README.md
+!services/seed/pulsebridge_seed/
 !services/v2-to-fhir/pyproject.toml
 !services/v2-to-fhir/README.md
 !services/v2-to-fhir/v2_to_fhir/

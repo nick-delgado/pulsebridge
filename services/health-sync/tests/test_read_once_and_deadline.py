@@ -10,7 +10,6 @@ from collections import Counter
 from datetime import timedelta
 
 import pytest
-from health_sync.stored import stored_windows
 from health_sync.sync import DEADLINE_STEPS, Outcome, run_sync, split_range, sync_range
 from health_sync.testing import (
     FHIR_PATH,
@@ -25,6 +24,7 @@ from health_sync.testing import (
     utc,
     window,
 )
+from pulsebridge_gcp.stored import stored_windows
 from pulsebridge_gcp.testing import json_response
 
 
@@ -498,6 +498,9 @@ def test_a_key_stored_twice_counts_as_not_stored(world, caplog, first_is_newer):
     assert (report.windows_new, report.windows_written) == (1, 1)
     events = [r.fields for r in caplog.records if r.fields.get("event") == "stored-duplicate-key"]
     assert events == [{"event": "stored-duplicate-key", "duplicate_keys": 1}]
+    # On the service's own logger (sync.py passes it to the shared read).
+    names = [r.name for r in caplog.records if r.fields.get("event") == "stored-duplicate-key"]
+    assert names == ["health_sync"]
 
 
 def test_duplicate_patients_are_a_read_state_of_their_own(world, caplog):

@@ -37,7 +37,7 @@ locals {
       }
       "scheduler-invoker" = {
         display_name = "PulseBridge scheduler invoker"
-        description  = "Identity in the OIDC token Cloud Scheduler sends to health-sync (T20). Can only invoke health-sync."
+        description  = "Identity in the OIDC token Cloud Scheduler sends to health-sync, or the OAuth token it uses to run the seeder job. Can only invoke health-sync or run the seeder job."
       }
       "pubsub-push" = {
         display_name = "PulseBridge Pub/Sub push"
@@ -93,7 +93,7 @@ locals {
     "openemr-client-private-key" = {
       readers    = ["fhir-proxy"]
       written_by = "OpenEMR client registration script (T23), run on the edge VM as edge-vm (see local.secret_writer_grants)"
-      purpose    = "Private key (PEM) that fhir-proxy signs its OpenEMR client assertion with."
+      purpose    = "OpenEMR client document (JSON, format pulsebridge.openemr-client.v1): the client's private key with its client ID, key ID and OpenEMR's certificate. fhir-proxy signs its OpenEMR client assertion with the key (module openemr README)."
     }
     # Decision D9: shared reviewer password, checked by fhir-proxy only.
     "reviewer-password" = {

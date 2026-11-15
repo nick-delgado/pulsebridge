@@ -12,6 +12,11 @@ For each image it checks, against the real container:
 - with bad configuration it refuses to start and says why (v2-to-fhir: "a bad store ID stops the
   service starting"), so a bad deploy fails at once instead of failing every request.
 
+A job image (seed, a Cloud Run job: JOB_CASES) serves nothing, so instead: `--help` exits 0; a
+dry run (`--dry-run --days 1`, synthetic PATIENT_ID and zone) prints the counts report, exits
+0, makes no network call (an audit hook records every socket operation) and leaves no file
+behind; without arguments it fails; with bad configuration it exits 2 and says why.
+
 All configuration is synthetic. The containers get no credentials: Application Default
 Credentials come from a throwaway authorized_user file with placeholder values that no request
 ever uses (the services build their client at start-up and would refuse to start without one),
@@ -116,6 +121,92 @@ for root, dirs, files in os.walk("/"):
 """
 
 
+# Run inside a service image (`python -c <script> <port> <command...>`): start the image's own
+# command as a child and try to connect to 127.0.0.1:<port> every 10 ms, from start until the
+# command exits (or, once the port has opened, stop it). Prints when the port first accepted a
+# connection (seconds, or null) and the command's exit status. Probing inside the container
+# matters: a port published to the host is accepted by Docker's proxy whether or not anything
+# listens in the container.
+LISTEN_PROBE = """
+import json, socket, subprocess, sys, time
+
+port, command = int(sys.argv[1]), sys.argv[2:]
+child = subprocess.Popen(command)
+start = time.monotonic()
+opened = None
+while child.poll() is None and time.monotonic() - start < 25:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.05).close()
+        opened = round(time.monotonic() - start, 3)
+        break
+    except OSError:
+        time.sleep(0.01)
+if child.poll() is None:
+    child.terminate()
+try:
+    status = child.wait(timeout=10)
+except subprocess.TimeoutExpired:
+    child.kill()
+    status = child.wait()
+print("LISTEN-PROBE " + json.dumps({"opened_at": opened, "exit": status}))
+"""
+
+
+@dataclass(frozen=True)
+class JobCase:
+    """A Cloud Run job image: its arguments come from the job, so each run passes its own."""
+
+    service: str
+    program: str  # the image's ENTRYPOINT, the README's console script
+    env: dict[str, str]
+    dry_run_args: list[str]
+    bad_env: dict[str, str]
+    bad_message: str
+
+
+JOB_CASES = {
+    # A dry run needs only PATIENT_ID (synthetic: SYN-) and TIME_ZONE, and makes no request
+    # (services/seed/README.md, "Running it").
+    "seed": JobCase(
+        service="seed",
+        program="pulsebridge-seed",
+        env={"PATIENT_ID": "SYN-SMOKE-0001", "TIME_ZONE": "America/New_York"},
+        dry_run_args=["--dry-run", "--days", "1"],
+        bad_env={"PATIENT_ID": "smoke-patient"},
+        bad_message="PATIENT_ID must start with SYN-",
+    ),
+}
+
+# Run inside a job image (`python -c <script> <args...>`): run the image's console script (the
+# same entry point the ENTRYPOINT runs) with an audit hook that records every socket operation
+# (CPython audit events "socket.*": getaddrinfo, connect, ...), even one whose error the code
+# swallows. Prints the events as the last stderr line and exits with the command's code.
+NETWORK_AUDIT = """
+import json, sys
+from importlib.metadata import entry_points
+
+events = []
+sys.addaudithook(lambda event, args: events.append(event) if event.startswith("socket.") else None)
+program = sys.argv[1]
+sys.argv = [program, *sys.argv[2:]]
+if program == "--self-check":
+    import socket
+    try:
+        socket.getaddrinfo("smoke.invalid", 443)
+    except OSError:
+        pass
+    code = 0
+else:
+    (script,) = entry_points(group="console_scripts", name=program)
+    try:
+        code = script.load()()
+    except SystemExit as exc:
+        code = exc.code
+print("SOCKET-EVENTS " + json.dumps(sorted(set(events))), file=sys.stderr)
+sys.exit(code)
+"""
+
+
 @dataclass(frozen=True)
 class Case:
     service: str
@@ -126,6 +217,7 @@ class Case:
     status: int
     bad_env: dict[str, str] = field(default_factory=dict)
     bad_message: str = ""
+    threads: str = "4"  # gunicorn --threads in the README's command
 
 
 CASES = {
@@ -179,7 +271,35 @@ CASES = {
         bad_env={"AUDIT_FHIR_STORE_ID": "smoke-hl7v2"},
         bad_message="AUDIT_FHIR_STORE_ID must differ from HL7V2_STORE_ID",
     ),
+    # Every route but POST /auth/login needs a session token, so GET <prefix>/status without one
+    # is 401 with WWW-Authenticate: Bearer, decided before any Google call. PATH_PREFIX=/api as
+    # behind the Firebase Hosting rewrite (module phr). The password file is a fake mounted like
+    # the reviewer-password secret volume; the URLs are reserved .test names nothing resolves.
+    "fhir-proxy": Case(
+        service="fhir-proxy",
+        env={
+            **COMMON,
+            "FHIR_STORE_ID": "smoke-fhir",
+            "AUDIT_FHIR_STORE_ID": "smoke-audit",
+            "HL7V2_STORE_ID": "smoke-hl7v2",
+            "REVIEWER_PASSWORD_FILE": "/smoke/reviewer-password",
+            "ALLOWED_ORIGINS": "https://smoke.example.test",
+            "CUFF_SIM_URL": "https://cuff-sim.smoke.example.test",
+            "PUBLIC_BASE_URL": "https://smoke.example.test/api",
+            "PATH_PREFIX": "/api",
+        },
+        method="GET",
+        path="/api/status",
+        body=None,
+        status=401,
+        bad_env={"CUFF_SIM_URL": ""},
+        bad_message="missing environment variables: CUFF_SIM_URL",
+        threads="8",
+    ),
 }
+
+# A fake reviewer password for fhir-proxy's smoke case: obviously not a real one, never logged.
+FAKE_REVIEWER_PASSWORD = "smoke-test-placeholder-password"  # noqa: S105 - a fake
 
 
 def docker(*args: str, check: bool = True, timeout: float = 120) -> subprocess.CompletedProcess:
@@ -192,13 +312,25 @@ def image(service: str) -> str:
     return f"{PREFIX}/{service}:{TAG}"
 
 
+def run_in(service: str, program: str, *args: str, user: str | None = None, **kw):
+    """Run `program` in the image instead of its command. --entrypoint replaces both the
+    ENTRYPOINT (a job image's) and the CMD (a service image's), so this works for either."""
+    user_args = ["--user", user] if user is not None else []
+    return docker("run", "--rm", *user_args, "--entrypoint", program, image(service), *args, **kw)
+
+
+ALL_IMAGES = sorted([*CASES, *JOB_CASES])
+
+
 @pytest.fixture(scope="module")
 def adc_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert shutil.which(DOCKER), f"{DOCKER} not found"
     d = tmp_path_factory.mktemp("adc")
     (d / "adc.json").write_text(json.dumps(FAKE_ADC))
+    (d / "reviewer-password").write_text(FAKE_REVIEWER_PASSWORD)
     d.chmod(0o755)
     (d / "adc.json").chmod(0o644)  # readable by the image's non-root user
+    (d / "reviewer-password").chmod(0o644)
     return d
 
 
@@ -217,7 +349,19 @@ def run_args(adc_dir: Path, env: dict[str, str]) -> list[str]:
 
 @pytest.fixture(params=list(CASES))
 def case(request: pytest.FixtureRequest) -> Case:
+    """A service image (gunicorn)."""
     return CASES[request.param]
+
+
+@pytest.fixture(params=list(JOB_CASES))
+def job(request: pytest.FixtureRequest) -> JobCase:
+    return JOB_CASES[request.param]
+
+
+@pytest.fixture(params=ALL_IMAGES)
+def any_image(request: pytest.FixtureRequest) -> str:
+    """Every image, service or job, for the checks that apply to both."""
+    return request.param
 
 
 @pytest.fixture
@@ -241,7 +385,7 @@ def running(case: Case, adc_dir: Path) -> Iterator[tuple[str, str]]:
         docker("rm", "--force", container, check=False)
 
 
-def request(base: str, case: Case) -> tuple[int, bytes]:
+def request(base: str, case: Case) -> tuple[int, bytes, dict[str, str]]:
     url = base + case.path
     if not url.startswith("http://127.0.0.1:"):  # only the published port on this machine
         raise ValueError(url)
@@ -254,12 +398,12 @@ def request(base: str, case: Case) -> tuple[int, bytes]:
     )
     try:
         with opener.open(req, timeout=5) as resp:
-            return resp.status, resp.read()
+            return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
+        return exc.code, exc.read(), dict(exc.headers)
 
 
-def wait_for_answer(container: str, base: str, case: Case) -> tuple[int, bytes]:
+def wait_for_answer(container: str, base: str, case: Case) -> tuple[int, bytes, dict[str, str]]:
     deadline = time.monotonic() + START_TIMEOUT
     last_error: Exception | None = None
     while time.monotonic() < deadline:
@@ -277,15 +421,24 @@ def wait_for_answer(container: str, base: str, case: Case) -> tuple[int, bytes]:
 
 def test_starts_listens_on_port_and_answers(case: Case, running: tuple[str, str]) -> None:
     container, base = running
-    status, body = wait_for_answer(container, base, case)
+    status, body, headers = wait_for_answer(container, base, case)
     assert status == case.status, body
     if case.service == "health-sync":
         assert json.loads(body)["googleHealth"] == "not-configured"
     if case.service == "cuff-sim":
         samples = json.loads(body)
         assert samples and all({"name", "label", "class", "transports"} <= set(s) for s in samples)
+    if case.service == "fhir-proxy":
+        # The token gate answered, under the prefix, with a FHIR OperationOutcome and its fixed
+        # reason. 401 (not 503 "login-not-configured") also proves the password file was read.
+        outcome = json.loads(body)
+        assert outcome["resourceType"] == "OperationOutcome", outcome
+        codes = [c["code"] for c in outcome["issue"][0]["details"]["coding"]]
+        assert codes == ["unauthorized"], outcome
+        assert headers.get("WWW-Authenticate", "").startswith("Bearer"), headers
     logs = docker("logs", container)
     output = logs.stdout + logs.stderr
+    assert FAKE_REVIEWER_PASSWORD not in output, "the password file's content was logged"
     assert f"Listening at: http://0.0.0.0:{SMOKE_PORT}" in output, output
     assert "Control server error" not in output, output
 
@@ -310,17 +463,23 @@ def test_bad_configuration_stops_start_up(case: Case, adc_dir: Path) -> None:
         docker("rm", "--force", name, check=False)
     assert result.returncode != 0, "the service started with bad configuration"
     assert case.bad_message in result.stdout + result.stderr
+    # gunicorn logs "Listening at" when it opens the port. With --preload the app fails to load
+    # first, so the line never appears (test_bad_configuration_exits_without_ever_listening
+    # proves the same with a probe inside the container).
+    assert "Listening at" not in result.stdout + result.stderr, (
+        "the port opened before the app failed"
+    )
 
 
-def test_runs_as_non_root(case: Case) -> None:
-    uid = docker("run", "--rm", image(case.service), "id", "-u").stdout.strip()
-    assert uid.isdigit() and int(uid) != 0, uid
-    user = docker("image", "inspect", "--format", "{{.Config.User}}", image(case.service))
+def test_runs_as_non_root(any_image: str) -> None:
+    uid = run_in(any_image, "id", "-u").stdout.strip()
+    assert uid == "10001", uid
+    user = docker("image", "inspect", "--format", "{{.Config.User}}", image(any_image))
     assert user.stdout.strip() == "10001:10001"
 
 
-def test_image_holds_no_stray_files(case: Case) -> None:
-    result = docker("run", "--rm", image(case.service), "python", "-c", STRAY_FILE_SCAN)
+def test_image_holds_no_stray_files(any_image: str) -> None:
+    result = run_in(any_image, "python", "-c", STRAY_FILE_SCAN)
     stray = [line for line in result.stdout.splitlines() if line]
     # Paths that belong to Debian or Python and are not ours: the system CA bundle, Debian's
     # own Python files, CPython's test package and certifi's public CA list.
@@ -334,9 +493,7 @@ def test_image_holds_no_stray_files(case: Case) -> None:
     )
     stray = [p for p in stray if not p.startswith(allowed)]
     assert not stray, stray
-    pip = docker(
-        "run", "--rm", image(case.service), "python", "-m", "pip", "--version", check=False
-    )
+    pip = run_in(any_image, "python", "-m", "pip", "--version", check=False)
     assert pip.returncode != 0, "pip is removed from the runtime image"
 
 
@@ -354,6 +511,14 @@ def test_package_data_and_entry_points_are_installed(case: Case) -> None:
             "run", "--rm", image(case.service), "health-sync-backfill", "--help", check=False
         )
         assert result.returncode == 0, result.stderr
+    if case.service == "fhir-proxy":
+        # The cuff trace loads T07's samples (package data of pulsebridge_hl7v2).
+        code = (
+            "import fhir_proxy.app; from pulsebridge_hl7v2.samples import all_samples; "
+            "assert all_samples(), 'no samples'"
+        )
+        result = docker("run", "--rm", image(case.service), "python", "-c", code, check=False)
+        assert result.returncode == 0, result.stderr
     if case.service == "v2-to-fhir":
         code = "import v2_to_fhir.app, pulsebridge_fhir, pulsebridge_gcp, pulsebridge_hl7v2"
         result = docker("run", "--rm", image(case.service), "python", "-c", code, check=False)
@@ -363,10 +528,11 @@ def test_package_data_and_entry_points_are_installed(case: Case) -> None:
 def test_every_image_has_a_smoke_case() -> None:
     root = Path(__file__).resolve().parents[2]
     services = sorted(p.parent.name for p in (root / "services").glob("*/Dockerfile"))
-    assert sorted(CASES) == services, "add a Case for each new image"
+    assert services == ALL_IMAGES, "add a Case (service) or a JobCase (job) for each new image"
+    assert not set(CASES) & set(JOB_CASES), "an image is a service or a job, not both"
 
 
-def test_code_is_owned_by_root_and_read_only_to_the_app_user(case: Case) -> None:
+def test_code_is_owned_by_root_and_read_only_to_the_app_user(any_image: str) -> None:
     # Runs as the image's own user: nothing under /opt/venv may be owned by anyone but root or
     # be writable by that user, so the running service cannot change its own code.
     result = docker(
@@ -374,7 +540,7 @@ def test_code_is_owned_by_root_and_read_only_to_the_app_user(case: Case) -> None
         "--rm",
         "--entrypoint",
         "find",
-        image(case.service),
+        image(any_image),
         "/opt/venv",
         "(",
         "!",
@@ -393,24 +559,13 @@ def test_code_is_owned_by_root_and_read_only_to_the_app_user(case: Case) -> None
 
 
 @pytest.mark.skipif(not PIP_CERT, reason="IMAGE_PIP_CERT not set: the images used no build secret")
-def test_the_pip_build_secret_is_not_in_the_image(case: Case) -> None:
+def test_the_pip_build_secret_is_not_in_the_image(any_image: str) -> None:
     # The CA bundle reaches the build only as a secret mount; no copy of it may be in a layer.
     # The scan runs as root: a copy made with `cp` from the mount is root-only (mode 0400) and
     # would be invisible to the image's own user.
     data = Path(PIP_CERT).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
-    result = docker(
-        "run",
-        "--rm",
-        "--user",
-        "0",
-        image(case.service),
-        "python",
-        "-c",
-        SAME_FILE_SCAN,
-        str(len(data)),
-        digest,
-    )
+    result = run_in(any_image, "python", "-c", SAME_FILE_SCAN, str(len(data)), digest, user="0")
     assert result.stdout.strip() == "", f"copies of {PIP_CERT} in the image: {result.stdout}"
 
 
@@ -430,7 +585,221 @@ def test_effective_gunicorn_settings(case: Case) -> None:
             settings[name.strip()] = value.strip()
     assert settings.get("bind") == "['0.0.0.0:8080']", result.stdout[-2000:]
     assert settings.get("workers") == "1"
-    assert settings.get("threads") == "4"
+    assert settings.get("threads") == case.threads
     assert settings.get("timeout") == "0"
     assert settings.get("graceful_timeout") == "8", "Cloud Run kills 10 s after SIGTERM"
     assert settings.get("control_socket_disable") == "True"
+    assert settings.get("preload_app") == "True", "the app loads before the port opens"
+
+
+# --- job images -------------------------------------------------------------------------------
+
+
+def job_env(env: dict[str, str]) -> list[str]:
+    """Only the job's own synthetic variables: no credentials, nothing from this session."""
+    args: list[str] = []
+    for name, value in env.items():
+        args += ["--env", f"{name}={value}"]
+    return args
+
+
+def test_job_entrypoint_is_the_command_and_there_is_no_cmd(job: JobCase) -> None:
+    config = json.loads(
+        docker("image", "inspect", "--format", "{{json .Config}}", image(job.service)).stdout
+    )
+    assert config["Entrypoint"] == [job.program]
+    # The base image's CMD ("python3") is cleared by ENTRYPOINT: the arguments are the job's.
+    assert not config.get("Cmd"), config.get("Cmd")
+    assert not config.get("ExposedPorts"), "a job listens on nothing"
+    assert not [e for e in config.get("Env") or [] if e.startswith(("PORT=", "GUNICORN"))]
+
+
+def test_job_help_exits_zero(job: JobCase) -> None:
+    result = docker("run", "--rm", "--network", "none", image(job.service), "--help", check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith(f"usage: {job.program}"), result.stdout[:500]
+
+
+def test_job_without_arguments_fails(job: JobCase) -> None:
+    # No CMD: a job created without args must fail visibly, not succeed doing nothing.
+    result = docker(
+        "run", "--rm", "--network", "none", *job_env(job.env), image(job.service), check=False
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "required" in result.stderr
+    # ... and logs its structured seed-run line, which the job's alert reads (T35).
+    assert ("WARNING", "not-started") in [(r["severity"], r["outcome"]) for r in seed_runs(result)]
+
+
+def seed_runs(result: subprocess.CompletedProcess) -> list[dict]:
+    lines = []
+    for line in result.stderr.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and entry.get("event") == "seed-run":
+            lines.append(entry)
+    return lines
+
+
+def test_job_sigterm_logs_terminated_and_exits_promptly(job: JobCase) -> None:
+    # A year-long dry run takes several seconds of generating; SIGTERM one second in must end
+    # it within a few seconds (Cloud Run sends SIGKILL 10 s after SIGTERM) with a seed-run line.
+    name = f"pulsebridge-smoke-term-{job.service}-{os.getpid()}"
+    try:
+        docker(
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--network",
+            "none",
+            *job_env(job.env),
+            image(job.service),
+            "--dry-run",
+            "--days",
+            "366",
+        )
+        time.sleep(1.0)
+        running = docker("inspect", "--format", "{{.State.Running}}", name).stdout.strip()
+        assert running == "true", "the dry run ended before SIGTERM was sent"
+        sent = time.monotonic()
+        docker("kill", "--signal", "TERM", name)
+        code = docker("wait", name, timeout=15).stdout.strip()
+        elapsed = time.monotonic() - sent
+        logs = docker("logs", name, check=False)
+    finally:
+        docker("rm", "--force", name, check=False)
+    assert code == "143", logs.stderr[-2000:]
+    assert elapsed < 5, f"took {elapsed:.1f} s to stop after SIGTERM"
+    runs = seed_runs(logs)
+    assert [(r["severity"], r["outcome"], r["reason"]) for r in runs] == [
+        ("WARNING", "terminated", "sigterm")
+    ]
+
+
+def test_job_dry_run_prints_the_counts_and_leaves_no_files(job: JobCase) -> None:
+    name = f"pulsebridge-smoke-job-{job.service}-{os.getpid()}"
+    try:
+        result = docker(
+            "run",
+            "--name",
+            name,
+            "--network",
+            "none",
+            *job_env(job.env),
+            image(job.service),
+            *job.dry_run_args,
+            check=False,
+            timeout=START_TIMEOUT,
+        )
+        changed = docker("diff", name).stdout.strip()
+    finally:
+        docker("rm", "--force", name, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report["outcome"] == "dry-run"
+    assert report["windows_in_range"] == 288  # one UTC day of five-minute windows (D8)
+    assert report["windows_generated"] + report["windows_absent"] == 288
+    assert report["windows_generated"] > 0
+    assert (report["windows_written"], report["bundles_written"]) == (0, 0)
+    assert report["safety_check"] == "not-run" and report["stored_read"] == "not-attempted"
+    assert job.env["PATIENT_ID"] not in result.stdout + result.stderr  # never logged
+    # Nothing written in the container's filesystem (no caches, no report files, no .pyc).
+    assert changed == "", changed
+
+
+def network_audit(job: JobCase, *args: str) -> tuple[subprocess.CompletedProcess, list[str]]:
+    result = docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        *job_env(job.env),
+        "--entrypoint",
+        "python",
+        image(job.service),
+        "-c",
+        NETWORK_AUDIT,
+        *args,
+        check=False,
+        timeout=START_TIMEOUT,
+    )
+    marker = [line for line in result.stderr.splitlines() if line.startswith("SOCKET-EVENTS ")]
+    assert marker, result.stderr[-2000:]
+    return result, json.loads(marker[-1].removeprefix("SOCKET-EVENTS "))
+
+
+def test_the_network_audit_sees_a_lookup() -> None:
+    # The detector itself is checked, so the next test cannot pass because it sees nothing.
+    _, events = network_audit(next(iter(JOB_CASES.values())), "--self-check")
+    assert "socket.getaddrinfo" in events, events
+
+
+def test_job_dry_run_makes_no_network_call(job: JobCase) -> None:
+    result, events = network_audit(job, job.program, *job.dry_run_args)
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert events == [], f"the dry run used the network: {events}"
+
+
+def test_job_bad_configuration_exits_2_and_says_why(job: JobCase) -> None:
+    result = docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        *job_env({**job.env, **job.bad_env}),
+        image(job.service),
+        *job.dry_run_args,
+        check=False,
+        timeout=START_TIMEOUT,
+    )
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert job.bad_message in result.stderr
+    assert job.bad_env["PATIENT_ID"] not in result.stderr  # the variable is named, not its value
+
+
+# --- start-up failures never listen (service images) ----------------------------------------
+
+
+def listen_probe(case: Case, adc_dir: Path, env: dict[str, str]) -> dict:
+    cmd = json.loads(
+        docker("image", "inspect", "--format", "{{json .Config.Cmd}}", image(case.service)).stdout
+    )
+    result = docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--env",
+        f"PORT={SMOKE_PORT}",
+        *run_args(adc_dir, env),
+        "--entrypoint",
+        "python",
+        image(case.service),
+        "-c",
+        LISTEN_PROBE,
+        SMOKE_PORT,
+        *cmd,
+        check=False,
+        timeout=60,
+    )
+    marker = [line for line in result.stdout.splitlines() if line.startswith("LISTEN-PROBE ")]
+    assert marker, result.stdout[-2000:] + result.stderr[-2000:]
+    return {**json.loads(marker[-1].removeprefix("LISTEN-PROBE ")), "output": result.stderr}
+
+
+def test_good_configuration_opens_the_port(case: Case, adc_dir: Path) -> None:
+    # The probe itself is checked: with good configuration it sees the port open.
+    probe = listen_probe(case, adc_dir, case.env)
+    assert probe["opened_at"] is not None, probe["output"][-2000:]
+
+
+def test_bad_configuration_exits_without_ever_listening(case: Case, adc_dir: Path) -> None:
+    # Cloud Run's default startup probe is a TCP connect to PORT. If gunicorn opened the port
+    # before the app failed to load, the probe could pass and a broken revision would serve.
+    probe = listen_probe(case, adc_dir, {**case.env, **case.bad_env})
+    assert probe["opened_at"] is None, f"the port opened at {probe['opened_at']} s"
+    assert probe["exit"] != 0, probe
+    assert case.bad_message in probe["output"]

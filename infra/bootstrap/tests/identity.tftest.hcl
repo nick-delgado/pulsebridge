@@ -1,6 +1,9 @@
 # AC: a deployer service account and a Workload Identity Federation pool and provider restricted
 # to one GitHub repository; outputs for the env roots and GitHub Actions. Mocked provider, plan only.
 
+# google-beta (google_firebase_project) is mocked too, so no real provider ever runs.
+mock_provider "google-beta" {}
+
 mock_provider "google" {
   source          = "./tests/mocks"
   override_during = plan
@@ -87,6 +90,29 @@ run "deployer_gets_exactly_the_configured_roles" {
 
 run "default_deployer_roles_are_not_basic_roles" {
   command = plan
+
+  assert {
+    # Module ingestion creates log-based metrics on every apply, and alert policies and an
+    # email channel when asked; without these the deployer's apply fails there.
+    condition = length(setsubtract(toset([
+      "roles/logging.configWriter",
+      "roles/monitoring.alertPolicyEditor",
+      "roles/monitoring.notificationChannelEditor",
+    ]), toset(keys(google_project_iam_member.deployer)))) == 0
+    error_message = "The default deployer roles must include the logging and monitoring roles module ingestion needs."
+  }
+
+  assert {
+    # Module phr's Hosting site and the page deploys need the Hosting role; the stack creates no
+    # bucket, so no project-wide storage role (state access is the bucket-scoped grant).
+    condition     = contains(keys(google_project_iam_member.deployer), "roles/firebasehosting.admin") && !contains(keys(google_project_iam_member.deployer), "roles/storage.admin")
+    error_message = "The default deployer roles must include roles/firebasehosting.admin and not roles/storage.admin."
+  }
+  assert {
+    # Adding Firebase is bootstrap's job (add_firebase), so the deployer gets no broad Firebase role.
+    condition     = length(setintersection(toset(keys(google_project_iam_member.deployer)), toset(["roles/firebase.admin", "roles/firebase.editor"]))) == 0
+    error_message = "The deployer must not get roles/firebase.admin or roles/firebase.editor."
+  }
 
   assert {
     condition     = length(setintersection(toset(keys(google_project_iam_member.deployer)), toset(["roles/owner", "roles/editor", "roles/viewer"]))) == 0

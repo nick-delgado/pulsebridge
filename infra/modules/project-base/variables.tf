@@ -43,8 +43,8 @@ variable "enabled_apis" {
   description = <<-EOT
     Google APIs (service names) to enable in the project. The default covers every component in
     the brief. Identity Platform (identitytoolkit.googleapis.com) is deliberately absent and is
-    rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Add
-    firebasehosting.googleapis.com here if decision D4 picks Firebase Hosting.
+    rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Firebase
+    Hosting (D4) is included.
   EOT
   type        = set(string)
   default = [
@@ -53,16 +53,19 @@ variable "enabled_apis" {
     "cloudresourcemanager.googleapis.com", # project-level IAM bindings made by Terraform (identity module)
     "cloudscheduler.googleapis.com",       # fires health-sync every 15 minutes
     "compute.googleapis.com",              # VPC, subnets, firewall, Cloud NAT and the edge VM
+    "firebase.googleapis.com",             # Firebase Management API: the project as a Firebase project (bootstrap adds it; D4)
+    "firebasehosting.googleapis.com",      # Firebase Hosting: the dashboard site and its page deploys (module phr, D4)
     "health.googleapis.com",               # Google Health API that health-sync reads (the deployer's OAuth app lives in this project)
     "healthcare.googleapis.com",           # Cloud Healthcare API: FHIR R4 store and HL7v2 store
     "iam.googleapis.com",                  # service accounts
     "iamcredentials.googleapis.com",       # short-lived tokens: OIDC for Scheduler/Pub/Sub push, Workload Identity Federation
     "logging.googleapis.com",              # Cloud Run and VM logs
+    "monitoring.googleapis.com",           # alert policies and charts of the ingestion log-based metrics (free to enable)
     "pubsub.googleapis.com",               # HL7v2 ingest notifications to v2-to-fhir
     "run.googleapis.com",                  # Cloud Run services
     "secretmanager.googleapis.com",        # OAuth client, refresh token, reviewer password, DB and OpenEMR keys
     "serviceusage.googleapis.com",         # lets Terraform list and enable services
-    "storage.googleapis.com",              # Cloud Build sources and the dashboard bucket (if D4 picks a bucket)
+    "storage.googleapis.com",              # Cloud Build source uploads (gcloud builds submit); Terraform state lives in bootstrap's bucket
   ]
 
   validation {
@@ -156,7 +159,7 @@ variable "openemr_https_port" {
 }
 
 variable "edge_vm_service_account_email" {
-  description = "Optional email of the edge VM's service account (created by the identity module). When set, firewall rules target that service account instead of the edge network tag, which is stronger: anyone allowed to edit an instance can add a tag, but attaching a service account needs IAM permission on it. Leave null to target the network tag."
+  description = "Email of the edge VM's service account (created by the identity module). When set, (1) firewall rules target that service account instead of the edge network tag, which is stronger: anyone allowed to edit an instance can add a tag, but attaching a service account needs IAM permission on it; and (2) the account gets roles/artifactregistry.reader on the Docker Hub mirror repository, which the edge VM needs to pull MariaDB and OpenEMR. Leave null only when no edge VM is deployed: the VM cannot pull its images without it."
   type        = string
   default     = null
 

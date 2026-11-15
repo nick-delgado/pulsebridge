@@ -11,8 +11,8 @@ Flow:
       first, because Google sends newest first.
    c. The first time a range has windows: find the Patient's server id and count stranded
       preliminary windows (FHIR searches). Then read what the store already holds for the
-      range (:mod:`health_sync.stored`) and keep only the windows that are new or changed, or
-      that have just become final.
+      range (:mod:`pulsebridge_gcp.stored`, shared with the seeder) and keep only the windows
+      that are new or changed, or that have just become final.
    d. In batches: one raw ``dataPoints`` call for the device name, platform and recording
       method (roll-ups carry none), then T06's ``heart_rate_transaction`` and ``executeBundle``.
 
@@ -52,6 +52,7 @@ from pulsebridge_fhir import (
     window_from_rollup,
     window_status,
 )
+from pulsebridge_fhir.stored import Plan, StoredReadError, StoredWindow, plan_writes
 from pulsebridge_gcp import (
     ClientError,
     ConflictError,
@@ -62,6 +63,7 @@ from pulsebridge_gcp import (
     RetryableError,
     operation_outcome_summary,
 )
+from pulsebridge_gcp.stored import stored_windows
 from pulsebridge_gcp.transport import Transport
 
 from health_sync.config import MAX_ROLLUP_RANGE, WINDOW, ServiceConfig
@@ -77,15 +79,7 @@ from health_sync.google_health import (
     TokenSource,
 )
 from health_sync.retry import MIN_STEP_SECONDS, Deadline, DeadlineReached, RetryPolicy
-from health_sync.stored import (
-    Plan,
-    StoredReadError,
-    StoredWindow,
-    count_stranded,
-    find_patient_ids,
-    plan_writes,
-    stored_windows,
-)
+from health_sync.stored import count_stranded, find_patient_ids
 
 logger = logging.getLogger("health_sync")
 
@@ -598,6 +592,7 @@ def _stored_for(run: _Run, piece: TimeRange, windows: int) -> dict[str, StoredWi
             run.patient_ref,
             piece.start,
             piece.end,
+            logger=logger,  # max_pages: the library default, MAX_SEARCH_PAGES (20)
         )
     except (HealthcareApiError, StoredReadError, ValueError) as exc:
         _read_failed(run.report, exc)

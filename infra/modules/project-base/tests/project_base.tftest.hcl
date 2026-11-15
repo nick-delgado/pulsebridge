@@ -64,6 +64,9 @@ run "default_api_list_covers_stack_and_excludes_identity_platform" {
       "cloudscheduler.googleapis.com",
       "cloudbuild.googleapis.com",
       "iam.googleapis.com",
+      "monitoring.googleapis.com",
+      "firebase.googleapis.com",
+      "firebasehosting.googleapis.com",
     ], keys(google_project_service.this))) == 0
     error_message = "The default API list is missing a service the stack needs."
   }
@@ -357,11 +360,52 @@ run "dockerhub_mirror_can_be_turned_off" {
   command = plan
 
   variables {
-    create_dockerhub_mirror = false
+    create_dockerhub_mirror       = false
+    edge_vm_service_account_email = "edge-vm@example-project-123.iam.gserviceaccount.com"
   }
 
   assert {
     condition     = length(google_artifact_registry_repository.dockerhub) == 0 && output.dockerhub_mirror_url == null
     error_message = "No Docker Hub mirror may exist when create_dockerhub_mirror is false."
+  }
+
+  assert {
+    condition     = length(google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader) == 0
+    error_message = "Without a mirror there is no reader grant on it."
+  }
+}
+
+# The edge VM (T21) pulls MariaDB and OpenEMR through the mirror. Its account lives in another
+# project here on purpose: the grant must be on THIS project's mirror, for exactly that member.
+run "edge_vm_account_can_read_the_mirror_only" {
+  command = plan
+
+  variables {
+    edge_vm_service_account_email = "edge-vm@other-identity-project.iam.gserviceaccount.com"
+  }
+
+  assert {
+    condition     = length(google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader) == 1
+    error_message = "With an edge VM account, exactly one reader grant must exist."
+  }
+
+  assert {
+    condition = (
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader[0].role == "roles/artifactregistry.reader" &&
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader[0].member == "serviceAccount:edge-vm@other-identity-project.iam.gserviceaccount.com" &&
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader[0].project == "example-project-123" &&
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader[0].location == "us-central1" &&
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader[0].repository == "pulsebridge-dockerhub"
+    )
+    error_message = "The grant must be roles/artifactregistry.reader on this project's Docker Hub mirror, for the edge VM's account only."
+  }
+}
+
+run "no_mirror_grant_without_an_edge_vm_account" {
+  command = plan
+
+  assert {
+    condition     = length(google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader) == 0
+    error_message = "No IAM binding may be created when no edge VM account is given."
   }
 }

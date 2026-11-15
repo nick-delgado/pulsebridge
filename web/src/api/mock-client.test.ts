@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // The real shapes the mock must imitate: T06's example resources (synthetic, in the repo).
 import heartRateExample from '../../../libs/pulsebridge_fhir/examples/observation-heart-rate.json';
 import bloodPressureExample from '../../../libs/pulsebridge_fhir/examples/observation-blood-pressure.json';
-import type { SendAttemptEntry } from './contract';
 import { ApiError, CuffSendError, LoginError, UnauthorizedError } from './errors';
 import { LOINC, type Observation } from './fhir';
 import { MockClient } from './mock-client';
@@ -184,63 +183,7 @@ describe('MockClient', () => {
     });
   });
 
-  describe('messages log', () => {
-    it('covers every outcome the log must show (D7, D12)', async () => {
-      const { entries } = await client.listMessages({ kind: 'cuff-send' });
-      const sends = entries as SendAttemptEntry[];
-      const ack = (e: SendAttemptEntry) => (e.commitAck.received ? e.commitAck.code : 'none');
-
-      expect(sends.some((e) => ack(e) === 'AA' && e.application?.outcome === 'accepted')).toBe(
-        true,
-      );
-      expect(sends.some((e) => ack(e) === 'AA' && e.application?.outcome === 'pending')).toBe(true);
-      const mappingError = sends.find((e) => e.application?.outcome === 'error');
-      expect(mappingError?.application?.reason).toBe('missing-obx-14');
-      const nack = sends.find((e) => ack(e) === 'AE');
-      expect(nack?.commitAck.received && nack.commitAck.reason).toBe('Invalid MSH header');
-      expect(nack?.application).toBeNull();
-      const whys = sends.flatMap((e) => (e.commitAck.received ? [] : [e.commitAck.why]));
-      expect(whys).toEqual(expect.arrayContaining(['timeout', 'api-error', 'unreadable-reply']));
-      // T31's closed set of no-acknowledgment reasons, and an HTTP status only with api-error.
-      for (const e of sends) {
-        if (e.commitAck.received) continue;
-        expect(['timeout', 'connection-closed', 'api-error', 'unreadable-reply']).toContain(
-          e.commitAck.why,
-        );
-        expect(e.commitAck.httpStatus !== null).toBe(e.commitAck.why === 'api-error');
-      }
-      // result and outcome follow T31's mapping.
-      for (const e of sends) {
-        const expected = !e.commitAck.received
-          ? ['no-acknowledgment', '8']
-          : e.commitAck.code === 'AA'
-            ? ['accepted', '0']
-            : ['rejected', '4'];
-        expect([e.result, e.outcome]).toEqual(expected);
-      }
-      expect(new Set(sends.map((e) => e.transport))).toEqual(new Set(['mllp', 'https']));
-    });
-
-    it('lists newest first, mixes in FHIR transactions, and filters by outcome', async () => {
-      const all = await client.listMessages();
-      const times = all.entries.map((e) => e.recordedAt ?? '');
-      expect(times).toEqual([...times].sort().reverse());
-      expect(all.entries.some((e) => e.kind === 'fhir-transaction')).toBe(true);
-      // An unreadable AuditEvent is a visible row and counted, never dropped.
-      const unreadable = all.entries.filter((e) => e.kind === 'unreadable-send-attempt');
-      expect(unreadable).toHaveLength(1);
-      expect(all.unreadable).toBe(1);
-      expect(unreadable[0]?.kind === 'unreadable-send-attempt' && unreadable[0].problem).toMatch(
-        /format version/,
-      );
-
-      const errors = await client.listMessages({ outcome: 'error' });
-      expect(errors.entries.length).toBeGreaterThan(0);
-      for (const e of errors.entries) {
-        expect(e.kind === 'cuff-send' && e.application?.outcome).toBe('error');
-      }
-    });
-  });
+  // The messages log is tested in mock-messages.test.ts.
 
   describe('cuff readings', () => {
     it('rejects values outside bounds with 422 and an OperationOutcome; nothing is logged', async () => {
@@ -358,47 +301,5 @@ describe('MockClient', () => {
       expect(mockControlId('any seed')).toMatch(/^[0-9A-F]{20}$/);
     });
   });
-
-  describe('share', () => {
-    it('shares a final Observation, then reports the same one as already shared', async () => {
-      const range = { start: new Date(NOW - DAY), end: new Date(NOW) };
-      const [obs] = await client.searchObservations({ code: LOINC.heartRate, range });
-      const ref = `Observation/${obs?.id ?? ''}`;
-
-      const first = await client.share({ observations: [ref] });
-      expect(first.outcome).toBe('shared');
-      expect(first.readBack.observations).toHaveLength(1);
-      expect(first.readBack.patient?.name?.[0]?.use).toBe('official');
-      // The trace never carries the assertion or the access token (T15).
-      expect(JSON.stringify(first.steps)).not.toMatch(/eyJ|mock-session/);
-
-      const second = await client.share({ observations: [ref] });
-      expect(second.outcome).toBe('already-shared');
-    });
-
-    it('sends the Observation to OpenEMR without device, performer, meta, identifier or id (T06)', async () => {
-      const range = { start: new Date(NOW - DAY), end: new Date(NOW) };
-      const [obs] = await client.searchObservations({ code: LOINC.heartRate, range });
-      const result = await client.share({ observations: [`Observation/${obs?.id ?? ''}`] });
-      const sent = result.steps.find((st) => st.step === 'observation-create')?.request
-        .body as Record<string, unknown>;
-      expect(obs).toHaveProperty('performer');
-      // performer names our Patient; OpenEMR does not keep it (spike S1), so it is dropped.
-      for (const element of ['device', 'performer', 'meta', 'identifier', 'id']) {
-        expect(sent, element).not.toHaveProperty(element);
-      }
-      expect(sent).toHaveProperty('subject');
-      expect(sent).toHaveProperty('encounter');
-    });
-
-    it('refuses a preliminary Observation', async () => {
-      const range = { start: new Date(NOW - DAY), end: new Date(NOW) };
-      const day = await client.searchObservations({ code: LOINC.heartRate, range });
-      const latest = day.at(-1);
-      expect(latest?.status).toBe('preliminary');
-      await expect(
-        client.share({ observations: [`Observation/${latest?.id ?? ''}`] }),
-      ).rejects.toMatchObject({ status: 422 });
-    });
-  });
+  // The share is tested in mock-share.test.ts.
 });

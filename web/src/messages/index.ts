@@ -1,19 +1,13 @@
 /**
- * Messages log: OWNED BY T19. T16 ships this placeholder so the shell has something to mount.
- *
- * T19 replaces the body of `mountMessages` (keep its name and signature): rows from
- * `client.listMessages()` in `slots.log` (cuff send attempts with the commit-level
- * acknowledgment and application-level outcome, and FHIR transactions), and optional short text
- * in `slots.summary`, which sits inside the strip's toggle button (text only, no controls).
+ * Messages log (T19): every cuff send attempt (D12) with its commit-level acknowledgment and
+ * application-level outcome (D7), stored messages no send record names, unreadable send
+ * records, and FHIR transactions, in `slots.log`; a one-line count in `slots.summary` (text
+ * inside the strip's toggle button). See log.ts for the flow and README.md here for the design.
  */
 import type { FeatureContext, MessagesSlot } from '../shell/features';
-import { append, placeholder } from '../ui/dom';
+import { createMessagesLog } from './log';
+import './messages.css';
 
-export function mountMessages({ slots }: FeatureContext<MessagesSlot>): void {
-  append(
-    slots.log,
-    placeholder(
-      'Every cuff send attempt (including rejected and unacknowledged ones) and every FHIR transaction will be listed here.',
-    ),
-  );
+export function mountMessages(context: FeatureContext<MessagesSlot>): void {
+  createMessagesLog(context);
 }

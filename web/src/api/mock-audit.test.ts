@@ -55,9 +55,12 @@ describe("mock send-attempt AuditEvents against T31's examples", () => {
     });
     await client.login('x');
     traceFor = (id) => client.getCuffAttemptTrace(id);
-    const { entries } = await client.listMessages({ kind: 'cuff-send' });
+    const { entries } = await client.listMessages({ kind: 'cuff-send', count: 50 });
     const pick = (name: string, test: (e: SendAttemptEntry) => boolean) => {
-      const entry = (entries as SendAttemptEntry[]).find(test);
+      // Store-only rows have no AuditEvent (amendment 5), so only attempts are compared.
+      const entry = (entries as SendAttemptEntry[]).find(
+        (e) => e.source === 'audit-event' && e.messageLookup !== 'not-found' && test(e),
+      );
       if (!entry) throw new Error(`mock has no ${name} attempt`);
       return entry;
     };

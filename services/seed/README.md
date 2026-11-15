@@ -31,7 +31,6 @@ services/seed/
     generator.py           the synthetic person: windows in the Google Health roll-up shape
     synthetic.py           what marks the data as synthetic; which stored Patients are "ours"
     seeder.py              one run: range, cutoff, safety check, setup Bundle, batches, report
-    stored.py              read once: what is already stored (copied from health-sync, reduced)
     testing.py             test helpers: an in-memory FHIR store behind the real client
     config.py              environment variables, validated before any work
     cli.py                 pulsebridge-seed: flags, exit codes, report on stdout
@@ -195,7 +194,7 @@ Editor on the health-data store (identity module), which includes search.
   an incomplete one (or with `--force`). Later runs send only ingest Bundles, whose Patient and
   Device entries are conditional creates that match and change nothing.
 - **Read once, write what changed.** After the safety check, one search reads the heart-rate
-  windows already stored for the range (`stored.py`, following `next` links). A window is
+  windows already stored for the range (`pulsebridge_gcp.stored`, following `next` links). A window is
   written only if it is new, stored `preliminary` and now due `final`, or stored with another
   end or other values (only after a change of `--seed` or `TIME_ZONE`). As in `health-sync`:
   a window stored `final` that changed and is complete now is written **`amended`** (R4:
@@ -208,8 +207,9 @@ Editor on the health-data store (identity module), which includes search.
   that window is written and its conditional update reports the duplicate. If the search fails
   or answers something unusable, every window is written (`stored_read: failed:…`): reading
   saves writes, it is never a condition for writing. The pages are bounded by the range, so a
-  server that keeps sending `next` links cannot loop the run. This logic is **copied, reduced,
-  from `services/health-sync/health_sync/stored.py`**; a later task can move it into a library.
+  server that keeps sending `next` links cannot loop the run. This logic is **shared with
+  `health-sync`** (T35): the read is `pulsebridge_gcp.stored.stored_windows` (here with one
+  client for every page and `max_pages_for_range`), the decision `pulsebridge_fhir.stored.plan_writes`.
 - **History is not rewritten.** Values depend only on the seed, the zone and the window start,
   so a later run over an overlapping range finds the same values and skips them.
 - **`preliminary` and `final`** follow `health-sync`'s rule: `complete_before = floor(now -
@@ -263,8 +263,9 @@ values, no patient identifier, no seed.
 | --- | --- |
 | 0 | `seeded`, or `dry-run` |
 | 1 | a FHIR failure: `fhir-unavailable` (429/5xx/409/network after retries), `fhir-misconfigured` (401/403 `fhir-permission-denied`, 404 `fhir-store-missing`), `fhir-rejected` (another 4xx, its OperationOutcome summarised without free text; a malformed 2xx; or a safety-search answer that cannot be trusted, reason `safety-search-…`); or an unexpected error (outcome `bug`, reason the exception type only, reported with the counts so far). Re-run: every write is keyed |
-| 2 | bad arguments or configuration (the message names the variable, never its value) |
+| 2 | bad arguments or configuration (the message names the variable, never its value); also logged as `seed-run` with outcome `not-started` and a reason naming the flag or variable only (`usage:--hours`, `config:PATIENT_ID`, `missing:FHIR_STORE_ID`) |
 | 4 | `refused` by the safety check |
+| 143 | `terminated`: SIGTERM (a task timeout or a cancelled execution); the counts are those so far |
 
 A run stopped part-way leaves the setup Bundle (if it was due) and the Bundles before the
 failure written; a transaction Bundle is all-or-nothing, so no Bundle is half written.
@@ -303,11 +304,16 @@ exists before any ingest Bundle's conditional create looks for it (D11).
 
 ## For T20, T22, T24 and T25: deploying it
 
-- **Image (T24).** Same pattern as the other services: install `libs/pulsebridge_fhir` and
-  `libs/pulsebridge_gcp`, then this package; the command is `pulsebridge-seed`. Run as a
-  non-root user. No port: it is a job, not a service.
+- **Image (`services/seed/Dockerfile`, T35).** Same pattern as the other images: install
+  `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp`, then this package; runs as UID 10001.
+  `ENTRYPOINT ["pulsebridge-seed"]` and no `CMD`. **The job sets only `args`** (the
+  container's arguments, for example `["--days", "30"]` or `["--hours", "4"]`), never
+  `command`, which would replace the `pulsebridge-seed` entrypoint. Without args it exits 2.
+  No port: it is a job, not a service (services/README.md,
+  "Job images"). The release build prints its digest as `seed_image`.
 - **Where it runs (T20 or T25).** A **Cloud Run job** (`google_cloud_run_v2_job`) with the
-  `seeder` service account, the environment variables above, `max_retries = 0` (the next
+  `seeder` service account, only `args` set on its container (see "Image"), the environment
+  variables above, `max_retries = 0` (the next
   scheduled execution is the retry; every write is keyed), and created only when
   `use_synthetic_data = true`.
 - **Task timeout: size it with the range.** 30 days is about 8,600 windows and 85 Bundles;
@@ -322,6 +328,10 @@ exists before any ingest Bundle's conditional create looks for it (D11).
   Patient; the seeder accepts it and completes it with the setup Bundle (see "Safety"), so the
   order is recoverable, but two first contacts at once can still create two Patients (T06
   README), which only a person can fix.
+  **If the first seeding does not finish** (`seed-run` outcome `terminated`, a FHIR failure,
+  or an execution killed without a log line), the hourly top-ups will not fill the gap: they
+  cover only the last 4 hours. Execute `["--days", "30"]` again. It is safe, because windows
+  already written are read and skipped.
 - **Keeping it current.** A Cloud Scheduler job **every hour** executes the job with args
   `["--hours", "4"]` (48 windows; with the read-once step each run writes about 24: the 12 of
   the last hour as `preliminary`, the 12 of the hour before as `final`; one Bundle). The rule
@@ -352,8 +362,10 @@ exists before any ingest Bundle's conditional create looks for it (D11).
 
 ## Logging
 
-Events: `seed-run` (the report fields; `ERROR` with outcome `bug` for an unexpected error,
-still with its counts), `fhir-retry` (status, attempt, delay), `seed-forced` (reason code),
+Events: `seed-run`, one per execution however it ends except a bare SIGKILL (the report
+fields; `INFO` when seeded or a dry run, `WARNING` for `refused`, the FHIR failures,
+`not-started` and `terminated`, `ERROR` with outcome `bug` for an unexpected error, still with
+its counts; services/README.md, "Job images"), `fhir-retry` (status, attempt, delay), `seed-forced` (reason code),
 `stored-read-failed` (HTTP status), `stored-duplicate-key` (a count). Never logged: heart-rate values, the patient
 identifier, the seed, the device name, a response body, OperationOutcome diagnostics, or an
 exception message. The data is synthetic, but the rule is the same as for the services that

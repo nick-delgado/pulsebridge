@@ -13,16 +13,13 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadEnv } from 'vite';
-import { chartChunkProblems } from './bundle-rules.mjs';
+import { chartChunkProblems, mockMarkerProblems } from './bundle-rules.mjs';
 
 const [dir, mode] = process.argv.slice(2);
 if (!dir || (mode !== 'http' && mode !== 'mock')) {
   console.error('usage: check-bundle.mjs <dist-dir> <http|mock>');
   process.exit(2);
 }
-
-// Strings that only exist in src/api/mock-client.ts and src/api/mock-data.ts.
-const MOCK_MARKERS = ['mock-session-', 'SYN-000123', 'Synthetic watch (mock mode)'];
 
 // The manifest is listed by readdirSync too, but it is JSON, not a script.
 const files = readdirSync(dir, { recursive: true }).map(String);
@@ -64,12 +61,7 @@ else {
 if (/<script(?![^>]*\bsrc=)[^>]*>/i.test(html)) problems.push('index.html has an inline <script>');
 
 const bundle = scripts.map(read).join('\n');
-for (const marker of MOCK_MARKERS) {
-  const found = bundle.includes(marker);
-  if (mode === 'http' && found) problems.push(`HTTP build contains mock code ("${marker}")`);
-  if (mode === 'mock' && !found)
-    problems.push(`mock build is missing "${marker}"; is the check stale?`);
-}
+problems.push(...mockMarkerProblems(bundle, mode));
 for (const host of ['localhost', '127.0.0.1']) {
   if (bundle.includes(host) || html.includes(host)) problems.push(`build references ${host}`);
 }

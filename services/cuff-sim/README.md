@@ -285,10 +285,15 @@ which can double that. Neither is a hard bound: a server trickling bytes could s
 | MLLP | `MLLP_TIMEOUT_SECONDS` + audit write (2 × `HTTPS_TIMEOUT_SECONDS`, doubled on a token refresh and 401 retry) | 5 + 20 = 25 s; 45 s with a refresh and retry |
 | HTTPS | ingest (2 × `HTTPS_TIMEOUT_SECONDS`, doubled likewise) + audit write (the same) | 20 + 20 = 40 s; 80 s with a refresh and retry on both |
 
-**Numbers to set:** the `cuff-sim` Cloud Run request timeout (T22) at **90 s**, the hard stop
-for anything above, and `fhir-proxy`'s forward timeout to this service (T14) at **at least
-90 s**, with the proxy's own Cloud Run timeout above it. If Cloud Run does cut a request off,
-the caller gets 504 and the attempt may have been sent but is not recorded.
+**Numbers to set:** the dashboard reaches the proxy through Firebase Hosting, which ends a
+request at 60 s, so set `HTTPS_TIMEOUT_SECONDS` to **6**: the worst cases become 5 + 24 = 29 s
+(MLLP) and 48 s (HTTPS). `fhir-proxy`'s forward timeout to this service (T14,
+`CUFF_FORWARD_TIMEOUT_SECONDS`) is **55 s** by default, above that. Set the `cuff-sim` Cloud Run
+request timeout (T22) **above the proxy's forward timeout** (for example 60 s), so an attempt the
+proxy has already answered 504 for can still finish and record its AuditEvent. Without Hosting in
+front, the defaults in the table need a forward timeout of at least 90 s and a request timeout
+here above it. If Cloud Run does cut a request off, the caller gets 504 and the attempt may have
+been sent but is not recorded.
 
 ## Who may call it
 
@@ -341,7 +346,7 @@ refused by name before hl7apy can raise an error that prints it. Timeouts are pl
 ## Running
 
 ```bash
-gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "cuff_sim.app:create_app()"
+gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 --preload "cuff_sim.app:create_app()"
 ```
 
 - **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
@@ -350,6 +355,18 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "cuff_sim.a
   `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
   requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
   this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
+- **`--preload`** loads the app (`create_app()`, which reads and checks the configuration) in
+  gunicorn's master before it opens the port and forks the worker. A configuration error then
+  stops gunicorn (exit 1) before anything listens, so Cloud Run's startup probe fails and the
+  deploy fails; without it the port opened first and the probe could pass while the worker
+  crashed. What `create_app()` builds before the fork is safe to fork with one worker: the
+  logging handler, the configuration, the `HealthcareClient` with its `AuthorizedSession` (the
+  session opens no connection and fetches no token until the first request), the simulator
+  (no MLLP connection: one is opened per send) and the token bucket with its unlocked
+  `threading.Lock`. On Cloud Run, finding Application Default Credentials (`google.auth.default()`) asks
+  the metadata server from inside the factory, through a session google-auth creates and
+  drops; at worst the worker inherits that idle connection, which neither process uses
+  again (services/README.md, "Fork safety"; not verified on Cloud Run). No thread is started.
 - For T24's container: install `libs/pulsebridge_fhir`, `libs/pulsebridge_hl7v2` and
   `libs/pulsebridge_gcp` before this package. They are declared by name only and are not on
   PyPI. T07's samples are package data of `pulsebridge_hl7v2` and must be installed with it.

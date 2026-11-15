@@ -26,7 +26,7 @@ services/health-sync/
   health_sync/
     google_health.py      the Google Health API client and the OAuth refresh (injectable transport)
     sync.py               one run: ranges, cutoff, window cleanup, what to write, batching, outcomes
-    stored.py             the FHIR searches: the Patient's id, stored windows, stranded windows
+    stored.py             the FHIR searches of its own: the Patient's id, stranded windows
     status.py             the stateless "is the connection working" check
     credentials.py        reads the three mounted secret files
     retry.py              bounded backoff and the run deadline
@@ -331,14 +331,18 @@ avoid rewriting it (next section), never to decide the range.
 
 ### Read once, write what changed
 
-Each run makes three FHIR searches (`stored.py`; standard R4 search parameters), each with its
+Each run makes three FHIR searches (standard R4 search parameters), each with its
 own 10 s timeout, a fresh client per page so each page's timeout is cut to the time left:
 
 1. `Patient?identifier=urn:pulsebridge:patient|<PATIENT_ID>&_elements=id`: the Patient's id;
 2. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&status=preliminary&date=lt<range start>&_summary=count`:
    stranded preliminary windows;
 3. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&date=ge<start>&date=lt<end>&_elements=identifier,status,effectivePeriod,valueQuantity,component&_count=1000`,
-   following the `next` links: what is stored for the range.
+   following the `next` links (bounded at 20 pages): what is stored for the range.
+
+The first two are `health_sync/stored.py`. The third, and the decision per window below, are
+shared with the seeder since T35: `pulsebridge_gcp.stored.stored_windows` (called with a fresh
+client per page) and `pulsebridge_fhir.stored.plan_writes`.
 
 Then each window of the roll-up is written only if it is new, its values or end changed, or it is
 stored `preliminary` and is now due for `final`. A window stored with the same values and the
@@ -352,6 +356,14 @@ runs twelve consecutive runs and checks no window is written more than twice.
   412 until the duplicate is removed by hand, T06 README); `skipped-for-time` (see "Deadline");
   `failed:<HTTP status or error type>` (`stored-read-failed` logged, every window written:
   reading only saves writes); `not-attempted` (the run had no windows).
+- **A search page that is not valid FHIR JSON** (since T35, the seeder's handling): an `entry`
+  that is not an array (`null`, a number, an object), or a stored Observation whose
+  `identifier`, `component` or `component.coding` is not an array or whose `component.code` is
+  not an object, is a read error (`failed:StoredReadError`, every window written). A
+  `component` item that is not an object is skipped (that window's min or max reads as unknown,
+  so it is written again). Before T35 some of these read as an empty page and the others
+  failed the run as a `bug`, writing nothing. Writing everything is the safe direction:
+  reading only saves writes.
 - **A stranded-count failure alone** is logged (`stranded-count-failed`); the stored-window read
   and the writes go on as normal, and `stranded_preliminary` is `null`.
 - **A key found twice** in the search result (two Observations with one identifier, which should
@@ -504,7 +516,7 @@ synthetic secret, the patient id, the device name or the distinctive heart-rate 
 ## Running
 
 ```bash
-gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "health_sync.app:create_app()"
+gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 --preload "health_sync.app:create_app()"
 ```
 
 - **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
@@ -513,6 +525,19 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "health_syn
   `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
   requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
   this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
+- **`--preload`** loads the app (`create_app()`, which reads and checks the configuration) in
+  gunicorn's master before it opens the port and forks the worker. A configuration error then
+  stops gunicorn (exit 1) before anything listens, so Cloud Run's startup probe fails and the
+  deploy fails; without it the port opened first and the probe could pass while the worker
+  crashed. What `create_app()` builds before the fork is safe to fork with one worker: the
+  logging handler, the configuration, the secret files' check (files read and closed), the
+  FHIR `AuthorizedSession` and the plain `requests.Session` for Google (neither session opens
+  a connection or fetches a token until the first request), the status cache and the two
+  `threading.Lock`s (unlocked: no thread runs in the master). On Cloud Run, finding Application Default Credentials (`google.auth.default()`) asks
+  the metadata server from inside the factory, through a session google-auth creates and
+  drops; at worst the worker inherits that idle connection, which neither process uses
+  again (services/README.md, "Fork safety"; not verified on Cloud Run). No thread is
+  started.
 - Honours `PORT`. `--timeout 0` leaves request deadlines to Cloud Run.
 - Routes: `POST /sync`, `GET /status`.
 - For T24's container: install `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp` before this

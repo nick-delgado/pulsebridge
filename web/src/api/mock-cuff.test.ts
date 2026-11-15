@@ -3,6 +3,7 @@
  * limits, refusals, the result fields, the derived MLLP message name, the rate limit, and an
  * AuditEvent that could not be recorded. Synthetic values only.
  */
+import type { SendAttemptEntry } from './contract';
 import { beforeEach, describe, expect, it } from 'vitest';
 import samplesManifest from '../../../libs/pulsebridge_hl7v2/samples/samples.json';
 import { isDerivedMessageName, type CuffReadingRequest } from './contract';
@@ -307,14 +308,31 @@ describe('mock cuff route: the result fields', () => {
 });
 
 describe('mock cuff route: AuditEvent not recorded', () => {
-  it('build failure: the send happened, attemptId is null, and nothing is in the log', async () => {
+  it('build failure: the send happened, attemptId is null, no attempt row, its message is store-only', async () => {
     const c = await client({ auditFailure: 'build' });
-    const before = (await c.listMessages({ kind: 'cuff-send' })).entries.length;
+    const rows = async () =>
+      (await c.listMessages({ kind: 'cuff-send', count: 50 })).entries as SendAttemptEntry[];
+    const before = await rows();
     const sent = await c.submitCuffReading(reading());
     expect(sent.attemptId).toBeNull();
     expect(sent.audit).toMatchObject({ recorded: false });
     expect(sent.ack).toMatchObject({ received: true, code: 'AA' });
-    expect((await c.listMessages({ kind: 'cuff-send' })).entries).toHaveLength(before);
+    const after = await rows();
+    // No attempt row (no AuditEvent), but the stored message nobody claims is listed as a
+    // store-only row (amendment 5), by its name, with no hint (no attempt qualifies).
+    expect(after.filter((e) => e.source === 'audit-event')).toHaveLength(
+      before.filter((e) => e.source === 'audit-event').length,
+    );
+    const added = after.filter((e) => !before.some((b) => b.id === e.id));
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({
+      source: 'store-only',
+      id: sent.messageName,
+      transport: null,
+      controlId: sent.controlId,
+      messageLookup: 'confirmed',
+      possibleDuplicateOf: null,
+    });
   });
 
   it('write failure: an id exists, but no AuditEvent is stored under it', async () => {
