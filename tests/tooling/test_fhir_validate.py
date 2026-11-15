@@ -340,12 +340,25 @@ def test_unreachable_terminology_server_is_retried_then_fails_with_exit_3() -> N
     assert "unreachable after 2 attempts" in result.stderr
 
 
-def test_validator_log_with_a_connection_failure_is_recognised(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "line",
+    [
+        TX_UNREACHABLE_LOG,
+        # Each of the validator's messages on its own (all from the same real failed run).
+        "FHIRException: Unable to connect to terminology server at https://tx.example.invalid.\n",
+        "org.hl7.fhir.exceptions.FHIRException: Error fetching the server's capability statement\n",
+        "Caused by: org.hl7.fhir.exceptions.TerminologyServiceException: (see above)\n",
+    ],
+)
+def test_validator_log_with_a_connection_failure_is_recognised(tmp_path: Path, line: str) -> None:
     failed = tmp_path / "failed.log"
-    failed.write_text("  Loading packages\n" + TX_UNREACHABLE_LOG)
+    failed.write_text("  Loading packages\n" + line)
+    assert run_function(f'tx_failure_in_log "{failed}"').returncode == 0
+
+
+def test_validator_log_without_a_connection_failure_is_not_mistaken(tmp_path: Path) -> None:
     fine = tmp_path / "fine.log"
     fine.write_text("  Terminology server https://tx.fhir.org - Version Connected\nDone.\n")
-    assert run_function(f'tx_failure_in_log "{failed}"').returncode == 0
     assert run_function(f'tx_failure_in_log "{fine}"').returncode != 0
 
 
