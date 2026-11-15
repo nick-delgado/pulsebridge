@@ -47,9 +47,15 @@ Every `services/<name>/Dockerfile` follows the same pattern (`v2-to-fhir`'s is t
 
 - **Built from the repository root.** The build context is `.`, not the service directory,
   because the image installs the shared libraries from `libs/`. They are not on PyPI and are
-  declared by name only. `.dockerignore` is an allow-list: only `libs/` and `services/` are sent,
-  and it leaves out tests, caches, `.venv`, `.env` files, key files, Terraform state and tfvars
-  (`.git`, `.worktrees`, `web/` and `infra/` are never sent).
+  declared by name only. `.dockerignore` is an allow-list. It sends exactly what `pip install`
+  reads for each library and service: its `pyproject.toml`, its `README.md` (the package's
+  `readme`) and the package directories its `pyproject.toml` names. Nothing else is sent:
+  `.git`, `.worktrees`, `web/`, `infra/`, tests and examples stay out. A deny-list then keeps
+  secret-looking files out even inside those directories: `.env` files, `.envrc`, `.netrc`,
+  `.pypirc`, SSH keys, `*.pem`, `*.key`, `*.crt`, `secrets/`, `token*.json`, credential JSON
+  files (including a service account key under its console name, `<project>-<12 hex>.json`),
+  Terraform state and tfvars, and caches. A new library or service adds its allow-list lines;
+  `test_dockerignore_allows_exactly_what_the_images_install` names any that are missing.
 - **Two stages.** The `build` stage creates a venv in `/opt/venv` and installs into it:
   first exactly the local libraries the service's `pyproject.toml` declares (and what those
   declare), then the service. Both are non-editable installs: real wheels, not links to the
@@ -69,9 +75,18 @@ Every `services/<name>/Dockerfile` follows the same pattern (`v2-to-fhir`'s is t
   `0.0.0.0:$PORT`. The result is the same: Cloud Run's `PORT` is honoured and 8080 is the default.
   The test compares the CMD with the README, so if either changes, both must change.
 - `PYTHONUNBUFFERED=1`, so log lines reach Cloud Logging as they are written.
-  `GUNICORN_CMD_ARGS=--no-control-socket` turns off gunicorn's local control socket (new in
-  gunicorn 25.1). Nothing in a container uses it, and it would log an error on every start
-  because the app user has no home directory.
+- `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` holds two settings the README
+  commands leave at gunicorn's defaults, so the CMD can stay equal to the READMEs:
+  - `--no-control-socket` turns off gunicorn's local control socket (new in gunicorn 25.1).
+    Nothing in a container uses it, and it would log an error on every start because the app
+    user has no home directory.
+  - `--graceful-timeout 8`: after SIGTERM, gunicorn lets running requests finish for this long
+    before stopping its workers. The default is 30 s, but Cloud Run sends SIGKILL 10 s after
+    SIGTERM, so 8 s lets gunicorn exit cleanly first.
+- **Limits of the image.** `PORT` must be a port number: an empty `PORT` is not supported
+  (gunicorn stops with `'' is not a valid port number`). The image expects a writable `/tmp`,
+  where gunicorn's workers keep a heartbeat file. Cloud Run provides one. On a platform with a
+  read-only root filesystem and no writable `/tmp`, add `--worker-tmp-dir /dev/shm`.
 - **No secrets.** The image holds no keys, tokens or `.env` files. On Cloud Run, credentials are
   the service account's own (Application Default Credentials), and secrets are mounted from
   Secret Manager at run time (`health-sync`'s Google Health files).
@@ -113,20 +128,32 @@ that no request uses, with `PORT=9123`. For each image it checks four things:
   `POST /pubsub/hl7v2` with an empty envelope gets 400, `GET /status` reports `not-configured`,
   and `GET /cuff/samples` lists the samples;
 - it refuses to start with bad configuration and says why;
-- it runs as UID 10001;
-- it holds no stray files (`.git`, tests, key files, pip).
+- it runs as UID 10001, and nothing under `/opt/venv` is owned by anyone but root or writable by
+  that user;
+- gunicorn's effective settings (`gunicorn --print-config` with the image's CMD) are the
+  README's, with `bind = 0.0.0.0:8080`, `graceful_timeout = 8` and the control socket off;
+- it holds no stray files (`.git`, tests, key and certificate files, pip);
+- with `make images-smoke IMAGE_PIP_CERT=<the same file>`, no file in the image has that CA
+  bundle's SHA-256, which proves the build secret was not copied into a layer.
 
 ### Build in Cloud Build
 
-`cloudbuild.yaml` has one step in the Docker builder image (pinned by digest). It runs these
-steps for every `services/*/Dockerfile` it finds:
+`cloudbuild.yaml` has one step in the Docker builder image (pinned by digest). It works on
+every `services/*/Dockerfile` it finds, in phases:
 
-1. Build from the repository root for `linux/amd64`. The base image is pulled through the
-   project's Docker Hub cache (below).
-2. Tag the image twice: with the git tag and with the full commit SHA, as
-   `<region>-docker.pkg.dev/<project>/<repository>/<service>:<tag>`. Then push both tags.
-3. Read the digest the registry stored. When every service has been built, print the block to
-   paste into `infra/envs/<env>/terraform.tfvars`:
+1. **Check.** The tag, the commit SHA, the substitutions and every service directory name: lower
+   case words joined by `-` (`^[a-z0-9]+(-[a-z0-9]+)*$`), because the name becomes the image
+   name and the tfvars variable name. Nothing is built if any check fails.
+2. **Plan.** For each service, ask the registry whether `<image>:<commit SHA>` already exists,
+   for example from an earlier run that failed part-way (below). An existing image is reused,
+   not rebuilt.
+3. **Build every image that does not exist yet**, from the repository root for `linux/amd64`,
+   tagged with the full commit SHA and the git tag. The base image is pulled through the
+   project's Docker Hub cache (below). Nothing is pushed in this phase.
+4. **Push**: the commit tag first, then the git tag. A reused image that lacks the git tag gets
+   it in the registry, as a copy of the same manifest, so its digest does not change.
+5. **Report.** Read each digest the registry stored, check that both tags name the same image,
+   and print the block to paste into `infra/envs/<env>/terraform.tfvars`:
 
 ```text
 ----- BEGIN tfvars (v0.1.0, 0123456789abcdef0123456789abcdef01234567) -----
@@ -139,8 +166,10 @@ v2_to_fhir_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/v2
 Each variable name is the service directory with `-` turned into `_`, plus `_image`. The value
 is the image by digest, without a tag. T20 (`v2_to_fhir_image`, `health_sync_image`), T22
 (`cuff_sim_image`, later `fhir_proxy_image`) and T25 should use these names, so the block can be
-pasted unchanged. If any service fails, no block is printed: you never get a partial set of
-digests. To get the block from a finished build:
+pasted unchanged. The block is printed only by a build that succeeded, and then it lists
+every service, each digest read back from the registry. A failed build prints no block. It may
+still have pushed some images (see "A failed release"), so do not take digests from the
+`=== <service>` lines of a failed build. To get the block from a finished build:
 `gcloud builds log <BUILD_ID> | sed -n '/BEGIN tfvars/,/END tfvars/p'`.
 
 | Substitution | Default | Meaning |
@@ -159,9 +188,32 @@ gcloud builds submit --config cloudbuild.yaml \
   --substitutions TAG_NAME=v0.1.0,COMMIT_SHA="$(git rev-parse HEAD)" .
 ```
 
-**Tags are pushed once.** The services repository has immutable tags (`project-base`). A
-second build of the same git tag, or of a commit that has already been released, is refused
-when it pushes. Release a new tag from a new commit.
+A manual `gcloud builds submit` uploads the source to a Cloud Storage bucket
+(`gs://<project>_cloudbuild` by default) and the build reads it from there. With a
+user-specified build service account, that account probably also needs read access to that
+bucket (for example `roles/storage.objectViewer` on it). This is not verified; it is a note for
+T26. A trigger reads the source from GitHub and does not need it.
+
+**Tags are pushed once.** The services repository has immutable tags (`project-base`): a
+pushed tag can never be moved to another image. The phases above are arranged around that:
+
+- **A build failure** (a typo, a PyPI outage) happens before any push, so nothing is pushed. Fix
+  the cause and run the same tag again.
+- **A failed release** is a build that stops during the pushes, for example on a registry or
+  network error. Some services may then have both tags, one may have only its commit tag, and
+  the rest have nothing. Recover by running the same build again (Cloud Build's "Retry", or
+  the same tag and commit). It finds each image that already has its commit tag and reuses it.
+  Immutable tags guarantee that this image is the one an earlier run built from that commit.
+  The re-run adds any missing git tag without a rebuild, builds and pushes the rest, and prints
+  the full block. The log says `already exists ... reusing it` for each reused image.
+- **A new git tag on a commit that was already released** reuses that commit's images and only
+  adds the new tag; nothing is rebuilt and the digests are the same. The images'
+  `org.opencontainers.image.version` label keeps the first tag they were built for.
+- The build **refuses** two situations it cannot have made itself: a git tag with no commit
+  tag for this commit, and a git tag and commit tag that name different images.
+- A registry lookup that fails for a reason other than "no such tag" (a permission or network
+  error) reads as "not there". The build then rebuilds and pushes, and the immutable tag refuses
+  the push if the tag did exist, so nothing is replaced; the build fails instead.
 
 **Where the base image comes from.** Cloud Build pulls it through the project's Docker Hub
 remote repository (an Artifact Registry pull-through cache), not straight from Docker Hub:
@@ -181,7 +233,7 @@ not the `terraform-deployer` (which has far more power than a build needs). It n
 
 | Role | On | Why |
 | --- | --- | --- |
-| `roles/artifactregistry.writer` | the services repository only | push the images |
+| `roles/artifactregistry.writer` | the services repository only | push the images, read existing tags (plan phase) and add a tag to an existing image |
 | `roles/artifactregistry.reader` | the Docker Hub remote repository only | pull (and cache) the base image |
 | `roles/logging.logWriter` | the project | write the build log (`options.logging: CLOUD_LOGGING_ONLY`) |
 
@@ -215,10 +267,12 @@ are free. No private worker pool is used: private pools are billed per minute an
 
 ### Bumping the base image
 
-1. `docker buildx imagetools inspect python:3.13-slim` (or a newer `3.13.x-slim-<debian>` tag),
-   and copy the `Digest:` line. It is the multi-platform index digest.
+1. Pick the exact tag you will write, for example `3.13.19-slim-trixie`, and inspect that
+   tag: `docker buildx imagetools inspect python:3.13.19-slim-trixie`. Copy the `Digest:` line
+   (the multi-platform index digest). Inspect the same tag you write, so the tag shown in the
+   Dockerfile is the image the digest names.
 2. Replace the tag and digest in the two `FROM` lines of **every** `services/*/Dockerfile`, for
-   example with `sed -i 's|python:3.13.18-slim-trixie@sha256:[0-9a-f]*|python:<new-tag>@sha256:<new>|' services/*/Dockerfile`.
+   example with `sed -i 's|python:3.13.18-slim-trixie@sha256:[0-9a-f]*|python:3.13.19-slim-trixie@sha256:<digest>|' services/*/Dockerfile`.
    `test_every_dockerfile_uses_the_same_base_image` fails if one is missed.
 3. Run `make images && make images-smoke`, then open a pull request.
 
@@ -228,7 +282,8 @@ version tag in front of the digest.
 
 ### Adding an image (T09 `seed`, T14 `fhir-proxy`)
 
-1. Copy `services/v2-to-fhir/Dockerfile` to `services/<name>/Dockerfile`.
+1. Copy `services/v2-to-fhir/Dockerfile` to `services/<name>/Dockerfile`. The directory name
+   must be lower-case words joined by `-` (the build checks it).
 2. Change the `COPY libs/...` lines and the first `pip install` line to the local libraries your
    `pyproject.toml` declares, and `services/v2-to-fhir` to `services/<name>`.
 3. Set `CMD` to your README's command in exec form. For a gunicorn service, use the README's
@@ -236,7 +291,9 @@ version tag in front of the digest.
 4. Delete the service from `NO_IMAGE_YET` in `tests/tooling/test_container_images.py`, or leave
    it (the Dockerfile is checked either way). Add a case to `tests/tooling/test_image_smoke.py`
    for its route and its bad-configuration error.
-5. Do not edit `cloudbuild.yaml`: it builds every `services/*/Dockerfile` it finds, and the tfvars
+5. Add the service's (and any new library's) `pyproject.toml`, `README.md` and package
+   directories to the allow-list in `.dockerignore`.
+6. Do not edit `cloudbuild.yaml`: it builds every `services/*/Dockerfile` it finds, and the tfvars
    block gets a `<name>_image` line by itself.
 
 The static tests fail if the COPY lines do not match the declared libraries, if a library is
@@ -255,8 +312,12 @@ installed after the service, or if the CMD differs from the README. Expected res
 ### Not verified against Google Cloud
 
 T24 made no GCP calls. The images were built and smoke-tested locally. The Cloud Build step's
-script was run in the pinned builder image against a local registry, with the real `docker`.
-To confirm on the first real build:
+script was run in the pinned builder image against a local registry, with the real `docker`:
+a first run, a re-run of the same tag (every image reused, nothing rebuilt) and a new tag on
+the same commit (tag added, same digests). The local registry does not enforce immutable tags,
+so refused pushes and recovery from a failed push were checked with the fake docker in
+`tests/tooling/test_cloudbuild.py`, not against Artifact Registry. To confirm on the first real
+build:
 
 - `automapSubstitutions` exposes the built-in `PROJECT_ID`, `TAG_NAME` and `COMMIT_SHA` to the
   `script` as well as the `_` substitutions.
@@ -266,3 +327,7 @@ To confirm on the first real build:
 - `gcloud builds submit` accepts `TAG_NAME` and `COMMIT_SHA` as `--substitutions`.
 - `roles/artifactregistry.reader` is enough to pull through the remote repository and cache new
   images.
+- Artifact Registry accepts `docker buildx imagetools create --prefer-index=false` (adding a tag
+  to an existing manifest) on a repository with immutable tags, and keeps the digest.
+- A manual `gcloud builds submit` with a user-specified build account needs read access to the
+  source bucket.
