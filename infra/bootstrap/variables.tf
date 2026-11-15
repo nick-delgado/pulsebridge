@@ -103,6 +103,13 @@ variable "auto_create_network" {
   nullable    = false
 }
 
+variable "add_firebase" {
+  description = "Add Firebase to the project (google_firebase_project), with the Firebase Management API (firebase.googleapis.com) enabled first. Firebase Hosting, which serves the dashboard (D4, module phr), needs it. Default true. Bootstrap runs once with the owner's credentials, and adding Firebase needs firebase.projects.update (owner or editor), so doing it here means the deployer never needs roles/firebase.admin. It CANNOT BE UNDONE: \"Once Firebase has been added to a Google Project it cannot be removed\" (provider docs). It costs nothing. false: no Firebase; then Hosting is unavailable and module phr's site cannot be created, unless Firebase is added another way (README, \"Firebase\")."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "labels" {
   description = "Labels added to the project (when created) and the state bucket, for example { app = \"pulsebridge\" }. Keys and values: lowercase letters, digits, hyphens and underscores; keys start with a letter."
   type        = map(string)
@@ -216,8 +223,10 @@ variable "deployer_roles" {
     # ingestion, only when an alert address or channel is given).
     "roles/monitoring.alertPolicyEditor",
     "roles/monitoring.notificationChannelEditor",
-    # Dashboard bucket (module phr).
-    "roles/storage.admin",
+    # Firebase Hosting: module phr's site and the page deploys (D4; T26's deploy step). Adding
+    # Firebase to the project needs more (firebase.projects.update): bootstrap does that once
+    # with the owner's credentials (add_firebase), so the deployer never needs roles/firebase.admin.
+    "roles/firebasehosting.admin",
   ]
 
   validation {

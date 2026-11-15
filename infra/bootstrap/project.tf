@@ -51,14 +51,16 @@ locals {
 
   # Only the APIs bootstrap itself calls. The full stack's APIs are enabled by module
   # project-base, run later by the deployer account (which holds serviceUsageAdmin for that).
-  bootstrap_apis = toset([
+  bootstrap_apis = toset(concat([
     "cloudresourcemanager.googleapis.com", # read the project, set project IAM policy
     "serviceusage.googleapis.com",         # enable APIs (this list, and project-base's later)
     "iam.googleapis.com",                  # service account, Workload Identity pool and provider
     "iamcredentials.googleapis.com",       # GitHub Actions mints deployer access tokens here
     "sts.googleapis.com",                  # Security Token Service: swaps GitHub's OIDC token for a Google token
     "storage.googleapis.com",              # the state bucket
-  ])
+    ], var.add_firebase ? [
+    "firebase.googleapis.com", # Firebase Management API: google_firebase_project (firebase.tf)
+  ] : []))
 }
 
 resource "google_project_service" "bootstrap" {

@@ -1,0 +1,66 @@
+# Outputs are this module's contract with the env roots (T25) and the page deploy (T26).
+
+output "fhir_proxy_url" {
+  description = "fhir-proxy's own run.app URL. The page does NOT use it: it calls /api on its own origin through the Hosting rewrite (one front door; a direct call would put a different X-Forwarded-For shape in front of the login limit)."
+  value       = google_cloud_run_v2_service.fhir_proxy.uri
+}
+
+output "fhir_proxy_service_name" {
+  description = "Name of the fhir-proxy Cloud Run service (the rewrite's serviceId)."
+  value       = google_cloud_run_v2_service.fhir_proxy.name
+}
+
+output "cuff_sim_url" {
+  description = "cuff-sim's run.app URL (internal only; fhir-proxy's CUFF_SIM_URL and identity-token audience)."
+  value       = google_cloud_run_v2_service.cuff_sim.uri
+}
+
+output "cuff_sim_service_name" {
+  description = "Name of the cuff-sim Cloud Run service."
+  value       = google_cloud_run_v2_service.cuff_sim.name
+}
+
+output "region" {
+  description = "Region of both services (and the rewrite's region)."
+  value       = var.region
+}
+
+output "hosting_site_id" {
+  description = "Firebase Hosting site ID; the deploy step's firebase.json names it."
+  value       = google_firebase_hosting_site.dashboard.site_id
+}
+
+output "hosting_default_url" {
+  description = "The site's default URL, https://<site_id>.web.app."
+  value       = google_firebase_hosting_site.dashboard.default_url
+}
+
+output "public_origin" {
+  description = "The origin reviewers open (public_origin, or the site's web.app origin). The page calls <public_origin>/api/..."
+  value       = local.public_origin
+}
+
+output "public_base_url" {
+  description = "fhir-proxy's PUBLIC_BASE_URL: public_origin plus /api."
+  value       = "${local.public_origin}${local.path_prefix}"
+}
+
+output "firebase_json" {
+  description = "The firebase.json the page deploy uses (README, \"Deploying the page\"): write it to web/firebase.json, build web/dist, then `firebase deploy --only hosting`. It holds the site, the /api/** rewrite to fhir-proxy, the security headers (with the Content-Security-Policy) and the ignore list. No secret is in it."
+  value       = jsonencode({ hosting = local.firebase_hosting })
+}
+
+output "content_security_policy" {
+  description = "The Content-Security-Policy header the site sends."
+  value       = local.security_headers["Content-Security-Policy"]
+}
+
+output "timeouts" {
+  description = "Every timeout in the request path, in seconds (README, \"Timeouts end to end\"), and cuff-sim's documented worst cases."
+  value       = merge(local.timeouts, { cuff_worst_case_mllp = local.cuff_worst_case.mllp, cuff_worst_case_https = local.cuff_worst_case.https })
+}
+
+output "cuff_sim_rate_limit_per_minute" {
+  description = "The effective service-wide cuff send limit: cuff-sim's per-instance 6 a minute times cuff_sim_max_instances."
+  value       = 6 * var.cuff_sim_max_instances
+}

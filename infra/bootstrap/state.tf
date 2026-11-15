@@ -47,9 +47,9 @@ resource "google_storage_bucket" "tfstate" {
   depends_on = [google_project_service.bootstrap]
 }
 
-# The deployer can already manage buckets through roles/storage.admin in var.deployer_roles.
-# This bucket-scoped grant keeps state access working even if someone trims that list, and
-# documents the one thing the deployer must always be able to do here.
+# The deployer's only Cloud Storage access: objects in this one bucket (the default
+# deployer_roles hold no storage role, because the stack creates no bucket). Bucket-scoped, so it
+# reaches no other bucket in the project, and it keeps state access working whatever the list.
 resource "google_storage_bucket_iam_member" "deployer_state" {
   bucket = google_storage_bucket.tfstate.name
   role   = "roles/storage.objectAdmin"

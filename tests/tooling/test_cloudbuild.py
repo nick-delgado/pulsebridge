@@ -295,7 +295,13 @@ def test_builds_exactly_the_repository_dockerfiles(tmp_path: Path) -> None:
     )
     assert sorted(flag_values(c, "--file")[0] for c in builds(calls)) == expected
     names = [line.split(" = ")[0] for line in tfvars_block(result.stdout)]
-    assert {"v2_to_fhir_image", "health_sync_image", "cuff_sim_image", "seed_image"} <= set(names)
+    assert {
+        "v2_to_fhir_image",
+        "health_sync_image",
+        "cuff_sim_image",
+        "seed_image",
+        "fhir_proxy_image",
+    } <= set(names)
     # One line per image, the job image (seed, a Cloud Run job) included.
     assert len(names) == len(expected)
 

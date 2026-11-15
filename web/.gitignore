@@ -10,3 +10,7 @@ coverage/
 # Local Vite env files can hold a developer's proxy URL; the committed example is .env.example.
 .env.local
 .env.*.local
+# Firebase Hosting deploy (infra/modules/phr, "Deploying the page"): firebase.json is generated
+# from Terraform's firebase_json output at deploy time; .firebase/ is the CLI's cache.
+firebase.json
+.firebase/

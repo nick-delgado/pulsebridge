@@ -2,6 +2,9 @@
 # expects exactly that variable's validation to fail (expect_failures). If the validation were
 # removed or loosened, the plan would succeed and the run would fail.
 
+# google-beta (google_firebase_project) is mocked too, so no real provider ever runs.
+mock_provider "google-beta" {}
+
 mock_provider "google" {
   source          = "./tests/mocks"
   override_during = plan

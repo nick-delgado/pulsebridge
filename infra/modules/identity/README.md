@@ -125,7 +125,7 @@ These are open in other tasks. Each may add a row to the table above; none is gr
 
 | Caller | Target | How the call is authorised | Binding created in |
 | --- | --- | --- | --- |
-| The browser (anyone) | `fhir-proxy` | Public: `roles/run.invoker` for `allUsers`; the reviewer password and signed token (D9) are the gate | `phr` (T22) |
+| The browser (anyone) | `fhir-proxy` | Public: Cloud Run invoker IAM check disabled (`invoker_iam_disabled = true`); no `allUsers` binding; the reviewer password and signed token (D9) are the gate | `phr` (T22) |
 | `fhir-proxy` | `cuff-sim` | OIDC token for `fhir-proxy`; `cuff-sim` is **not** public and has no other invoker | `phr` (T22) |
 | Cloud Scheduler job | `health-sync` | OIDC token for `scheduler-invoker` | `ingestion` (T20) |
 | Cloud Scheduler job (synthetic data) | seeder Cloud Run job, via the Cloud Run Admin API `jobs.run` | OAuth token for `scheduler-invoker` | `ingestion` (T20) |

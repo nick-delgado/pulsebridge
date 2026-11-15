@@ -43,8 +43,8 @@ variable "enabled_apis" {
   description = <<-EOT
     Google APIs (service names) to enable in the project. The default covers every component in
     the brief. Identity Platform (identitytoolkit.googleapis.com) is deliberately absent and is
-    rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Add
-    firebasehosting.googleapis.com here if decision D4 picks Firebase Hosting.
+    rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Firebase
+    Hosting (D4) is included.
   EOT
   type        = set(string)
   default = [
@@ -53,6 +53,8 @@ variable "enabled_apis" {
     "cloudresourcemanager.googleapis.com", # project-level IAM bindings made by Terraform (identity module)
     "cloudscheduler.googleapis.com",       # fires health-sync every 15 minutes
     "compute.googleapis.com",              # VPC, subnets, firewall, Cloud NAT and the edge VM
+    "firebase.googleapis.com",             # Firebase Management API: the project as a Firebase project (bootstrap adds it; D4)
+    "firebasehosting.googleapis.com",      # Firebase Hosting: the dashboard site and its page deploys (module phr, D4)
     "health.googleapis.com",               # Google Health API that health-sync reads (the deployer's OAuth app lives in this project)
     "healthcare.googleapis.com",           # Cloud Healthcare API: FHIR R4 store and HL7v2 store
     "iam.googleapis.com",                  # service accounts
@@ -63,7 +65,7 @@ variable "enabled_apis" {
     "run.googleapis.com",                  # Cloud Run services
     "secretmanager.googleapis.com",        # OAuth client, refresh token, reviewer password, DB and OpenEMR keys
     "serviceusage.googleapis.com",         # lets Terraform list and enable services
-    "storage.googleapis.com",              # Cloud Build sources and the dashboard bucket (if D4 picks a bucket)
+    "storage.googleapis.com",              # Cloud Build source uploads (gcloud builds submit); Terraform state lives in bootstrap's bucket
   ]
 
   validation {

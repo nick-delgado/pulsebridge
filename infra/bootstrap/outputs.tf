@@ -24,3 +24,8 @@ output "workload_identity_provider" {
   description = "Full resource name of the Workload Identity provider, projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>. GitHub Actions passes it as `workload_identity_provider` to google-github-actions/auth."
   value       = google_iam_workload_identity_pool_provider.github.name
 }
+
+output "firebase_added" {
+  description = "Whether bootstrap added Firebase to the project (add_firebase). module phr's Hosting site needs Firebase; with false, add it another way or leave the dashboard unhosted."
+  value       = length(google_firebase_project.this) > 0
+}

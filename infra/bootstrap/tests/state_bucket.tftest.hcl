@@ -1,5 +1,8 @@
 # AC: a versioned GCS state bucket, with public access prevented. Mocked provider, plan only.
 
+# google-beta (google_firebase_project) is mocked too, so no real provider ever runs.
+mock_provider "google-beta" {}
+
 mock_provider "google" {
   source          = "./tests/mocks"
   override_during = plan
