@@ -43,8 +43,8 @@
       ],
       "locations": ["Patient.identifier[0].type"],
       "when": "always",
-      "status": "reported",
-      "reason": "Patient.identifier[0].type is v2-0203 PT (Patient external identifier). Identifier.type is bound EXTENSIBLY to the R4 IdentifierType value set, a short subset of v2-0203 that does not include PT; PT is a real v2-0203 code and OpenEMR searches by it (README, 'Identifiers'). Not discussed in the README; reported to the library owner (T08) to decide between documenting it and using MR."
+      "status": "documented",
+      "reason": "Patient.identifier[0].type is v2-0203 PT (Patient external identifier). Identifier.type is bound EXTENSIBLY to the R4 IdentifierType value set, a short subset of v2-0203 that does not include PT; an extensible binding allows another code when none in the set fits (MR would claim a medical record number), and OpenEMR searches patients by their PT identifier (spike S1, T15). Deliberate, see the README 'Identifiers'."
     },
     {
       "id": "auditevent-subtype-v2-trigger",
@@ -55,8 +55,8 @@
       ],
       "locations": ["AuditEvent.subtype[0]"],
       "when": "always",
-      "status": "reported",
-      "reason": "AuditEvent.subtype is v2-0003 R01 (the HL7v2 trigger event attempted, README 'AuditEvent ... The model'). R4 binds subtype EXTENSIBLY to audit-event-sub-type, which holds the DICOM audit event codes 110120 to 110142 (application start and stop, login and logout, security and similar events) and the FHIR REST interactions; none of them names an HL7v2 message send, so another code is allowed. The README does not mention the binding; reported to the library owner (T08) to document."
+      "status": "documented",
+      "reason": "AuditEvent.subtype is v2-0003 R01 (the HL7v2 trigger event attempted). R4 binds subtype EXTENSIBLY to audit-event-sub-type, which holds the DICOM audit event codes 110120 to 110142 (application start and stop, login and logout, security and similar events) and the FHIR REST interactions; none of them names an HL7v2 message send, so another code is allowed. Deliberate, see the README 'AuditEvent for a cuff send attempt (T31)', 'The model'."
     },
     {
       "id": "no-narrative-dom-6",
@@ -64,17 +64,8 @@
       "text_contains": ["Constraint failed: dom-6: 'A resource should have narrative for robust management'"],
       "locations": ["Patient", "Device", "Observation", "Provenance", "AuditEvent"],
       "when": "always",
-      "status": "reported",
-      "reason": "dom-6 is a best-practice invariant ('A resource should have narrative'). The library writes no Resource.text for any of the five resource types it builds: text is optional in R4 and the dashboard renders the data itself. Reported to the library owner (T08) as a possible improvement (a generated narrative), not a conformance error."
-    },
-    {
-      "id": "observation-without-performer",
-      "message_id": "All_observations_should_have_a_performer",
-      "text_contains": ["Best Practice Recommendation: In general, all observations should have a performer"],
-      "locations": ["Observation"],
-      "when": "always",
-      "status": "reported",
-      "reason": "Best-practice recommendation that every Observation has a performer. Observation.performer is 0..* in R4 and in the vital-signs profiles; the device is recorded in Observation.device and as the Provenance performer agent. Reported to the library owner (T08): Observation.performer = the Patient (self-measured) would remove it."
+      "status": "documented",
+      "reason": "dom-6 is a best-practice invariant ('A resource should have narrative'). The library writes no Resource.text for any of the five resource types it builds: text is optional in R4 and the dashboard renders the data itself. Deliberate, see the README 'No narrative (text)'."
     }
   ]
 }

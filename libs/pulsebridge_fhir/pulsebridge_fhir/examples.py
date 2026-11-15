@@ -112,6 +112,25 @@ SYNTHETIC_SEND_ACCEPTED = SendAttempt(
     destination=SYNTHETIC_HL7V2_STORE,
     message_name=SYNTHETIC_HL7V2_STORE + "/messages/synthetic-message-0002",
 )
+# Over MLLP the adapter's ACK carries no message name, so the simulator records the name it
+# DERIVED from the message bytes (T13, T33): a detail, not entity.what.
+SYNTHETIC_SEND_ACCEPTED_MLLP = SendAttempt(
+    sent_at=datetime(2026, 1, 1, 14, 30, 30, 250000, tzinfo=UTC),
+    transport="mllp",
+    control_id="MSG-SYN-0006",
+    result=Acknowledged(
+        code="AA",
+        # The adapter relays the store's ACK (spike S4): the same shape as over HTTPS.
+        raw_ack=b"MSH|^~\\&|PHR|PULSEBRIDGE|CUFFSIM|PULSEBRIDGE|20260101143030||ACK|ACK-SYN-0006"
+        b"|P|2.5.1\rMSA|AA|MSG-SYN-0006",
+    ),
+    patient_id="PB-SYN-0001",
+    agent="cuff-sim",
+    destination=SYNTHETIC_HL7V2_STORE,
+    # A made-up id in the shape of urlsafe-base64(SHA-256(bytes)): 43 characters and "=".
+    derived_message_name=SYNTHETIC_HL7V2_STORE
+    + "/messages/c3ludGhldGljLWRlcml2ZWQtbWVzc2FnZS0wMDA2LTA=",
+)
 SYNTHETIC_SEND_REJECTED = SendAttempt(
     sent_at=datetime(2026, 1, 1, 14, 31, 0, tzinfo=UTC),
     transport="mllp",
@@ -184,6 +203,7 @@ def build_examples() -> dict[str, dict]:
         ).resource
         for name, attempt, seconds in (
             ("auditevent-send-accepted.json", SYNTHETIC_SEND_ACCEPTED, 1),
+            ("auditevent-send-accepted-mllp.json", SYNTHETIC_SEND_ACCEPTED_MLLP, 1),
             ("auditevent-send-rejected.json", SYNTHETIC_SEND_REJECTED, 1),
             # recorded after the simulator's read timeout
             ("auditevent-send-no-ack.json", SYNTHETIC_SEND_NO_ACK, 5),

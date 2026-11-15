@@ -341,10 +341,14 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
   the sample's own bytes.
 - A built reading is byte for byte what T07's builder makes (a test compares it with T07's
   `valid_bp_reading`).
-- Send-attempt AuditEvents follow T31's final model: they are built from T31's four examples
-  (copied into `src/api/t31-examples/`) and a test compares them element by element.
-- The mock share strips `id`, `meta`, `identifier` and `device` from the Observation before
-  "posting" it, as T06 says the real share must.
+- Heart-rate and blood-pressure Observations carry `performer`, the same Patient reference as
+  `subject` (T06, changed in T33: the readings are self-measured).
+- Send-attempt AuditEvents follow T31's final model: they are built from T31's five examples
+  (copied into `src/api/t31-examples/`; `src/api/t31-examples.test.ts` fails when a copy differs
+  from `libs/pulsebridge_fhir/examples/`) and a test compares them element by element.
+- The mock share strips `id`, `meta`, `identifier`, `device` and `performer` from the Observation
+  before "posting" it, as T06 says the real share must (`performer` names our Patient; OpenEMR
+  does not keep it, spike S1).
 - **A cuff send is checked as cuff-sim checks it**: integers from 1 to 400 mm[Hg], systolic above
   diastolic, both required unless `sendMalformed` is set (then still checked if present), a known
   sample that lists the transport; refusals are `CuffSendError` 422 with one OperationOutcome issue
@@ -357,9 +361,12 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
   **derived** name `<store>/messages/<urlsafe-base64(sha256(bytes))>`, computed exactly as
   cuff-sim's `derived_message_name` (a test checks fixed vectors cuff-sim computed for T07's sample
   bytes). A real derived name is over the bytes actually sent: on a deployment cuff-sim (T33)
-  substitutes the configured patient into samples with a usable PID, so for those samples the name
-  differs from the manifest's. As in cuff-sim, the derived name is not written into the AuditEvent,
-  so the log row's `messageName` stays null over MLLP.
+  substitutes the configured patient into every sample except the seven T07's samples README
+  lists (`with_patient`), so for those samples the bytes, and the name, differ from the
+  manifest's. In the mock the configured patient is T07's own `SYN-000123`, so the bytes are the
+  manifest's. As in cuff-sim since T33, the derived name **is** recorded in the AuditEvent, as the
+  detail `derived-message-name` and never as `entity.what`; the log row has it as
+  `derivedMessageName`, and `messageName` stays the store-returned name only (null over MLLP).
 - **Refusals use cuff-sim's exact texts**: the field in `expression`, a fragment in `diagnostics`
   ("is required", "must be from 1 to 400 mm[Hg]", "must be greater than diastolic"), `code`
   `invalid`, every issue collected before refusing; an absent `transport` is `mllp`; a null value
@@ -557,22 +564,25 @@ returned (MSA-1 `AA` stored, `AE` rejected, with MSA-3 as the reason), or no ACK
 T34 brought the contract in line with the services T13 (cuff-sim) and T10 (health-sync) built.
 Code written against the old shapes no longer type-checks, on purpose.
 
-| Type or value                          | Before (T16)                                                                    | After (T34)                                                                                                                                                                   | Who must follow |
-| -------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
-| `CuffReadingRequest`                   | `{systolic, diastolic, transport, sendMalformed: string \| null}`, all required | a union: built reading `{systolic, diastolic, transport, sendMalformed: null}`, or malformed `{systolic?, diastolic?, transport, sendMalformed: string}`                      | T18, T14        |
-| `CUFF_BOUNDS` (60-250 / 30-150)        | presented as the bounds                                                         | **removed**. `CUFF_SERVICE_LIMITS` = cuff-sim's 1 to 400 mm[Hg], systolic above diastolic; `MAPPER_PLAUSIBLE_RANGE` = T12's 50-300 / 20-200 (information only)                | T18             |
-| `CuffSendResult.attemptId`             | `string`                                                                        | `string \| null` (null: the AuditEvent could not be built; no trace, not in the log)                                                                                          | T18             |
-| `CuffSendResult` new fields            |                                                                                 | `result` (`accepted` \| `rejected` \| `no-acknowledgment`), `framing` (`MllpFraming \| null`), `messageNameSource` (`ingest-response` \| `derived-sha256-unverified` \| null) | T18, T14        |
-| `CuffSendResult.messageName`           | HTTPS only; null over MLLP                                                      | also set over MLLP for an accepted send, but **derived**: show it labelled as derived and unconfirmed (`isDerivedMessageName(result)`), never as the stored message's name    | T18             |
-| Cuff refusals                          | `ApiError` 422 / 429                                                            | `CuffSendError` with `reason` for 400, 413, 422, 429, 500, 504; `fields`; `retryAfterSeconds`                                                                                 | T18             |
-| `MalformedSample`                      | `{name, label, class, transports}`                                              | unchanged, now documented as cuff-sim's list (`label` = the manifest's description)                                                                                           | T18             |
-| `StatusSummary.watchSync.state`        | `ok` \| `reconnect-needed` \| `never-synced` \| `error`                         | health-sync's `connected` \| `reconnect-needed` \| `not-configured` \| `unknown`; "never synced" is `lastSyncAt === null`                                                     | T14, T17 (done) |
-| `StatusSummary.watchSync` other fields | `lastSyncAt`, `detail`                                                          | `reason`, `notes`, `strandedPreliminary` (number \| null), `checkedAt`, `lastSyncAt` (`detail` removed)                                                                       | T14             |
-| `StatusSummary.watchSync.lastSyncAt`   | "last sync"                                                                     | the time of the newest heart-rate write (does not move while the watch is off); the strip says "Newest watch data"                                                            | T14             |
-| `HeartRateTrace.source`                | `GoogleHealthRollUpWindow \| null`                                              | `{kind: 'reconstructed' \| 'original' \| 'unknown', window} \| null`; on the wire `{kind, window}`                                                                            | T14, T17 (done) |
-| `OperationOutcome.issue`               |                                                                                 | `expression?: string[]` (cuff-sim names the field there)                                                                                                                      | T18             |
-| `'sync'` data change                   | "anyone who learns of a new sync (none today)"                                  | announced by the status strip; features only listen                                                                                                                           | T17 (done), T19 |
-| Shell element ids                      | `cuff-heading`, `share-heading`, `messages-log`, `tabs-N`, ...                  | `shell-...` and `ui-...`; features use their own prefix (see "Element ids")                                                                                                   | T18, T19        |
+| Type or value                               | Before (T16)                                                                    | After (T34)                                                                                                                                                                                                                                                                                            | Who must follow |
+| ------------------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------- |
+| `CuffReadingRequest`                        | `{systolic, diastolic, transport, sendMalformed: string \| null}`, all required | a union: built reading `{systolic, diastolic, transport, sendMalformed: null}`, or malformed `{systolic?, diastolic?, transport, sendMalformed: string}`                                                                                                                                               | T18, T14        |
+| `CUFF_BOUNDS` (60-250 / 30-150)             | presented as the bounds                                                         | **removed**. `CUFF_SERVICE_LIMITS` = cuff-sim's 1 to 400 mm[Hg], systolic above diastolic; `MAPPER_PLAUSIBLE_RANGE` = T12's 50-300 / 20-200 (information only)                                                                                                                                         | T18             |
+| `CuffSendResult.attemptId`                  | `string`                                                                        | `string \| null` (null: the AuditEvent could not be built; no trace, not in the log)                                                                                                                                                                                                                   | T18             |
+| `CuffSendResult` new fields                 |                                                                                 | `result` (`accepted` \| `rejected` \| `no-acknowledgment`), `framing` (`MllpFraming \| null`), `messageNameSource` (`ingest-response` \| `derived-sha256-unverified` \| null)                                                                                                                          | T18, T14        |
+| `CuffSendResult.messageName`                | HTTPS only; null over MLLP                                                      | also set over MLLP for an accepted send, but **derived**: show it labelled as derived and unconfirmed (`isDerivedMessageName(result)`), never as the stored message's name                                                                                                                             | T18             |
+| Cuff refusals                               | `ApiError` 422 / 429                                                            | `CuffSendError` with `reason` for 400, 413, 422, 429, 500, 504; `fields`; `retryAfterSeconds`                                                                                                                                                                                                          | T18             |
+| `MalformedSample`                           | `{name, label, class, transports}`                                              | unchanged, now documented as cuff-sim's list (`label` = the manifest's description)                                                                                                                                                                                                                    | T18             |
+| `StatusSummary.watchSync.state`             | `ok` \| `reconnect-needed` \| `never-synced` \| `error`                         | health-sync's `connected` \| `reconnect-needed` \| `not-configured` \| `unknown`; "never synced" is `lastSyncAt === null`                                                                                                                                                                              | T14, T17 (done) |
+| `StatusSummary.watchSync` other fields      | `lastSyncAt`, `detail`                                                          | `reason`, `notes`, `strandedPreliminary` (number \| null), `checkedAt`, `lastSyncAt` (`detail` removed)                                                                                                                                                                                                | T14             |
+| `StatusSummary.watchSync.lastSyncAt`        | "last sync"                                                                     | the time of the newest heart-rate write (does not move while the watch is off); the strip says "Newest watch data"                                                                                                                                                                                     | T14             |
+| `HeartRateTrace.source`                     | `GoogleHealthRollUpWindow \| null`                                              | `{kind: 'reconstructed' \| 'original' \| 'unknown', window} \| null`; on the wire `{kind, window}`                                                                                                                                                                                                     | T14, T17 (done) |
+| `SendAttemptEntry.derivedMessageName` (T33) |                                                                                 | new: the name cuff-sim derived for an accepted MLLP send (the AuditEvent's `derived-message-name` detail). `messageName` stays the store-returned name only. The proxy joins the attempt to its stored message by the derived name and confirms it with a `get`; the page shows it labelled as derived | T14, T19        |
+| Sample bytes (T33)                          | T07's patient `SYN-000123`                                                      | cuff-sim substitutes the configured patient (`with_patient`) except in the seven samples T07's samples README lists; a derived name is over the bytes actually sent                                                                                                                                    | T14, T18        |
+| `Observation.performer` (T33)               |                                                                                 | the Patient, as `subject`; a share drops it                                                                                                                                                                                                                                                            | T15, T19        |
+| `OperationOutcome.issue`                    |                                                                                 | `expression?: string[]` (cuff-sim names the field there)                                                                                                                                                                                                                                               | T18             |
+| `'sync'` data change                        | "anyone who learns of a new sync (none today)"                                  | announced by the status strip; features only listen                                                                                                                                                                                                                                                    | T17 (done), T19 |
+| Shell element ids                           | `cuff-heading`, `share-heading`, `messages-log`, `tabs-N`, ...                  | `shell-...` and `ui-...`; features use their own prefix (see "Element ids")                                                                                                                                                                                                                            | T18, T19        |
 
 For T18 in short: offer inputs inside `CUFF_SERVICE_LIMITS` (a narrower form range is fine, but
 do not call it the service's); let a malformed send leave the values out; show `result`, the
@@ -582,7 +592,8 @@ derived; handle `attemptId: null`; on `CuffSendError` mark `error.fields` and, f
 in mock mode too.
 
 For T19 in short: an attempt whose AuditEvent was not recorded is not in the log; the log row's
-`messageName` is null over MLLP (the derived name is not in the AuditEvent); prefix ids with
+`messageName` is only ever a name the store returned (null over MLLP), and an accepted MLLP row
+has `derivedMessageName` instead: show it labelled as derived and unconfirmed; prefix ids with
 `share-` and `log-`.
 
 The minimal edits T34 made in `src/heart-rate/` to keep T17's code compiling and honest against
@@ -603,10 +614,10 @@ the new types: `trace.ts` takes the source tab's note and code-block label from 
    referenced from the Provenance), the proxy sends `kind: "original"` and the page needs no change.
 3. **"HL7v2 as sent".** T31 never stores the message. For a malformed send the proxy can take the
    bytes from the T07 sample named in `malformed-sample`. For a valid send it must fetch the stored
-   message (`view=RAW_ONLY`) by name. Over MLLP the AuditEvent carries no name; cuff-sim's derived
-   name (`<store>/messages/<urlsafe-base64(sha256(bytes))>`) is unverified, so the proxy should
-   confirm it (or search by MSH-10, if the store can filter on it) before it presents a name as the
-   stored message's.
+   message (`view=RAW_ONLY`) by name. Over MLLP the AuditEvent carries cuff-sim's derived name
+   (`derived-message-name`, T33: `<store>/messages/<urlsafe-base64(sha256(bytes sent))>`), which
+   is unverified, so the proxy joins by it, confirms it with a `get`, and sends it as
+   `derivedMessageName`, never as `messageName`. A control ID is not a key (samples share them).
 4. **FHIR transaction rows.** The brief's log lists one row per FHIR transaction (Bundle, HTTP
    status, resource ids), but no task records them. Proposal: derive them from the `Provenance`
    each ingest Bundle writes (`recorded`, `target`); the HTTP status would then be unknown (`null`).

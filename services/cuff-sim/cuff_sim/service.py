@@ -34,6 +34,7 @@ from cuff_sim.message import (
     derived_message_name,
     find_sample,
     from_sample,
+    patient,
 )
 from cuff_sim.mllp_client import send_mllp
 from cuff_sim.outcome import AckReceived, NoAck, TransportOutcome
@@ -135,10 +136,10 @@ class CuffSimulator:
             sample = find_sample(request.sample_name, request.transport)
             if sample is None:  # parse_request already refused this; do not guess
                 raise ValueError("sample does not apply to this transport")
-            # The sample carries T07's own patient (SYN-000123), not the configured one.
-            # FOLLOW-UP (one line): when T07 offers with_patient, pass
-            # sample.with_patient(patient(self.config)) here instead of sample.
-            return from_sample(sample, request.transport)
+            # T07's samples carry their own patient (SYN-000123). with_patient (T33) rebuilds
+            # the PID for the configured one, so the mapper reaches the sample's own reason, not
+            # unknown-patient; samples whose PID cannot or must not change come back as they are.
+            return from_sample(sample.with_patient(patient(self.config)), request.transport)
         outgoing = build_reading(
             self.config,
             systolic=request.systolic,
@@ -182,11 +183,11 @@ class CuffSimulator:
             message_name = source = None
             log_fields["send_error_type"] = type(exc).__name__
 
-        # The AuditEvent carries a message name only when the store itself returned it (T31:
-        # "HTTPS 200 only"); the derived MLLP name stays out of the permanent record until
-        # the derivation is confirmed and T31 has a field for a derived name.
-        # FOLLOW-UP (one line): pass the derived name to that new field here.
+        # The store's own name (HTTPS) goes into the AuditEvent as the message; the name we
+        # derived (MLLP) goes into its own field, which T31's builder writes as a detail marked
+        # "derived", so nobody takes it for a name the store confirmed (T33).
         audit_name = message_name if source == NAME_FROM_INGEST else None
+        derived_name = message_name if source == NAME_DERIVED else None
         audit = record_attempt(
             self.client,
             self.config.audit_fhir_store_id,
@@ -199,6 +200,7 @@ class CuffSimulator:
                 agent=SERVICE_NAME,
                 destination=self.store_name,
                 message_name=audit_name,
+                derived_message_name=derived_name,
                 sample_name=outgoing.sample_name,
             ),
             recorded=max(self._clock(), sent_at),

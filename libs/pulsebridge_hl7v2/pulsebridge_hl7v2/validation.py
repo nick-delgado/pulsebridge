@@ -36,10 +36,9 @@ from hl7apy import exceptions as hl7apy_exceptions
 from hl7apy.consts import VALIDATION_LEVEL
 from hl7apy.core import Field, Message, is_base_datatype
 from hl7apy.factories import datatype_factory
-from hl7apy.parser import get_message_info
 from hl7apy.validation import Validator
 
-from .parsing import HL7ParseError, check_framing_text, decode_payload, parse_er7
+from .parsing import HL7ParseError, check_framing_text, decode_payload, message_info, parse_er7
 
 
 class HL7ValidationError(ValueError):
@@ -161,7 +160,7 @@ def validate_oru_r01(payload: bytes | str | Message) -> Message:
         # hl7apy's own reading of MSH-9: the message structure, e.g. "ORU_R01". Checked before
         # the STRICT parse, which otherwise fails on an empty MSH-9 with "Cannot instantiate an
         # unknown Element".
-        _chars, structure, _version = get_message_info(text)
+        _chars, structure, _version = message_info(text)
     except (HL7ParseError, hl7apy_exceptions.HL7apyException, ValueError) as exc:
         raise HL7ValidationError([getattr(exc, "reason", str(exc))]) from exc
     if structure != "ORU_R01":

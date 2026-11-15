@@ -16,6 +16,7 @@ from pulsebridge_gcp import (
     NotFoundError,
     PermissionDeniedError,
     RetryableError,
+    TimedOutError,
     operation_outcome_summary,
 )
 from pulsebridge_gcp.testing import FakeTransport, json_response
@@ -168,6 +169,18 @@ def test_status_codes_map_to_typed_errors(client, transport, status, expected):
     # The retry decision depends on the class; these must not overlap.
     assert isinstance(caught.value, RetryableError) == (expected is RetryableError)
     assert isinstance(caught.value, ClientError) == (expected in (ClientError, ConflictError))
+    # An HTTP status, 408 included, is an answer: never a TimedOutError (T33), exact class only.
+    assert type(caught.value) is expected
+    assert not isinstance(caught.value, TimedOutError)
+
+
+def test_http_408_is_a_plain_retryable_error_not_a_timeout(client, transport):
+    # 408 Request Timeout is the SERVER answering; TimedOutError means no answer arrived.
+    transport.add("POST", "/fhir", json_response(408, {"error": {"message": "slow"}}))
+    with pytest.raises(RetryableError) as caught:
+        client.execute_bundle("fhir", {"resourceType": "Bundle"})
+    assert type(caught.value) is RetryableError
+    assert caught.value.status == 408
 
 
 def test_a_fhir_4xx_carries_the_operation_outcome_but_not_in_its_message(client, transport):

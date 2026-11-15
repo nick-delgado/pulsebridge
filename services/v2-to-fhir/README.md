@@ -226,6 +226,12 @@ the HL7v2 store; see `infra/modules/healthcare/README.md`). No key file.
 gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "v2_to_fhir.app:create_app()"
 ```
 
+- **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
+  `0.0.0.0:$PORT` when `PORT` is set and no `--bind` is given, the same result as the command
+  above without a shell to expand it. The image also sets
+  `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
+  requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
+  this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
 - Honours `PORT` (Cloud Run sets it). `--timeout 0` leaves request deadlines to Cloud Run, as
   Google's Cloud Run Python samples do.
 - One authorised session (`google-auth`'s `AuthorizedSession`, a `requests.Session`) is shared

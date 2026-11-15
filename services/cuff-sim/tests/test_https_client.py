@@ -8,7 +8,7 @@ import pytest
 import requests
 from cuff_sim.https_client import send_https
 from cuff_sim.outcome import AckReceived, NoAck
-from pulsebridge_gcp import RetryableError
+from pulsebridge_gcp import HealthcareClient, RequestsTransport, RetryableError, TimedOutError
 from pulsebridge_gcp.testing import json_response
 from pulsebridge_gcp.transport import HttpResponse
 
@@ -89,29 +89,52 @@ def test_error_without_nack_is_api_error_with_status(client, transport, status):
     assert delivery.message_name is None
 
 
-def no_response(cause: BaseException) -> RetryableError:
-    """What RequestsTransport raises when no response arrived: the original exception chained."""
-    error = RetryableError("POST ingest", None, server_message=type(cause).__name__)
-    error.__cause__ = cause
-    return error
+class _FailingSession:
+    """Stands in for google-auth's AuthorizedSession: every request raises ``failure``."""
+
+    def __init__(self, failure: BaseException) -> None:
+        self.failure = failure
+
+    def request(self, *args, **kwargs):
+        raise self.failure
 
 
 @pytest.mark.parametrize(
-    ("cause", "why"),
+    ("failure", "why"),
     [
         (requests.ReadTimeout(), "timeout"),  # sent; the message may have been stored
         (requests.ConnectTimeout(), "timeout"),
         (requests.ConnectionError(), "connection-closed"),
         (google.auth.exceptions.RefreshError(), "connection-closed"),  # nothing was sent
-        (None, "connection-closed"),
     ],
 )
-def test_no_response_is_classified_by_its_cause(client, transport, cause, why):
-    error = no_response(cause) if cause is not None else RetryableError("POST ingest", None)
-    transport.add("POST", INGEST, error)
+def test_no_response_is_classified_through_the_real_transport(h, failure, why):
+    # The real RequestsTransport turns the session's exception into pulsebridge_gcp's error
+    # (TimedOutError for a timeout, T33); the client classifies that error by its class.
+    client = HealthcareClient(
+        project=h.PROJECT,
+        location="us-central1",
+        dataset="demo",
+        transport=RequestsTransport(_FailingSession(failure)),
+    )
     outcome = send_https(client, "main", PAYLOAD).outcome
     assert outcome.why == why
     assert outcome.http_status is None
+
+
+@pytest.mark.parametrize(
+    ("error", "why"),
+    [
+        (TimedOutError("POST ingest", None), "timeout"),
+        (RetryableError("POST ingest", None), "connection-closed"),
+    ],
+)
+def test_no_response_is_classified_by_the_error_class_alone(client, transport, error, why):
+    # No __cause__ at all: the class is enough.
+    assert error.__cause__ is None
+    transport.add("POST", INGEST, error)
+    outcome = send_https(client, "main", PAYLOAD).outcome
+    assert (outcome.why, outcome.http_status) == (why, None)
 
 
 @pytest.mark.parametrize("reply", [b"MSH^~MSH|", b"MSH|^~\\&|\rMSA"])

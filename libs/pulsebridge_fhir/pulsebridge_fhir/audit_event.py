@@ -54,6 +54,10 @@ OUTCOME_SUCCESS = "0"
 OUTCOME_MINOR_FAILURE = "4"
 OUTCOME_SERIOUS_FAILURE = "8"
 
+# Where a recorded message name came from (SendAttemptRecord.message_name_source).
+MESSAGE_NAME_FROM_STORE = "store"
+MESSAGE_NAME_DERIVED = "derived"
+
 # The three results the messages log shows.
 ACCEPTED = "accepted"
 REJECTED = "rejected"
@@ -78,6 +82,11 @@ DETAIL_HTTP_STATUS = "http-status"
 # for one.
 DETAIL_UNREADABLE_REPLY = "unreadable-reply-bytes"
 DETAIL_SAMPLE = "malformed-sample"
+# A message name the SENDER computed (T13 over MLLP, from the message bytes), not one the store
+# returned. Deliberately not in entity.what: ``what`` is a reference that says "this entity IS
+# that stored message", which only the store can confirm. A reader that knows nothing of this
+# detail therefore sees no message name at all, rather than an unverified one taken as fact.
+DETAIL_DERIVED_MESSAGE_NAME = "derived-message-name"
 
 _NO_ACK_TEXT = {
     "timeout": "the read timed out",
@@ -91,7 +100,8 @@ FHIR_JSON = "application/fhir+json; charset=utf-8"
 
 
 def send_attempt_key(attempt: SendAttempt) -> str:
-    """The AuditEvent's id: UUIDv5 of the sender, the transport, MSH-10 and the send time (UTC, ms).
+    """The AuditEvent's id: UUIDv5 of the sender, the transport, MSH-10, the send time (UTC, ms)
+    and, for a malformed sample, the sample's name.
 
     - The **send time** is in the key because the same control ID can legitimately be sent twice
       (a resend of the same reading reuses MSH-10, see T07): those are two attempts and need two
@@ -105,15 +115,27 @@ def send_attempt_key(attempt: SendAttempt) -> str:
       resource, so an overwrite is still visible in its history.
     - A malformed sample with no MSH-10 uses an empty string for it; that cannot collide with a
       real control ID, which is never empty.
+    - The **sample name** (T33) is added for a malformed sample, because samples share control
+      IDs (``SYN-BAD-0001`` is in two of them) or have none (every ``unparseable_*``): without it,
+      two different samples sent in the same millisecond on one transport (two instances) would
+      get one id, and the second write would replace the first. The name rather than a digest
+      of the bytes: the library holds no message bytes (on purpose), and the name already says
+      which bytes were sent. A built reading has no sample name and a fresh MSH-10 each time, so
+      its key, and every id already written for one, is unchanged. The same sample sent twice in
+      one millisecond by two instances still shares an id: those are the same bytes to the same
+      store, which keeps one message (spike S5), and the history keeps both versions.
     """
-    return deterministic_uuid(
+    parts = [
         "AuditEvent",
         "cuff-send-attempt",
         attempt.agent,
         attempt.transport,
         attempt.control_id or "",
         attempt.sent_at_utc,
-    )
+    ]
+    if attempt.sample_name is not None:
+        parts.append(attempt.sample_name)
+    return deterministic_uuid(*parts)
 
 
 def _result_kind(result: Acknowledged | NotAcknowledged) -> str:
@@ -172,6 +194,8 @@ def _message_details(attempt: SendAttempt) -> list[dict]:
             details.append(_bytes_detail(DETAIL_UNREADABLE_REPLY, result.reply_prefix))
     if attempt.sample_name is not None:
         details.append(_detail(DETAIL_SAMPLE, attempt.sample_name))
+    if attempt.derived_message_name is not None:
+        details.append(_detail(DETAIL_DERIVED_MESSAGE_NAME, attempt.derived_message_name))
     return details
 
 
@@ -212,6 +236,7 @@ def build_send_attempt_audit_event(attempt: SendAttempt, *, recorded: datetime) 
     kind = _result_kind(attempt.result)
     message_entity: dict = {}
     if attempt.message_name is not None:
+        # Only a name the store returned (a derived one is a detail, see _message_details).
         # Same identifier as T06's Provenance.entity for this message, so the two can be joined.
         # No Reference.type: an HL7v2 store message is not a FHIR resource, and no R4 type
         # (Binary, DocumentReference) describes it without claiming something false.
@@ -339,6 +364,12 @@ class SendAttemptRecord:
     ``id`` is the stored resource's id (or the derived one when the resource has none).
     ``format_version`` is the version the writer declared; it may be newer than
     ``FORMAT_VERSION`` (the fields this library knows were still read).
+
+    The stored message's name is in one of two fields, never both, so it cannot be taken for
+    the other kind: ``message_name`` is a name **the store returned** (HTTPS ingest);
+    ``derived_message_name`` is a name **the sender computed** and nobody has confirmed (MLLP).
+    Confirm a derived name (for example with a ``get`` of the message) before treating it as
+    the stored message; ``message_name_source`` says which kind is present.
     """
 
     id: str
@@ -361,6 +392,16 @@ class SendAttemptRecord:
     attempt: SendAttempt
     reply_prefix: bytes | None = None
     format_version: int = FORMAT_VERSION
+    derived_message_name: str | None = None
+
+    @property
+    def message_name_source(self) -> str | None:
+        """``"store"`` (``message_name``), ``"derived"`` (``derived_message_name``) or ``None``."""
+        if self.message_name is not None:
+            return MESSAGE_NAME_FROM_STORE
+        if self.derived_message_name is not None:
+            return MESSAGE_NAME_DERIVED
+        return None
 
 
 # [0-9], not \d (no non-ASCII digits). Up to 9 fraction digits; Python 3.13's fromisoformat
@@ -379,6 +420,7 @@ _STRING_DETAILS = (
     DETAIL_NO_ACK_REASON,
     DETAIL_HTTP_STATUS,
     DETAIL_SAMPLE,
+    DETAIL_DERIVED_MESSAGE_NAME,
 )
 _BYTES_DETAILS = (DETAIL_RAW_ACK, DETAIL_UNREADABLE_REPLY)
 
@@ -581,6 +623,7 @@ def _read_values(
                 else None
             ),
             sample_name=details.get(DETAIL_SAMPLE),
+            derived_message_name=details.get(DETAIL_DERIVED_MESSAGE_NAME),
         )
     except UnreadableSendAttempt:
         raise
@@ -617,6 +660,7 @@ def _read_values(
         attempt=attempt,
         reply_prefix=result.reply_prefix if isinstance(result, NotAcknowledged) else None,
         format_version=version,
+        derived_message_name=attempt.derived_message_name,
     )
 
 
