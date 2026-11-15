@@ -64,7 +64,10 @@ export type GoogleHealthConnection =
 export type WatchSyncNote = 'backfill-needed' | 'refresh-token-rotated';
 
 export interface WatchSyncStatus {
-  /** health-sync's `googleHealth`. */
+  /**
+   * health-sync's `googleHealth`. The proxy should send it as `state`; the HTTP client also
+   * reads `googleHealth` when `state` is absent, so health-sync's body can be passed through.
+   */
   state: GoogleHealthConnection;
   /**
    * health-sync's `reason` code, for example `refresh-token-invalid` or
@@ -81,10 +84,14 @@ export interface WatchSyncStatus {
   /** When health-sync checked the connection (its `checkedAt`), ISO 8601. */
   checkedAt: string;
   /**
-   * When the last sync run wrote heart-rate data, ISO 8601; null when there has been none. NOT
-   * part of health-sync's `/status` (which is stateless): the proxy derives it from the FHIR
-   * store (README open question for T14). The status strip announces a `sync` data change when
-   * this moves forward between two loads.
+   * The time of the NEWEST HEART-RATE WRITE to the FHIR store, ISO 8601; null when there has
+   * been none. It is not the time of the last sync run: health-sync writes only windows that
+   * changed, so while the watch is off the wrist (or a run finds nothing new) this does not
+   * move. The strip therefore labels it "Newest watch data". NOT part of health-sync's
+   * `/status` (which is stateless): the proxy derives it from the store (README open question
+   * 9). The field keeps its name so T17's code is unchanged; read it as "last data written".
+   * The status strip announces a `sync` data change when it changes between two loads, which
+   * is exactly when there is new data to re-fetch.
    */
   lastSyncAt: string | null;
 }

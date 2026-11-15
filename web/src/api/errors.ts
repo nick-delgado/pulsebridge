@@ -97,18 +97,44 @@ export class CuffSendError extends ApiError {
 
   /**
    * The typed error for a cuff-route `ApiError`, or the error unchanged for any other status.
-   * The message joins every issue's diagnostics (a 422 can name several fields).
+   *
+   * cuff-sim's issues are a field plus a FRAGMENT: `expression: ["systolic"]`,
+   * `diagnostics: "is required"` (services/cuff-sim/cuff_sim/request.py). The message therefore
+   * puts the two together, one issue per clause: "systolic: is required; diastolic: is required".
+   * An issue without an expression is its diagnostics alone.
    */
   static from(error: ApiError): ApiError {
     const reason = CUFF_FAILURE_BY_STATUS[error.status];
     if (reason === undefined) return error;
-    const all = (error.outcome?.issue ?? []).flatMap((i) => i.diagnostics ?? []);
+    const message = issueMessage(error.outcome);
     return new CuffSendError(
       reason,
       error.status,
-      all.length > 0 ? all.join(' ') : error.message,
+      message ?? error.message,
       error.outcome,
       error.retryAfterSeconds,
     );
   }
+}
+
+/** "field: fragment; other: fragment" from an OperationOutcome's issues, or null if none. */
+export function issueMessage(outcome: OperationOutcome | null): string | null {
+  const parts = (outcome?.issue ?? []).flatMap((i) => {
+    const text = i.diagnostics?.trim() ?? '';
+    const where = (i.expression ?? []).join(', ');
+    if (text === '') return where === '' ? [] : [where];
+    return [where === '' ? text : `${where}: ${text}`];
+  });
+  return parts.length > 0 ? parts.join('; ') : null;
+}
+
+/**
+ * Seconds from a `Retry-After` header. Only the delay-seconds form (RFC 9110 section 10.2.3:
+ * one or more digits) is accepted; anything else (a negative or decimal number, `10abc`, or the
+ * HTTP-date form, which neither cuff-sim nor the login route sends) is null, "not given".
+ */
+export function retryAfterSeconds(header: string | null): number | null {
+  if (header === null) return null;
+  const value = header.trim();
+  return /^\d+$/.test(value) ? Number(value) : null;
 }

@@ -8,7 +8,7 @@ import { MockClient } from '../api/mock-client';
 import { SYNC_INTERVAL_MS } from '../api/mock-data';
 import { Session } from '../api/session';
 import type { DataChangeKind } from '../state/data-changed';
-import { startApp, STATUS_REFRESH_MS } from './app';
+import { startApp, STATUS_REFRESH_MS, VISIBILITY_RELOAD_MIN_GAP_MS } from './app';
 import type { FeatureContext, Features } from './features';
 
 const settle = async () => {
@@ -39,6 +39,11 @@ interface Harness {
   ctx: () => FeatureContext<string>;
   stripText: () => string;
   setNow: (ms: number) => void;
+  now: () => number;
+  /** Extra listeners for the heart-rate stand-in, called with the context and the kind. */
+  onKind: ((ctx: FeatureContext<string>, kind: DataChangeKind) => void)[];
+  logOut: () => void;
+  logIn: () => Promise<void>;
 }
 
 const quiet = () => undefined;
@@ -61,11 +66,15 @@ async function start(answers?: (StatusSummary | Promise<StatusSummary>)[]): Prom
     for (const answer of answers) getStatus.mockImplementationOnce(() => Promise.resolve(answer));
   }
   const heard: DataChangeKind[] = [];
+  const onKind: Harness['onKind'] = [];
   let context: FeatureContext<string> | null = null;
   const features: Features = {
     heartRate: (c) => {
       context = c;
-      c.onDataChanged((kind) => heard.push(kind), c.signal);
+      c.onDataChanged((kind) => {
+        heard.push(kind);
+        for (const f of onKind) f(c, kind);
+      }, c.signal);
     },
     cuff: quiet,
     share: quiet,
@@ -83,6 +92,18 @@ async function start(answers?: (StatusSummary | Promise<StatusSummary>)[]): Prom
     stripText: () => root.querySelector('.status-strip')?.textContent ?? '',
     setNow: (ms) => {
       now = ms;
+    },
+    now: () => now,
+    onKind,
+    logOut: () => {
+      [...root.querySelectorAll('button')].find((b) => b.textContent === 'Log out')?.click();
+    },
+    logIn: async () => {
+      const input = root.querySelector<HTMLInputElement>('#login-password');
+      if (!input) throw new Error('no login form');
+      input.value = 'x';
+      root.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }));
+      await settle();
     },
   };
 }
@@ -121,6 +142,22 @@ describe('status strip: announcing a new sync', () => {
     await settle();
     expect(h.getStatus).toHaveBeenCalledTimes(3);
     expect(h.heard).toEqual(['sync', 'cuff-send']);
+  });
+
+  it("still reloads for another change a 'sync' listener reports during the announcement", async () => {
+    const h = await start([
+      status('2026-03-10T11:47:00Z'),
+      status('2026-03-10T12:02:00Z'),
+      status('2026-03-10T12:02:00Z'),
+    ]);
+    h.onKind.push((ctx, kind) => {
+      if (kind === 'sync') ctx.notifyDataChanged('share');
+    });
+    h.ctx().refreshStatus();
+    await settle();
+    expect(h.heard).toEqual(['sync', 'share']);
+    // Load 1, load 2 (announces), and the reload for 'share'; none for the strip's own 'sync'.
+    expect(h.getStatus).toHaveBeenCalledTimes(3);
   });
 
   it('announces nothing when the time becomes null', async () => {
@@ -162,11 +199,47 @@ describe('status strip: periodic reload', () => {
     await settle();
     expect(h.getStatus).toHaveBeenCalledTimes(2);
 
-    // Coming back to the tab reloads at once.
+    // Coming back to the tab reloads at once, a minute or more after the last load started.
+    h.setNow(h.now() + VISIBILITY_RELOAD_MIN_GAP_MS);
     visibility.mockReturnValue('visible');
     document.dispatchEvent(new Event('visibilitychange'));
     await settle();
     expect(h.getStatus).toHaveBeenCalledTimes(3);
+  });
+
+  it('a visibility change within a minute of the last load does not reload', async () => {
+    const h = await start();
+    h.setNow(h.now() + VISIBILITY_RELOAD_MIN_GAP_MS - 1000);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settle();
+    expect(h.getStatus).toHaveBeenCalledTimes(1);
+    h.setNow(h.now() + 1000);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settle();
+    expect(h.getStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it('logout stops the old dashboard polling; after logging in again only the new one polls', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    const h = await start();
+    expect(h.getStatus).toHaveBeenCalledTimes(1);
+    h.logOut();
+    // Logged out: neither the timer nor a visibility change loads the status.
+    h.setNow(h.now() + 10 * VISIBILITY_RELOAD_MIN_GAP_MS);
+    vi.advanceTimersByTime(STATUS_REFRESH_MS * 2);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settle();
+    expect(h.getStatus).toHaveBeenCalledTimes(1);
+
+    await h.logIn();
+    expect(h.getStatus).toHaveBeenCalledTimes(2); // the new dashboard's first load
+    vi.advanceTimersByTime(STATUS_REFRESH_MS);
+    await settle();
+    expect(h.getStatus).toHaveBeenCalledTimes(3); // one timer, not two
+    h.setNow(h.now() + VISIBILITY_RELOAD_MIN_GAP_MS);
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settle();
+    expect(h.getStatus).toHaveBeenCalledTimes(4); // one visibility listener, not two
   });
 
   it('with the mock: a sync run during the session is noticed and announced', async () => {

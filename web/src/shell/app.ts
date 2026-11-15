@@ -34,6 +34,9 @@ export const SESSION_ENDED = 'Your session has ended. Log in again.';
  */
 export const STATUS_REFRESH_MS = 5 * 60 * 1000;
 
+/** A visibility change reloads the status only if no load started this recently. */
+export const VISIBILITY_RELOAD_MIN_GAP_MS = 60 * 1000;
+
 export const DEFAULT_FEATURES: Features = {
   heartRate: mountHeartRate,
   cuff: mountCuff,
@@ -109,8 +112,10 @@ export async function startApp(options: AppOptions): Promise<App> {
     let statusLoads = 0;
     let shown = false;
     let announcing = false;
+    let lastLoadStartedAt = Number.NEGATIVE_INFINITY;
     const refreshStatus = () => {
       const load = ++statusLoads;
+      lastLoadStartedAt = now();
       // "Loading…" only before the first answer; a reload keeps the last answer on screen.
       if (!shown) layout.status.render({ kind: 'loading' });
       client.getStatus({ signal }).then(
@@ -153,7 +158,14 @@ export async function startApp(options: AppOptions): Promise<App> {
     document.addEventListener(
       'visibilitychange',
       () => {
-        if (document.visibilityState === 'visible') refreshStatus();
+        // Coming back to the tab reloads, unless a load started within the last minute
+        // (switching tabs back and forth must not hammer the proxy).
+        if (
+          document.visibilityState === 'visible' &&
+          now() - lastLoadStartedAt >= VISIBILITY_RELOAD_MIN_GAP_MS
+        ) {
+          refreshStatus();
+        }
       },
       { signal },
     );
@@ -201,8 +213,10 @@ export async function startApp(options: AppOptions): Promise<App> {
 
     // The status strip shows counts and the last sync, so any change refreshes it, except the
     // strip's own 'sync' announcement (it has just loaded the status).
-    dataChanges.subscribe(() => {
-      if (!announcing) refreshStatus();
+    dataChanges.subscribe((kind) => {
+      // Only the strip's own 'sync' is skipped: any other change, even one a 'sync' listener
+      // reports while the announcement is running, reloads the strip.
+      if (!(announcing && kind === 'sync')) refreshStatus();
     }, signal);
 
     replaceChildren(root, layout.root);

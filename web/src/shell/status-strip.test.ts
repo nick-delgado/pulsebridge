@@ -40,7 +40,7 @@ const values = (s: StatusSummary) =>
 describe('status strip', () => {
   it('shows last sync, counts per source and reachability', () => {
     const t = text(status());
-    expect(t).toContain('Last sync: 7 min ago');
+    expect(t).toContain('Newest watch data: 7 min ago');
     expect(t).toMatch(/Observations: 8,?412 watch · 6 cuff/);
     expect(t).toContain('FHIR store: Reachable');
     expect(t).toContain('OpenEMR: Reachable');
@@ -50,7 +50,7 @@ describe('status strip', () => {
     const s = status({ state: 'reconnect-needed', reason: 'refresh-token-invalid' });
     expect(values(s)[0]).toBe('Watch sync: Reconnect needed');
     expect(text(s)).toContain('refresh-token-invalid');
-    expect(text(s)).not.toContain('Last sync');
+    expect(text(s)).not.toContain('Newest watch data');
   });
 
   it('says "Not connected" for not-configured', () => {
@@ -61,7 +61,7 @@ describe('status strip', () => {
 
   it('keeps the last sync time when the check is unknown, and says the check did not finish', () => {
     const s = status({ state: 'unknown', reason: 'token-endpoint-unavailable' });
-    expect(values(s)[0]).toBe('Last sync: 7 min ago');
+    expect(values(s)[0]).toBe('Newest watch data: 7 min ago');
     expect(text(s)).toContain('could not finish');
     expect(strip(s).querySelector('.status-item')?.className).toContain('status-item--neutral');
     // A connected one is "ok", and says nothing about a check.
@@ -69,8 +69,8 @@ describe('status strip', () => {
     expect(text(status())).not.toContain('could not finish');
   });
 
-  it('says "Never synced" when there has been no sync', () => {
-    expect(values(status({ lastSyncAt: null }))[0]).toBe('Watch sync: Never synced');
+  it('says "None yet" when no watch data has been written', () => {
+    expect(values(status({ lastSyncAt: null }))[0]).toBe('Watch data: None yet');
   });
 
   it('shows the backfill-needed note with the stranded count, or without one when unknown', () => {
@@ -85,7 +85,7 @@ describe('status strip', () => {
   it('shows the refresh-token-rotated note as "Reconnect needed soon"', () => {
     const s = status({ notes: ['refresh-token-rotated'] });
     expect(values(s)).toContain('Watch sync: Reconnect needed soon');
-    expect(values(s)[0]).toBe('Last sync: 7 min ago');
+    expect(values(s)[0]).toBe('Newest watch data: 7 min ago');
     expect(values(status())).not.toContain('Watch sync: Reconnect needed soon');
   });
 

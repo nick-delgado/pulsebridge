@@ -139,6 +139,104 @@ describe('mock cuff route: the service limits', () => {
   });
 });
 
+describe('mock cuff route: refusals exactly as cuff-sim writes them', () => {
+  /** [expression, diagnostics] of each issue, in order. */
+  const issues = (e: CuffSendError) =>
+    (e.outcome?.issue ?? []).map((i) => [i.expression?.join(','), i.diagnostics, i.code]);
+
+  it('uses request.py fragments, the field in expression, code invalid', async () => {
+    const c = await client();
+    const cases: [Record<string, unknown>, [string, string][]][] = [
+      [{ systolic: 401 }, [['systolic', 'must be from 1 to 400 mm[Hg]']]],
+      [{ diastolic: 0 }, [['diastolic', 'must be from 1 to 400 mm[Hg]']]],
+      [{ systolic: 120.5 }, [['systolic', 'must be a whole number of mm[Hg]']]],
+      [{ systolic: true }, [['systolic', 'must be a whole number of mm[Hg]']]],
+      [{ systolic: 80, diastolic: 80 }, [['systolic', 'must be greater than diastolic']]],
+      [{ transport: 'ftp' }, [['transport', 'must be "mllp" or "https"']]],
+      [{ transport: null }, [['transport', 'must be "mllp" or "https"']]],
+      [
+        { sendMalformed: 'no_such_sample' },
+        [['sendMalformed', 'must be the name of a malformed sample, or null']],
+      ],
+      [
+        { transport: 'https', sendMalformed: 'noack_missing_end_block' },
+        [['sendMalformed', 'this sample cannot be sent over https']],
+      ],
+    ];
+    for (const [over, expected] of cases) {
+      const e = await refusal(c, { ...reading(), ...over });
+      expect(issues(e), JSON.stringify(over)).toEqual(expected.map(([f, t]) => [f, t, 'invalid']));
+      expect(e.status).toBe(422);
+    }
+  });
+
+  it('collects every issue before refusing, systolic-not-above included', async () => {
+    const c = await client();
+    const e = await refusal(c, {
+      systolic: 80,
+      diastolic: 90,
+      transport: 'mllp',
+      sendMalformed: null,
+      extra: 1,
+    });
+    expect(issues(e)).toEqual([
+      [
+        'body',
+        'only these fields are accepted: systolic, diastolic, transport, sendMalformed',
+        'invalid',
+      ],
+      ['systolic', 'must be greater than diastolic', 'invalid'],
+    ]);
+    expect(e.message).toBe(
+      'body: only these fields are accepted: systolic, diastolic, transport, sendMalformed; systolic: must be greater than diastolic',
+    );
+  });
+
+  it('treats a null value as absent, so a built reading requires both', async () => {
+    const c = await client();
+    const e = await refusal(c, { systolic: null, diastolic: null, sendMalformed: null });
+    expect(issues(e)).toEqual([
+      ['systolic', 'is required', 'invalid'],
+      ['diastolic', 'is required', 'invalid'],
+    ]);
+    expect(e.message).toBe('systolic: is required; diastolic: is required');
+    // With a sample, null values are simply absent.
+    await expect(
+      c.submitCuffReading({ systolic: null, sendMalformed: 'unparseable_no_msh' } as never),
+    ).resolves.toMatchObject({ sample: 'unparseable_no_msh' });
+  });
+
+  it('defaults an absent transport to mllp', async () => {
+    const c = await client();
+    const sent = await c.submitCuffReading({
+      systolic: 120,
+      diastolic: 80,
+      sendMalformed: null,
+    } as never);
+    expect(sent.transport).toBe('mllp');
+    expect(sent.framing).toBe('standard');
+  });
+
+  it('refuses a body that is not an object with 400', async () => {
+    const c = await client();
+    for (const body of [null, [], 'x']) {
+      const e = await refusal(c, body);
+      expect([e.status, e.reason, e.message]).toEqual([
+        400,
+        'invalid-body',
+        'body: must be a JSON object',
+      ]);
+    }
+  });
+
+  it("rate limit: 429 with cuff-sim's text", async () => {
+    const c = await client({ rateLimit: { burst: 1, perMinute: 6 } });
+    await c.submitCuffReading(reading());
+    const e = await refusal(c, reading());
+    expect(issues(e)).toEqual([['body', 'too many sends; try again later', 'throttled']]);
+  });
+});
+
 describe('mock cuff route: the result fields', () => {
   it('over MLLP: standard framing, and a DERIVED message name from the bytes sent', async () => {
     const c = await client();
@@ -153,6 +251,24 @@ describe('mock cuff route: the result fields', () => {
     // The derived name is not in the permanent record (cuff-sim keeps it out of the AuditEvent).
     const trace = await c.getCuffAttemptTrace(sent.attemptId ?? '');
     expect(trace.attempt.messageName).toBeNull();
+  });
+
+  it('derives the same names as cuff-sim for fixed sample bytes', async () => {
+    // Vectors computed by cuff-sim's derived_message_name over T07's manifest bytes. On a
+    // deployment cuff-sim (T33) substitutes the configured patient into samples with a usable
+    // PID, so a real name is over the bytes actually sent; these two samples are never changed.
+    const c = await client();
+    const vectors: [string, string][] = [
+      ['unmappable_msh_only', 'wi1Blno9Nl-URg3wpycXvp6NuzBMZv5q3SL_idAs_l0='],
+      ['invalid_missing_pid3', 'EuH8LonYjPPSSR8TOmtxfqoKCy69KUcDnjZt2LHnu2I='],
+      // Manifest bytes only: on a deployment its PID carries the configured patient.
+      ['unmappable_unknown_obx3_code', '0eF13P7qGXwhLzcUU4JK6C-47fFcIVDBAn8Tw60Q0J4='],
+    ];
+    for (const [name, id] of vectors) {
+      const sent = await c.submitCuffReading({ transport: 'mllp', sendMalformed: name });
+      expect(sent.result, name).toBe('accepted');
+      expect(sent.messageName, name).toBe(`${MOCK_HL7V2_STORE}/messages/${id}`);
+    }
   });
 
   it('over HTTPS: no framing, and the name from the ingest response', async () => {
@@ -206,7 +322,10 @@ describe('mock cuff route: AuditEvent not recorded', () => {
     const sent = await c.submitCuffReading(reading());
     expect(sent.attemptId).not.toBeNull();
     expect(sent.audit.recorded).toBe(false);
-    expect(!sent.audit.recorded && sent.audit.detail).toMatch(/^write-failed/);
+    // cuff-sim's own sentence (audit.py), with the store's HTTP status.
+    expect(!sent.audit.recorded && sent.audit.detail).toBe(
+      'the audit store write failed (HTTP 503)',
+    );
     await expect(c.getCuffAttemptTrace(sent.attemptId ?? '')).rejects.toMatchObject({
       status: 404,
     });

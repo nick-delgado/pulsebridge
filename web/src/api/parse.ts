@@ -18,6 +18,8 @@ import type {
   GoogleHealthSourceKind,
   MessageNameSource,
   MllpFraming,
+  Reachability,
+  SendResultKind,
   StatusSummary,
   WatchSyncNote,
   WatchSyncStatus,
@@ -31,6 +33,14 @@ const CONNECTION_STATES: readonly GoogleHealthConnection[] = [
 ];
 const NOTES: readonly WatchSyncNote[] = ['backfill-needed', 'refresh-token-rotated'];
 const SOURCE_KINDS: readonly GoogleHealthSourceKind[] = ['reconstructed', 'original'];
+const RESULTS: readonly SendResultKind[] = ['accepted', 'rejected', 'no-acknowledgment'];
+
+/** T31's mapping: AA/CA accepted, any other MSA-1 rejected, no readable ACK no-acknowledgment. */
+function resultFromAck(ack: unknown): SendResultKind {
+  if (!isObject(ack) || ack.received !== true) return 'no-acknowledgment';
+  return ack.code === 'AA' || ack.code === 'CA' ? 'accepted' : 'rejected';
+}
+
 const FRAMINGS: readonly MllpFraming[] = ['standard', 'missing_end_block', 'missing_final_cr'];
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -50,7 +60,9 @@ export function parseWatchSync(wire: unknown): WatchSyncStatus {
   const w = isObject(wire) ? wire : {};
   const stranded = w.strandedPreliminary;
   return {
-    state: oneOf(CONNECTION_STATES, w.state) ?? 'unknown',
+    // The proxy sends `state`; health-sync's own name for it, `googleHealth`, is read when
+    // `state` is absent, so a /status body passed through unchanged also works.
+    state: oneOf(CONNECTION_STATES, 'state' in w ? w.state : w.googleHealth) ?? 'unknown',
     reason: stringOrNull(w.reason),
     notes: Array.isArray(w.notes)
       ? [...new Set(w.notes.flatMap((n) => oneOf(NOTES, n) ?? []))]
@@ -63,10 +75,33 @@ export function parseWatchSync(wire: unknown): WatchSyncStatus {
   };
 }
 
-/** `GET /status`. The parts that are our own views (counts, reachability) pass through. */
+function count(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function reachability(value: unknown): Reachability {
+  const r = isObject(value) ? value : {};
+  return {
+    // Only an explicit true is "reachable"; a missing or odd value is not a claim of health.
+    reachable: r.reachable === true,
+    checkedAt: stringOrNull(r.checkedAt) ?? '',
+    detail: stringOrNull(r.detail) ?? (r.reachable === true ? null : 'not reported'),
+  };
+}
+
+/**
+ * `GET /status`. Never throws on an odd body (for example JSON `null`): every part is read from
+ * a checked object, so a missing part reads as "not known" (`unknown`, unreachable, 0).
+ */
 export function parseStatus(wire: unknown): StatusSummary {
-  const body = (isObject(wire) ? wire : {}) as unknown as StatusSummary;
-  return { ...body, watchSync: parseWatchSync((wire as { watchSync?: unknown }).watchSync) };
+  const body = isObject(wire) ? wire : {};
+  const counts = isObject(body.observationCounts) ? body.observationCounts : {};
+  return {
+    watchSync: parseWatchSync(body.watchSync),
+    observationCounts: { watch: count(counts.watch), cuff: count(counts.cuff) },
+    fhirStore: reachability(body.fhirStore),
+    openemr: reachability(body.openemr),
+  };
 }
 
 function isRollUpWindow(value: unknown): value is GoogleHealthRollUpWindow {
@@ -103,6 +138,8 @@ export function parseCuffSendResult(wire: unknown): CuffSendResult {
         : 'derived-sha256-unverified';
   return {
     ...body,
+    // An unknown `result` is not passed on: it is worked out from the ACK, as T31 does.
+    result: oneOf(RESULTS, body.result) ?? resultFromAck(body.ack),
     attemptId: stringOrNull(body.attemptId),
     framing: oneOf(FRAMINGS, body.framing),
     messageName,

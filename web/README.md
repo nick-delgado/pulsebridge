@@ -57,7 +57,7 @@ contain the mock client at all (`scripts/check-bundle.mjs` fails the build if it
 
 ```
 +--------------------------------------- header -----------------------------------------+
-| PulseBridge [Mock data]  status strip: last sync, counts, FHIR store, OpenEMR  Log out |
+| PulseBridge [Mock data]  status strip: newest data, counts, FHIR store, OpenEMR Log out |
 +----------------------------+--------------------------+-------------------------------+
 | Blood pressure (episodic)  |       line-art figure     | Heart rate (continuous)       |
 |                            |   <-- cuff    watch -->   |                               |
@@ -116,8 +116,8 @@ signature `(context: FeatureContext<Slot>) => void` (`src/shell/features.ts`). T
 - `notifyDataChanged(kind)` and `onDataChanged(listener, signal)`: see "Telling each other data changed".
 - `refreshStatus()`: reload the header's status strip. Rarely needed: the strip already reloads
   on every data change, every 5 minutes while the tab is visible (`STATUS_REFRESH_MS`) and when
-  the tab becomes visible again, and announces `'sync'` itself when the watch's last sync time
-  changes.
+  the tab becomes visible again (unless a load started in the last minute), and announces
+  `'sync'` itself when the time of the newest watch data changes.
 
 If a mount function throws, the shell logs it and shows "This area failed to load" in that
 feature's first slot; the rest of the page keeps working. Split your code into more files inside
@@ -159,8 +159,14 @@ const observations = await client.searchObservations(
   | 504    | `no-answer`     | cut off upstream (Cloud Run's request timeout): it **may** have been sent, unrecorded            | maybe |
 
   `error.fields` lists the request fields the OperationOutcome names (`systolic`, `diastolic`,
-  `sendMalformed`, `transport`, or `body`), and `error.message` joins every issue's text. Any other
-  status (for example a 502 from the proxy) stays a plain `ApiError`.
+  `sendMalformed`, `transport`, or `body`). cuff-sim's `diagnostics` are fragments with the field
+  only in `expression` ("is required"), so `error.message` puts each field before its fragment and
+  joins the issues: `systolic: is required; diastolic: is required`. Any other status (for example
+  a 502 from the proxy) stays a plain `ApiError`.
+
+- **`Retry-After`** is read only in its delay-seconds form (digits only, RFC 9110 section
+  10.2.3). Anything else (negative, decimal, `10abc`, an HTTP-date) gives `retryAfterSeconds: null`,
+  for the cuff route and for login alike.
 
 - Never call `fetch` yourself: the page has one backend and one client.
 
@@ -214,18 +220,30 @@ carries no data on purpose: the server is the source of truth (`src/state/data-c
 | ------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------- |
 | `'cuff-send'` | T18, after `submitCuffReading` returns (whatever the ACK)                                     | T19 messages log; the status strip (built in) |
 | `'share'`     | T19, after `share` returns                                                                    | T19 if it lists shares; the status strip      |
-| `'sync'`      | the status strip (built in), when the watch's last sync time changes between two status loads | T17 chart                                     |
+| `'sync'`      | the status strip (built in), when the newest watch data time changes between two status loads | T17 chart                                     |
 
 A listener is not called at subscribe time; load your data once in the mount function.
+
+**What `lastSyncAt` means.** Despite its name, `watchSync.lastSyncAt` is the time of the **newest
+heart-rate write** to the FHIR store, not the time of the last sync run: health-sync writes only
+windows that changed, so while the watch is off the wrist the time stays where it was. The strip
+labels it "Newest watch data" for that reason. (The field kept its name so T17's code did not
+change.)
 
 **How `'sync'` is announced.** The strip compares each status load's `watchSync.lastSyncAt` with
 the previous load's (`src/shell/sync-watch.ts`): it announces on a change, but not on the first
 load, not when the time is unchanged (compared as instants) and not when it becomes null (a later
 real time is announced again). A load that answers after a newer one started is ignored. The strip
 does not reload on its own announcement, and a reload that finds the same time announces nothing,
-so the two cannot loop. With health-sync running every 15 minutes and the strip reloading every
-5, a sync is noticed within 5 minutes, and a window that was provisional can become final during a
-session.
+so the two cannot loop; only the strip's own `'sync'` is skipped, and any other change reported
+meanwhile still reloads it. With health-sync running every 15 minutes and the strip reloading every
+5, new data is noticed within 5 minutes, and a window that was provisional can become final during
+a session.
+
+**What the polling costs.** About 12 status loads an hour per visible tab (one every 5 minutes,
+plus at most one per minute when the tab becomes visible again), and none while it is hidden. A
+session lasts at most 8 hours (the token's lifetime), so one tab left open makes at most about 100
+loads. Each is one proxy call; health-sync caches its own answer for 60 s.
 
 **Waiting for "pending".** After a cuff send the stored message is `pending` until `v2-to-fhir`
 labels it (D7), usually seconds. The feature that shows a pending item polls for it, with
@@ -337,8 +355,16 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
   over MLLP, the sample's own `mllp_framing` from T07 for a malformed one, null over HTTPS),
   `messageName` with `messageNameSource`: from the "ingest response" over HTTPS, and over MLLP the
   **derived** name `<store>/messages/<urlsafe-base64(sha256(bytes))>`, computed exactly as
-  cuff-sim's `derived_message_name` (a test recomputes it). As in cuff-sim, the derived name is not
-  written into the AuditEvent, so the log row's `messageName` stays null over MLLP.
+  cuff-sim's `derived_message_name` (a test checks fixed vectors cuff-sim computed for T07's sample
+  bytes). A real derived name is over the bytes actually sent: on a deployment cuff-sim (T33)
+  substitutes the configured patient into samples with a usable PID, so for those samples the name
+  differs from the manifest's. As in cuff-sim, the derived name is not written into the AuditEvent,
+  so the log row's `messageName` stays null over MLLP.
+- **Refusals use cuff-sim's exact texts**: the field in `expression`, a fragment in `diagnostics`
+  ("is required", "must be from 1 to 400 mm[Hg]", "must be greater than diastolic"), `code`
+  `invalid`, every issue collected before refusing; an absent `transport` is `mllp`; a null value
+  counts as absent; an unknown field is a `body` issue; a body that is not an object is 400.
+  `audit.detail` uses cuff-sim's sentences.
 - A reading inside cuff-sim's limits but outside the mapper's (`MAPPER_PLAUSIBLE_RANGE`) is stored
   with `AA` and then mapped to `error` / `out-of-range`, as T12 does.
 - `new MockClient({ auditFailure: 'build' | 'write' })` makes every send fail to record its
@@ -396,7 +422,9 @@ For comparison, our own code is the main chunk, 46,619 B (17.25 kB gzip), and th
 never waits for it: `scripts/check-bundle.mjs` reads Vite's build manifest (`dist/.vite/manifest.json`,
 `build.manifest: true`) and fails the build if the entry chunk, or any chunk it imports statically,
 is uPlot's or contains uPlot's code (`scripts/bundle-rules.mjs`, tested on hand-made manifests).
-The manifest lists only the build's public file names; T22's hosting config may leave `.vite/` out.
+The manifest lists only the build's public file names. It is written into `dist/.vite/` with the
+build; **for T22:** Firebase Hosting's default `ignore` (`**/.*`) skips dot-directories, so it is
+not deployed. Keep that default.
 
 ### Development dependencies
 
@@ -472,7 +500,9 @@ server made.** An unknown connection state is `unknown` (not `connected`); an un
 `source` that is not a roll-up window is null; an unknown `messageNameSource` is treated as
 `derived-sha256-unverified` (only the store's own answer is presented as confirmed); an unknown
 `framing` is null; unknown `notes` are dropped; a `strandedPreliminary` that is not a whole number
-is null ("not known"), never zero.
+is null ("not known"), never zero; an unknown `result` is worked out from the ACK (T31's mapping);
+a `/status` body that is not an object (even JSON `null`) does not throw: it reads as `unknown`,
+unreachable and zero counts. `googleHealth` is read as the state when `state` is absent.
 
 **Date rule for heart-rate windows.** The page sends `date=gt<start>&date=lt<end>`. On a Period
 (`effectivePeriod`), R4 defines `gt` as "the period ends after the value" and `lt` as "the period
@@ -538,6 +568,7 @@ Code written against the old shapes no longer type-checks, on purpose.
 | `MalformedSample`                      | `{name, label, class, transports}`                                              | unchanged, now documented as cuff-sim's list (`label` = the manifest's description)                                                                                           | T18             |
 | `StatusSummary.watchSync.state`        | `ok` \| `reconnect-needed` \| `never-synced` \| `error`                         | health-sync's `connected` \| `reconnect-needed` \| `not-configured` \| `unknown`; "never synced" is `lastSyncAt === null`                                                     | T14, T17 (done) |
 | `StatusSummary.watchSync` other fields | `lastSyncAt`, `detail`                                                          | `reason`, `notes`, `strandedPreliminary` (number \| null), `checkedAt`, `lastSyncAt` (`detail` removed)                                                                       | T14             |
+| `StatusSummary.watchSync.lastSyncAt`   | "last sync"                                                                     | the time of the newest heart-rate write (does not move while the watch is off); the strip says "Newest watch data"                                                            | T14             |
 | `HeartRateTrace.source`                | `GoogleHealthRollUpWindow \| null`                                              | `{kind: 'reconstructed' \| 'original' \| 'unknown', window} \| null`; on the wire `{kind, window}`                                                                            | T14, T17 (done) |
 | `OperationOutcome.issue`               |                                                                                 | `expression?: string[]` (cuff-sim names the field there)                                                                                                                      | T18             |
 | `'sync'` data change                   | "anyone who learns of a new sync (none today)"                                  | announced by the status strip; features only listen                                                                                                                           | T17 (done), T19 |
@@ -586,15 +617,20 @@ the new types: `trace.ts` takes the source tab's note and code-block label from 
    500 from cuff-sim, and 504 for a cut-off request. T14 should forward cuff-sim's status, body and
    `Retry-After` unchanged, keep its own forward timeout at least 90 s (cuff-sim's README), and
    answer 502 (not 500) when cuff-sim cannot be reached, so the page does not report a cuff-sim bug.
-8. **`/status` from health-sync.** health-sync answers 200 in every state. T14 should pass
-   `googleHealth` as `state` and `reason`, `notes`, `strandedPreliminary` and `checkedAt` unchanged,
+   **For T22 (unverified):** Firebase Hosting's rewrite to the proxy may have a shorter timeout than
+   cuff-sim's worst case (90 s); if so, that is where a 504 `no-answer` would really come from.
+   T22 should check the limit and say what it is.
+8. **`/status` from health-sync.** health-sync answers 200 in every state. T14 should send
+   `googleHealth` as `state` (the client also accepts `googleHealth` itself when `state` is absent),
+   and `reason`, `notes`, `strandedPreliminary` and `checkedAt` unchanged,
    and report health-sync itself not answering (any non-200 or no answer) as `state: "unknown"`
    with a `reason` such as `health-sync-unreachable`, not as a disconnection.
 9. **`lastSyncAt`.** health-sync's `/status` is stateless and has no last sync time. The page
-   needs it (the strip shows it, and a change announces `'sync'`). Proposal: the proxy reads it from
-   the FHIR store, for example the newest `Provenance.recorded` whose agent is health-sync, or the
-   newest heart-rate Observation's `meta.lastUpdated`, with a short cache. It must move only when a
-   sync run wrote data, or the chart re-fetches for nothing.
+   needs the time of the newest heart-rate write (the strip shows it as "Newest watch data", and a
+   change announces `'sync'`). Proposal: the proxy reads it from the FHIR store, for example the
+   newest `Provenance.recorded` whose agent is health-sync, or the newest heart-rate Observation's
+   `meta.lastUpdated`, with a short cache. It moves only when data was written, which is what the
+   page wants: otherwise the chart would re-fetch for nothing.
 10. **Store-only rows.** A send whose AuditEvent was not recorded leaves a stored message without
     an AuditEvent. The contract has `source: "store-only"` rows for these; the mock does not make
     any. T14 decides whether to list them.

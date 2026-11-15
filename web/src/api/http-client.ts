@@ -22,7 +22,13 @@ import type {
   ShareResult,
   StatusSummary,
 } from './contract';
-import { ApiError, CuffSendError, LoginError, UnauthorizedError } from './errors';
+import {
+  ApiError,
+  CuffSendError,
+  LoginError,
+  retryAfterSeconds,
+  UnauthorizedError,
+} from './errors';
 import {
   bundleResources,
   isOperationOutcome,
@@ -98,11 +104,10 @@ export class HttpClient implements PulseBridgeApi {
     }
     if (response.status === 401) throw new LoginError('wrong-password', 'Wrong password.');
     if (response.status === 429) {
-      const retry = Number.parseInt(response.headers.get('Retry-After') ?? '', 10);
       throw new LoginError(
         'rate-limited',
         'Too many attempts. Wait a minute and try again.',
-        Number.isFinite(retry) ? retry : null,
+        retryAfterSeconds(response.headers.get('Retry-After')),
       );
     }
     if (response.status === 503) {
@@ -357,6 +362,10 @@ async function toApiError(response: Response): Promise<ApiError> {
     // Not JSON.
   }
   const text = outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`;
-  const retry = Number.parseInt(response.headers.get('Retry-After') ?? '', 10);
-  return new ApiError(response.status, text, outcome, Number.isFinite(retry) ? retry : null);
+  return new ApiError(
+    response.status,
+    text,
+    outcome,
+    retryAfterSeconds(response.headers.get('Retry-After')),
+  );
 }

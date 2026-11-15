@@ -10,7 +10,7 @@
  *   the same refusals as `CuffSendError` 422 with an OperationOutcome naming the field, and the
  *   same per-instance rate limit (429 with `retryAfterSeconds`);
  * - a send result has cuff-sim's fields, including the DERIVED message name over MLLP;
- * - heart-rate data arrives only at a mock sync run (every 15 minutes), so the last sync time,
+ * - heart-rate data arrives only at a mock sync run (every 15 minutes), so `lastSyncAt` (the newest write),
  *   the windows and their status change together, as they do with health-sync.
  */
 import type {
@@ -178,7 +178,9 @@ export class MockClient implements PulseBridgeApi {
         state: 'connected',
         reason: null,
         notes: [],
-        strandedPreliminary: 0,
+        // health-sync's count is per instance and in memory, so with scale to zero it is
+        // usually null ("not known") between runs; the strip must cope with that.
+        strandedPreliminary: null,
         checkedAt,
         lastSyncAt: new Date(sync).toISOString(),
       },
@@ -249,13 +251,13 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     // The same checks as cuff-sim's parse_request, in the same order: the body, then the rate
     // limit (a typo does not use up a send), then the send.
-    const { transport, sendMalformed } = request;
-    const sample = this.#checkReading(request);
+    const checked = this.#checkReading(request);
     this.#takeToken();
+    const { transport, sendMalformed, sample } = checked;
 
     const at = this.#now();
-    const systolic = request.systolic ?? 118;
-    const diastolic = request.diastolic ?? 76;
+    const systolic = checked.systolic ?? 118;
+    const diastolic = checked.diastolic ?? 76;
     // The mapper's own plausibility check (T12): inside cuff-sim's limits but outside these, a
     // reading is stored with AA and then gets the application-level outcome `out-of-range`.
     const { systolic: ms, diastolic: md } = MAPPER_PLAUSIBLE_RANGE;
@@ -310,9 +312,10 @@ export class MockClient implements PulseBridgeApi {
         ? {
             recorded: false,
             detail:
+              // cuff-sim's own sentences (services/cuff-sim/cuff_sim/audit.py, record_attempt).
               failure === 'build'
-                ? 'build-failed: the AuditEvent could not be built'
-                : 'write-failed: the audit FHIR store did not accept the AuditEvent',
+                ? 'the attempt could not be expressed as an AuditEvent'
+                : 'the audit store write failed (HTTP 503)',
           }
         : { recorded: true },
     };
@@ -546,71 +549,73 @@ export class MockClient implements PulseBridgeApi {
   }
 
   /**
-   * cuff-sim's request rules (services/cuff-sim/README.md): integers from 1 to 400 mm[Hg],
-   * systolic above diastolic, required unless `sendMalformed` is set (then still checked if
-   * present); a sample must exist and list the transport. Returns the sample, or null for a
-   * built reading. Throws `CuffSendError` 422 naming each wrong field, as cuff-sim does.
+   * cuff-sim's `parse_request` (services/cuff-sim/cuff_sim/request.py), check for check, with
+   * its exact issue texts: each issue is a field in `expression` and a fragment in `diagnostics`
+   * ("is required"), all collected before refusing with 422 (`code` `invalid`). In its order:
+   * - not a JSON object: 400, `body` "must be a JSON object";
+   * - any other key: `body` "only these fields are accepted: ...";
+   * - `transport` absent means `mllp`; anything but "mllp" or "https" (null included) is refused;
+   * - `sendMalformed` null or absent, or a known sample name that lists the transport;
+   * - `systolic`/`diastolic`: null counts as absent; else a JSON integer (not a boolean) from
+   *   1 to 400; both required when `sendMalformed` is null or absent;
+   * - when both are valid, systolic must be above diastolic, reported with the other issues.
    */
-  #checkReading(request: CuffReadingRequest): MockSampleBehaviour | null {
+  #checkReading(body: unknown): {
+    transport: Transport;
+    sendMalformed: string | null;
+    sample: MockSampleBehaviour | null;
+    systolic: number | null;
+    diastolic: number | null;
+  } {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      throw cuffRefusal(400, [['body', 'must be a JSON object']], 'invalid');
+    }
+    const b = body as Record<string, unknown>;
     const issues: [field: string, text: string][] = [];
     const { min, max } = CUFF_SERVICE_LIMITS;
-    const { transport, sendMalformed } = request;
-    // A caller outside TypeScript can send anything; cuff-sim refuses any other transport.
-    if (!(['mllp', 'https'] as unknown[]).includes(transport)) {
-      issues.push(['transport', 'transport must be "mllp" or "https"']);
+    if (Object.keys(b).some((k) => !(CUFF_FIELDS as readonly string[]).includes(k))) {
+      issues.push(['body', `only these fields are accepted: ${CUFF_FIELDS.join(', ')}`]);
     }
+    const rawTransport = 'transport' in b ? b.transport : 'mllp';
+    const transport = rawTransport === 'mllp' || rawTransport === 'https' ? rawTransport : null;
+    if (transport === null) issues.push(['transport', 'must be "mllp" or "https"']);
+
+    const rawSample = b.sendMalformed ?? null;
     let sample: MockSampleBehaviour | null = null;
-    if (sendMalformed !== null) {
-      const found = MOCK_SAMPLES.find((s) => s.name === sendMalformed);
-      if (!found)
-        issues.push(['sendMalformed', 'sendMalformed must name a sample from GET /cuff/samples']);
-      else if (!found.transports.includes(transport)) {
-        issues.push(['sendMalformed', 'this sample cannot be sent over the chosen transport']);
+    if (rawSample !== null) {
+      const found = MOCK_SAMPLES.find((s) => s.name === rawSample);
+      if (typeof rawSample !== 'string' || !found) {
+        issues.push(['sendMalformed', 'must be the name of a malformed sample, or null']);
+      } else if (transport !== null && !found.transports.includes(transport)) {
+        issues.push(['sendMalformed', `this sample cannot be sent over ${transport}`]);
       } else sample = found;
     }
-    const values: [field: 'systolic' | 'diastolic', value: unknown][] = [
-      ['systolic', request.systolic],
-      ['diastolic', request.diastolic],
-    ];
-    for (const [field, value] of values) {
-      if (value === undefined) {
-        if (sendMalformed === null) issues.push([field, `${field} is required`]);
-      } else if (
-        typeof value !== 'number' ||
-        !Number.isInteger(value) ||
-        value < min ||
-        value > max
-      ) {
-        issues.push([field, `${field} must be a whole number from ${min} to ${max} mm[Hg]`]);
+
+    const pressure = (field: 'systolic' | 'diastolic'): number | null => {
+      const value = b[field] ?? null;
+      if (value === null) return null;
+      if (typeof value !== 'number' || !Number.isInteger(value)) {
+        issues.push([field, 'must be a whole number of mm[Hg]']);
+        return null;
+      }
+      if (value < min || value > max) {
+        issues.push([field, `must be from ${min} to ${max} mm[Hg]`]);
+        return null;
+      }
+      return value;
+    };
+    const systolic = pressure('systolic');
+    const diastolic = pressure('diastolic');
+    if (rawSample === null) {
+      for (const field of ['systolic', 'diastolic'] as const) {
+        if ((b[field] ?? null) === null) issues.push([field, 'is required']);
       }
     }
-    const { systolic, diastolic } = request;
-    if (
-      issues.length === 0 &&
-      systolic !== undefined &&
-      diastolic !== undefined &&
-      systolic <= diastolic
-    ) {
-      issues.push(['systolic', 'systolic must be above diastolic']);
+    if (systolic !== null && diastolic !== null && systolic <= diastolic) {
+      issues.push(['systolic', 'must be greater than diastolic']);
     }
-    if (issues.length > 0) {
-      const outcome: OperationOutcome = {
-        resourceType: 'OperationOutcome',
-        issue: issues.map(([field, text]) => ({
-          severity: 'error',
-          code: 'invalid',
-          diagnostics: text,
-          expression: [field],
-        })),
-      };
-      throw new CuffSendError(
-        'invalid-input',
-        422,
-        issues.map(([, text]) => `${text[0]?.toUpperCase() ?? ''}${text.slice(1)}.`).join(' '),
-        outcome,
-      );
-    }
-    return sample;
+    if (issues.length > 0 || transport === null) throw cuffRefusal(422, issues, 'invalid');
+    return { transport, sendMalformed: sample?.name ?? null, sample, systolic, diastolic };
   }
 
   /** cuff-sim's token bucket: `burst` sends back to back, refilled at `perMinute`. */
@@ -627,23 +632,7 @@ export class MockClient implements PulseBridgeApi {
     }
     // Retry-After: whole seconds until a token is back, rounded up (RFC 9110 section 10.2.3).
     const wait = Math.max(1, Math.ceil((1 - this.#tokens) / perMs / 1000));
-    throw new CuffSendError(
-      'rate-limited',
-      429,
-      'Too many sends; try again later.',
-      {
-        resourceType: 'OperationOutcome',
-        issue: [
-          {
-            severity: 'error',
-            code: 'throttled',
-            diagnostics: 'too many sends; try again later',
-            expression: ['body'],
-          },
-        ],
-      },
-      wait,
-    );
+    throw cuffRefusal(429, [['body', 'too many sends; try again later']], 'throttled', wait);
   }
 
   async #lookup(reference: string): Promise<Observation> {
@@ -898,6 +887,34 @@ export class MockClient implements PulseBridgeApi {
       });
     }
   }
+}
+
+/** The request fields cuff-sim accepts (`FIELDS` in request.py), in its order. */
+const CUFF_FIELDS = ['systolic', 'diastolic', 'transport', 'sendMalformed'] as const;
+
+/**
+ * A refusal exactly as cuff-sim writes it (`_operation_outcome` in app.py): one issue per
+ * (field, fragment), all with the same `code`, turned into the typed error the HTTP client
+ * would make of it.
+ */
+function cuffRefusal(
+  status: number,
+  issues: [field: string, text: string][],
+  code: string,
+  retryAfter: number | null = null,
+): ApiError {
+  const outcome: OperationOutcome = {
+    resourceType: 'OperationOutcome',
+    issue: issues.map(([field, text]) => ({
+      severity: 'error',
+      code,
+      diagnostics: text,
+      expression: [field],
+    })),
+  };
+  return CuffSendError.from(
+    new ApiError(status, `The server answered HTTP ${status}.`, outcome, retryAfter),
+  );
 }
 
 /**

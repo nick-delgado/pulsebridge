@@ -157,6 +157,38 @@ describe('status: health-sync states', () => {
   });
 });
 
+describe('status: odd bodies and health-sync names', () => {
+  it('does not throw on a body that is not an object; reads as not known', async () => {
+    for (const body of [null, [], 'x', 5]) {
+      const status = await client(json(200, body)).getStatus();
+      expect(status.watchSync.state, JSON.stringify(body)).toBe('unknown');
+      expect(status.fhirStore.reachable).toBe(false);
+      expect(status.openemr.reachable).toBe(false);
+      expect(status.observationCounts).toEqual({ watch: 0, cuff: 0 });
+    }
+  });
+
+  it("accepts health-sync's own name `googleHealth` when `state` is absent", async () => {
+    const s = await client(
+      json(200, { watchSync: { googleHealth: 'reconnect-needed' } }),
+    ).getStatus();
+    expect(s.watchSync.state).toBe('reconnect-needed');
+    // `state` wins when both are there.
+    const both = await client(
+      json(200, { watchSync: { state: 'connected', googleHealth: 'reconnect-needed' } }),
+    ).getStatus();
+    expect(both.watchSync.state).toBe('connected');
+  });
+
+  it('only an explicit true is reachable', async () => {
+    const s = await client(
+      json(200, { fhirStore: { reachable: 'yes' }, openemr: { reachable: true, checkedAt: 't' } }),
+    ).getStatus();
+    expect(s.fhirStore.reachable).toBe(false);
+    expect(s.openemr).toEqual({ reachable: true, checkedAt: 't', detail: null });
+  });
+});
+
 describe('cuff send: result fields', () => {
   const RESULT = {
     attemptId: 'ae-1',
@@ -202,6 +234,22 @@ describe('cuff send: result fields', () => {
     expect(none.messageNameSource).toBeNull();
   });
 
+  it('works an unknown or missing result out from the ACK instead of passing it on', async () => {
+    const cases: [unknown, unknown, string][] = [
+      ['stored', RESULT.ack, 'accepted'],
+      [undefined, { ...RESULT.ack, code: 'AE' }, 'rejected'],
+      [42, { received: false, why: 'timeout' }, 'no-acknowledgment'],
+      ['accepted?', undefined, 'no-acknowledgment'],
+    ];
+    for (const [result, ack, expected] of cases) {
+      const r = await client(json(200, { ...RESULT, result, ack })).submitCuffReading(READING);
+      expect(r.result, JSON.stringify([result, ack])).toBe(expected);
+    }
+    // A known value is kept as sent.
+    const r = await client(json(200, { ...RESULT, result: 'rejected' })).submitCuffReading(READING);
+    expect(r.result).toBe('rejected');
+  });
+
   it('reads an unknown framing as null rather than inventing one', async () => {
     const r = await client(json(200, { ...RESULT, framing: 'weird' })).submitCuffReading(READING);
     expect(r.framing).toBeNull();
@@ -213,60 +261,125 @@ describe('cuff send: result fields', () => {
 });
 
 describe('cuff send: refusals are typed', () => {
-  const outcome = (code: string, field: string, text: string) => ({
+  /**
+   * Bodies exactly as cuff-sim writes them: `_operation_outcome` in services/cuff-sim/cuff_sim/
+   * app.py (one issue per field, `diagnostics` a fragment, the field in `expression`), with the
+   * texts from request.py and app.py and the statuses its README and tests/test_app.py assert.
+   */
+  const fhir = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'Content-Type': 'application/fhir+json', ...headers },
+    });
+  const oo = (code: string, issues: [string, string][]) => ({
     resourceType: 'OperationOutcome',
-    issue: [{ severity: 'error', code, diagnostics: text, expression: [field] }],
+    issue: issues.map(([name, text]) => ({
+      severity: 'error',
+      code,
+      diagnostics: text,
+      expression: [name],
+    })),
   });
-
-  it.each([
-    [400, 'invalid-body', 'invalid'],
-    [413, 'too-large', 'too-long'],
-    [422, 'invalid-input', 'invalid'],
-    [500, 'server-error', 'structure'],
-    [504, 'no-answer', 'timeout'],
-  ] as const)('%i becomes CuffSendError %s', async (status, reason, code) => {
-    const error: unknown = await client(json(status, outcome(code, 'body', 'refused')))
+  const refuse = async (response: Response): Promise<CuffSendError> => {
+    const error: unknown = await client(response)
       .submitCuffReading(READING)
       .catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(CuffSendError);
+    if (!(error instanceof CuffSendError)) throw new Error(`not a CuffSendError: ${String(error)}`);
     expect(error).toBeInstanceOf(ApiError);
-    expect(error).toMatchObject({ status, reason, message: 'refused' });
+    return error;
+  };
+
+  it('400: the body is not a JSON object', async () => {
+    const e = await refuse(fhir(400, oo('invalid', [['body', 'must be a JSON object']])));
+    expect([e.status, e.reason, e.message, e.fields]).toEqual([
+      400,
+      'invalid-body',
+      'body: must be a JSON object',
+      ['body'],
+    ]);
   });
 
-  it('429 carries Retry-After as seconds', async () => {
-    const error: unknown = await client(
-      json(429, outcome('throttled', 'body', 'too many sends; try again later'), {
-        'Retry-After': '7',
+  it('413: over 16 KiB', async () => {
+    const e = await refuse(
+      fhir(413, oo('too-long', [['body', 'the body must be at most 16384 bytes']])),
+    );
+    expect([e.reason, e.message]).toEqual([
+      'too-large',
+      'body: the body must be at most 16384 bytes',
+    ]);
+  });
+
+  it('422 with two fields: each fragment is put after its field, never run together', async () => {
+    const e = await refuse(
+      fhir(
+        422,
+        oo('invalid', [
+          ['systolic', 'is required'],
+          ['diastolic', 'is required'],
+        ]),
+      ),
+    );
+    expect(e.reason).toBe('invalid-input');
+    expect(e.fields).toEqual(['systolic', 'diastolic']);
+    expect(e.message).toBe('systolic: is required; diastolic: is required');
+  });
+
+  it('422 for bounds and order', async () => {
+    const e = await refuse(
+      fhir(
+        422,
+        oo('invalid', [
+          ['diastolic', 'must be from 1 to 400 mm[Hg]'],
+          ['systolic', 'must be greater than diastolic'],
+        ]),
+      ),
+    );
+    expect(e.message).toBe(
+      'diastolic: must be from 1 to 400 mm[Hg]; systolic: must be greater than diastolic',
+    );
+  });
+
+  it('429: rate-limited, with Retry-After in seconds', async () => {
+    const e = await refuse(
+      fhir(429, oo('throttled', [['body', 'too many sends; try again later']]), {
+        'Retry-After': '10',
       }),
-    )
-      .submitCuffReading(READING)
-      .catch((e: unknown) => e);
-    expect(error).toMatchObject({ status: 429, reason: 'rate-limited', retryAfterSeconds: 7 });
+    );
+    expect([e.reason, e.retryAfterSeconds, e.message]).toEqual([
+      'rate-limited',
+      10,
+      'body: too many sends; try again later',
+    ]);
   });
 
-  it('a 422 names every wrong field and joins every diagnostic', async () => {
+  it('500: a built message failed validation, or a bug', async () => {
+    const validation = await refuse(
+      fhir(
+        500,
+        oo('structure', [['body', 'the built message failed HL7v2 validation; nothing was sent']]),
+      ),
+    );
+    expect([validation.reason, validation.outcome?.issue[0]?.code]).toEqual([
+      'server-error',
+      'structure',
+    ]);
+    const bug = await refuse(
+      fhir(500, oo('exception', [['body', 'internal error; see the logs']])),
+    );
+    expect(bug.message).toBe('body: internal error; see the logs');
+  });
+
+  it('504 without a body: no-answer, with a generic message', async () => {
+    const e = await refuse(new Response('upstream request timeout', { status: 504 }));
+    expect([e.reason, e.message]).toEqual(['no-answer', 'The server answered HTTP 504.']);
+  });
+
+  it('an issue without an expression is its diagnostics alone', async () => {
     const body = {
       resourceType: 'OperationOutcome',
-      issue: [
-        {
-          severity: 'error',
-          code: 'invalid',
-          diagnostics: 'systolic: 1 to 400.',
-          expression: ['systolic'],
-        },
-        {
-          severity: 'error',
-          code: 'invalid',
-          diagnostics: 'diastolic: 1 to 400.',
-          expression: ['diastolic'],
-        },
-      ],
+      issue: [{ severity: 'error', code: 'invalid', diagnostics: 'Something is wrong.' }],
     };
-    const error = (await client(json(422, body))
-      .submitCuffReading(READING)
-      .catch((e: unknown) => e)) as CuffSendError;
-    expect(error.fields).toEqual(['systolic', 'diastolic']);
-    expect(error.message).toBe('systolic: 1 to 400. diastolic: 1 to 400.');
+    expect((await refuse(fhir(422, body))).message).toBe('Something is wrong.');
   });
 
   it('another status stays a plain ApiError', async () => {
@@ -278,10 +391,39 @@ describe('cuff send: refusals are typed', () => {
   });
 
   it('only the cuff route is typed: another route keeps a plain ApiError for 422', async () => {
-    const error: unknown = await client(json(422, outcome('invalid', 'x', 'no')))
+    const error: unknown = await client(fhir(422, oo('invalid', [['x', 'no']])))
       .share({ observations: [] })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).not.toBeInstanceOf(CuffSendError);
+  });
+});
+
+describe('Retry-After', () => {
+  it.each([
+    ['10', 10],
+    [' 7 ', 7],
+    ['0', 0],
+    ['-5', null],
+    ['1.5', null],
+    ['10abc', null],
+    ['Wed, 21 Oct 2026 07:28:00 GMT', null],
+    ['', null],
+  ])('"%s" is %s seconds', async (header, expected) => {
+    const e: unknown = await client(json(429, {}, { 'Retry-After': header }))
+      .submitCuffReading(READING)
+      .catch((x: unknown) => x);
+    expect((e as ApiError).retryAfterSeconds).toBe(expected);
+  });
+
+  it('applies to the login route too', async () => {
+    const e: unknown = await client(json(429, {}, { 'Retry-After': '10abc' }))
+      .login('pw')
+      .catch((x: unknown) => x);
+    expect(e).toMatchObject({ reason: 'rate-limited', retryAfterSeconds: null });
+    const ok: unknown = await client(json(429, {}, { 'Retry-After': '30' }))
+      .login('pw')
+      .catch((x: unknown) => x);
+    expect(ok).toMatchObject({ retryAfterSeconds: 30 });
   });
 });

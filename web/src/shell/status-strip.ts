@@ -74,11 +74,13 @@ function syncItem(sync: WatchSyncStatus, now: number): HTMLLIElement {
       ? `The connection check could not finish${because(sync.reason)}; it is retried on the next load.`
       : undefined;
   if (sync.lastSyncAt === null) {
-    return item('neutral', 'Watch sync', 'Never synced', unknown);
+    return item('neutral', 'Watch data', 'None yet', unknown);
   }
   return item(
     unknown ? 'neutral' : 'ok',
-    'Last sync',
+    // `lastSyncAt` is the newest heart-rate WRITE, not the last run: health-sync writes only
+    // what changed, so while the watch is off the wrist this time stays put (contract.ts).
+    'Newest watch data',
     relativeTime(sync.lastSyncAt, now),
     unknown,
     sync.lastSyncAt,
