@@ -1,0 +1,12 @@
+# Dependencies, installed by `npm ci` from package-lock.json.
+node_modules/
+# Build output: `npm run build` (HTTP mode) and `npm run build:mock` (the browser test's build).
+dist/
+dist-mock/
+# Playwright and Vitest output.
+test-results/
+playwright-report/
+coverage/
+# Local Vite env files can hold a developer's proxy URL; the committed example is .env.example.
+.env.local
+.env.*.local

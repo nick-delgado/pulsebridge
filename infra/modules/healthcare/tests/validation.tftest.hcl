@@ -27,6 +27,23 @@ run "rejects_bad_name_prefix" {
   expect_failures = [var.name_prefix]
 }
 
+run "rejects_bad_audit_store_name" {
+  command = plan
+  variables {
+    audit_fhir_store_name = "audit store"
+  }
+  expect_failures = [var.audit_fhir_store_name]
+}
+
+run "rejects_audit_store_named_like_the_main_store" {
+  command = plan
+  variables {
+    name_prefix           = "pb-dev"
+    audit_fhir_store_name = "pb-dev-fhir"
+  }
+  expect_failures = [var.audit_fhir_store_name]
+}
+
 run "rejects_bad_location" {
   command = plan
   variables {

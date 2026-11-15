@@ -17,6 +17,10 @@ mock_provider "google" {
     values = { id = "projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir" }
   }
   override_resource {
+    target = google_healthcare_fhir_store.audit
+    values = { id = "projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir-audit" }
+  }
+  override_resource {
     target = google_healthcare_hl7_v2_store.this
     values = { id = "projects/example-project/locations/us-central1/datasets/pulsebridge/hl7V2Stores/pulsebridge-hl7v2" }
   }
@@ -72,6 +76,65 @@ run "fhir_store_is_r4_with_chosen_settings" {
   assert {
     condition     = google_healthcare_fhir_store.this.dataset == "projects/example-project/locations/us-central1/datasets/pulsebridge"
     error_message = "The FHIR store must live in the module's dataset."
+  }
+}
+
+# D15: the audit store holds only send-attempt AuditEvents (T31 writes PUT AuditEvent/<id>).
+run "audit_fhir_store_is_r4_with_chosen_settings" {
+  command = apply
+
+  assert {
+    condition     = google_healthcare_fhir_store.audit.name == "pulsebridge-fhir-audit" && google_healthcare_fhir_store.audit.name != google_healthcare_fhir_store.this.name
+    error_message = "The audit store must default to <name_prefix>-fhir-audit, separate from the main store."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.version == "R4"
+    error_message = "The audit store must be R4."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.enable_update_create == true
+    error_message = "update-create must be on in the audit store: T31 PUTs AuditEvents to deterministic IDs."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.disable_referential_integrity == false
+    error_message = "Referential integrity must stay on in the audit store."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.disable_resource_versioning == false
+    error_message = "Versioning must stay on in the audit store: an overwritten attempt keeps its history."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.enable_history_import == false
+    error_message = "History import must be off in the audit store."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.complex_data_type_reference_parsing == "ENABLED"
+    error_message = "Complex data type reference parsing must be ENABLED explicitly in the audit store."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.default_search_handling_strict == true
+    error_message = "Search handling must default to strict in the audit store."
+  }
+  assert {
+    condition     = length(google_healthcare_fhir_store.audit.notification_configs) == 0 && length(google_healthcare_fhir_store.audit.notification_config) == 0
+    error_message = "The audit store must have no notification config."
+  }
+  assert {
+    condition     = google_healthcare_fhir_store.audit.dataset == "projects/example-project/locations/us-central1/datasets/pulsebridge"
+    error_message = "The audit store must live in the module's dataset."
+  }
+}
+
+run "audit_fhir_store_name_can_be_set" {
+  command = apply
+
+  variables {
+    audit_fhir_store_name = "phr-audit"
+  }
+
+  assert {
+    condition     = google_healthcare_fhir_store.audit.name == "phr-audit" && output.audit_fhir_store_name == "phr-audit"
+    error_message = "audit_fhir_store_name must name the audit store."
   }
 }
 
@@ -174,6 +237,7 @@ run "healthcare_agent_is_publisher_on_ingest_topic_and_nothing_wider" {
         google_pubsub_subscription_iam_member.pubsub_agent_ingest_subscriber.member,
       ] : m if strcontains(m, "gcp-sa-healthcare")],
       [for b in google_healthcare_fhir_store_iam_member.app : b if strcontains(b.member, "gcp-sa-healthcare")],
+      [for b in google_healthcare_fhir_store_iam_member.audit : b if strcontains(b.member, "gcp-sa-healthcare")],
       [for b in google_healthcare_hl7_v2_store_iam_member.app : b if strcontains(b.member, "gcp-sa-healthcare")],
     )) == 0
     error_message = "The Healthcare service agent must hold no other binding in this module."
@@ -205,7 +269,7 @@ run "no_app_bindings_without_service_accounts" {
   command = apply
 
   assert {
-    condition     = length(google_healthcare_fhir_store_iam_member.app) == 0 && length(google_healthcare_hl7_v2_store_iam_member.app) == 0
+    condition     = length(google_healthcare_fhir_store_iam_member.app) == 0 && length(google_healthcare_fhir_store_iam_member.audit) == 0 && length(google_healthcare_hl7_v2_store_iam_member.app) == 0
     error_message = "No store bindings may be created when no service accounts are given."
   }
 }
@@ -217,6 +281,7 @@ run "destroy_deletes_by_default" {
     condition = (
       google_healthcare_dataset.this.deletion_policy == "DELETE" &&
       google_healthcare_fhir_store.this.deletion_policy == "DELETE" &&
+      google_healthcare_fhir_store.audit.deletion_policy == "DELETE" &&
       google_healthcare_hl7_v2_store.this.deletion_policy == "DELETE"
     )
     error_message = "Default deletion_policy must let destroy remove the dataset and stores."
@@ -234,9 +299,10 @@ run "prevent_protects_dataset_and_stores" {
     condition = (
       google_healthcare_dataset.this.deletion_policy == "PREVENT" &&
       google_healthcare_fhir_store.this.deletion_policy == "PREVENT" &&
+      google_healthcare_fhir_store.audit.deletion_policy == "PREVENT" &&
       google_healthcare_hl7_v2_store.this.deletion_policy == "PREVENT"
     )
-    error_message = "deletion_policy = PREVENT must reach the dataset and both stores."
+    error_message = "deletion_policy = PREVENT must reach the dataset and all three stores."
   }
 }
 
@@ -246,6 +312,18 @@ run "outputs_give_paths_consumers_need" {
   assert {
     condition     = output.fhir_base_url == "https://healthcare.googleapis.com/v1/projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir/fhir"
     error_message = "fhir_base_url must be the store's FHIR REST base."
+  }
+  assert {
+    condition = (
+      output.audit_fhir_store_id == "projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir-audit" &&
+      output.audit_fhir_store_name == "pulsebridge-fhir-audit" &&
+      output.audit_fhir_base_url == "https://healthcare.googleapis.com/v1/projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir-audit/fhir"
+    )
+    error_message = "Audit store outputs must give its ID, short name and FHIR REST base."
+  }
+  assert {
+    condition     = output.audit_fhir_base_url != output.fhir_base_url
+    error_message = "The audit base URL must not be the main store's."
   }
   assert {
     condition     = output.hl7v2_ingest_url == "https://healthcare.googleapis.com/v1/projects/example-project/locations/us-central1/datasets/pulsebridge/hl7V2Stores/pulsebridge-hl7v2/messages:ingest"
@@ -281,13 +359,14 @@ run "time_zone_and_labels_reach_resources" {
   assert {
     condition = alltrue([for l in [
       google_healthcare_fhir_store.this.labels,
+      google_healthcare_fhir_store.audit.labels,
       google_healthcare_hl7_v2_store.this.labels,
       google_pubsub_topic.ingest.labels,
       google_pubsub_topic.dead_letter.labels,
       google_pubsub_subscription.ingest.labels,
       google_pubsub_subscription.dead_letter.labels,
     ] : l == tomap({ app = "pulsebridge" })])
-    error_message = "labels must reach both stores, both topics and both subscriptions."
+    error_message = "labels must reach all three stores, both topics and both subscriptions."
   }
 }
 

@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <!--
+      A Content-Security-Policy <meta> is added here at build time by vite.config.ts (not in the
+      dev server, whose hot reload needs inline styles). The hosting layer (Firebase Hosting, D4;
+      task T22) must send the real policy as an HTTP header, which can also set frame-ancestors.
+    -->
+    <title>PulseBridge</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>PulseBridge needs JavaScript.</noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

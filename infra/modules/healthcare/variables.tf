@@ -15,7 +15,7 @@ variable "project_id" {
 }
 
 variable "location" {
-  description = "Cloud Healthcare API location for the dataset and both stores (a region such as \"us-central1\", or a multi-region such as \"us\"). Stored health data stays in this location."
+  description = "Cloud Healthcare API location for the dataset and all its stores (a region such as \"us-central1\", or a multi-region such as \"us\"). Stored health data stays in this location."
   type        = string
   default     = "us-central1"
 
@@ -35,6 +35,27 @@ variable "name_prefix" {
     # Healthcare IDs allow letters, digits, '_' and '-'. 3-30 characters leaves room for suffixes.
     condition     = can(regex("^[a-z][a-z0-9-]{1,28}[a-z0-9]$", var.name_prefix))
     error_message = "name_prefix must be 3-30 characters of lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen."
+  }
+}
+
+variable "audit_fhir_store_name" {
+  description = <<-EOT
+    Name (which is also the ID) of the second FHIR R4 store, which holds only the AuditEvents
+    that record cuff send attempts (D15). null (default) gives "<name_prefix>-fhir-audit".
+    Must differ from the main FHIR store's name, "<name_prefix>-fhir". Changing it replaces
+    the store and deletes its records.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    # Healthcare store IDs: letters, digits, '_', '-' and '.', 1-256 characters.
+    condition     = var.audit_fhir_store_name == null || can(regex("^[A-Za-z0-9_.-]{1,256}$", coalesce(var.audit_fhir_store_name, "x")))
+    error_message = "audit_fhir_store_name must be 1-256 characters of letters, digits, '_', '-' and '.'."
+  }
+  validation {
+    condition     = var.audit_fhir_store_name != "${var.name_prefix}-fhir"
+    error_message = "audit_fhir_store_name must differ from the main FHIR store's name (<name_prefix>-fhir)."
   }
 }
 
@@ -61,7 +82,8 @@ variable "labels" {
 
 variable "deletion_policy" {
   description = <<-EOT
-    What `terraform destroy` (or a replacing apply) may do to the dataset and the two stores.
+    What `terraform destroy` (or a replacing apply) may do to the dataset and its three stores
+    (FHIR, audit FHIR, HL7v2).
     "DELETE" (default) deletes them together with every stored FHIR resource and HL7v2 message,
     so a destroyed dev stack leaves nothing billable. "PREVENT" makes destroy fail instead, which
     suits prod where the data is real. The setting is read from state, so switching from PREVENT
@@ -223,10 +245,12 @@ variable "store_iam_service_accounts" {
       seeder      -> FHIR store: roles/healthcare.fhirResourceEditor
       v2-to-fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;
                      HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)
-      fhir-proxy  -> FHIR store: roles/healthcare.fhirResourceReader;
+      fhir-proxy  -> FHIR store and audit FHIR store: roles/healthcare.fhirResourceReader;
                      HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)
       edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)
-      cuff-sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)
+      cuff-sim    -> audit FHIR store: roles/healthcare.fhirResourceEditor (AuditEvents, D15);
+                     HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport);
+                     nothing on the main FHIR store
     Bindings are chosen by key name only, so Terraform knows at plan time which exist even
     while the emails are still unknown (first apply, accounts not yet created).
   EOT

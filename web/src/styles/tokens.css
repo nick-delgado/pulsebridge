@@ -1,0 +1,82 @@
+/*
+ * Design tokens: the only place colours, spacing and type are defined. Feature styles use these
+ * custom properties, never raw values, so light and dark schemes stay consistent.
+ * System fonts only: no web font is loaded (and the CSP allows none).
+ */
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces and text */
+  --color-bg: #f6f7f9;
+  --color-surface: #ffffff;
+  --color-surface-sunken: #eef0f3;
+  --color-text: #1b1f24;
+  --color-text-muted: #5a6370;
+  --color-border: #d9dde3;
+  /* Boundary of an input or other control: at least 3:1 against the surface (WCAG 1.4.11). */
+  --color-control-border: #7b8490;
+  --color-focus: #1f6feb;
+
+  /* The two sides: episodic (cuff, left) and continuous (watch, right) */
+  --color-episodic: #b4532a;
+  --color-continuous: #1f6f8b;
+
+  /* Figure strokes are muted on purpose: the panels should dominate */
+  --color-figure: #9aa3ae;
+
+  /* States, always paired with words */
+  --color-ok: #1a7f4b;
+  --color-warn: #b25e00;
+  --color-error: #c0392b;
+  --color-neutral: #7b8490;
+
+  /* Primary button */
+  --color-primary: #24476b;
+  --color-primary-text: #ffffff;
+
+  /* Type */
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-md: 1rem;
+  --text-lg: 1.25rem;
+
+  /* Spacing scale (4 px steps) */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+
+  --radius: 8px;
+  --shadow: 0 1px 2px rgb(0 0 0 / 6%);
+  --gutter: 16px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #0f1216;
+    --color-surface: #171b21;
+    --color-surface-sunken: #1e232a;
+    --color-text: #e4e7eb;
+    --color-text-muted: #9aa3ae;
+    --color-border: #2c333c;
+    --color-control-border: #737c88;
+    --color-focus: #58a6ff;
+
+    --color-episodic: #e08a5f;
+    --color-continuous: #5fb6d4;
+    --color-figure: #5d6672;
+
+    --color-ok: #4cc38a;
+    --color-warn: #e3a33b;
+    --color-error: #f0776a;
+    --color-neutral: #8b949e;
+
+    --color-primary: #6ea8e0;
+    --color-primary-text: #0f1216;
+    --shadow: none;
+  }
+}

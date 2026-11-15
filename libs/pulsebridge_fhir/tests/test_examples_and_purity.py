@@ -1,4 +1,4 @@
-"""Committed examples for T08 (T06 AC 7) and the no-network rule."""
+"""Committed examples for T08 (T06 AC 7, T31 AC 6) and the no-network rule."""
 
 import json
 import subprocess
@@ -18,13 +18,18 @@ EXPECTED = {
     "bundle-patient-setup.json",
     "bundle-heart-rate-ingest.json",
     "bundle-blood-pressure-ingest.json",
+    # T31: one cuff send attempt per result shape.
+    "auditevent-send-accepted.json",
+    "auditevent-send-rejected.json",
+    "auditevent-send-no-ack.json",
+    "auditevent-send-unreadable-reply.json",
 }
 
 
 def test_examples_exist_for_every_resource_type():
     assert {p.name for p in EXAMPLES.glob("*.json")} == EXPECTED
     types = {json.loads((EXAMPLES / n).read_text())["resourceType"] for n in EXPECTED}
-    assert types == {"Patient", "Device", "Observation", "Provenance", "Bundle"}
+    assert types == {"Patient", "Device", "Observation", "Provenance", "Bundle", "AuditEvent"}
 
 
 def test_committed_examples_match_the_code():
@@ -45,6 +50,12 @@ def test_examples_are_synthetic():
             if r["resourceType"] == "Patient":
                 assert all(
                     i["value"].startswith(("PB-SYN-", "synthetic-")) for i in r["identifier"]
+                )
+            if r["resourceType"] == "AuditEvent":
+                # The patient by synthetic identifier only; placeholder project and store.
+                assert r["entity"][0]["what"]["identifier"]["value"].startswith("PB-SYN-")
+                assert r["agent"][1]["who"]["identifier"]["value"].startswith(
+                    "projects/example-project/"
                 )
 
 

@@ -135,3 +135,35 @@ check: lint test tf-validate tf-test ## lint + test + tf-validate + tf-test (wha
 clean: ## Remove the venv and tool caches
 	rm -rf $(VENV) .pytest_cache .ruff_cache
 	find . -name __pycache__ -type d -not -path './.worktrees/*' -prune -exec rm -rf {} +
+
+# ---- Dashboard (web/) ---------------------------------------------------------------------------
+# The single-page dashboard is a Node project (Vite + TypeScript); see web/README.md. These targets
+# need Node 22.12 or newer and npm. They are deliberately NOT part of `check`: `check` is the
+# Python and Terraform gate and must keep working on a machine without Node. CI runs the web
+# targets in their own job ("Web (lint, test, build)"); run `make web-check` locally.
+WEB_DIR := web
+NPM ?= npm
+
+.PHONY: web-install web-lint web-test web-browser-test web-build web-check
+
+# `npm ci` installs exactly what package-lock.json lists; the stamp reruns it only when the lockfile
+# changes.
+$(WEB_DIR)/node_modules/.installed: $(WEB_DIR)/package-lock.json
+	cd $(WEB_DIR) && $(NPM) ci --no-audit --no-fund
+	@touch $@
+
+web-install: $(WEB_DIR)/node_modules/.installed ## Install the dashboard's pinned npm packages
+
+web-lint: web-install ## Dashboard: ESLint, Prettier check and TypeScript type check
+	cd $(WEB_DIR) && $(NPM) run lint && $(NPM) run typecheck
+
+web-test: web-install ## Dashboard: unit tests (Vitest)
+	cd $(WEB_DIR) && $(NPM) test
+
+web-browser-test: web-install ## Dashboard: browser test (Playwright, Chromium) against the mock build
+	cd $(WEB_DIR) && $(NPM) run test:browser
+
+web-build: web-install ## Dashboard: production build plus the bundle check
+	cd $(WEB_DIR) && $(NPM) run build
+
+web-check: web-lint web-test web-build web-browser-test ## Every dashboard check (needs Chromium for web-browser-test)

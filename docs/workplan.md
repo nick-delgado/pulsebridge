@@ -33,6 +33,7 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D14 | Cloud Run to the VM | Direct VPC egress into a dedicated subnet (built in T03). The firewall rule for MLLP and OpenEMR HTTPS lives in `project-base`, sourced from that subnet; `edge-vm` adds no rule and needs no public port. |
 | D4 | Dashboard hosting | Firebase Hosting. It has no hourly charge, unlike a bucket behind a load balancer, and its rewrites can put the page and `fhir-proxy` on one origin. Consequences: T22 adds the Firebase Hosting API to `project-base`'s API list and a hosting role to the deployer's roles (both are variables). |
 | D5 | Dashboard framework | Vite and TypeScript with a small chart library; no heavy framework. |
+| D15 | Audit data in its own FHIR store | Send-attempt AuditEvents are written to a second FHIR store. The cuff simulator can write there and has no access to the store with health data; `fhir-proxy` reads both. Chosen over giving the simulator the editor role on the main store, which would also let it read and delete health data. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
 | D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
@@ -188,19 +189,19 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T09 | Synthetic data seeder | T06 | `services/seed/` | todo |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | todo |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
-| T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | in-progress |
+| T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | todo |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6 | `services/fhir-proxy/` (except `share/`) | todo |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
-| T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | in-progress |
-| T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | in-progress |
-| T32 | FHIR store write access for the cuff simulator | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | in-progress |
+| T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
+| T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
+| T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
 - AC: CI fails when an example resource is made invalid (demonstrated in the task summary).
-- The examples are the nine files in `libs/pulsebridge_fhir/examples/` (three Bundles: Patient
-  setup, heart-rate ingest, blood-pressure ingest). Expected validator warnings, not errors: the
+- The examples are all the files in `libs/pulsebridge_fhir/examples/` (including three Bundles:
+  Patient setup, heart-rate ingest, blood-pressure ingest; and the send-attempt AuditEvents). Expected validator warnings, not errors: the
   heart-rate minimum and maximum component codes and the local `urn:pulsebridge:*` code systems.
 
 **T09 Synthetic data seeder.** Backs the `use_synthetic_data` flag: generates plausible heart-rate
@@ -276,7 +277,8 @@ parse; map; write to FHIR; patch the outcome labels; acknowledge.
 - AC: a notification whose `msgType` attribute is `ACK` is acknowledged and ignored.
 - AC: every `hl7apy` exception, including an unsupported version, becomes an `error` outcome, and
   a message that no longer exists (404) is acknowledged, not retried.
-- AC: the `Provenance` target is the message name from the notification.
+- AC: the `Provenance` source entity is the message name from the notification (its target is
+  the Observation).
 - AC: unknown OBX-3 code, missing OBX-14 and non-numeric OBX-5 each give outcome `error` with a
   distinct reason and write no Observation.
 - AC: on any mapping error the push is still acknowledged; the handler never raises to Pub/Sub
@@ -306,8 +308,15 @@ HTTPS ingest; returns the ACK.
 - AC: segments end with a carriage return all the way to the wire; nothing converts them to line feeds.
 - AC: inputs outside bounds are rejected; no free text reaches the message.
 - AC: every send attempt, including a rejected or unacknowledged one and a "send malformed"
-  one, is recorded as an `AuditEvent` built with T31 and written to the FHIR store (D12). A
+  one, is recorded as an `AuditEvent` built with T31 and written to the audit FHIR store (D12,
+  D15). The simulator builds that resource itself from validated values and never forwards FHIR
+  supplied by a caller. A
   failure to record is logged and reported in the response, but never hides the send's result.
+- AC: uses the shared `pulsebridge_gcp` client (T12) for HTTPS ingest and for writing the
+  AuditEvent. A 401, 403 or 404 from the API and a network failure are recorded as "no
+  acknowledgment" with one of T31's reasons, never raised to the caller.
+- AC: every reading gets a new, unique control ID (MSH-10): the mapper keys the Observation on
+  it, so a reused ID would overwrite an earlier reading.
 - AC: rate-limited; both transports covered by tests against a fake listener.
 - AC: it has no login of its own and relies on Cloud Run's invoker check; the README says so.
 
@@ -320,10 +329,18 @@ rate limit. It also forwards cuff requests to the cuff simulator (D10).
 - AC: the messages log lists stored HL7v2 messages newest first by send time and filters by the
   outcome labels; a message with no outcome label is reported as "pending". For a stored message
   the commit-level acknowledgment is `AA` by definition.
-- AC: the messages log is built from the send-attempt `AuditEvent`s (D12), newest first, joined
+- AC: the messages log is built from the send-attempt `AuditEvent`s in the audit FHIR store
+  (D12, D15), newest first, joined
   to the stored message and its outcome labels where the send was accepted. Rejected and
   unacknowledged attempts appear with their reason and raw ACK; a stored message with no
   AuditEvent (for example one sent straight to the adapter) is still listed.
+- AC: the routes implement, or deliberately amend, the contract the dashboard shell proposes in
+  `web/README.md` and `web/src/api/contract.ts`, and settle its open questions (whether searches
+  are pinned to the configured patient; the date-boundary rule for heart-rate windows; where the
+  heart-rate source JSON and the raw HL7v2 text of a valid send come from; where FHIR
+  transaction rows come from). Any change to the contract is reported so the dashboard's client
+  and mock can follow.
+- AC: only the login route is unauthenticated; the cuff route can answer 429 with `Retry-After`.
 - AC: unsupported search parameters return a FHIR `OperationOutcome`, not a pass-through.
 - AC: the `CapabilityStatement` lists exactly what is implemented (test compares the two).
 - AC: unauthenticated requests are rejected.
@@ -357,6 +374,9 @@ Bundle endpoint and ignores conditional create.
   (D13). It reads by id, not by search: spike S1 found the patient-and-category search returns
   placeholder Observations. The client's scopes include the reads this needs and nothing more.
 - AC: no link to OpenEMR's screens is returned; they are not reachable from the internet.
+- AC: failures follow the dashboard contract: a share refused before OpenEMR is called (for
+  example an incomplete Patient, with what is missing) is a 422 with an `OperationOutcome`;
+  OpenEMR unreachable is a 502; a failure part-way returns the steps completed so far.
 - AC: the assertion's audience comes from configuration (OpenEMR's `site_addr_oath` value).
 - AC: the trace returned to the dashboard never contains the private key, the signed assertion
   or the full token.
@@ -386,17 +406,22 @@ the simulator can send. Pure Python, no GCP calls.
 - AC: a function reads an AuditEvent back into the fields the messages log needs.
 - AC: an example is added to `libs/pulsebridge_fhir/examples/` for the validator (T08).
 
-**T32 FHIR store write access for the cuff simulator.** The simulator writes AuditEvents (D12),
-so its service account needs to create resources in the FHIR store.
-- AC: `cuff-sim` gets the narrowest predefined role that allows it on the FHIR store only, and
-  nothing on any other resource; the module READMEs' tables are updated.
-- AC: `fhir-proxy` remains read-only on the FHIR store; a test asserts both.
+**T32 Audit FHIR store for send attempts.** The simulator writes AuditEvents (D12). So that it
+has no access to the store holding health data, they go to a second, separate FHIR store (D15).
+- AC: the healthcare module creates a second FHIR R4 store for audit data, with the same
+  deletion behaviour as the first and its IDs and paths as outputs.
+- AC: `cuff-sim` can write to the audit store and has no binding at all on the health-data
+  store; `fhir-proxy` is read-only on both stores; no other workload has access to the audit
+  store. Tests assert each of these.
+- AC: a static check fails if the module declares any FHIR or HL7v2 store IAM resource other
+  than the ones driven by the role table, or any authoritative binding or policy.
+- AC: the module READMEs say plainly what each role on each store allows, including reading.
 
 ## Wave 3: dashboard features and infrastructure for services
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/` | todo |
+| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | todo |
 | T18 | Dashboard: cuff simulator and left trace panel | T16 | `web/src/cuff/` | todo |
 | T19 | Dashboard: share action and messages log | T16 | `web/src/share/`, `web/src/messages/` | todo |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | todo |
@@ -405,9 +430,15 @@ so its service account needs to create resources in the FHIR store.
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | todo |
 
-**T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief.
+**T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
+task fills its own directory through the mount function and slots defined by the shell (T16) and
+follows `web/README.md`: the ownership table, the typed client, the selection store, the
+data-changed notification and the polling convention for pending outcomes. Only T17 may add a
+dependency (the chart library). A task that needs a change to the shared client, the mock, the
+contract or the shell reports it to the orchestrator instead of editing those files.
 - AC (T17): 24 h, 7 d and 30 d windows of five-minute averages; min, mean and max for the window;
-  selecting a point fills the trace panel with that roll-up window.
+  selecting a point fills the trace panel with that roll-up window. A window that is not `final`
+  is shown as provisional and is selected as not shareable, with the reason.
 - AC (T18): bounded inputs, transport toggle, "send malformed" checkbox, readings list with ACK
   code, three trace tabs; the trace shows the commit-level acknowledgment and the application-level
   outcome as two separately labelled items.
@@ -421,6 +452,11 @@ so its service account needs to create resources in the FHIR store.
 **T20 Module `ingestion`.** Cloud Run services `health-sync` and `v2-to-fhir`, Scheduler job,
 OIDC invoker bindings.
 - AC: services scale to zero and are not publicly invocable; images are referenced by digest.
+- AC: `v2-to-fhir` gets the environment variables listed in its README, and Pub/Sub pushes to
+  its `/pubsub/hl7v2` route; a bad store ID stops the service starting, so it fails the deploy.
+- AC: there is a documented way to replay the dead-letter subscription. A message whose
+  notification was dead-lettered (for example because a role was missing) stays "pending"
+  until it is replayed; the README says how to find and replay such messages.
 
 **T21 Module `edge-vm`.** e2-micro, startup script, swap file, persistent disk, MLLP adapter and
 MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in `project-base`
@@ -480,6 +516,9 @@ registration script.
 **T24 Container build pipeline.** Dockerfiles and a Cloud Build config that builds on tag and
 reports image digests.
 - AC: images run as a non-root user; a build prints the digest to put in `tfvars`.
+- AC: each image installs the local libraries it needs from `libs/` before the service; they
+  are declared by name only and are not on PyPI. `v2-to-fhir` starts with the gunicorn command
+  in its README and honours `PORT`.
 
 ## Wave 4: integration, CI/CD and documentation
 
