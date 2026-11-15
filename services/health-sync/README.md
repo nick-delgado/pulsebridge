@@ -370,15 +370,27 @@ runs twelve consecutive runs and checks no window is written more than twice.
 ### Amendments
 
 R4 `amended`: "Subsequent to being Final, the observation has been modified". A window already
-stored `final` whose values change (a late sample arrived more than 60 minutes after the window
-ended) should be written `amended`. **T06's `heart_rate_transaction`, which this service must use,
-cannot write `amended`**: it gives each window `final` or `preliminary` from the cutoff. Until it
-can, such a window is written **`final` with the new values: a silent amendment.** The run counts
-them (`windows_amended`), and the store's version history keeps the earlier values. The API change
-proposed for T06 is a keyword on `heart_rate_transaction` (and `heart_rate_resources`):
-`amended: Collection[datetime] = ()`, the UTC start times of windows to write with status
-`amended` instead of `final`. (T06's lower-level `build_heart_rate_observation` already accepts
-`amended`.)
+stored `final` (or `amended`) whose values change (a late sample arrived more than 60 minutes
+after the window ended) is written **`amended`** with the new values (T33). The plan
+(`stored.plan_writes`) collects those windows' keys, and each Bundle passes their start times to
+T06's `heart_rate_transaction(..., amended=...)`. The Observation keeps its key, so the
+conditional update replaces the stored one; the store's version history keeps the earlier
+values. The run counts them (`windows_amended`), and they are also counted in `windows_final`
+(complete windows: `final` or `amended`).
+
+- **Amended again.** A window stored `amended` whose values change again is written `amended`
+  again; with the same values it is left alone (`windows_unchanged`).
+- **Not amended: a final window that is incomplete again.** If the cutoff moves back between
+  runs (for example `FINAL_AFTER_MINUTES` is raised), a window stored `final` can be inside the
+  "still filling" part of the range. T06 refuses `amended` for a window that is not complete
+  (it would claim the data is settled), so such a window is written `preliminary` with its new
+  values and counted as `windows_changed`.
+- **When the read fails** (`stored_read` not `ok`), nothing is known about what is stored, so
+  every window is written with the status the cutoff gives (`final` or `preliminary`), as
+  before: a window that was `amended` goes back to `final` until its values change again.
+- **The dashboard** treats `amended` like other non-final statuses: drawn on the solid line,
+  described as "status amended: not shared (only final is)" (`web/src/heart-rate`). So an
+  amended window cannot be shared with the clinic (T15 shares only `final`).
 
 **Longer-term option, not built:** write each window by a deterministic id
 (`PUT Observation/<key>`, update-as-create) instead of a conditional update. It would let the

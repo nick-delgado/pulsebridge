@@ -132,8 +132,8 @@ Fallback, matching decision D11 (not implemented):
 | `patient_for_sharing(stored)` | The Patient to send to OpenEMR: PT identifier, official name, gender, birth date only. |
 | `build_ingest_bundle`, `build_setup_bundle` | The only two ways to make a Bundle (see above). |
 | `Write` (`UPDATE`, `CREATE_IF_ABSENT`), `request_for(resource, write)` | The two write modes, and the request each implies for a resource. |
-| `heart_rate_transaction(points, *, patient, device, data_source, tz, recorded, complete_before, assembler="PulseBridge health-sync")` | `health-sync`: roll-up JSON to an ingest Bundle. |
-| `heart_rate_resources(windows, *, patient, device, data_source, tz, recorded, complete_before, assembler=…)` | The same, as a list of built Observations and Provenance, for a caller assembling its own ingest Bundle. |
+| `heart_rate_transaction(points, *, patient, device, data_source, tz, recorded, complete_before, amended=(), assembler="PulseBridge health-sync")` | `health-sync`: roll-up JSON to an ingest Bundle. `amended`: start times of windows to write `amended` (T33). |
+| `heart_rate_resources(windows, *, patient, device, data_source, tz, recorded, complete_before, amended=(), assembler=…)` | The same, as a list of built Observations and Provenance, for a caller assembling its own ingest Bundle. |
 | `blood_pressure_transaction(reading, *, patient, device, source, recorded, assembler="PulseBridge v2-to-fhir", status="final")` | `v2-to-fhir`: one cuff reading to an ingest Bundle. |
 | `patient_setup_transaction(patient, *, devices=())` | Setup: the full Patient as an upsert. |
 | `window_from_rollup(point)`, `parse_google_utc_offset("-18000s")`, `window_status(window, complete_before)` | Google helpers. |
@@ -178,6 +178,7 @@ bundle = heart_rate_transaction(
     tz=ZoneInfo(configured_time_zone),              # IANA zone, e.g. "America/New_York"
     recorded=now_ms(),                              # pulsebridge_fhir.now_ms: UTC, whole ms
     complete_before=start_of_next_overlap,          # windows ending later are "preliminary"
+    amended=changed_final_starts,                   # stored final, values changed (T33)
 )
 ```
 
@@ -281,6 +282,18 @@ A five-minute window can still gain samples after a sync (the watch uploads late
 pass `None` only to declare every window complete): a window whose end is after that instant is
 written `preliminary`. T10 should pass the start of the overlap it will re-request on its next
 run; that run rewrites the same Observation (same key) as `final` once the window is complete.
+
+`amended`: "Subsequent to being Final, the observation has been modified". A window that was
+already written `final` can still change (a sample uploaded hours late). `amended=` (T33, on
+`heart_rate_transaction` and `heart_rate_resources`) takes the start times of such windows, as
+time-zone-aware datetimes compared as UTC instants, and writes them `amended` instead of
+`final`, under the same key. The library cannot know what is stored, so the caller says which
+windows those are. Two kinds of start are **refused** (`FhirInputError`), not ignored, because
+ignoring them would write `final` and hide the caller's mistake:
+
+- a start that is **not a window of this batch** (the caller meant a different batch);
+- a start whose window would be **`preliminary`** (ends after `complete_before`): a window that
+  is still filling has not been final, and `amended` would claim its data is settled.
 
 ### Heart rate: value, components and the LOINC codes
 

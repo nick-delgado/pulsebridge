@@ -218,6 +218,8 @@ class Plan:
     finalised: int
     amended: int
     withdrawn_kept: int = 0
+    # Keys (heart_rate_key) of the windows in ``write`` to be written ``amended`` (T33).
+    amend_keys: frozenset[str] = frozenset()
 
 
 def plan_writes(
@@ -233,12 +235,17 @@ def plan_writes(
     - stored with the same end and values and the status it would get now, or already final
       with the same values: skip (unchanged);
     - stored preliminary, now complete, same values: write as final (finalised);
-    - stored final (or amended), values changed: write (amended; see the README for the status
-      it is written with);
+    - stored final (or amended), values changed, and complete now: write with status
+      ``amended`` (its key goes in ``amend_keys``; R4: "Subsequent to being Final, the
+      observation has been modified");
+    - stored final, values changed, but it would be ``preliminary`` now (the cutoff moved back,
+      for example ``FINAL_AFTER_MINUTES`` was raised): write as ``preliminary`` (changed). T06
+      refuses ``amended`` for a window that is not complete, and the data is still changing;
     - stored ``entered-in-error`` or ``cancelled``: skip, whatever the values (withdrawn_kept);
     - otherwise (preliminary with new values): write (changed).
     """
     write: list[dict] = []
+    amend_keys: set[str] = set()
     unchanged = new = changed = finalised = amended = withdrawn = 0
     for item in items:
         key, end, values = key_of(item)
@@ -258,8 +265,11 @@ def plan_writes(
         write.append(item)
         if same:
             finalised += 1
-        elif before.is_final:
+        elif before.is_final and wanted == "final":
             amended += 1
+            amend_keys.add(key)
         else:
             changed += 1
-    return Plan(write, unchanged, new, changed, finalised, amended, withdrawn)
+    return Plan(
+        write, unchanged, new, changed, finalised, amended, withdrawn, frozenset(amend_keys)
+    )
