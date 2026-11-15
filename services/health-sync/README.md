@@ -531,9 +531,13 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 --preload "
   deploy fails; without it the port opened first and the probe could pass while the worker
   crashed. What `create_app()` builds before the fork is safe to fork with one worker: the
   logging handler, the configuration, the secret files' check (files read and closed), the
-  FHIR `AuthorizedSession` and the plain `requests.Session` for Google (no connection open, no
-  token fetched until the first request), the status cache and the two `threading.Lock`s
-  (unlocked: no thread runs in the master). No thread is started.
+  FHIR `AuthorizedSession` and the plain `requests.Session` for Google (neither session opens
+  a connection or fetches a token until the first request), the status cache and the two
+  `threading.Lock`s (unlocked: no thread runs in the master). On Cloud Run, finding Application Default Credentials (`google.auth.default()`) asks
+  the metadata server from inside the factory, through a session google-auth creates and
+  drops; at worst the worker inherits that idle connection, which neither process uses
+  again (services/README.md, "Fork safety"; not verified on Cloud Run). No thread is
+  started.
 - Honours `PORT`. `--timeout 0` leaves request deadlines to Cloud Run.
 - Routes: `POST /sync`, `GET /status`.
 - For T24's container: install `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp` before this

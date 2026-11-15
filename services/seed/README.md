@@ -263,8 +263,9 @@ values, no patient identifier, no seed.
 | --- | --- |
 | 0 | `seeded`, or `dry-run` |
 | 1 | a FHIR failure: `fhir-unavailable` (429/5xx/409/network after retries), `fhir-misconfigured` (401/403 `fhir-permission-denied`, 404 `fhir-store-missing`), `fhir-rejected` (another 4xx, its OperationOutcome summarised without free text; a malformed 2xx; or a safety-search answer that cannot be trusted, reason `safety-search-…`); or an unexpected error (outcome `bug`, reason the exception type only, reported with the counts so far). Re-run: every write is keyed |
-| 2 | bad arguments or configuration (the message names the variable, never its value) |
+| 2 | bad arguments or configuration (the message names the variable, never its value); also logged as `seed-run` with outcome `not-started` and a reason naming the flag or variable only (`usage:--hours`, `config:PATIENT_ID`, `missing:FHIR_STORE_ID`) |
 | 4 | `refused` by the safety check |
+| 143 | `terminated`: SIGTERM (a task timeout or a cancelled execution); the counts are those so far |
 
 A run stopped part-way leaves the setup Bundle (if it was due) and the Bundles before the
 failure written; a transaction Bundle is all-or-nothing, so no Bundle is half written.
@@ -327,6 +328,10 @@ exists before any ingest Bundle's conditional create looks for it (D11).
   Patient; the seeder accepts it and completes it with the setup Bundle (see "Safety"), so the
   order is recoverable, but two first contacts at once can still create two Patients (T06
   README), which only a person can fix.
+  **If the first seeding does not finish** (`seed-run` outcome `terminated`, a FHIR failure,
+  or an execution killed without a log line), the hourly top-ups will not fill the gap: they
+  cover only the last 4 hours. Execute `["--days", "30"]` again. It is safe, because windows
+  already written are read and skipped.
 - **Keeping it current.** A Cloud Scheduler job **every hour** executes the job with args
   `["--hours", "4"]` (48 windows; with the read-once step each run writes about 24: the 12 of
   the last hour as `preliminary`, the 12 of the hour before as `final`; one Bundle). The rule
@@ -357,8 +362,10 @@ exists before any ingest Bundle's conditional create looks for it (D11).
 
 ## Logging
 
-Events: `seed-run` (the report fields; `ERROR` with outcome `bug` for an unexpected error,
-still with its counts), `fhir-retry` (status, attempt, delay), `seed-forced` (reason code),
+Events: `seed-run`, one per execution however it ends except a bare SIGKILL (the report
+fields; `INFO` when seeded or a dry run, `WARNING` for `refused`, the FHIR failures,
+`not-started` and `terminated`, `ERROR` with outcome `bug` for an unexpected error, still with
+its counts; services/README.md, "Job images"), `fhir-retry` (status, attempt, delay), `seed-forced` (reason code),
 `stored-read-failed` (HTTP status), `stored-duplicate-key` (a count). Never logged: heart-rate values, the patient
 identifier, the seed, the device name, a response body, OperationOutcome diagnostics, or an
 exception message. The data is synthetic, but the rule is the same as for the services that

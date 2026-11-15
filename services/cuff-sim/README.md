@@ -355,10 +355,13 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 --preload "
   stops gunicorn (exit 1) before anything listens, so Cloud Run's startup probe fails and the
   deploy fails; without it the port opened first and the probe could pass while the worker
   crashed. What `create_app()` builds before the fork is safe to fork with one worker: the
-  logging handler, the configuration, the `HealthcareClient` with its `AuthorizedSession` (no
-  connection open, no token fetched until the first request), the simulator (no MLLP
-  connection: one is opened per send) and the token bucket with its unlocked
-  `threading.Lock`. No thread is started.
+  logging handler, the configuration, the `HealthcareClient` with its `AuthorizedSession` (the
+  session opens no connection and fetches no token until the first request), the simulator
+  (no MLLP connection: one is opened per send) and the token bucket with its unlocked
+  `threading.Lock`. On Cloud Run, finding Application Default Credentials (`google.auth.default()`) asks
+  the metadata server from inside the factory, through a session google-auth creates and
+  drops; at worst the worker inherits that idle connection, which neither process uses
+  again (services/README.md, "Fork safety"; not verified on Cloud Run). No thread is started.
 - For T24's container: install `libs/pulsebridge_fhir`, `libs/pulsebridge_hl7v2` and
   `libs/pulsebridge_gcp` before this package. They are declared by name only and are not on
   PyPI. T07's samples are package data of `pulsebridge_hl7v2` and must be installed with it.

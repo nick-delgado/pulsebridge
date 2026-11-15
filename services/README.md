@@ -151,10 +151,23 @@ differences, and `tests/tooling/test_container_images.py` tells the two kinds ap
   of --days or --hours is required"): a mis-wired job fails visibly instead of succeeding
   without doing anything. `ENTRYPOINT` also clears the base image's `CMD` (`python3`).
 - **No `PORT`, no `EXPOSE`, no `GUNICORN_CMD_ARGS`**, and no gunicorn in the image.
-- **Signals.** The script installs no SIGTERM handler and Linux applies no default signal
-  action to PID 1, so on SIGTERM (task timeout, cancelled execution) the run goes on until the
-  platform's SIGKILL. Every write is keyed and each transaction Bundle is all-or-nothing, so
-  that is safe; the next run carries on.
+- **Every ending logs one `seed-run` line** (JSON on stderr), which the ingestion module's
+  `seed-run-failed` alert (event `seed-run`, severity WARNING or higher) reads:
+  - bad arguments, a bad or missing variable: outcome `not-started` at WARNING, with a reason
+    naming only the flag or variable (`usage:--days|--hours`, `config:PATIENT_ID`,
+    `missing:FHIR_STORE_ID`), exit 2. The human-readable message is still printed;
+  - SIGTERM (a task timeout or a cancelled execution): PID 1 gets no default action for it,
+    so the CLI has its own handler. It raises in the main thread, so the run stops at once,
+    even inside a FHIR request or a retry's sleep. It logs outcome `terminated` at WARNING
+    with the counts so far and exits 143, inside the 10 s Cloud Run allows before SIGKILL. A
+    Bundle in flight may or may not have been applied, and it is never half applied;
+  - the run's own outcomes: `seeded` and `dry-run` at INFO; `refused` and the FHIR failures at
+    WARNING; `bug` at ERROR.
+
+  Not alerted: an execution killed without a SIGTERM first (out of memory, SIGKILL), which logs
+  nothing. Cloud Run reports that execution as failed, but this alert does not see it. **A first
+  seeding (`--days 30`) that is stopped is not resumed by the hourly top-ups**, because they
+  cover only the last 4 hours. Run it again: windows already written are skipped.
 
 The smoke test for a job (`JOB_CASES`): `--help` exits 0; `--dry-run --days 1` with
 `PATIENT_ID=SYN-SMOKE-0001` and a time zone prints the counts report and exits 0, makes no

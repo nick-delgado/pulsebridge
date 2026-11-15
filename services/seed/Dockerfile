@@ -77,8 +77,10 @@ USER 10001:10001
 # which exits 2 (one of --days or --hours is required), so a mis-wired job fails visibly
 # instead of succeeding without doing anything. Setting ENTRYPOINT also clears the base image's
 # CMD ("python3"). `docker run <image> --help` shows the flags.
-# Signals: the script installs no SIGTERM handler, and Linux applies no default signal action to
-# PID 1, so on SIGTERM (a task timeout, a cancelled execution) the run goes on until the
-# platform's SIGKILL. That is safe: every write is keyed, and a transaction Bundle is
-# all-or-nothing, so a stopped run leaves whole Bundles and the next run carries on.
+# Signals: PID 1 gets no default action for SIGTERM, so the script installs its own handler
+# (cli.py). On SIGTERM (a task timeout, a cancelled execution) it stops at once, logs its
+# seed-run line with outcome "terminated" and the counts so far, and exits 143, well inside
+# Cloud Run's 10 s before SIGKILL. Each transaction Bundle is all-or-nothing and every write is
+# keyed, so a stopped run leaves whole Bundles. A SIGKILL alone (no SIGTERM first, or a run
+# that ignores it) still leaves no seed-run line, and nothing alerts on it.
 ENTRYPOINT ["pulsebridge-seed"]

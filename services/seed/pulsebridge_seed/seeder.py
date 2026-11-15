@@ -88,6 +88,15 @@ class Outcome(StrEnum):
     FHIR_MISCONFIGURED = "fhir-misconfigured"  # 401/403/404
     FHIR_REJECTED = "fhir-rejected"  # a 4xx refusal, or a 2xx answer that cannot be used
     BUG = "bug"  # an unexpected exception; only its type is kept
+    NOT_STARTED = "not-started"  # bad arguments or configuration (cli.py): nothing was tried
+    TERMINATED = "terminated"  # SIGTERM (a task timeout or a cancelled execution), cli.py
+
+
+class Terminated(BaseException):  # noqa: N818 - a signal, not an error
+    """Raised in the main thread by the CLI's SIGTERM handler, wherever the run is (generating,
+    a FHIR request, a retry's sleep). A BaseException, so ``except Exception`` around a request
+    or the run's own "bug" handler cannot swallow it; :func:`run` turns it into outcome
+    ``terminated`` with the counts so far."""
 
 
 class FhirClient:
@@ -471,6 +480,11 @@ def run(
         report.outcome, report.reason, report.fhir_status = stop.outcome, stop.reason, stop.status
     except Exception as exc:  # noqa: BLE001 - reported with its counts; its text could quote data
         report.outcome, report.reason = Outcome.BUG, type(exc).__name__
+    except Terminated:
+        # Bundles already answered are counted. One in flight may or may not have been applied
+        # (each transaction Bundle is all-or-nothing on the server); its keyed writes make the
+        # next run correct either way.
+        report.outcome, report.reason = Outcome.TERMINATED, "sigterm"
     return report
 
 

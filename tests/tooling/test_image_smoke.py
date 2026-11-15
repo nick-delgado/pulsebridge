@@ -573,6 +573,56 @@ def test_job_without_arguments_fails(job: JobCase) -> None:
     )
     assert result.returncode == 2, result.stdout + result.stderr
     assert "required" in result.stderr
+    # ... and logs its structured seed-run line, which the job's alert reads (T35).
+    assert ("WARNING", "not-started") in [(r["severity"], r["outcome"]) for r in seed_runs(result)]
+
+
+def seed_runs(result: subprocess.CompletedProcess) -> list[dict]:
+    lines = []
+    for line in result.stderr.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and entry.get("event") == "seed-run":
+            lines.append(entry)
+    return lines
+
+
+def test_job_sigterm_logs_terminated_and_exits_promptly(job: JobCase) -> None:
+    # A year-long dry run takes several seconds of generating; SIGTERM one second in must end
+    # it within a few seconds (Cloud Run sends SIGKILL 10 s after SIGTERM) with a seed-run line.
+    name = f"pulsebridge-smoke-term-{job.service}-{os.getpid()}"
+    try:
+        docker(
+            "run",
+            "--detach",
+            "--name",
+            name,
+            "--network",
+            "none",
+            *job_env(job.env),
+            image(job.service),
+            "--dry-run",
+            "--days",
+            "366",
+        )
+        time.sleep(1.0)
+        running = docker("inspect", "--format", "{{.State.Running}}", name).stdout.strip()
+        assert running == "true", "the dry run ended before SIGTERM was sent"
+        sent = time.monotonic()
+        docker("kill", "--signal", "TERM", name)
+        code = docker("wait", name, timeout=15).stdout.strip()
+        elapsed = time.monotonic() - sent
+        logs = docker("logs", name, check=False)
+    finally:
+        docker("rm", "--force", name, check=False)
+    assert code == "143", logs.stderr[-2000:]
+    assert elapsed < 5, f"took {elapsed:.1f} s to stop after SIGTERM"
+    runs = seed_runs(logs)
+    assert [(r["severity"], r["outcome"], r["reason"]) for r in runs] == [
+        ("WARNING", "terminated", "sigterm")
+    ]
 
 
 def test_job_dry_run_prints_the_counts_and_leaves_no_files(job: JobCase) -> None:
