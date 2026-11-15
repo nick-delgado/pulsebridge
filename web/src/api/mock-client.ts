@@ -6,7 +6,12 @@
  * - any non-empty password logs in, and the token goes into the same sessionStorage session;
  * - every other call checks that token first, and with none it clears the session and calls
  *   `onUnauthorized`, exactly as the HTTP client does on a 401;
- * - inputs outside bounds give the same ApiError 422 with an OperationOutcome.
+ * - a cuff send is checked as cuff-sim checks it (services/cuff-sim/README.md): the same limits,
+ *   the same refusals as `CuffSendError` 422 with an OperationOutcome naming the field, and the
+ *   same per-instance rate limit (429 with `retryAfterSeconds`);
+ * - a send result has cuff-sim's fields, including the DERIVED message name over MLLP;
+ * - heart-rate data arrives only at a mock sync run (every 15 minutes), so the last sync time,
+ *   the windows and their status change together, as they do with health-sync.
  */
 import type {
   CommitAck,
@@ -31,15 +36,20 @@ import type {
   StatusSummary,
   Transport,
 } from './contract';
-import { CUFF_BOUNDS } from './contract';
-import { ApiError, LoginError, UnauthorizedError } from './errors';
+import { CUFF_SERVICE_LIMITS, MAPPER_PLAUSIBLE_RANGE } from './contract';
+import { ApiError, CuffSendError, LoginError, UnauthorizedError } from './errors';
 import { LOINC, type Observation, type OperationOutcome, type Resource } from './fhir';
 import {
   bloodPressureObservation,
+  derivedMessageName,
   hash32,
   heartRateObservation,
   heartRateObservations,
+  lastSyncRun,
+  MOCK_DATA_SETS,
   MOCK_SAMPLES,
+  type MockDataSet,
+  type MockSampleBehaviour,
   MOCK_WATCH,
   mockAck,
   MOCK_HL7V2_STORE,
@@ -65,7 +75,24 @@ export interface MockClientOptions {
   latencyMs?: number;
   /** How long a stored message stays `pending` before the mock "mapper" labels it. */
   mappingDelayMs?: number;
+  /** The zone heart-rate timestamps are written in (mock-data.ts, `MOCK_DATA_SETS`). */
+  dataSet?: MockDataSet;
+  /**
+   * cuff-sim's per-instance token bucket (RATE_LIMIT_BURST, RATE_LIMIT_PER_MINUTE; defaults 3
+   * and 6). Null switches it off, for tests that send many readings.
+   */
+  rateLimit?: { burst: number; perMinute: number } | null;
+  /**
+   * Makes every cuff send fail to record its AuditEvent, as cuff-sim reports it: `build` (T31
+   * refused a value, so there is no AuditEvent id: `attemptId` is null) or `write` (the audit
+   * store did not take it: the id exists but nothing is stored under it). Either way the send
+   * itself happened, `audit.recorded` is false, and the attempt is not in the messages log.
+   */
+  auditFailure?: 'build' | 'write' | null;
 }
+
+/** cuff-sim's defaults (RATE_LIMIT_BURST=3, RATE_LIMIT_PER_MINUTE=6). */
+export const MOCK_RATE_LIMIT = { burst: 3, perMinute: 6 } as const;
 
 /** Mock tokens look nothing like a JWT on purpose, so nobody mistakes one for a real token. */
 const MOCK_TOKEN_PREFIX = 'mock-session-';
@@ -81,6 +108,8 @@ interface MockAttempt {
   resolveAt: number;
   /** Sequence number, used to name the Observation once mapped. */
   seq: number;
+  /** False when the AuditEvent was not recorded: the attempt is then not in the log. */
+  audited: boolean;
 }
 
 export class MockClient implements PulseBridgeApi {
@@ -92,13 +121,26 @@ export class MockClient implements PulseBridgeApi {
   readonly #transactions: FhirTransactionEntry[] = [];
   readonly #unreadable: UnreadableSendAttemptEntry[] = [];
   readonly #shared = new Set<string>();
+  readonly #zone: string | null;
+  readonly #rateLimit: { burst: number; perMinute: number } | null;
+  #tokens: number;
+  #tokensAt: number;
   #sequence = 0;
 
   constructor(private readonly options: MockClientOptions) {
     this.#now = options.now ?? (() => Date.now());
     this.#latency = options.latencyMs ?? 150;
     this.#mappingDelay = options.mappingDelayMs ?? 3000;
+    this.#zone = (options.dataSet ?? MOCK_DATA_SETS.utc).timeZone;
+    this.#rateLimit = options.rateLimit === undefined ? MOCK_RATE_LIMIT : options.rateLimit;
+    this.#tokens = this.#rateLimit?.burst ?? 0;
+    this.#tokensAt = this.#now();
     this.#seed();
+  }
+
+  /** The heart-rate data as the last mock sync run left it in the store. */
+  #lastSync(): number {
+    return lastSyncRun(this.#now());
   }
 
   // -- login ------------------------------------------------------------------------------------
@@ -128,15 +170,20 @@ export class MockClient implements PulseBridgeApi {
   async getStatus(options: CallOptions = {}): Promise<StatusSummary> {
     await this.#authorised(options.signal);
     const now = this.#now();
+    const sync = this.#lastSync();
     const checkedAt = new Date(now).toISOString();
     return {
+      // health-sync's /status shape (services/health-sync/README.md), plus the proxy's lastSyncAt.
       watchSync: {
-        state: 'ok',
-        lastSyncAt: new Date(now - 7 * 60 * 1000).toISOString(),
-        detail: null,
+        state: 'connected',
+        reason: null,
+        notes: [],
+        strandedPreliminary: 0,
+        checkedAt,
+        lastSyncAt: new Date(sync).toISOString(),
       },
       observationCounts: {
-        watch: heartRateObservations(now - 30 * 864e5, now, now).length,
+        watch: heartRateObservations(now - 30 * 864e5, now, sync).length,
         cuff: this.#bloodPressure().length,
       },
       fhirStore: { reachable: true, checkedAt, detail: null },
@@ -151,7 +198,9 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     const start = query.range.start.getTime();
     const end = query.range.end.getTime();
-    if (query.code === LOINC.heartRate) return heartRateObservations(start, end, this.#now());
+    if (query.code === LOINC.heartRate) {
+      return heartRateObservations(start, end, this.#lastSync(), this.#zone);
+    }
     if (query.code === LOINC.bloodPressurePanel) {
       return this.#bloodPressure().filter((o) => {
         const t = Date.parse(o.effectiveDateTime ?? '');
@@ -168,15 +217,18 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     const start = windowStartFromId(observationId);
     const window = start === null ? null : syntheticRollUp(start);
-    if (start === null || window === null || start + 5 * 60 * 1000 > this.#now()) {
+    const sync = this.#lastSync();
+    if (start === null || window === null || start + 5 * 60 * 1000 > sync) {
       throw notFound(`Observation/${observationId}`);
     }
-    const observation = heartRateObservation(window, this.#now());
+    const observation = heartRateObservation(window, sync, this.#zone);
     return {
       observation,
       provenance: provenanceFor(`Observation/${observationId}`, window.endTime, 'watch'),
       device: MOCK_WATCH,
-      source: window,
+      // What the proxy will do (README open question 2): rebuild the window from the stored
+      // reading, and say so.
+      source: { kind: 'reconstructed', window },
     };
   }
 
@@ -195,42 +247,74 @@ export class MockClient implements PulseBridgeApi {
     options: CallOptions = {},
   ): Promise<CuffSendResult> {
     await this.#authorised(options.signal);
-    const { systolic, diastolic, transport, sendMalformed } = request;
-    const sample =
-      sendMalformed === null ? null : MOCK_SAMPLES.find((s) => s.name === sendMalformed);
-    if (sample === undefined) throw this.#unprocessable(`Unknown sample ${String(sendMalformed)}.`);
-    if (sample && !sample.transports.includes(transport)) {
-      throw this.#unprocessable(`Sample ${sample.name} cannot be sent over ${transport}.`);
-    }
-    if (sample === null) {
-      const issues = boundsIssues(systolic, diastolic);
-      if (issues.length > 0) throw this.#unprocessable(issues.join(' '));
-    }
+    // The same checks as cuff-sim's parse_request, in the same order: the body, then the rate
+    // limit (a typo does not use up a send), then the send.
+    const { transport, sendMalformed } = request;
+    const sample = this.#checkReading(request);
+    this.#takeToken();
 
+    const at = this.#now();
+    const systolic = request.systolic ?? 118;
+    const diastolic = request.diastolic ?? 76;
+    // The mapper's own plausibility check (T12): inside cuff-sim's limits but outside these, a
+    // reading is stored with AA and then gets the application-level outcome `out-of-range`.
+    const { systolic: ms, diastolic: md } = MAPPER_PLAUSIBLE_RANGE;
+    const plausible =
+      systolic >= ms.min && systolic <= ms.max && diastolic >= md.min && diastolic <= md.max;
     const attempt = this.#record({
-      at: this.#now(),
+      at,
       transport,
       systolic,
       diastolic,
-      sample: sample?.name ?? null,
+      sample: sendMalformed,
       commit: sample ? sample.commitAck : 'AA',
       commitReason: sample?.commitReason ?? null,
       final: sample
         ? sample.application && { outcome: sample.application, reason: sample.mappingReason }
-        : { outcome: 'accepted', reason: null },
-      resolveAt: this.#now() + this.#mappingDelay,
+        : plausible
+          ? { outcome: 'accepted', reason: null }
+          : { outcome: 'error', reason: 'out-of-range' },
+      resolveAt: at + this.#mappingDelay,
+      audited: !this.options.auditFailure,
     });
     this.#resolve();
+
+    const entry = attempt.entry;
+    const accepted = entry.result === 'accepted';
+    // Over HTTPS the ingest response names the stored message; over MLLP the ACK does not, and
+    // cuff-sim DERIVES the name for an accepted send (spike S5; unverified).
+    let messageName: string | null = null;
+    let messageNameSource: CuffSendResult['messageNameSource'] = null;
+    if (accepted && transport === 'https') {
+      messageName = entry.messageName;
+      messageNameSource = 'ingest-response';
+    } else if (accepted) {
+      messageName = await derivedMessageName(MOCK_HL7V2_STORE, attempt.messageSent);
+      messageNameSource = 'derived-sha256-unverified';
+    }
+    const failure = this.options.auditFailure;
     return {
-      attemptId: attempt.entry.id,
-      sentAt: attempt.entry.sentAt,
+      // No AuditEvent could be built, so there is no id to look up (cuff-sim: `attemptId` null).
+      attemptId: failure === 'build' ? null : entry.id,
+      sentAt: entry.sentAt,
       transport,
-      controlId: attempt.entry.controlId,
-      sample: attempt.entry.sample,
+      controlId: entry.controlId,
+      sample: entry.sample,
       messageSent: attempt.messageSent,
-      messageName: attempt.entry.messageName,
-      ack: attempt.entry.commitAck,
-      audit: { recorded: true },
+      framing: transport === 'mllp' ? (sample?.mllpFraming ?? 'standard') : null,
+      messageName,
+      messageNameSource,
+      result: entry.result,
+      ack: structuredClone(entry.commitAck),
+      audit: failure
+        ? {
+            recorded: false,
+            detail:
+              failure === 'build'
+                ? 'build-failed: the AuditEvent could not be built'
+                : 'write-failed: the audit FHIR store did not accept the AuditEvent',
+          }
+        : { recorded: true },
     };
   }
 
@@ -240,7 +324,7 @@ export class MockClient implements PulseBridgeApi {
   ): Promise<CuffAttemptTrace> {
     await this.#authorised(options.signal);
     this.#resolve();
-    const attempt = this.#attempts.find((a) => a.entry.id === attemptId);
+    const attempt = this.#attempts.find((a) => a.audited && a.entry.id === attemptId);
     if (!attempt) throw notFound(`AuditEvent/${attemptId}`);
     const observation = this.#observationFor(attempt);
     return {
@@ -267,7 +351,9 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     this.#resolve();
     const all: MessagesLogEntry[] = [
-      ...this.#attempts.map((a) => structuredClone(a.entry)),
+      // An attempt whose AuditEvent was not recorded is not in the audit store, so not listed.
+      // (The proxy may show its stored message as a `store-only` row; the mock does not.)
+      ...this.#attempts.filter((a) => a.audited).map((a) => structuredClone(a.entry)),
       ...this.#unreadable.map((u) => structuredClone(u)),
       ...this.#transactions.map((t) => structuredClone(t)),
     ]
@@ -459,6 +545,107 @@ export class MockClient implements PulseBridgeApi {
     return new ApiError(422, message, operationOutcome('invalid', message));
   }
 
+  /**
+   * cuff-sim's request rules (services/cuff-sim/README.md): integers from 1 to 400 mm[Hg],
+   * systolic above diastolic, required unless `sendMalformed` is set (then still checked if
+   * present); a sample must exist and list the transport. Returns the sample, or null for a
+   * built reading. Throws `CuffSendError` 422 naming each wrong field, as cuff-sim does.
+   */
+  #checkReading(request: CuffReadingRequest): MockSampleBehaviour | null {
+    const issues: [field: string, text: string][] = [];
+    const { min, max } = CUFF_SERVICE_LIMITS;
+    const { transport, sendMalformed } = request;
+    // A caller outside TypeScript can send anything; cuff-sim refuses any other transport.
+    if (!(['mllp', 'https'] as unknown[]).includes(transport)) {
+      issues.push(['transport', 'transport must be "mllp" or "https"']);
+    }
+    let sample: MockSampleBehaviour | null = null;
+    if (sendMalformed !== null) {
+      const found = MOCK_SAMPLES.find((s) => s.name === sendMalformed);
+      if (!found)
+        issues.push(['sendMalformed', 'sendMalformed must name a sample from GET /cuff/samples']);
+      else if (!found.transports.includes(transport)) {
+        issues.push(['sendMalformed', 'this sample cannot be sent over the chosen transport']);
+      } else sample = found;
+    }
+    const values: [field: 'systolic' | 'diastolic', value: unknown][] = [
+      ['systolic', request.systolic],
+      ['diastolic', request.diastolic],
+    ];
+    for (const [field, value] of values) {
+      if (value === undefined) {
+        if (sendMalformed === null) issues.push([field, `${field} is required`]);
+      } else if (
+        typeof value !== 'number' ||
+        !Number.isInteger(value) ||
+        value < min ||
+        value > max
+      ) {
+        issues.push([field, `${field} must be a whole number from ${min} to ${max} mm[Hg]`]);
+      }
+    }
+    const { systolic, diastolic } = request;
+    if (
+      issues.length === 0 &&
+      systolic !== undefined &&
+      diastolic !== undefined &&
+      systolic <= diastolic
+    ) {
+      issues.push(['systolic', 'systolic must be above diastolic']);
+    }
+    if (issues.length > 0) {
+      const outcome: OperationOutcome = {
+        resourceType: 'OperationOutcome',
+        issue: issues.map(([field, text]) => ({
+          severity: 'error',
+          code: 'invalid',
+          diagnostics: text,
+          expression: [field],
+        })),
+      };
+      throw new CuffSendError(
+        'invalid-input',
+        422,
+        issues.map(([, text]) => `${text[0]?.toUpperCase() ?? ''}${text.slice(1)}.`).join(' '),
+        outcome,
+      );
+    }
+    return sample;
+  }
+
+  /** cuff-sim's token bucket: `burst` sends back to back, refilled at `perMinute`. */
+  #takeToken(): void {
+    const limit = this.#rateLimit;
+    if (!limit) return;
+    const now = this.#now();
+    const perMs = limit.perMinute / 60_000;
+    this.#tokens = Math.min(limit.burst, this.#tokens + (now - this.#tokensAt) * perMs);
+    this.#tokensAt = now;
+    if (this.#tokens >= 1) {
+      this.#tokens -= 1;
+      return;
+    }
+    // Retry-After: whole seconds until a token is back, rounded up (RFC 9110 section 10.2.3).
+    const wait = Math.max(1, Math.ceil((1 - this.#tokens) / perMs / 1000));
+    throw new CuffSendError(
+      'rate-limited',
+      429,
+      'Too many sends; try again later.',
+      {
+        resourceType: 'OperationOutcome',
+        issue: [
+          {
+            severity: 'error',
+            code: 'throttled',
+            diagnostics: 'too many sends; try again later',
+            expression: ['body'],
+          },
+        ],
+      },
+      wait,
+    );
+  }
+
   async #lookup(reference: string): Promise<Observation> {
     const [type, id = ''] = reference.split('/');
     if (type !== 'Observation') throw this.#unprocessable(`${reference} is not an Observation.`);
@@ -509,6 +696,7 @@ export class MockClient implements PulseBridgeApi {
     final: { outcome: 'accepted' | 'error'; reason: string | null } | null;
     resolveAt: number;
     noAck?: CommitAck & { received: false };
+    audited?: boolean;
   }): MockAttempt {
     const n = this.#sequence++;
     const sample = MOCK_SAMPLES.find((x) => x.name === input.sample);
@@ -566,6 +754,7 @@ export class MockClient implements PulseBridgeApi {
       finalOutcome: stored ? input.final : null,
       resolveAt: input.resolveAt,
       seq: n,
+      audited: input.audited ?? true,
     };
     this.#attempts.push(attempt);
     return attempt;
@@ -691,10 +880,10 @@ export class MockClient implements PulseBridgeApi {
         "written in format version 2, newer than this library's 1: the MSA-1 detail is missing",
     });
 
-    // health-sync runs every 15 minutes (brief, "Ingestion, wearable").
+    // health-sync runs every 15 minutes (brief, "Ingestion, wearable"): the last eight runs.
     for (let i = 0; i < 8; i++) {
-      const at = now - (7 + 15 * i) * min;
-      const ids = heartRateObservations(at - 30 * min, at, at).slice(-3);
+      const at = lastSyncRun(now) - 15 * i * min;
+      const ids = heartRateObservations(at - 30 * min, at, at, this.#zone).slice(-3);
       this.#transactions.push({
         kind: 'fhir-transaction',
         id: `mock-tx-${String(i)}`,
@@ -709,20 +898,6 @@ export class MockClient implements PulseBridgeApi {
       });
     }
   }
-}
-
-function boundsIssues(systolic: number, diastolic: number): string[] {
-  const issues: string[] = [];
-  const { systolic: s, diastolic: d } = CUFF_BOUNDS;
-  if (!Number.isInteger(systolic) || systolic < s.min || systolic > s.max) {
-    issues.push(`Systolic must be a whole number from ${s.min} to ${s.max} mm[Hg].`);
-  }
-  if (!Number.isInteger(diastolic) || diastolic < d.min || diastolic > d.max) {
-    issues.push(`Diastolic must be a whole number from ${d.min} to ${d.max} mm[Hg].`);
-  }
-  if (issues.length === 0 && diastolic >= systolic)
-    issues.push('Systolic must be above diastolic.');
-  return issues;
 }
 
 /**

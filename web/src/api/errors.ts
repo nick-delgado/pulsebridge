@@ -29,7 +29,8 @@ export class LoginError extends Error {
 
 /** Any other non-2xx answer, or a network failure (status 0). */
 export class ApiError extends Error {
-  override readonly name = 'ApiError';
+  // Typed `string` so a subclass (CuffSendError) can name itself.
+  override readonly name: string = 'ApiError';
   constructor(
     readonly status: number,
     message: string,
@@ -39,5 +40,75 @@ export class ApiError extends Error {
     readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
+  }
+}
+
+/**
+ * Why a cuff send was refused, from the status the cuff simulator (through the proxy) answered;
+ * see services/cuff-sim/README.md, "Responses":
+ *
+ *   status  reason          when                                                 sent?
+ *   400     invalid-body    the body is not a JSON object                        no
+ *   413     too-large       the body is over 16 KiB                              no
+ *   422     invalid-input   bounds, type, unknown field or sample, a sample      no
+ *                           not for this transport (`fields` names them)
+ *   429     rate-limited    too many sends; `retryAfterSeconds` from             no
+ *                           `Retry-After`
+ *   500     server-error    a built message failed HL7v2 validation, or a bug    no (the service
+ *                                                                                 cannot 500 once
+ *                                                                                 sending began)
+ *   504     no-answer       cut off upstream (Cloud Run's request timeout): the  maybe, and not
+ *                           attempt MAY have been sent                           recorded
+ *
+ * Any other status (for example 502 from the proxy) stays a plain `ApiError`.
+ */
+export type CuffSendFailure =
+  'invalid-body' | 'too-large' | 'invalid-input' | 'rate-limited' | 'server-error' | 'no-answer';
+
+export const CUFF_FAILURE_BY_STATUS: Readonly<Partial<Record<number, CuffSendFailure>>> = {
+  400: 'invalid-body',
+  413: 'too-large',
+  422: 'invalid-input',
+  429: 'rate-limited',
+  500: 'server-error',
+  504: 'no-answer',
+};
+
+/** A refused cuff send. Still an `ApiError`, so generic handling (`status`, `message`) works. */
+export class CuffSendError extends ApiError {
+  override readonly name: string = 'CuffSendError';
+  constructor(
+    readonly reason: CuffSendFailure,
+    status: number,
+    message: string,
+    outcome: OperationOutcome | null = null,
+    retryAfterSeconds: number | null = null,
+  ) {
+    super(status, message, outcome, retryAfterSeconds);
+  }
+
+  /**
+   * The request fields the OperationOutcome names (each issue's `expression`, for example
+   * `systolic`), so a form can mark them. Empty when the body named none.
+   */
+  get fields(): string[] {
+    return [...new Set((this.outcome?.issue ?? []).flatMap((i) => i.expression ?? []))];
+  }
+
+  /**
+   * The typed error for a cuff-route `ApiError`, or the error unchanged for any other status.
+   * The message joins every issue's diagnostics (a 422 can name several fields).
+   */
+  static from(error: ApiError): ApiError {
+    const reason = CUFF_FAILURE_BY_STATUS[error.status];
+    if (reason === undefined) return error;
+    const all = (error.outcome?.issue ?? []).flatMap((i) => i.diagnostics ?? []);
+    return new CuffSendError(
+      reason,
+      error.status,
+      all.length > 0 ? all.join(' ') : error.message,
+      error.outcome,
+      error.retryAfterSeconds,
+    );
   }
 }

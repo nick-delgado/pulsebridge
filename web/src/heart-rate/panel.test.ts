@@ -48,10 +48,17 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-function status(state: StatusSummary['watchSync']['state'] = 'ok'): StatusSummary {
+function status(state: StatusSummary['watchSync']['state'] = 'connected'): StatusSummary {
   const checkedAt = new Date(NOW).toISOString();
   return {
-    watchSync: { state, lastSyncAt: null, detail: null },
+    watchSync: {
+      state,
+      reason: null,
+      notes: [],
+      strandedPreliminary: null,
+      checkedAt,
+      lastSyncAt: null,
+    },
     observationCounts: { watch: 0, cuff: 0 },
     fhirStore: { reachable: true, checkedAt, detail: null },
     openemr: { reachable: true, checkedAt, detail: null },
