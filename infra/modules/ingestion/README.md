@@ -81,7 +81,7 @@ module "ingestion" {
 
   # Set at least one, or the alerts are metrics only and nobody is told.
   alert_email                = var.alert_email                 # sensitive; with the bool below
-  create_alert_email_channel = var.alert_email != null         # creates the email channel (see "Alerts")
+  create_alert_email_channel = nonsensitive(var.alert_email != null) # see "Alerts"
   notification_channels      = var.alert_notification_channels # existing channels, may be []
 
   # The secret accessor grants (module identity) must exist before health-sync deploys.
@@ -457,8 +457,12 @@ made elsewhere). T25 should set one of them.
 one, such as `alert_email != null`) in `count` or `for_each`, because the number of resources would
 then reveal it. So the plain bool `create_alert_email_channel` decides whether the channel exists
 (the same pattern as project-base's `grant_edge_vm_mirror_reader`): a validation refuses an address
-without the bool, and a precondition refuses the bool without an address. The address is still
-stored in the state and on the channel. **With neither, there are metrics only: no alert policy exists and nobody is told** when
+without the bool, and a precondition refuses the bool without an address. A caller whose
+address is itself sensitive passes `nonsensitive(var.alert_email != null)`: whether an address is
+set reveals nothing about it (env `_stack` does this). The address is still
+stored in the state and on the channel.
+
+**With neither, there are metrics only: no alert policy exists and nobody is told** when
 ingestion breaks; the counters can still be charted in Metrics Explorer as
 `logging.googleapis.com/user/<metric name>` (charting needs the Monitoring API, enabled by
 project-base).

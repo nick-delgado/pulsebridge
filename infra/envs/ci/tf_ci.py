@@ -228,13 +228,13 @@ def check_redaction(plan_text: str, tfvars_text: str) -> None:
         )
 
 
-def make_plan(env: str, workdir: Path, *, destroy: bool = False) -> tuple[Path, str, int, str]:
+def make_plan(env: str, workdir: Path) -> tuple[Path, str, int, str]:
     """Plan into workdir (never into the repository: a plan file holds sensitive values in
-    clear). Returns the plan file, its digest, the number of changes and the redacted text."""
+    clear). Returns the plan file, its digest, the number of changes and the redacted text.
+    `terraform plan` also prints the plan to the job log; the sensitive tfvars values were
+    registered with the runner's masking when the tfvars were fetched."""
     plan_file = workdir / "tfplan"
     args = ["plan", "-input=false", "-no-color", "-lock-timeout=10m", f"-out={plan_file}"]
-    if destroy:
-        args.append("-destroy")
     if terraform(env, *args).returncode != 0:
         raise CiError("terraform plan failed")
     shown = terraform(env, "show", "-json", str(plan_file), capture=True)
