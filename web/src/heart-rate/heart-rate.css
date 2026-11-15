@@ -1,0 +1,236 @@
+/* Heart-rate area (T17). Colours, spacing and type come from src/styles/tokens.css only. */
+
+.hr-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.hr-ranges {
+  display: inline-flex;
+  gap: var(--space-1);
+}
+
+.hr-ranges__button {
+  border-color: var(--color-control-border);
+  padding: var(--space-1) var(--space-3);
+}
+
+.hr-ranges__button[aria-pressed='true'] {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: var(--color-primary-text);
+  font-weight: 600;
+}
+
+.hr-zone,
+.hr-summary,
+.hr-stats__note,
+.hr-trace__note {
+  color: var(--color-text-muted);
+  font-size: var(--text-xs);
+}
+
+.hr-message:empty {
+  display: none;
+}
+
+.hr-message {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.hr-message__text {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.hr-message__text--warn {
+  color: var(--color-text);
+  border-left: 3px solid var(--color-warn);
+  padding-left: var(--space-2);
+}
+
+.hr-message__text--error,
+.hr-error {
+  color: var(--color-text);
+  border-left: 3px solid var(--color-error);
+  padding-left: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.hr-chart {
+  border-radius: calc(var(--radius) - 2px);
+  min-width: 0;
+}
+
+.hr-chart:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.hr-chart__canvas {
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* uPlot sets `width: min-content` on its root; let it follow the container instead. */
+.hr-chart__canvas .uplot {
+  width: 100%;
+  font-family: var(--font-sans);
+}
+
+.hr-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.hr-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.hr-swatch {
+  display: inline-block;
+  width: 1.25rem;
+  height: 0.75rem;
+}
+
+.hr-swatch--line {
+  height: 0;
+  border-top: 2px solid var(--color-continuous);
+}
+
+.hr-swatch--band {
+  background: var(--color-continuous);
+  opacity: 0.25;
+}
+
+.hr-swatch--provisional {
+  height: 0;
+  border-top: 2px dashed var(--color-warn);
+}
+
+.hr-readout {
+  min-height: 2.6em;
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+.hr-summary {
+  margin-top: var(--space-2);
+}
+
+.hr-stats__list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin: var(--space-3) 0 var(--space-1);
+}
+
+.hr-stat {
+  background: var(--color-surface-sunken);
+  border-radius: calc(var(--radius) - 2px);
+  padding: var(--space-2);
+  min-width: 0;
+}
+
+.hr-stat dd {
+  margin: 0;
+}
+
+.hr-stat__label {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.hr-stat__value {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.hr-stat__help {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.hr-details:empty {
+  display: none;
+}
+
+.hr-details {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-3);
+}
+
+.hr-details__title {
+  font-size: var(--text-sm);
+  margin-bottom: var(--space-2);
+}
+
+.hr-details__list {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.hr-details__list dt {
+  color: var(--color-text-muted);
+}
+
+.hr-details__list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.hr-provisional {
+  border-left: 3px solid var(--color-warn);
+  padding-left: var(--space-2);
+}
+
+.hr-trace__section + .hr-trace__section {
+  margin-top: var(--space-3);
+}
+
+.hr-trace__heading {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  margin: var(--space-2) 0 var(--space-1);
+}
+
+.hr-trace__note {
+  margin-bottom: var(--space-2);
+}
+
+@media (max-width: 480px) {
+  .hr-stats__list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* Nothing here animates; keep it that way for people who ask for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .hr-chart,
+  .hr-ranges__button {
+    transition: none;
+    scroll-behavior: auto;
+  }
+}
