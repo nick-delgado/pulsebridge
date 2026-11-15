@@ -143,3 +143,41 @@ variable "hook_timeout_minutes" {
     error_message = "hook_timeout_minutes must be a whole number from 30 to 120 (first boot needs about 15 minutes; edge-vm allows at most 120)."
   }
 }
+
+variable "scopes" {
+  description = <<-EOT
+    OAuth2 scopes the client is registered with, and fhir-proxy requests. Default: spike S1's six
+    SMART v1 scopes, the only set verified end to end with client_credentials. In OpenEMR 8.5.0 a v1
+    `system/<R>.write` grants create, update AND delete, and `.read` grants read and search
+    (ScopePermissionObject.php: write -> cud, read -> rs), so the default allows more than the share
+    needs (create, read, search). The narrower SMART v2 set to try on the first boot:
+      ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"]
+    (Patient: search by identifier, create, read back; Encounter: create, search to reuse, read
+    back; Observation: create, read back by id). v2 system scopes with client_credentials are not
+    verified on OpenEMR 8.5.0. A change registers a new client on the next boot.
+  EOT
+  type        = list(string)
+  default = [
+    "system/Patient.read",
+    "system/Patient.write",
+    "system/Encounter.read",
+    "system/Encounter.write",
+    "system/Observation.read",
+    "system/Observation.write",
+  ]
+
+  validation {
+    # system/ scopes on the three resources the share uses, with a SMART v1 suffix (read, write) or
+    # a SMART v2 permission string: the letters c r u d s, each at most once, in that order
+    # (OpenEMR's isOrderedCrudString). No wildcard (*), no other resource, no query constraints.
+    condition = length(var.scopes) > 0 && alltrue([
+      for s in var.scopes : can(regex("^system/(Patient|Encounter|Observation)\\.(read|write|c?r?u?d?s?)$", s)) && !endswith(s, ".")
+    ])
+    error_message = "scopes must be system/Patient, system/Encounter or system/Observation scopes ending in .read, .write or an ordered subset of cruds (for example .crs); no wildcards."
+  }
+
+  validation {
+    condition     = length(distinct(var.scopes)) == length(var.scopes)
+    error_message = "scopes must not repeat a scope."
+  }
+}

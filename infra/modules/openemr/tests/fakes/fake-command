@@ -27,6 +27,12 @@
 #   FAKE_UPLOAD_FAIL=<code>   Secret Manager answers <code> to addVersion
 #   FAKE_SM_GET=<code>        Secret Manager answers <code> to the versions/latest metadata read
 #   FAKE_IPTABLES_FAIL=1      iptables -I fails (for example: no DOCKER-USER chain)
+#   FAKE_SQL_FAIL_MATCH=re    SQL statements matching the regex fail (ERROR 2013, lost connection)
+#   FAKE_SETUP_INTERRUPTED=1  OpenEMR's first-time setup stops before the ACL install and marker
+#   FAKE_SEED_FAIL=1          the sites seed copies part of the directory, then fails
+#   FAKE_UPLOAD_LOST=1        addVersion stores the version but the answer is lost (HTTP 503)
+#   FAKE_HOSTILE_CLIENT_ID=1  the registration answers with a client_id holding SQL
+#   FAKE_TERM_AT=<tool>       the hook receives SIGTERM while the PHP tool <tool> runs
 #   FAKE_DB_PASSWORD, FAKE_TOKEN, FAKE_CLIENT_SECRET, FAKE_REGISTRATION_TOKEN   sentinels
 #   REAL_DATE, REAL_PHP       paths of the real date and php
 
@@ -74,7 +80,14 @@ fake_sql() {
   local q="'([^']*)'"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    if [[ "$line" =~ ^SELECT\ gl_name,\ gl_value\ FROM\ globals\ WHERE\ gl_index\ =\ 0\ AND\ gl_name\ IN\ \((.*)\)\;$ ]]; then
+    printf '%s\n' "$line" >> "$FAKE_STATE/sql.log"
+    if [ -n "${FAKE_SQL_FAIL_MATCH:-}" ] && [[ "$line" =~ $FAKE_SQL_FAIL_MATCH ]]; then
+      echo "ERROR 2013 (HY000): Lost connection to server during query (fake)" >&2
+      return 1
+    fi
+    if [[ "$line" == "SELECT COUNT(*) FROM gacl_acl;" ]]; then
+      cat "$FAKE_STATE/db/gacl_acl" 2> /dev/null || echo 0
+    elif [[ "$line" =~ ^SELECT\ gl_name,\ gl_value\ FROM\ globals\ WHERE\ gl_index\ =\ 0\ AND\ gl_name\ IN\ \((.*)\)\;$ ]]; then
       names=${BASH_REMATCH[1]}
       while [[ "$names" =~ $q(.*) ]]; do
         name=${BASH_REMATCH[1]}
@@ -184,20 +197,33 @@ fake_docker_run() {
           echo "fake docker: REAL_PHP is not set" >&2
           return 127
         }
-        local mapped=()
+        local mapped=() rc=0
         mapfile -t mapped < <(map_paths mounts "$@")
-        "$REAL_PHP" "${mapped[@]}"
-        return $?
+        "$REAL_PHP" "${mapped[@]}" || rc=$?
+        # The hook is this process's parent (timeout execs the fake). Bash runs its TERM trap once
+        # this "container" has finished, as it would with a real docker run.
+        if [ -n "${FAKE_TERM_AT:-}" ] && [ "${2:-}" = "$FAKE_TERM_AT" ]; then
+          kill -TERM "$PPID"
+        fi
+        return "$rc"
         ;;
       sh)
-        # The sites-directory seed: cp -a <image sites> /seed/sites. Like cp -a, the copy keeps the
-        # image's mode on the directory itself (0755 in the image), whatever umask the caller has.
+        # The sites-directory seed: cp -a /swarm-pieces/sites /seed/sites. Like cp -a run as root,
+        # the copy keeps the image's owner and mode: in the 8.5.0 image /swarm-pieces/sites is
+        # dr-x------ 1000:101 (apache) and sites/default drwx------ 1000:101.
         local seed
         seed=$(map_paths mounts /seed)
-        [[ "${*: -1}" == *" /seed/sites" ]] || return 1
+        [ "${*: -1}" = "cp -a /swarm-pieces/sites /seed/sites" ] || return 1
         mkdir -p "$seed/sites/default"
-        chmod 755 "$seed/sites" "$seed/sites/default"
         echo "<?php \$config = 0; // fake image sites/default/sqlconf.php" > "$seed/sites/default/sqlconf.php"
+        if [ "${FAKE_SEED_FAIL:-0}" = 1 ]; then
+          echo "cp: error writing '/seed/sites/default/LBF': No space left on device" >&2
+          return 1
+        fi
+        echo "fake image config" > "$seed/sites/default/config.php"
+        chmod 700 "$seed/sites/default"
+        chmod 500 "$seed/sites"
+        if [ "$(id -u)" = 0 ]; then chown -R 1000:101 "$seed/sites"; fi
         return 0
         ;;
       *) return 1 ;;
@@ -222,7 +248,27 @@ fake_docker_run() {
     printf 'OE_PASS=%s\n' "${OE_PASS-<unset>}"
   } > "$containers/$name/env-values"
   apply_setting_env "$containers/$name/args"
+  if [ "$name" = openemr ]; then
+    # The image declares VOLUME [/etc/letsencrypt/ /etc/ssl]: two anonymous volumes per container.
+    mkdir -p "$FAKE_STATE/volumes"
+    touch "$FAKE_STATE/volumes/$name-$RANDOM-letsencrypt" "$FAKE_STATE/volumes/$name-$RANDOM-ssl"
+    fake_first_time_setup
+  fi
   echo "fakecontainerid-$name"
+}
+
+# What openemr.sh does on a first start against an empty database: auto-configure (which installs
+# the ACL tables), print "Setup Complete!", then write sites/default/docker-version.
+fake_first_time_setup() {
+  local sites
+  sites=$(awk -F '|' '$1 == "/var/www/localhost/htdocs/openemr/sites" { print $2 }' "$containers/openemr/mounts")
+  if [ -z "$sites" ] || [ -e "$sites/default/docker-version" ]; then return 0; fi
+  if [ "${FAKE_SETUP_INTERRUPTED:-0}" = 1 ]; then
+    echo "<?php \$config = 1;" > "$sites/default/sqlconf.php" # openemr#15084: configured, but no ACL
+    return 0
+  fi
+  echo 31 > "$FAKE_STATE/db/gacl_acl"
+  echo 16 > "$sites/default/docker-version"
 }
 
 fake_docker() {
@@ -280,14 +326,22 @@ fake_docker() {
       echo "$name"
       ;;
     rm)
-      local name=${*: -1}
-      [ "$1" = --force ] && echo "FORCED REMOVE" >> "$FAKE_STATE/calls.log"
+      local name=${*: -1} force=0 volumes=0 opt
+      for opt in "${@:1:$#-1}"; do
+        case "$opt" in
+          --force | -f) force=1 ;;
+          -v | --volumes) volumes=1 ;;
+        esac
+      done
+      [ "$force" = 1 ] && echo "FORCED REMOVE" >> "$FAKE_STATE/calls.log"
       [ -d "$containers/$name" ] || return 1
-      if [ "$(cat "$containers/$name/status")" = running ] && [ "$1" != --force ]; then
+      if [ "$(cat "$containers/$name/status")" = running ] && [ "$force" = 0 ]; then
         echo "Error response from daemon: cannot remove container \"/$name\": container is running" >&2
         return 1
       fi
       rm -rf "${containers:?}/$name"
+      # Like Docker: -v removes the container's anonymous volumes, never bind-mount sources.
+      if [ "$volumes" = 1 ]; then rm -f "$FAKE_STATE/volumes/$name-"*; fi
       ;;
     exec)
       if [ "${FAKE_HANG:-}" = "docker exec" ]; then hang docker exec "$@"; fi
@@ -369,6 +423,10 @@ fake_curl() {
           cp "$data" "$FAKE_STATE/sm/v$n"
           echo ENABLED > "$FAKE_STATE/sm/v$n.state"
           body='{"name":"projects/123456789012/secrets/x/versions/'"$n"'","createTime":"2026-11-15T00:00:00Z","state":"ENABLED"}'
+          if [ "${FAKE_UPLOAD_LOST:-0}" = 1 ]; then
+            code=503 # stored, but the caller never learns it
+            body='{"error":{"code":503,"status":"UNAVAILABLE"}}'
+          fi
         fi
       elif [[ "$url" == */versions/latest ]]; then
         local n
@@ -426,6 +484,7 @@ fake_curl() {
             count=$(($(find "$FAKE_STATE/registrations" -maxdepth 1 -name '*.json' | wc -l) + 1))
             cp "$data" "$FAKE_STATE/registrations/$count.json"
             id="fakeclient$(printf '%04d' "$count")AbCdEfGhIjKlMnOpQrSt"
+            if [ "${FAKE_HOSTILE_CLIENT_ID:-0}" = 1 ]; then id="x'; UPDATE oauth_clients SET is_enabled = 1; --"; fi
             cname=$(sed -n 's/.*"client_name":"\([^"]*\)".*/\1/p' "$data")
             printf '%s\t%s\t0\n' "$id" "$cname" >> "$FAKE_STATE/db/oauth_clients"
             body='{"client_id":"'"$id"'","client_secret":"'"$FAKE_CLIENT_SECRET"'","registration_access_token":"'"$FAKE_REGISTRATION_TOKEN"'","client_name":"'"$cname"'"}'

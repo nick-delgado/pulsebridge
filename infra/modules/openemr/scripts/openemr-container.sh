@@ -12,7 +12,7 @@
 #   5. write the Apache low-memory settings (spike S2: four workers, required);
 #   6. block the metadata server for the edge Docker network (before OpenEMR can start);
 #   7. create, replace or start the container (label-hash pattern, graceful stop);
-#   8. wait for /meta/health/readyz;
+#   8. wait for /meta/health/readyz, then check first-time setup really finished;
 #   9. check the OpenEMR settings in the database and write them there if the OPENEMR_SETTING_*
 #      variables did not take effect; then check the FHIR API answers.
 
@@ -38,12 +38,13 @@ check_prerequisites() {
   log "data disk mounted, MariaDB healthy, password files present"
 }
 
-# A bind mount does not copy the image's files the way an empty Docker volume does, so the first
-# boot copies the image's sites directory onto the data disk. The directory itself is copied
-# (cp -a sites /seed/sites), so it keeps the image's owner and mode: the hook's own umask is 077,
-# and a sites directory made by the hook would be unreadable for Apache's unprivileged user. It is
-# copied into a temporary directory and moved into place, so an interrupted copy is never mistaken
-# for a seeded directory.
+# A bind mount does not copy the image's files the way an empty Docker volume does, and the
+# image's openemr.sh restores an empty sites directory only in swarm mode (from /swarm-pieces/sites,
+# its pristine copy, with `rsync --owner --group --perms`). So the first boot copies that directory
+# onto the data disk itself, with `cp -a`, keeping the image's owner and mode (dr-x------ apache,
+# uid 1000, gid 101): the hook's own umask is 077, and a directory made by the hook would be
+# root's, unreadable for Apache. It is copied into a temporary directory and moved into place, so
+# an interrupted copy never leaves a sites directory that looks populated.
 seed_sites_dir() {
   local tmp="$EDGE_DATA_DIR/.openemr-sites-seed"
   if [ -n "$(ls -A "$EDGE_OPENEMR_DIR")" ]; then
@@ -55,7 +56,7 @@ seed_sites_dir() {
   mkdir -p "$tmp"
   timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh \
     --mount "type=bind,source=$tmp,target=/seed" \
-    "$OPENEMR_IMAGE" -c "cp -a $OPENEMR_SITES_TARGET /seed/sites"
+    "$OPENEMR_IMAGE" -c "cp -a /swarm-pieces/sites /seed/sites"
   if [ ! -d "$tmp/sites" ] || [ -z "$(ls -A "$tmp/sites")" ]; then
     die "copying the image's sites directory produced nothing"
   fi
@@ -198,9 +199,12 @@ start_openemr() {
   )
 }
 
-# Spike S1 saw the image apply OPENEMR_SETTING_* on every start; spike S2 saw no effect and wrote
-# the globals table instead. So read the values back from the database and, for any that are wrong,
-# write them there (S2's REPLACE INTO, keyed on gl_name and gl_index), then read them again.
+# The image applies OPENEMR_SETTING_* itself: setGlobalSettings in /root/devtoolsLibrary.source
+# runs `UPDATE globals SET gl_value = ... WHERE gl_name = ...` for each variable, from openemr.sh
+# after first-time setup and on every later start (spike S1 saw it work; spike S2 had not tried it).
+# Its UPDATE silently does nothing for a row that does not exist, so as defence in depth the values
+# are read back from the database and, for any that is wrong, written there (S2's REPLACE INTO,
+# keyed on gl_name and gl_index), then read again. rest_api is enforced at 0 the same way.
 verify_settings() {
   local setting name value i names=() want=() current wrong=() sql="" row code
   for setting in "${OPENEMR_SETTINGS[@]}"; do
@@ -268,6 +272,7 @@ main() {
   block_metadata_server
   start_openemr
   wait_until_ready
+  require_setup_complete
   verify_settings
   log "done: OpenEMR is up at $OPENEMR_SITE_ADDRESS (port $OPENEMR_HTTPS_PORT on the VM, HTTPS only)"
 }

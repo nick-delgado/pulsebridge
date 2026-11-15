@@ -43,9 +43,12 @@ OPENEMR_DEADLINE=0
 
 # ---- Logging and time ---------------------------------------------------------------------------
 
-log() { printf '%s pulsebridge-openemr[%s]: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OPENEMR_HOOK_NAME" "$*"; }
+# All log lines go to standard error, so a function whose standard output is captured
+# (`version=$(upload_key ...)`) can log without its messages becoming part of the value. edge-vm
+# collects both streams into the startup log.
+log() { printf '%s pulsebridge-openemr[%s]: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OPENEMR_HOOK_NAME" "$*" >&2; }
 warn() { log "WARNING: $*"; }
-error() { log "ERROR: $*" >&2; }
+error() { log "ERROR: $*"; }
 die() {
   error "$*"
   exit 1
@@ -174,7 +177,11 @@ ensure_container() {
     fi
     log "container $name has an older configuration (image, flags, certificate or Apache settings changed); stopping it gracefully and replacing it"
     docker stop --time "$OPENEMR_STOP_TIMEOUT_SECONDS" "$name" > /dev/null
-    docker rm "$name" > /dev/null
+    # -v removes the container's ANONYMOUS volumes with it: the OpenEMR image declares
+    # VOLUME [/etc/letsencrypt/ /etc/ssl], so every replacement would otherwise leave two orphaned
+    # volumes on the boot disk. Bind mounts (the sites directory, the certificate) are not volumes
+    # and are never touched by -v.
+    docker rm -v "$name" > /dev/null
   fi
   log "creating container $name"
   docker run --detach --name "$name" --label "$OPENEMR_CONFIG_LABEL=$hash" "$@" > /dev/null
@@ -237,6 +244,26 @@ wait_until_ready() {
     fi
     pause
   done
+}
+
+# OpenEMR's first-time setup must have finished. The image's openemr.sh runs auto_configure.php,
+# prints "Setup Complete!", and only then writes sites/default/docker-version (its "version
+# marker"); auto_configure.php's installer is what fills the access-control (phpGACL) tables. A
+# reboot or crash restart during the roughly five minutes of setup can leave sqlconf.php marked as
+# configured while the ACL install never ran (openemr#15084): the image then skips setup on every
+# later start, readyz may still answer, and OpenEMR is broken. Both checks are cheap and read-only.
+# Nothing is ever wiped automatically: the recovery deletes the clinic database.
+require_setup_complete() {
+  local marker="$EDGE_OPENEMR_DIR/default/docker-version" count
+  local recovery="Recovery (dev; it deletes the clinic data): stop the openemr container, drop OpenEMR's database and user in MariaDB (DROP DATABASE $OPENEMR_DB_NAME; DROP USER '$OPENEMR_DB_USER'@'%';) AND empty $EDGE_OPENEMR_DIR, both together, never one without the other; then run: sudo google_metadata_script_runner startup"
+  if [ ! -s "$marker" ]; then
+    die "OpenEMR's first-time setup did not finish: $marker (written by the image after 'Setup Complete!') is missing. It was probably interrupted by a reboot or restart. $recovery"
+  fi
+  count=$(printf 'SELECT COUNT(*) FROM gacl_acl;\n' | openemr_sql) || die "cannot check OpenEMR's access-control tables (the query failed); not continuing on a guess"
+  if [[ ! "$count" =~ ^[0-9]+$ ]] || [ "$count" -eq 0 ]; then
+    die "OpenEMR's first-time setup did not finish: its access-control table gacl_acl is empty. $recovery"
+  fi
+  log "OpenEMR's first-time setup is complete (setup marker present, $count access-control rules)"
 }
 
 # ---- The OpenEMR database -----------------------------------------------------------------------

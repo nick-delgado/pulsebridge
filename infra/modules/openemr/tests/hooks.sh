@@ -70,7 +70,8 @@ render() { # <directory> [extra -var ...]
 }
 render "$TMP/default"
 render "$TMP/no-block" -var "block_metadata_server=false"
-pass "rendered both hooks with terraform console (default, and block_metadata_server = false)"
+render "$TMP/v2-scopes" -var 'scopes=["system/Patient.crs","system/Encounter.crs","system/Observation.cr"]'
+pass "rendered both hooks with terraform console (default, block_metadata_server = false, SMART v2 scopes)"
 
 # ---- 2. Lint --------------------------------------------------------------------------------------
 
@@ -117,6 +118,7 @@ HOOK_TIMEOUT=2400 # EDGE_HOOK_TIMEOUT_SECONDS (40 minutes, this module's default
 TLS_TARGET=/etc/ssl/certs/selfsigned.cert.pem
 REAL_DATE=$(command -v date)
 HOOKS="$TMP/default"
+FOREIGN_CLIENT="foreignclient0000AbCdEfGhIjKlMn"
 
 new_sandbox() {
   SB=$(mktemp -d "$TMP/sb.XXXXXX")
@@ -126,7 +128,7 @@ new_sandbox() {
     ln -s "$fake" "$SB/bin/$c"
   done
   # The real tools the hooks need, and nothing else.
-  for c in awk base64 basename bash cat chmod cmp cp cut find grep head ls mkdir mktemp mv rm rmdir sed sha256sum sort tail touch tr wc; do
+  for c in awk base64 basename bash cat chmod chown cmp cp cut find grep head id ls mkdir mktemp mv rm rmdir sed sha256sum sort tail touch tr wc; do
     real=$(command -v "$c") || {
       echo "test setup: $c not found" >&2
       exit 2
@@ -144,6 +146,8 @@ new_sandbox() {
   echo 0 > "$SB/state/clock"
   mkdir -p "$SB/state/db"
   printf 'rest_fhir_api\t0\nrest_system_scopes_api\t0\nsite_addr_oath\t\nrest_api\t0\n' > "$SB/state/db/globals"
+  # A client of another application, enabled: nothing this module does may touch it.
+  printf '%s\t%s\t1\n' "$FOREIGN_CLIENT" "another-clinic-app" > "$SB/state/db/oauth_clients"
 }
 
 RC=0
@@ -174,7 +178,9 @@ boot() { # both hooks, in edge-vm's order
 calls() { grep -cE -- "$1" "$SB/state/calls.log" || true; }
 elapsed() { cat "$SB/state/clock"; }
 db_rows() { cat "$SB/state/db/oauth_clients" 2> /dev/null || true; }
-enabled_clients() { awk -F '\t' '$3 == 1 { print $1 }' "$SB/state/db/oauth_clients" 2> /dev/null || true; }
+enabled_clients() { awk -F '\t' '$2 == "pulsebridge-fhir-proxy" && $3 == 1 { print $1 }' "$SB/state/db/oauth_clients" 2> /dev/null || true; }
+our_rows() { awk -F '\t' '$2 == "pulsebridge-fhir-proxy"' "$SB/state/db/oauth_clients" 2> /dev/null || true; }
+foreign_row() { awk -F '\t' -v c="$FOREIGN_CLIENT" '$1 == c' "$SB/state/db/oauth_clients" 2> /dev/null || true; }
 uploads() { find "$SB/state/sm" -maxdepth 1 -name 'v[0-9]*' ! -name '*.state' 2> /dev/null | wc -l; }
 registrations() { find "$SB/state/registrations" -maxdepth 1 -name '*.json' 2> /dev/null | wc -l; }
 state_value() { sed -n "s/^$1=//p" "$SB/mnt/disks/edge/openemr-client/state" 2> /dev/null || true; }
@@ -215,15 +221,32 @@ key_lines() {
     case "$v" in *.state) continue ;; esac
     python3 -I -c 'import base64,json,sys
 doc = json.loads(base64.b64decode(json.load(open(sys.argv[1]))["payload"]["data"]))
-for line in doc["private_key_pem"].splitlines():
+for line in doc["private_key"].splitlines():
     if line and not line.startswith("-----"):
         print(line)' "$v"
+  done
+}
+# The key in other encodings: the base64 of the whole PEM, the base64 bundle that is the upload's
+# payload, and the upload document itself (add-version.json), from what the fake Secret Manager got.
+key_encodings() {
+  local v
+  for v in "$SB"/state/sm/v[0-9]*; do
+    [ -e "$v" ] || continue
+    case "$v" in *.state) continue ;; esac
+    python3 -I -c 'import base64,json,sys
+raw = open(sys.argv[1]).read()
+data = json.loads(raw)["payload"]["data"]
+doc = json.loads(base64.b64decode(data))
+print(base64.b64encode(doc["private_key"].encode()).decode())
+print(data)
+print(raw.strip())' "$v"
   done
 }
 expect_no_leak() {
   local f found=0 pattern_file="$TMP/patterns"
   printf '%s\n' "$ROOT_PW" "$DB_PW" "$ADMIN_PW" "$FAKE_TOKEN" "$FAKE_CLIENT_SECRET" "$FAKE_REGISTRATION_TOKEN" > "$pattern_file"
   key_lines >> "$pattern_file"
+  key_encodings >> "$pattern_file"
   for f in "$SB/out.log" "$SB/state/calls.log" "$HOOKS/openemr.sh" "$HOOKS/openemr-oauth-client.sh"; do
     if grep -qF -f "$pattern_file" "$f"; then
       fail "$1: a password, token, client secret or private-key line appears in $(basename "$f")"
@@ -281,13 +304,22 @@ else
 fi
 expect_eq "$(grep -c '^MaxRequestWorkers *4$' "$SB/var/lib/pulsebridge-edge/openemr/apache-lowmem.conf" || true)" 1 "Apache capped at four workers"
 if [ -s "$SB/mnt/disks/edge/openemr/default/sqlconf.php" ]; then pass "sites directory seeded from the image"; else fail "sites directory not seeded"; fi
-expect_eq "$(stat -c %a "$SB/mnt/disks/edge/openemr")" "755" "the seeded sites directory keeps the image's mode (not the hook's umask 077)"
+expect_eq "$(stat -c %a "$SB/mnt/disks/edge/openemr")" "500" "the seeded sites directory keeps the image's mode dr-x------ (not the hook's umask 077)"
+if [ "$(id -u)" = 0 ]; then
+  expect_eq "$(stat -c %u:%g "$SB/mnt/disks/edge/openemr")" "1000:101" "the seeded sites directory keeps the image's owner (apache, uid 1000), so Apache's user can read it as the image intends"
+else
+  echo "WARN: not root, so the fake cannot give the seed the image's owner; owner check skipped"
+fi
+expect_calls '^timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh --mount type=bind,source='"$SB"'/mnt/disks/edge/\.openemr-sites-seed,target=/seed .* -c cp -a /swarm-pieces/sites /seed/sites$' 1 "the seed copies the image's pristine sites into a temporary directory first"
+expect_log "first-time setup is complete" "checks that OpenEMR's first-time setup finished"
 if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "no seed directory left behind"; else fail "the seed directory was left behind"; fi
 expect_eq "$("$REAL_OPENSSL" x509 -in "$SB/mnt/disks/edge/openemr-tls/server.crt" -noout -ext subjectAltName | tail -n 1 | tr -d ' ')" "IPAddress:$IP" "the certificate names the VM's address"
 expect_calls '^curl .*--cacert '"$SB"'/mnt/disks/edge/openemr-tls/server\.crt .*https://10\.10\.0\.10/meta/health/readyz$' "$(calls '/meta/health/readyz$')" "every readiness poll verifies OpenEMR's certificate (--cacert)"
 expect_calls 'INSECURE' 0 "TLS verification is never switched off"
 expect_log 'OPENEMR_SETTING_\* took effect' "the settings check passes when the variables took effect"
 expect_calls '^docker run --rm --network none .*client-tools\.php keygen' 1 "generates one key pair, in a container with no network"
+expect_calls '^docker run --rm .*source='"$SB"'/run/pulsebridge-openemr-client\.[A-Za-z0-9]+,target=/work .*client-tools\.php (keygen|register-body|bundle) ' 3 "the key's work directory is in the memory-backed run directory"
+expect_calls '^docker run --rm .*source='"$SB"'/mnt/[^,]*,target=/work .*client-tools\.php (keygen|bundle)' 0 "the key's work directory is never on the data disk"
 expect_eq "$(registrations)" 1 "registers one client"
 reg="$SB/state/registrations/1.json"
 if python3 -I - "$reg" << 'PY'; then pass "registration body: private client, private_key_jwt, client_credentials only, S1's six scopes, a public-only JWKS whose kid is its RFC 7638 thumbprint"; else fail "registration body is not as S1's recipe"; fi
@@ -310,6 +342,7 @@ PY
 expect_eq "$(uploads)" 1 "stores the key in Secret Manager once"
 client=$(enabled_clients)
 expect_eq "$(enabled_clients | wc -l)" 1 "exactly one enabled client in OpenEMR"
+expect_eq "$(foreign_row)" "$(printf '%s\t%s\t1' "$FOREIGN_CLIENT" another-clinic-app)" "another application's client is untouched"
 expect_eq "$(state_value status)" "done" "state file: done"
 expect_eq "$(state_value client_id)" "$client" "state file holds the enabled client's ID"
 expect_eq "$(cat "$SB/mnt/disks/edge/openemr-client/client_id")" "$client" "client_id file holds the client ID (plain configuration)"
@@ -319,7 +352,7 @@ expect_eq "$(state_value secret_version)" "1" "state file records the version it
 python3 -I - "$SB/state/sm/v1" "$TMP/bundle-key.pem" << 'PY' > "$TMP/bundle.txt"
 import base64, json, sys
 doc = json.loads(base64.b64decode(json.load(open(sys.argv[1]))["payload"]["data"]))
-open(sys.argv[2], "w").write(doc["private_key_pem"])
+open(sys.argv[2], "w").write(doc["private_key"])
 for f in ("format", "client_id", "kid", "alg", "token_endpoint_auth_method", "site_addr_oath", "token_url", "fhir_base_url", "scope"):
     print(f"{f}={doc[f]}")
 open(sys.argv[2] + ".crt", "w").write(doc["server_certificate_pem"])
@@ -383,7 +416,8 @@ boot
 expect_rc 0 "$RC1" "hook openemr with a new certificate"
 expect_rc 0 "$RC2" "hook openemr-oauth-client with a new certificate"
 expect_calls '^docker stop --time 60 openemr$' 1 "the old container is stopped gracefully"
-expect_calls '^docker rm openemr$' 1 "then removed without --force"
+expect_calls '^docker rm -v openemr$' 1 "then removed without --force, with its anonymous volumes (-v)"
+expect_eq "$(find "$SB/state/volumes" -type f | wc -l)" 2 "no orphaned anonymous volumes: only the new container's two"
 expect_calls 'FORCED REMOVE' 0 "never docker rm --force"
 expect_calls '^docker run --detach --name openemr' 1 "and created again"
 expect_log 'certificate changed' "the registration hook notices the new certificate"
@@ -425,12 +459,12 @@ expect_log 'cannot check the key secret' "warns that it cannot check"
 expect_eq "$(registrations)" 4 "does not re-register on a guess"
 
 # -- Case: the database cannot be queried during the check ----------------------------------------
-echo "== the database query hangs while checking the registered client"
-run_hook openemr-oauth-client "FAKE_HANG=docker exec"
+echo "== the database query fails while checking the registered client"
+run_hook openemr-oauth-client "FAKE_SQL_FAIL_MATCH=^SELECT is_enabled"
 expect_rc nonzero "$RC" "registration hook when the database does not answer"
 expect_log 'cannot query OpenEMR.s database' "says it cannot query the database"
 expect_eq "$(registrations)" 4 "does not register a new client because a query failed"
-expect_no_hang "database hang during the check"
+expect_no_hang "database failure during the check"
 
 # -- Case: the settings variables have no effect (spike S2) ----------------------------------------
 echo "== OPENEMR_SETTING_* ignored by the image; rest_api found on"
@@ -532,13 +566,15 @@ for code in 403 503; do
   run_hook openemr-oauth-client "FAKE_UPLOAD_FAIL=$code"
   expect_rc nonzero "$RC" "upload $code: hook openemr-oauth-client"
   expect_eq "$(enabled_clients | wc -l)" 0 "upload $code: no enabled client without a stored key"
-  expect_eq "$(db_rows | wc -l)" 0 "upload $code: the new, disabled client is deleted"
+  expect_eq "$(our_rows | wc -l)" 0 "upload $code: the new, disabled client is deleted"
+  expect_eq "$(uploads)" 0 "upload $code: no version stored"
   if [ ! -e "$SB/mnt/disks/edge/openemr-client/state" ]; then pass "upload $code: no state file"; else fail "upload $code: a state file was left"; fi
   if [ -z "$(ls -A "$SB/run")" ]; then pass "upload $code: the run directory is empty"; else fail "upload $code: left in the run directory: $(ls -A "$SB/run")"; fi
   expect_no_hang "upload $code"
   expect_no_leak "upload $code"
   if [ "$code" = 503 ]; then
-    expect_log 'before the hook deadline' "upload 503: retried until the deadline"
+    expect_calls ':addVersion$' 3 "upload 503: at most three attempts"
+    expect_log 'still 0, so it did not land' "upload 503: each failure is checked against the version metadata before a retry"
   else
     expect_calls ':addVersion' 1 "upload 403: a refusal is not retried"
   fi
@@ -559,6 +595,125 @@ expect_no_hang "registration with Google's endpoints hanging"
 if [ "$(calls 'googleapis\.com|metadata\.google\.internal')" -ge 2 ]; then pass "the token and Secret Manager calls were reached and retried"; else fail "Google's endpoints were not called"; fi
 expect_eq "$(enabled_clients | wc -l)" 0 "no enabled client when the key could not be stored"
 expect_no_leak "registration with Google's endpoints hanging"
+
+# -- Case: five boots per scenario, counting clients and versions (review F3, F4) -------------------
+# Prints "<enabled clients> <our clients> <versions> <registrations>".
+counts() { echo "$(enabled_clients | wc -l) $(our_rows | wc -l) $(uploads) $(registrations)"; }
+five_boots() { # <scenario> <environment for boot 1...>
+  local scenario=$1
+  shift
+  new_sandbox
+  run_hook openemr
+  run_hook openemr-oauth-client "$@"
+  BOOT1_RC=$RC
+  BOOT1_STATE=$(state_value status)
+  for _ in 2 3 4 5; do run_hook openemr-oauth-client; done
+  FIVE_RC=$RC
+  echo "   $scenario after 5 boots (enabled, clients, versions, registrations): $(counts)"
+}
+
+echo "== F3: the key is stored but Secret Manager's answer is lost"
+five_boots "answer lost" FAKE_UPLOAD_LOST=1
+expect_rc 0 "$BOOT1_RC" "answer lost: boot 1 notices the upload landed and carries on"
+expect_eq "$BOOT1_STATE" "done" "answer lost: boot 1 enables the client"
+expect_calls ':addVersion$' 1 "answer lost: one addVersion call in five boots (no retry after it landed)"
+expect_log 'the upload landed' "answer lost: says the upload landed"
+expect_eq "$(counts)" "1 1 1 1" "answer lost: after 5 boots one client, one version, one registration"
+expect_rc 0 "$FIVE_RC" "answer lost: boot 5"
+
+echo "== F3: the upload really fails on boot 1 (503, nothing stored)"
+five_boots "real failure" FAKE_UPLOAD_FAIL=503
+expect_rc nonzero "$BOOT1_RC" "real failure: boot 1 fails"
+expect_eq "$(counts)" "1 1 1 2" "real failure: after 5 boots one client, one version (boot 1's client deleted)"
+
+echo "== F3: answer lost and the version metadata unreadable: no blind retry"
+new_sandbox
+run_hook openemr
+run_hook openemr-oauth-client FAKE_UPLOAD_LOST=1 FAKE_SM_GET=403
+expect_rc nonzero "$RC" "lost answer without metadata access"
+expect_calls ':addVersion$' 1 "lost answer without metadata access: exactly one addVersion call"
+expect_log 'not retrying' "lost answer without metadata access: says it does not retry"
+expect_eq "$(enabled_clients | wc -l)" 0 "lost answer without metadata access: no enabled client"
+
+echo "== F4: enabling fails on boot 1"
+five_boots "enable fails" "FAKE_SQL_FAIL_MATCH=^UPDATE oauth_clients SET is_enabled = 1 "
+expect_rc nonzero "$BOOT1_RC" "enable fails: boot 1 fails"
+expect_eq "$BOOT1_STATE" "uploaded" "enable fails: boot 1 leaves status=uploaded, never done"
+expect_log 'resuming: client .* enabling it' "enable fails: boot 2 resumes by enabling"
+expect_eq "$(counts)" "1 1 1 1" "enable fails: after 5 boots the same one client and one version"
+expect_rc 0 "$FIVE_RC" "enable fails: boot 5"
+
+echo "== F4: revoking fails on boot 1"
+five_boots "revoke fails" "FAKE_SQL_FAIL_MATCH=^UPDATE oauth_clients SET is_enabled = 0 WHERE client_name"
+expect_rc nonzero "$BOOT1_RC" "revoke fails: boot 1 fails"
+expect_eq "$BOOT1_STATE" "enabled" "revoke fails: boot 1 leaves status=enabled, never done"
+expect_log 'resuming: client .* revoking earlier clients' "revoke fails: boot 2 retries only the revoke"
+expect_eq "$(counts)" "1 1 1 1" "revoke fails: after 5 boots one client, one version, no new client"
+expect_eq "$(foreign_row)" "$(printf '%s\t%s\t1' "$FOREIGN_CLIENT" another-clinic-app)" "revoke fails: another application's client is untouched"
+
+# -- Case: scopes (review F1) ------------------------------------------------------------------------
+echo "== scopes changed to the SMART v2 set"
+new_sandbox
+boot
+HOOKS="$TMP/v2-scopes"
+run_hook openemr-oauth-client
+HOOKS="$TMP/default"
+expect_rc 0 "$RC" "registration after the scopes changed"
+expect_log "registered with scopes .* not the configured" "says the registered scopes differ"
+expect_eq "$(registrations)" 2 "a new client is registered with the new scopes"
+expect_eq "$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["scope"])' "$SB/state/registrations/2.json")" "system/Patient.crs system/Encounter.crs system/Observation.cr" "the registration asks for exactly the configured v2 scopes"
+expect_eq "$(python3 -I -c 'import base64,json,sys; print(json.loads(base64.b64decode(json.load(open(sys.argv[1]))["payload"]["data"]))["scope"])' "$SB/state/sm/v2")" "system/Patient.crs system/Encounter.crs system/Observation.cr" "the stored document's scope equals what was registered"
+expect_eq "$(state_value scopes)" "system/Patient.crs system/Encounter.crs system/Observation.cr" "the state file records the registered scopes"
+
+# -- Case: a hostile client_id in the registration answer (review F10) -------------------------------
+echo "== the registration answers with a client_id that holds SQL"
+new_sandbox
+run_hook openemr
+run_hook openemr-oauth-client FAKE_HOSTILE_CLIENT_ID=1
+expect_rc nonzero "$RC" "hostile client_id"
+expect_log 'no client_id in the expected form' "hostile client_id: refused"
+if grep -qF "UPDATE oauth_clients SET is_enabled = 1; --" "$SB/state/sql.log" 2> /dev/null; then fail "hostile client_id: it reached a SQL statement"; else pass "hostile client_id: it never reaches a SQL statement"; fi
+if [ ! -e "$SB/mnt/disks/edge/openemr-client/state" ]; then pass "hostile client_id: nothing written to the state file"; else fail "hostile client_id: a state file was written"; fi
+expect_eq "$(uploads)" 0 "hostile client_id: nothing stored"
+expect_eq "$(enabled_clients | wc -l)" 0 "hostile client_id: no enabled client"
+
+# -- Case: TERM while the key is in memory (review F10) -----------------------------------------------
+for at in keygen bundle; do
+  echo "== SIGTERM while the PHP tool runs '$at'"
+  new_sandbox
+  run_hook openemr
+  run_hook openemr-oauth-client "FAKE_TERM_AT=$at"
+  expect_eq "$RC" 143 "TERM at $at: the hook exits 143"
+  if [ -z "$(ls -A "$SB/run")" ]; then pass "TERM at $at: the EXIT trap emptied the run directory"; else fail "TERM at $at: left in the run directory: $(ls -A "$SB/run")"; fi
+  hits=$(grep -rlF "PRIVATE KEY""-----" "$SB" --exclude-dir=openemr-tls --exclude-dir=sm || true)
+  if [ -z "$hits" ]; then pass "TERM at $at: no private key left outside OpenEMR's own TLS directory"; else fail "TERM at $at: a private key is left in: $hits"; fi
+  expect_eq "$(enabled_clients | wc -l)" 0 "TERM at $at: no enabled client"
+done
+
+# -- Case: interrupted seed and interrupted first-time setup (review F9, F10) --------------------------
+echo "== the sites seed fails half-way"
+new_sandbox
+run_hook openemr FAKE_SEED_FAIL=1
+expect_rc nonzero "$RC" "interrupted seed"
+expect_eq "$(ls -A "$SB/mnt/disks/edge/openemr")" "" "interrupted seed: the sites directory stays empty (the partial copy is in the temporary directory)"
+expect_calls '^docker run --detach --name openemr' 0 "interrupted seed: OpenEMR is not started"
+run_hook openemr
+expect_rc 0 "$RC" "interrupted seed, next boot"
+if [ -s "$SB/mnt/disks/edge/openemr/default/config.php" ]; then pass "interrupted seed, next boot: seeded completely"; else fail "interrupted seed, next boot: not seeded"; fi
+if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "interrupted seed, next boot: the temporary directory is gone"; else fail "interrupted seed, next boot: the temporary directory is left"; fi
+
+echo "== first-time setup interrupted (configured, but no ACL and no setup marker)"
+new_sandbox
+boot FAKE_SETUP_INTERRUPTED=1
+expect_rc nonzero "$RC1" "interrupted setup: hook openemr fails instead of reporting success"
+expect_log 'first-time setup did not finish' "interrupted setup: says so"
+expect_log 'DROP DATABASE openemr' "interrupted setup: gives the recovery"
+expect_rc nonzero "$RC2" "interrupted setup: the registration hook refuses too"
+expect_eq "$(registrations)" 0 "interrupted setup: no client registered"
+if [ -s "$SB/mnt/disks/edge/openemr/default/sqlconf.php" ] && [ -d "$SB/mnt/disks/edge/mariadb" ]; then pass "interrupted setup: nothing is wiped automatically"; else fail "interrupted setup: data was removed"; fi
+echo 31 > "$SB/state/db/gacl_acl"
+run_hook openemr
+expect_rc nonzero "$RC" "ACL present but no setup marker: still refused"
 
 # -- Case: registration without OpenEMR running --------------------------------------------------------
 echo "== registration hook with OpenEMR not running"

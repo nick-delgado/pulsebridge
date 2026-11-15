@@ -28,25 +28,11 @@ locals {
 
   image = "${var.dockerhub_mirror_url}/${var.openemr_image}"
 
-  # Exactly what fhir-proxy's share action (T15) needs, as spike S1 registered and tested them
-  # (SMART v1 "system/<Resource>.<read|write>" scopes, which OpenEMR 8.5.0 offers only with
-  # rest_system_scopes_api on):
-  #   Patient.read      search by identifier before creating (S1: without it the search got 401),
-  #                     and the read-back by id for the "As stored in OpenEMR" panel (D13);
-  #   Patient.write     create the Patient when the search finds none;
-  #   Encounter.write   create the Encounter each Observation must reference;
-  #   Encounter.read    reuse an Encounter (search) and the read-back;
-  #   Observation.write create each Observation;
-  #   Observation.read  the read-back by id.
-  # Nothing else: no user/ or patient/ scopes, no openid, no api:oemr (the standard REST API).
-  scopes = [
-    "system/Patient.read",
-    "system/Patient.write",
-    "system/Encounter.read",
-    "system/Encounter.write",
-    "system/Observation.read",
-    "system/Observation.write",
-  ]
+  # The scopes the client is registered with (variable `scopes`; README, "Scopes"). Default: spike
+  # S1's six SMART v1 scopes, the set verified end to end. In OpenEMR 8.5.0 a v1 `.write` means
+  # create, update AND delete (ScopePermissionObject::createFromString: write -> cud) and `.read`
+  # means read and search; the share needs create, read and search only.
+  scopes = var.scopes
 
   # OpenEMR settings (rows of its `globals` table) set through OPENEMR_SETTING_<name> variables on
   # the container (spike S1 verified the image applies them on every start), and checked in the

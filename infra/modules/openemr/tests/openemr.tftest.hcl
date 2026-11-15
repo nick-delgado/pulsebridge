@@ -313,3 +313,71 @@ run "rejects_quote_in_tls_path" {
   }
   expect_failures = [var.tls_mount_targets]
 }
+
+# --- Scopes (review F1) ---------------------------------------------------------------------------
+
+run "narrower_smart_v2_scopes" {
+  command = plan
+
+  variables {
+    scopes = ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"]
+  }
+
+  assert {
+    condition     = output.scopes == "system/Patient.crs system/Encounter.crs system/Observation.cr"
+    error_message = "The configured scopes must be the ones output for fhir-proxy."
+  }
+
+  assert {
+    condition     = alltrue([for h in values(output.edge_vm_hooks) : strcontains(h, "OPENEMR_CLIENT_SCOPES='system/Patient.crs system/Encounter.crs system/Observation.cr'")])
+    error_message = "The hooks must register exactly the configured scopes."
+  }
+}
+
+run "rejects_wildcard_scope" {
+  command = plan
+  variables {
+    scopes = ["system/*.read"]
+  }
+  expect_failures = [var.scopes]
+}
+
+run "rejects_other_resource_scope" {
+  command = plan
+  variables {
+    scopes = ["system/Patient.read", "system/Practitioner.read"]
+  }
+  expect_failures = [var.scopes]
+}
+
+run "rejects_unordered_v2_scope" {
+  command = plan
+  variables {
+    scopes = ["system/Patient.rcs"]
+  }
+  expect_failures = [var.scopes]
+}
+
+run "rejects_empty_suffix_and_user_scope" {
+  command = plan
+  variables {
+    scopes = ["system/Patient.", "user/Patient.read"]
+  }
+  expect_failures = [var.scopes]
+}
+
+run "rejects_repeated_scope" {
+  command = plan
+  variables {
+    scopes = ["system/Patient.read", "system/Patient.read"]
+  }
+  expect_failures = [var.scopes]
+}
+
+run "rejects_no_scopes" {
+  command = plan
+  variables {
+    scopes = []
+  }
+  expect_failures = [var.scopes]
+}

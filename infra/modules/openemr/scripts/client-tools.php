@@ -176,7 +176,8 @@ function bundle(string $dir, string $clientId, string $site, string $scope, stri
         'token_endpoint_auth_method' => 'private_key_jwt',
         'kid' => trim(read_file("$dir/kid")),
         'alg' => ASSERTION_ALG,
-        'private_key_pem' => read_file("$dir/private.pem"),
+        // Named private_key so fhir-proxy's trace redaction (exact key names) hides it.
+        'private_key' => read_file("$dir/private.pem"),
         'site_addr_oath' => $site,
         'token_url' => "$site/oauth2/default/token",
         'fhir_base_url' => "$site/apis/default/fhir",
