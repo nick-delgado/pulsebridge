@@ -38,8 +38,24 @@ export type OutcomeLookup =
   | 'gave-up'
   /** The trace lookup answered 404: the attempt is not (or no longer) in the audit store. */
   | 'missing'
+  /**
+   * The proxy looked for the stored message and the HL7v2 store does not have it
+   * (`messageLookup: "not-found"`, amendment 1): the derived MLLP name was wrong, or the message
+   * was deleted. There is no outcome to wait for, so polling stops.
+   */
+  | 'message-not-found'
+  /**
+   * The proxy could not ask the HL7v2 store in time (`messageLookup: "failed"`). Polling stops
+   * (the proxy says so rather than "pending"); "Check again" asks once more.
+   */
+  | 'message-unchecked'
   /** The outcome is accepted or error. */
-  | 'settled';
+  | 'settled'
+  /**
+   * An attempt from another session, shown from its trace: still pending when the trace was
+   * loaded. The panel does not poll it (only this session's sends are polled).
+   */
+  | 'not-polled';
 
 export interface Reading {
   /** Local key for this row (unique on the page, `cuff-` prefixed so it can be an element id). */
@@ -83,9 +99,73 @@ export function newReading(
   };
 }
 
-/** True while the outcome may still change, so the row should be polled. */
+/**
+ * A Reading for an attempt that was NOT sent in this session, built only from its trace (the
+ * messages log selected it). What the send result would have said and the trace does not keep
+ * is left honest: no framing (`null`, "not said"), the ACK without MSA-2 (the send record keeps
+ * MSH-10 instead), and the message bytes only when the proxy returned them. The request's
+ * pressures come from the Observation when there is one; nothing shows them for such a row.
+ */
+export function readingFromAttempt(key: string, trace: CuffAttemptTrace): Reading {
+  const a = trace.attempt;
+  const transport = a.transport ?? 'mllp';
+  const value = (code: string) =>
+    trace.observation?.component?.find((c) => c.code.coding?.some((x) => x.code === code))
+      ?.valueQuantity?.value ?? 0;
+  const request: CuffReadingRequest =
+    a.sample !== null
+      ? { transport, sendMalformed: a.sample }
+      : { systolic: value('8480-6'), diastolic: value('8462-4'), transport, sendMalformed: null };
+  const stored = a.result === 'accepted';
+  let lookup: OutcomeLookup = 'not-stored';
+  if (stored) {
+    if (a.messageLookup === 'not-found') lookup = 'message-not-found';
+    else if (a.messageLookup !== 'confirmed') lookup = 'message-unchecked';
+    else lookup = a.application?.outcome === 'pending' ? 'not-polled' : 'settled';
+  }
+  return {
+    key,
+    request,
+    result: {
+      attemptId: a.id,
+      sentAt: a.sentAt,
+      transport,
+      controlId: a.controlId,
+      sample: a.sample,
+      messageSent: trace.messageSent ?? '',
+      framing: null,
+      messageName: a.messageName ?? a.derivedMessageName,
+      messageNameSource:
+        a.messageName !== null
+          ? 'ingest-response'
+          : a.derivedMessageName !== null
+            ? 'derived-sha256-unverified'
+            : null,
+      result: a.result,
+      ack: a.commitAck,
+      audit: { recorded: true },
+    },
+    recorded: true,
+    // An unconfirmed lookup keeps "pending" with the lookup saying why, as for a session row.
+    application: stored ? (a.application ?? { outcome: 'pending', reason: null }) : null,
+    lookup,
+    observationId: trace.observation?.id ?? a.observation?.replace(/^Observation\//, '') ?? null,
+    observationStatus: trace.observation?.status ?? null,
+  };
+}
+
+/**
+ * True while the outcome may still change, so the row should be polled. Not once the proxy has
+ * said the stored message could not be found or checked (`message-not-found`,
+ * `message-unchecked`): there is then nothing to wait for.
+ */
 export function isPending(r: Reading): boolean {
-  return r.recorded && r.application?.outcome === 'pending';
+  return (
+    r.recorded &&
+    r.application?.outcome === 'pending' &&
+    r.lookup !== 'message-not-found' &&
+    r.lookup !== 'message-unchecked'
+  );
 }
 
 /**
@@ -94,6 +174,18 @@ export function isPending(r: Reading): boolean {
  */
 export function withTrace(r: Reading, trace: CuffAttemptTrace): Reading {
   if (isStaleTrace(r, trace)) return r;
+  const settled = r.application !== null && r.application.outcome !== 'pending';
+  const lookupFailed =
+    trace.attempt.messageLookup === 'not-found' || trace.attempt.messageLookup === 'failed';
+  // The store could not confirm this attempt's message (amendment 1): it has no outcome and no
+  // Observation, so the row stops waiting and says why. A row that already settled keeps what
+  // it learnt (an older answer cannot undo it).
+  if (lookupFailed && !settled && r.application !== null) {
+    const lookup: OutcomeLookup =
+      trace.attempt.messageLookup === 'not-found' ? 'message-not-found' : 'message-unchecked';
+    if (r.lookup === lookup && r.observationId === null) return r;
+    return { ...r, lookup, observationId: null, observationStatus: null };
+  }
   const application = trace.attempt.application ?? r.application;
   const fromRef = trace.attempt.observation?.replace(/^Observation\//, '') ?? null;
   const next: Reading = {
@@ -220,17 +312,37 @@ export function applicationPhrase(r: Reading): Phrase {
       tone: 'error',
     };
   }
+  if (r.lookup === 'message-not-found') {
+    return {
+      label: 'Not found',
+      detail:
+        'Not known: the HL7v2 store has no message under the name the simulator derived for this send, so its outcome cannot be looked up. The page stopped checking. The messages log may list the stored message separately.',
+      tone: 'warn',
+    };
+  }
+  if (r.lookup === 'message-unchecked') {
+    return {
+      label: 'Could not be checked',
+      detail:
+        'Not known: the proxy could not ask the HL7v2 store in time, so the outcome could not be checked. The page stopped checking; use "Check again".',
+      tone: 'warn',
+    };
+  }
   // pending
   const waiting: Record<OutcomeLookup, string> = {
     polling: 'Pending: stored, waiting for the mapper (checking every few seconds).',
     'gave-up':
       'Pending: still not mapped after 2 minutes, so the page stopped checking. The mapper may have failed, or the message is waiting to be replayed.',
     missing:
-      'Pending when last known: the send-attempt record could not be found, so the outcome cannot be looked up.',
+      'Pending when last known: the send-attempt record could not be found (or, answered 422, could not be read), so the outcome cannot be looked up.',
     'not-recorded':
       'Not known: this attempt was not recorded, so its outcome cannot be looked up here.',
     'not-stored': 'Pending.',
     settled: 'Pending.',
+    'message-not-found': 'Pending.',
+    'message-unchecked': 'Pending.',
+    'not-polled':
+      'Pending when this trace was loaded: stored, not mapped yet. This send is from another session, so the page does not keep checking; select it again to check.',
   };
   return {
     label: r.lookup === 'not-recorded' ? 'Not known' : 'Pending',
@@ -277,6 +389,12 @@ export function unshareableReason(r: Reading): string | null {
   }
   if (r.result.result !== 'accepted' || r.application === null) {
     return 'the HL7v2 store rejected this message, so it was never stored and there is no Observation.';
+  }
+  if (r.lookup === 'message-not-found') {
+    return 'the HL7v2 store has no message under this send’s derived name, so its Observation cannot be found.';
+  }
+  if (r.lookup === 'message-unchecked') {
+    return 'its stored message could not be checked, so its Observation is not known.';
   }
   if (r.application.outcome === 'pending') {
     return 'not mapped to FHIR yet (application-level outcome pending), so there is no Observation to share.';

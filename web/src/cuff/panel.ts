@@ -28,7 +28,7 @@ import {
   type CuffReadingRequest,
   type MalformedSample,
 } from '../api/contract';
-import { ApiError, CuffSendError, UnauthorizedError } from '../api/errors';
+import { CuffSendError, isFinalTraceAnswer, UnauthorizedError } from '../api/errors';
 import type { CuffSlot, FeatureContext } from '../shell/features';
 import { pollUntil, type PollOptions } from '../state/poll';
 import type { Selection } from '../state/selection';
@@ -53,6 +53,7 @@ import {
   fieldMessages,
   isPending,
   newReading,
+  readingFromAttempt,
   readingSummary,
   sendFailureText,
   unshareableReason,
@@ -102,6 +103,11 @@ function childController(parent: AbortSignal): AbortController {
 function selectionTarget(s: Selection | null): string {
   if (s === null) return 'none';
   return s.source === 'cuff' ? `cuff:${s.attemptId}` : `watch:${s.observationId}`;
+}
+
+/** True for the 422 that means the attempt's AuditEvent is unreadable (amendment 12). */
+function unreadableAnswer(error: unknown): boolean {
+  return isFinalTraceAnswer(error) && (error as { status: number }).status === 422;
 }
 
 function errorMessage(error: unknown): string {
@@ -642,7 +648,12 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
       on: {
         click: () => {
           const now = find(r.key);
-          if (now) startPolling(now);
+          // A lookup that could not be checked is asked again from "pending".
+          if (now?.lookup === 'message-unchecked') {
+            const again: Reading = { ...now, lookup: 'polling' };
+            replace(again);
+            startPolling(again);
+          } else if (now) startPolling(now);
         },
       },
       signal,
@@ -682,7 +693,10 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     view.root.classList.toggle('cuff-reading--selected', isSelected);
     view.selected.hidden = !isSelected;
     view.show?.setAttribute('aria-pressed', String(isSelected));
-    view.checkAgain.hidden = !(r.lookup === 'gave-up' && r.application?.outcome === 'pending');
+    view.checkAgain.hidden = !(
+      (r.lookup === 'gave-up' && r.application?.outcome === 'pending') ||
+      r.lookup === 'message-unchecked'
+    );
   };
 
   const renderAllRows = () => {
@@ -715,10 +729,10 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
 
   // -- selection and trace ---------------------------------------------------------------------
   /** Clears the selection because its attempt is gone from the audit store, and says so. */
-  const dropSelection = (r: Reading) => {
+  const dropSelection = (r: Reading, unreadable = false) => {
     selectedKey = null;
     setOwn(null);
-    trace.render({ kind: 'gone', summary: readingSummary(r, deps.timeZone) });
+    trace.render({ kind: 'gone', summary: readingSummary(r, deps.timeZone), unreadable });
     renderAllRows();
   };
 
@@ -779,10 +793,11 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
         if (isAbort(error, c.signal) || error instanceof UnauthorizedError) return;
         if (selectedKey !== r.key) return;
         const current = find(r.key) ?? r;
-        if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
+        // 404/410 and 422 (an unreadable AuditEvent, amendment 12) are final: no retry helps.
+        if (isFinalTraceAnswer(error)) {
           pollers.get(r.key)?.abort();
           replace({ ...current, lookup: isPending(current) ? 'missing' : current.lookup });
-          dropSelection(current);
+          dropSelection(current, unreadableAnswer(error));
           return;
         }
         // Not knowing is not shareable: say why on the selection, and offer a retry.
@@ -826,11 +841,66 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     }
   }
 
+  // -- an attempt from another session (selected in the messages log) -------------------------
+  /** The attempt shown from its trace alone, while the selection names it; null otherwise. */
+  let remoteId: string | null = null;
+
+  /**
+   * Loads and shows the trace of an attempt this panel has no row for. The selection is marked
+   * "being checked" until the answer, then re-set from the trace (Observation, final or not),
+   * keeping the summary the other feature gave it. 404, 410 and 422 are final.
+   */
+  const loadRemote = (sel: Extract<Selection, { source: 'cuff' }>) => {
+    const id = sel.attemptId;
+    remoteId = id;
+    traceController?.abort();
+    const c = childController(signal);
+    traceController = c;
+    const summary = sel.summary;
+    trace.render({ kind: 'loading', summary });
+    setOwn({ ...sel, unshareableReason: CHECKING_REASON });
+    client.getCuffAttemptTrace(id, { signal: c.signal }).then(
+      (t) => {
+        if (c.signal.aborted || remoteId !== id) return;
+        const reading = readingFromAttempt(`cuff-attempt-${id}`, t);
+        trace.render({ kind: 'attempt', trace: t, summary });
+        setOwn({
+          source: 'cuff',
+          attemptId: id,
+          observationId: reading.observationId,
+          summary,
+          unshareableReason: unshareableReason(reading),
+        });
+      },
+      (error: unknown) => {
+        if (isAbort(error, c.signal) || error instanceof UnauthorizedError) return;
+        if (remoteId !== id) return;
+        if (isFinalTraceAnswer(error)) {
+          remoteId = null;
+          setOwn(null);
+          trace.render({ kind: 'gone', summary, unreadable: unreadableAnswer(error) });
+          return;
+        }
+        setOwn({ ...sel, unshareableReason: `could not be checked: ${errorMessage(error)}` });
+        trace.render({
+          kind: 'error',
+          summary,
+          message: errorMessage(error),
+          retry: () => {
+            const now = selection.get();
+            if (now?.source === 'cuff' && now.attemptId === id) loadRemote(now);
+          },
+        });
+      },
+    );
+  };
+
   selection.subscribe((current) => {
     const ours =
       current?.source === 'cuff'
         ? readings.find((r) => r.recorded && r.result.attemptId === current.attemptId)
         : undefined;
+    if (ours) remoteId = null;
     if (ours && !settingOwn) {
       // Another feature (for example the messages log) selected one of our rows, a different one
       // or the same one with its own values: show its trace, and until it answers, mark the
@@ -843,9 +913,14 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
       loadTrace(ours);
     } else if (ours) {
       selectedKey = ours.key;
-    } else if (selectedKey !== null) {
+    } else if (current?.source === 'cuff') {
+      // An attempt from another session: no row here, so its trace is shown from the proxy.
+      selectedKey = null;
+      if (!settingOwn) loadRemote(current);
+    } else if (selectedKey !== null || remoteId !== null) {
       // The selection moved to the watch side or was cleared: drop our highlight and trace.
       selectedKey = null;
+      remoteId = null;
       traceController?.abort();
       trace.render({ kind: 'empty' });
     }
@@ -870,11 +945,11 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
           return now === undefined || !isPending(now);
         } catch (error) {
           if (isAbort(error, c.signal) || error instanceof UnauthorizedError) throw error;
-          if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
+          if (isFinalTraceAnswer(error)) {
             const now = find(r.key);
             if (now) replace({ ...now, lookup: 'missing' });
             // The same as a 404 from a trace load: the selected attempt is gone.
-            if (now && selectedKey === r.key) dropSelection(now);
+            if (now && selectedKey === r.key) dropSelection(now, unreadableAnswer(error));
             return true;
           }
           return false; // a passing failure: try again at the next tick
@@ -975,7 +1050,14 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
   context.onDataChanged((kind) => {
     // 'cuff-send' is our own announcement; a sync or a share may change what is behind the
     // selected reading (for example its Observation), so re-check it before Share can use it.
-    if (kind === 'cuff-send' || selectedKey === null) return;
+    if (kind === 'cuff-send') return;
+    if (remoteId !== null) {
+      // An attempt from another session: re-check it through its trace too.
+      const current = selection.get();
+      if (current?.source === 'cuff' && current.attemptId === remoteId) loadRemote(current);
+      return;
+    }
+    if (selectedKey === null) return;
     const r = find(selectedKey);
     const sel = r ? selectionFor(r) : null;
     if (!r || !sel) return;

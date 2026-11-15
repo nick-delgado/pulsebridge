@@ -103,3 +103,54 @@ describe('status strip', () => {
     expect(relativeTime('2026-03-07T12:00:00Z', NOW)).toBe('3 d ago');
   });
 });
+
+describe('status strip: the proxy as built (T19, amendments 9, 10, 11, 13, 15)', () => {
+  it('a null count is "unknown", never 0; a real 0 stays 0', () => {
+    const unknown = status({}, { observationCounts: { watch: null, cuff: 0 } });
+    expect(values(unknown)).toContain('Observations: unknown watch · 0 cuff');
+    expect(text(unknown)).toContain(
+      'A count is unknown: the FHIR store could not be asked in time.',
+    );
+  });
+
+  it('OpenEMR "not-checked" is "Not checked", neutral, not "Unreachable"', () => {
+    const s = status(
+      {},
+      { openemr: { reachable: false, checkedAt: '2026-03-10T12:00:00Z', detail: 'not-checked' } },
+    );
+    expect(values(s)).toContain('OpenEMR: Not checked');
+    expect(text(s)).not.toContain('OpenEMR: Unreachable');
+    const item = [...strip(s).querySelectorAll('.status-item')].find((li) =>
+      li.textContent.includes('OpenEMR'),
+    );
+    expect(item?.className).toContain('status-item--neutral');
+    // A real failure still says Unreachable, with its code.
+    const down = status(
+      {},
+      { openemr: { reachable: false, checkedAt: '2026-03-10T12:00:00Z', detail: 'error' } },
+    );
+    expect(values(down)).toContain('OpenEMR: Unreachable');
+  });
+
+  it("health-sync's failure reasons in words, with the code", () => {
+    const s = status({ state: 'unknown', reason: 'health-sync-timeout' });
+    expect(text(s)).toContain('(health-sync did not answer in time: health-sync-timeout)');
+    // Its own reasons stay codes.
+    expect(text(status({ state: 'reconnect-needed', reason: 'refresh-token-invalid' }))).toContain(
+      '(refresh-token-invalid)',
+    );
+  });
+
+  it('lastSyncAt with milliseconds reads like any instant', () => {
+    expect(text(status({ lastSyncAt: '2026-03-10T11:53:00.000Z' }))).toContain(
+      'Newest watch data: 7 min ago',
+    );
+  });
+
+  it('not configured: one clear item, no counts', () => {
+    const st = statusStrip();
+    st.render({ kind: 'not-configured' });
+    expect(st.root.textContent).toContain('Service: Not configured');
+    expect(st.root.textContent).toContain('You are still logged in');
+  });
+});

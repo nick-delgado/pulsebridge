@@ -6,7 +6,13 @@
  * time but says the check did not finish, and the `backfill-needed` and `refresh-token-rotated`
  * notes are shown as items of their own. Every state is spelled out in words, not only by colour.
  */
-import type { Reachability, StatusSummary, WatchSyncStatus } from '../api/contract';
+import {
+  HEALTH_SYNC_FAILURE_REASONS,
+  REACHABILITY_NOT_CHECKED,
+  type Reachability,
+  type StatusSummary,
+  type WatchSyncStatus,
+} from '../api/contract';
 import { el, replaceChildren } from '../ui/dom';
 
 export function statusStrip(): { root: HTMLElement; render(state: StripState): void } {
@@ -27,28 +33,53 @@ export function statusStrip(): { root: HTMLElement; render(state: StripState): v
 export type StripState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
+  /** Every route answers 503 `login-not-configured` (amendment 11): the session is kept. */
+  | { kind: 'not-configured' }
   | { kind: 'ready'; status: StatusSummary; now: number };
 
 function items(state: StripState): HTMLLIElement[] {
   if (state.kind === 'loading') return [item('neutral', 'Status', 'Loading…')];
   if (state.kind === 'error') return [item('warn', 'Status', `Unavailable: ${state.message}`)];
+  if (state.kind === 'not-configured') {
+    return [
+      item(
+        'warn',
+        'Service',
+        'Not configured',
+        'The server is missing its reviewer password secret, so it answers no request. You are still logged in; the page tries again every few minutes.',
+      ),
+    ];
+  }
   const { status, now } = state;
   const fmt = new Intl.NumberFormat();
+  // A null count is "not known" (the store could not be asked in time), never 0 (amendment 15).
+  const count = (n: number | null) => (n === null ? 'unknown' : fmt.format(n));
+  const counts = status.observationCounts;
   return [
     syncItem(status.watchSync, now),
     ...noteItems(status.watchSync),
     item(
       'neutral',
       'Observations',
-      `${fmt.format(status.observationCounts.watch)} watch · ${fmt.format(status.observationCounts.cuff)} cuff`,
+      `${count(counts.watch)} watch · ${count(counts.cuff)} cuff`,
+      counts.watch === null || counts.cuff === null
+        ? 'A count is unknown: the FHIR store could not be asked in time.'
+        : undefined,
     ),
     reach('FHIR store', status.fhirStore),
     reach('OpenEMR', status.openemr),
   ];
 }
 
-/** health-sync's reason code as detail text, for example "(refresh-token-invalid)". */
-const because = (reason: string | null) => (reason ? ` (${reason})` : '');
+/**
+ * health-sync's reason code as detail text, for example "(refresh-token-invalid)"; the proxy's
+ * own codes for "health-sync could not be asked" (amendment 9) in words, with the code.
+ */
+const because = (reason: string | null) => {
+  if (!reason) return '';
+  const words = HEALTH_SYNC_FAILURE_REASONS[reason];
+  return words ? ` (${words}: ${reason})` : ` (${reason})`;
+};
 
 function syncItem(sync: WatchSyncStatus, now: number): HTMLLIElement {
   if (sync.state === 'reconnect-needed') {
@@ -117,9 +148,12 @@ function noteItems(sync: WatchSyncStatus): HTMLLIElement[] {
 }
 
 function reach(label: string, r: Reachability): HTMLLIElement {
-  return r.reachable
-    ? item('ok', label, 'Reachable')
-    : item('warn', label, 'Unreachable', r.detail ?? undefined);
+  if (r.reachable) return item('ok', label, 'Reachable');
+  // Nobody checked (no OpenEMR probe before T15, amendment 10): not a claim that it is down.
+  if (r.detail === REACHABILITY_NOT_CHECKED) {
+    return item('neutral', label, 'Not checked', 'The server does not check this yet.');
+  }
+  return item('warn', label, 'Unreachable', r.detail ?? undefined);
 }
 
 function item(

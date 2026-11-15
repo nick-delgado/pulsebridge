@@ -14,6 +14,7 @@ import { createSelectionStore, shareableObservation } from '../state/selection';
 import { CHECKING_REASON, createCuff, RECHECK_REASON } from './panel';
 import { ACK_MODE_NOTE, ACK_MODE_SHORT } from './readings';
 import {
+  AA,
   AE,
   attemptTrace,
   bpObservation,
@@ -711,6 +712,68 @@ describe('polling the application-level outcome', () => {
     expect(m.rows()[0]?.textContent).toContain('the send-attempt record could not be found');
   });
 
+  it('messageLookup not-found: no outcome, polling stops, and the row says the stored message was not found', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(m.traces).toHaveLength(2);
+    m.traces[1]?.answer.resolve(attemptTrace(sendResult(), null, { lookup: 'not-found' }));
+    await flush();
+    // Stopped: no further trace calls however long we wait.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.traces).toHaveLength(2);
+    const row = m.rows()[0];
+    expect(row?.querySelectorAll('.cuff-reading__label')[1]?.textContent).toBe('Not found');
+    expect(row?.textContent).toContain(
+      'the HL7v2 store has no message under the name the simulator derived for this send',
+    );
+    expect(row?.textContent).not.toContain('Pending');
+    expect(row?.querySelector<HTMLButtonElement>('.cuff-reading__again')?.hidden).toBe(true);
+    expect(m.selection.get()?.unshareableReason).toContain('the HL7v2 store has no message');
+    expect(shareableObservation(m.selection.get())).toBeNull();
+    expect(m.slots.trace.textContent).toContain(
+      'Not found: the HL7v2 store has no message under this derived name.',
+    );
+  });
+
+  it('messageLookup failed: polling stops, "could not be checked", and "Check again" asks once more', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    m.traces[1]?.answer.resolve(attemptTrace(sendResult(), null, { lookup: 'failed' }));
+    await flush();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.traces).toHaveLength(2);
+    const row = m.rows()[0];
+    expect(row?.querySelectorAll('.cuff-reading__label')[1]?.textContent).toBe(
+      'Could not be checked',
+    );
+    const again = row?.querySelector<HTMLButtonElement>('.cuff-reading__again');
+    expect(again?.hidden).toBe(false);
+    again?.click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(m.traces).toHaveLength(3);
+    m.traces[2]?.answer.resolve(
+      attemptTrace(
+        sendResult(),
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-9') },
+      ),
+    );
+    await flush();
+    expect(row?.querySelectorAll('.cuff-reading__label')[1]?.textContent).toBe('Accepted');
+    expect(shareableObservation(m.selection.get())).toBe('Observation/bp-9');
+  });
+
+  it('a 422 (unreadable AuditEvent) is final like a 404: polling stops and the trace says why', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    m.traces[1]?.answer.reject(new ApiError(422, 'unreadable'));
+    await flush();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.traces).toHaveLength(2);
+    expect(m.selection.get()).toBeNull();
+    expect(m.slots.trace.textContent).toContain('could not be read');
+  });
+
   it('a tick that changes nothing touches no DOM; settling replaces only what changed', async () => {
     const m = await sentPending();
     const message = m.slots.trace.querySelector('pre');
@@ -1148,5 +1211,142 @@ describe('element ids', () => {
       ),
     );
     expect(refs.filter((id) => !document.getElementById(id))).toEqual([]);
+  });
+});
+
+describe('an attempt from another session, selected elsewhere (F3)', () => {
+  // As a log row from the audit store: the ACK without MSA-2 (T31 keeps MSH-10 instead).
+  const OTHER = sendResult({
+    attemptId: 'att-other',
+    controlId: 'OTHER000000000000001',
+    ack: {
+      received: true,
+      code: 'AA',
+      controlId: null,
+      reason: null,
+      raw: AA.received ? AA.raw : null,
+    },
+  });
+  const fromLog = (attemptId = 'att-other') => ({
+    source: 'cuff' as const,
+    attemptId,
+    observationId: 'bp-7',
+    summary: 'Cuff send at 01 Mar, 09:15:30, MLLP (from the messages log)',
+    unshareableReason: null,
+  });
+  const tab = (m: Awaited<ReturnType<typeof mount>>, name: string) =>
+    [...m.slots.trace.querySelectorAll<HTMLElement>('[role="tab"]')].find(
+      (t) => t.textContent === name,
+    );
+  const panelText = (m: Awaited<ReturnType<typeof mount>>, name: string) => {
+    tab(m, name)?.click();
+    return m.slots.trace.querySelector('[role="tabpanel"]:not([hidden])')?.textContent ?? '';
+  };
+
+  it('loads its trace, renders it without a session row, and re-sets the selection from it', async () => {
+    const m = await mount();
+    m.selection.set(fromLog());
+    expect(m.traces.map((t) => t.id)).toEqual(['att-other']);
+    expect(m.selection.get()?.unshareableReason).toBe(CHECKING_REASON);
+    expect(m.slots.trace.textContent).toContain('Loading the trace');
+    m.traces[0]?.answer.resolve(
+      attemptTrace(
+        OTHER,
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-7') },
+      ),
+    );
+    await flush();
+    expect(m.rows()).toHaveLength(0);
+    expect(m.selection.get()).toEqual({ ...fromLog(), unshareableReason: null });
+    expect(shareableObservation(m.selection.get())).toBe('Observation/bp-7');
+    expect(panelText(m, 'HL7v2 as sent')).toContain('OBX|1|NM|8480-6');
+    // What only a send result knows is said to be unknown, not guessed.
+    expect(panelText(m, 'HL7v2 as sent')).toContain(
+      'the server did not say which framing was used',
+    );
+    expect(panelText(m, 'ACK as received')).toContain('Not kept in the send record');
+    expect(panelText(m, 'ACK as received')).toContain('Accepted: the mapper wrote');
+    expect(panelText(m, 'FHIR as stored')).toContain('"id": "bp-7"');
+  });
+
+  it('no bytes from the proxy: says they are not available, shows no empty message', async () => {
+    const m = await mount();
+    m.selection.set(fromLog());
+    m.traces[0]?.answer.resolve(
+      attemptTrace(sendResult({ attemptId: 'att-other', ack: AE }), null, { messageSent: null }),
+    );
+    await flush();
+    const text = panelText(m, 'HL7v2 as sent');
+    expect(text).toContain('The message bytes are not available');
+    expect(m.slots.trace.querySelector('[aria-label="HL7v2 message as sent (ER7)"]')).toBeNull();
+    expect(m.selection.get()?.unshareableReason).toContain('rejected');
+  });
+
+  it('a not-found lookup is worded and nothing polls it', async () => {
+    vi.useFakeTimers({ now: Date.parse('2026-03-01T09:15:31Z') });
+    const m = await mount();
+    m.selection.set(fromLog());
+    m.traces[0]?.answer.resolve(attemptTrace(OTHER, null, { lookup: 'not-found' }));
+    await flush();
+    expect(panelText(m, 'ACK as received')).toContain('the HL7v2 store has no message');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.traces).toHaveLength(1);
+  });
+
+  it.each([
+    [404, 'no longer in the audit store'],
+    [410, 'no longer in the audit store'],
+    [422, 'could not be read'],
+  ])('a %s is final: the selection is cleared and the trace says why', async (status, words) => {
+    const m = await mount();
+    m.selection.set(fromLog());
+    m.traces[0]?.answer.reject(new ApiError(status, 'x'));
+    await flush();
+    expect(m.selection.get()).toBeNull();
+    expect(m.slots.trace.textContent).toContain(words);
+  });
+
+  it('another failure keeps it unshareable and offers a retry', async () => {
+    const m = await mount();
+    m.selection.set(fromLog());
+    m.traces[0]?.answer.reject(new ApiError(503, 'busy'));
+    await flush();
+    expect(m.selection.get()?.unshareableReason).toBe('could not be checked: busy');
+    m.slots.trace.querySelector<HTMLButtonElement>('button')?.click();
+    expect(m.traces).toHaveLength(2);
+  });
+
+  it('late answers: a newer selection wins; moving to the watch side empties the trace', async () => {
+    const m = await mount();
+    m.selection.set(fromLog('att-a'));
+    m.selection.set(fromLog('att-b'));
+    expect(m.traces[0]?.signal.aborted).toBe(true);
+    m.traces[1]?.answer.resolve(
+      attemptTrace(sendResult({ attemptId: 'att-b' }), { outcome: 'accepted', reason: null }),
+    );
+    m.traces[0]?.answer.resolve(attemptTrace(sendResult({ attemptId: 'att-a', ack: AE }), null));
+    await flush();
+    expect(m.selection.get()).toMatchObject({ attemptId: 'att-b' });
+    expect(panelText(m, 'ACK as received')).toContain('AA');
+    m.selection.set({
+      source: 'watch',
+      observationId: 'hr-1',
+      summary: 'HR',
+      unshareableReason: null,
+    });
+    expect(m.slots.trace.textContent).toContain('Select a reading to see its trace');
+  });
+
+  it('a sync or share data change re-checks it; a cuff-send does not', async () => {
+    const m = await mount();
+    m.selection.set(fromLog());
+    m.traces[0]?.answer.resolve(attemptTrace(OTHER, { outcome: 'accepted', reason: null }));
+    await flush();
+    m.bus.notify('cuff-send');
+    expect(m.traces).toHaveLength(1);
+    m.bus.notify('share');
+    expect(m.traces).toHaveLength(2);
+    expect(m.selection.get()?.unshareableReason).toBe(CHECKING_REASON);
   });
 });

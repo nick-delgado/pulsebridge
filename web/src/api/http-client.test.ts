@@ -51,6 +51,17 @@ const ANSWERS_EVERYTHING = {
   readBack: { resourceType: 'Bundle', type: 'collection', entry: [] },
   entries: [],
   nextCursor: null,
+  partial: false,
+  // A readable trace attempt (parseSendAttemptEntry) and share result (parseShareResult).
+  attempt: {
+    kind: 'cuff-send',
+    id: 'a-1',
+    sentAt: '2026-01-01T00:00:00.000Z',
+    result: 'rejected',
+    commitAck: { received: true, code: 'AE', controlId: null, reason: null, raw: null },
+  },
+  outcome: 'shared',
+  steps: [],
   // A readable cuff send result (parseCuffSendResult refuses one without these).
   transport: 'mllp',
   sentAt: '2026-01-01T00:00:00Z',
@@ -89,7 +100,8 @@ const CALLS: Record<
     ),
   getCuffAttemptTrace: (c, signal) => c.getCuffAttemptTrace('a-1', { signal }),
   listMessages: (c, signal) => c.listMessages({}, { signal }),
-  share: (c, signal) => c.share({ observations: ['Observation/hr-1'] }, { signal }),
+  share: (c, signal) => c.share({ observationId: 'hr-1' }, { signal }),
+  getObservation: (c, signal) => c.getObservation('hr-1', { signal }),
 };
 
 const futureLogin = () => ({
@@ -114,7 +126,19 @@ describe('HttpClient', () => {
   describe('bearer token', () => {
     it('every method: one backend (D10), bearer token, no cookies, no cache, no redirects, signal', async () => {
       session.save(futureLogin());
-      const f = fakeFetch(...Object.keys(CALLS).map(() => json(200, ANSWERS_EVERYTHING)));
+      // The read route must answer with the Observation asked for; everything else shares one body.
+      const f = fakeFetch(
+        ...Object.entries(CALLS)
+          .filter(([, call]) => call !== 'no-request')
+          .map(([name]) =>
+            json(
+              200,
+              name === 'getObservation'
+                ? { resourceType: 'Observation', id: 'hr-1', status: 'final', code: {} }
+                : ANSWERS_EVERYTHING,
+            ),
+          ),
+      );
       const c = client(f.fetch);
       const signal = new AbortController().signal;
       for (const [name, call] of Object.entries(CALLS)) {

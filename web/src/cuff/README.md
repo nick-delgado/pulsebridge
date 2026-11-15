@@ -61,7 +61,11 @@ unshareableReason}`. `observationId` is null until the mapper has accepted the m
   `unshareableReason` is set for pending, rejected, no acknowledgment, mapper error, an
   Observation that is not `final` or not found, and while a check runs.
 - A cuff selection set by another feature for an attempt in this panel's list loads its trace
-  and is re-set from the row; an attempt not sent in this session has no row and no trace here.
+  and is re-set from the row. An attempt not sent in this session (selected in the messages log)
+  has no row: its trace is fetched and shown from the trace alone (TraceState `attempt`, built
+  with `readingFromAttempt`: framing and MSA-2 are said to be unknown, the bytes shown only when
+  the proxy returned them), 404/410/422 are final, it is not polled, and it is re-checked on
+  `'sync'` and `'share'`.
 - The panel announces `'cuff-send'` after every send that returned a result, and after a failure
   that may have sent one (504, a lost connection, an unreadable 200). It re-checks its selection
   on `'sync'` and `'share'`.

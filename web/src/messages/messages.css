@@ -1,0 +1,246 @@
+/* Messages log (T19). Tokens only; every state is also said in words. */
+.log {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  /* The log body scrolls (the shell's strip); the log keeps its own scroll anchor. */
+  overflow-anchor: none;
+  overflow-wrap: anywhere;
+}
+
+.log-hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.log-filter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.log-filter__label {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.log-filter__select {
+  font: inherit;
+  max-width: 100%;
+  padding: var(--space-1) var(--space-2);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-control-border);
+  border-radius: var(--radius);
+}
+
+.log-filters .log-hint {
+  flex: 1 1 16rem;
+}
+
+.log-status:empty,
+.log-alert:empty {
+  display: none;
+}
+
+.log-status {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.log-note {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding-left: var(--space-2);
+  border-left: 3px solid var(--color-neutral);
+  font-size: var(--text-sm);
+}
+
+.log-note--warn,
+.log-note--hint {
+  border-left-color: var(--color-warn);
+}
+
+.log-note--error {
+  border-left-color: var(--color-error);
+}
+
+.log-alert {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.log-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.log-row:focus {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.log-row--selected {
+  border-color: var(--color-episodic);
+  box-shadow: inset 3px 0 0 var(--color-episodic);
+}
+
+.log-row__heading {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+}
+
+.log-row__time {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.log-row__title {
+  font-weight: 600;
+}
+
+.log-row__tag,
+.log-row__selected {
+  font-size: var(--text-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-control-border);
+  border-radius: var(--radius);
+  color: var(--color-text);
+}
+
+.log-row__selected {
+  border-color: var(--color-episodic);
+  font-weight: 600;
+}
+
+.log-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.log-fact {
+  min-width: 0;
+}
+
+.log-tone {
+  border-left: 3px solid var(--color-neutral);
+  padding-left: var(--space-2);
+}
+
+.log-tone--ok {
+  border-left-color: var(--color-ok);
+}
+
+.log-tone--warn {
+  border-left-color: var(--color-warn);
+}
+
+.log-tone--error {
+  border-left-color: var(--color-error);
+}
+
+.log-fact__term {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.log-fact__value {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.log-fact__label {
+  font-weight: 600;
+}
+
+.log-fact__detail {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.log-row__actions,
+.log-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.log-link {
+  color: var(--color-primary);
+}
+
+.log-resources {
+  margin: 0;
+  padding-left: var(--space-4);
+}
+
+.log-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.log-summary {
+  overflow-wrap: anywhere;
+}
+
+/* Wider screens: the facts of a row line up in columns, like a table row. */
+@media (min-width: 960px) {
+  .log-facts {
+    grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  }
+
+  .log-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .log-row__body {
+    min-width: 0;
+  }
+
+  .log-row__actions {
+    align-self: start;
+  }
+
+  .log-row__wrote {
+    grid-column: 1 / -1;
+  }
+}
+
+/* `hidden` must win over the display values above. */
+.log-note[hidden],
+.log-row__wrote[hidden],
+.log-more[hidden] {
+  display: none;
+}

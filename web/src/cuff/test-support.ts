@@ -8,6 +8,7 @@ import type {
   CuffAttemptTrace,
   CuffSendResult,
   MalformedSample,
+  MessageLookup,
   SendAttemptEntry,
 } from '../api/contract';
 import type { Observation } from '../api/fhir';
@@ -104,9 +105,20 @@ export function bpObservation(id: string, status: Observation['status'] = 'final
 export function attemptTrace(
   result: CuffSendResult,
   application: ApplicationOutcome | null,
-  options: { observation?: Observation | null; messageSent?: string | null } = {},
+  options: {
+    observation?: Observation | null;
+    messageSent?: string | null;
+    /** The proxy's lookup (amendment 1); `confirmed` for an accepted send by default. */
+    lookup?: MessageLookup;
+  } = {},
 ): CuffAttemptTrace {
   const observation = options.observation ?? null;
+  const lookup =
+    options.lookup !== undefined
+      ? options.lookup
+      : result.result === 'accepted'
+        ? 'confirmed'
+        : null;
   const entry: SendAttemptEntry = {
     kind: 'cuff-send',
     id: result.attemptId ?? 'none',
@@ -122,8 +134,10 @@ export function attemptTrace(
     messageName: result.messageNameSource === 'ingest-response' ? result.messageName : null,
     derivedMessageName:
       result.messageNameSource === 'derived-sha256-unverified' ? result.messageName : null,
+    messageLookup: lookup,
     observation: observation?.id ? `Observation/${observation.id}` : null,
     source: 'audit-event',
+    possibleDuplicateOf: null,
   };
   return {
     attempt: entry,

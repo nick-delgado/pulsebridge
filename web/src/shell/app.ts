@@ -12,7 +12,7 @@
 import type { PulseBridgeApi } from '../api/contract';
 import type { ClientDeps } from '../api/index';
 import { Session } from '../api/session';
-import { UnauthorizedError } from '../api/errors';
+import { isServiceNotConfigured, UnauthorizedError } from '../api/errors';
 import { mountCuff } from '../cuff/index';
 import { mountHeartRate } from '../heart-rate/index';
 import { mountMessages } from '../messages/index';
@@ -139,10 +139,15 @@ export async function startApp(options: AppOptions): Promise<App> {
         (error: unknown) => {
           if (signal.aborted || load !== statusLoads || error instanceof UnauthorizedError) return;
           shown = false;
-          layout.status.render({
-            kind: 'error',
-            message: error instanceof Error ? error.message : 'unknown error',
-          });
+          // A missing password secret makes every route 503 (amendment 11); the session stays.
+          layout.status.render(
+            isServiceNotConfigured(error)
+              ? { kind: 'not-configured' }
+              : {
+                  kind: 'error',
+                  message: error instanceof Error ? error.message : 'unknown error',
+                },
+          );
         },
       );
     };

@@ -1,0 +1,166 @@
+/* Share with clinic (T19). Tokens only; every state is also said in words. */
+.share-status:empty,
+.share-alert:empty {
+  display: none;
+}
+
+.share-status,
+.share-hint {
+  font-size: var(--text-sm);
+  color: var(--color-text-muted);
+}
+
+.share-status,
+.share-alert,
+.share-confirm,
+.share-steps,
+.share-readback__item {
+  overflow-wrap: anywhere;
+  text-align: left;
+  width: 100%;
+}
+
+.share-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-control-border);
+  border-radius: var(--radius);
+}
+
+.share-confirm__heading {
+  font-size: var(--text-md);
+}
+
+.share-confirm__heading:focus,
+.share-trace__summary:focus {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.share-confirm__what,
+.share-confirm__label {
+  font-weight: 600;
+}
+
+.share-confirm__list {
+  margin: 0;
+  padding-left: var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.share-confirm__left {
+  font-size: var(--text-sm);
+}
+
+.share-confirm__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.share-note {
+  font-size: var(--text-sm);
+  padding-left: var(--space-2);
+  border-left: 3px solid var(--color-neutral);
+}
+
+.share-note--warn {
+  border-left-color: var(--color-warn);
+}
+
+.share-note--error {
+  border-left-color: var(--color-error);
+}
+
+.share-trace__summary {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.share-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.share-step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.share-tone {
+  border-left: 3px solid var(--color-neutral);
+  padding-left: var(--space-2);
+}
+
+.share-tone--ok {
+  border-left-color: var(--color-ok);
+}
+
+.share-tone--warn {
+  border-left-color: var(--color-warn);
+}
+
+.share-tone--error {
+  border-left-color: var(--color-error);
+}
+
+.share-step__head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+}
+
+.share-step__title {
+  font-weight: 600;
+}
+
+.share-mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+.share-step__time {
+  color: var(--color-text-muted);
+}
+
+.share-readback__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.share-readback__heading {
+  font-size: var(--text-sm);
+}
+
+.share-diff {
+  margin: 0;
+  padding-left: var(--space-4);
+  font-size: var(--text-sm);
+}
+
+.share-readback__pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+}
+
+.share-readback__side {
+  min-width: 0;
+}
+
+/* `hidden` must win over the display values above. */
+.share-confirm[hidden] {
+  display: none;
+}
