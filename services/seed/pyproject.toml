@@ -1,0 +1,27 @@
+# seed: writes synthetic five-minute heart-rate roll-ups for a synthetic patient into the FHIR
+# store, for deployments with use_synthetic_data = true (task T09). See README.md.
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pulsebridge-seed"
+version = "0.1.0"
+description = "Generates deterministic synthetic heart-rate roll-up windows for a synthetic patient and writes them to the FHIR store through the T06 mapping."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  # The repository's own libraries (libs/). They are not on PyPI: install them from libs/ first
+  # (`make install` does; the container build in T24 must too). Unpinned because they are
+  # versioned with this repository. pulsebridge-gcp brings google-auth and requests.
+  "pulsebridge-fhir",
+  "pulsebridge-gcp",
+]
+
+[project.scripts]
+# pulsebridge-seed --days N | --hours H [--until ...] [--seed ...] [--dry-run] [--force]
+pulsebridge-seed = "pulsebridge_seed.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pulsebridge_seed"]
