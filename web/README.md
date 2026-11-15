@@ -60,8 +60,9 @@ Two more switches exist for browser tests, in mock builds only (both are parsed 
 - `?mock-audit=build|write`: every cuff send fails to record its AuditEvent
   (`MockClientOptions.auditFailure`), so "not recorded" rows can be seen in the browser.
 
-T19 added four more (all parsed by `mockSwitchesFromSearch` in `src/api/mock-data.ts`, which the
-bundle check's markers cover; a check of the HTTP build for the switch names finds none):
+T19 added four more (all parsed by `mockSwitchesFromSearch` in `src/api/mock-data.ts`; each switch
+name is a marker in `scripts/bundle-rules.mjs` `MOCK_MARKERS`, so an HTTP build that contains one
+fails the bundle check):
 
 - `?mock-lookup=not-found|failed`: the HL7v2 store does not have (or cannot be asked for) the
   name of any accepted send (`messageLookup`); with `not-found` an MLLP message nobody claims is
@@ -70,7 +71,7 @@ bundle check's markers cover; a check of the HTTP build for the switch names fin
 - `?mock-status=openemr-not-checked|counts-unknown|health-sync-timeout|not-configured`: the
   status (or, for `not-configured`, a 503 `login-not-configured` on every route but login) the
   proxy sends in that state.
-- `?mock-share=patient-incomplete|not-configured|openemr-unreachable|encounter-refused|observation-timeout|read-back`:
+- `?mock-share=patient-incomplete|not-configured|openemr-unreachable|encounter-refused|observation-timeout|read-back|hosting-timeout`:
   where a share is refused or stops.
 
 Put a local value in `web/.env.local` (git-ignored); `.env.example` shows the format. Vite copies
@@ -437,11 +438,12 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
 - **Status**: `lastSyncAt` in UTC with milliseconds; `observationCounts` null when not known
   (switch); OpenEMR reachable (as with T15's probe) or `not-checked` (switch, the proxy before T15).
 - **The share walks T15's specified sequence** (see "For T15: the share route"): token, Patient
-  search then create only if absent, Encounter search for the reading's day then create only if
-  none, the Observation POST (a repeat in the same Encounter gets OpenEMR's "already exists" 400
-  and is reported as `already-shared`), then the three reads by id. Trace steps are redacted with
-  a copy of T14's `SECRET_KEYS` (so the assertion and token never appear; nor, as the helper is
-  written, any `code` element). The mock OpenEMR's read-back differs from what was sent the way
+  search then create only if absent, Encounter search for the reading's UTC day then create only
+  if none, the Observation POST (a repeat in the same Encounter gets OpenEMR's "already exists"
+  400 and is reported as `already-shared`), then the three reads by id. Search parameters are in
+  `request.query`. Trace steps are redacted with the final rule (the token step's credentials
+  hidden, FHIR codes visible). `?mock-share=hosting-timeout` does the whole share and then answers
+  as the HTTP client reads Firebase Hosting's HTML 504 (no steps, no OperationOutcome). The mock OpenEMR's read-back differs from what was sent the way
   spike S1 saw (its own `id` and `meta.profile`, `type` on references, rewritten displays and
   unit texts, times in `+00:00`), and for a heart rate it keeps no components or period: that last
   part is this mock's assumption, not measured.
@@ -545,7 +547,7 @@ a fixed `diagnostics` sentence and a reason code in `issue[0].details.coding[0]`
 | `GET /fhir/Observation?code=&date=&_sort=&_count=` | `searchObservations`   | `searchset` Bundle pinned to the configured patient; `link` `self` and `next` path-absolute; every entry has `fullUrl` (`PUBLIC_BASE_URL/fhir/Observation/<id>`); no `total`; `400` (`not-supported`/`invalid`) for anything unsupported                                                                                                                                                        |
 | `GET /fhir/Observation/{id}`                       | `getObservation`       | the Observation if it is the configured patient's, else `404`; any query parameter `400`; `ETag`, `Last-Modified`. The share area reads the selected reading with it                                                                                                                                                                                                                            |
 | `GET /trace/heart-rate/{observationId}`            | `getHeartRateTrace`    | `{"resources": Bundle (Observation, Provenance?, Device?), "source": {"kind": "reconstructed", "window"} \| null}`; `404`                                                                                                                                                                                                                                                                       |
-| `GET /trace/cuff-attempts/{attemptId}`             | `getCuffAttemptTrace`  | `{"attempt": SendAttemptEntry (with messageLookup), "messageSent": ER7 \| null, "resources": Bundle (AuditEvent as stored, Observation?, Provenance?)}`; `404`; `422` the AuditEvent is unreadable (final); a store-only message name (it has slashes) matches no route: `404` `unknown-route`; another id that is not a FHIR id `400` `invalid-id`                                                                                                                       |
+| `GET /trace/cuff-attempts/{attemptId}`             | `getCuffAttemptTrace`  | `{"attempt": SendAttemptEntry (with messageLookup), "messageSent": ER7 \| null, "resources": Bundle (AuditEvent as stored, Observation?, Provenance?)}`; `404`; `422` the AuditEvent is unreadable (final); a store-only message name (it has slashes) matches no route: `404` `unknown-route`; another id that is not a FHIR id `400` `invalid-id`                                             |
 | `GET /messages?kind=&outcome=&count=&cursor=`      | `listMessages`         | `{"entries", "nextCursor", "unreadable", "partial"}`, newest first by send time; `count` default 25, cap 50; filters applied after the join (short or empty pages while `nextCursor` is set); `400` an unknown parameter or value, or `invalid-cursor`                                                                                                                                          |
 | `GET /cuff/samples`                                | `listMalformedSamples` | cuff-sim's list, forwarded                                                                                                                                                                                                                                                                                                                                                                      |
 | `POST /cuff/readings`                              | `submitCuffReading`    | forwarded to cuff-sim; its `200/400/413/422/429/500`, body and `Retry-After` unchanged; `502` cuff-sim unreachable or unusable; `504` timed out (may have been sent)                                                                                                                                                                                                                            |
@@ -581,36 +583,68 @@ Field names in the JSON views are camelCase, except the login response (`token`,
 
 ### For T15: the share route
 
-T19 specifies `POST /share` here; `src/api/contract.ts` (`ShareRequest`, `ShareStep`,
-`ShareResult`, `ShareFailureReason`) and `src/api/parse.ts` (`parseShareResult`) are the
-normative shapes, and `src/api/http-client-proxy.test.ts` holds literal bodies. It follows the
-proxy's conventions: the route is registered through `extensions.add_route` (token-gated, in the
-CapabilityStatement), refusals are `Problem`s (OperationOutcome with a reason code), every step
-is built with `extensions.trace_step`, and nothing secret or host-shaped reaches the page.
+This is the FINAL contract for `POST /share` (agreed after the T19 review; T15 implements it and
+adjusts T14's trace helper to the redaction rule below). `src/api/contract.ts` (`ShareRequest`,
+`ShareStep`, `ShareQuery`, `ShareResult`, `ShareFailureReason`, `SHARE_TOKEN_STEP_SECRETS`,
+`SHARE_FHIR_STEP_SECRETS`) and `src/api/parse.ts` (`parseShareResult`) are the normative shapes;
+`src/api/http-client-proxy.test.ts` holds literal bodies, and the mock implements it. It follows
+the proxy's conventions: the route is registered through `extensions.add_route` (token-gated, in
+the CapabilityStatement), refusals are `Problem`s (OperationOutcome with a reason code), every
+step is built with `extensions.trace_step`, and nothing secret or host-shaped reaches the page.
 
 **Request.** `{"observationId": "<FHIR id>"}`, exactly that one member (a FHIR id, the proxy's
 `SAFE_ID`), at most a few hundred bytes (read with `bodies.read_body`). Never a patient, a
 reference to another type or a URL: the proxy pins the Observation to the configured patient
-(`stores.read`, `stores.is_ours`) and builds everything it sends from its own store.
+(`stores.read`, `stores.is_ours`) and builds everything it sends from its own store. There is no
+idempotency key: shares are serialised per proxy instance, and a repeat is handled by the
+sequence itself (below).
 
-**Sequence and steps** (spike S1), each step a `trace_step(...)` with a PATH-ONLY url (no host,
-no query: a search's parameters go in the step's `request.body`, for example
-`{"identifier": "<value>"}`):
+**Steps.** Each step is `{step, label, request: {method, url, query, body}, response: {status,
+body}, result, durationMs}`:
+
+- `request.url` is a PATH ONLY: no scheme, host or query string;
+- `request.query` holds a search's parameters as an object, parameter name to one value or a list
+  of values (`{"identifier": "<value>"}`, `{"patient": "<uuid>", "date": "2026-03-10"}`), or
+  `null`; the page shows it as "Search parameters: …";
+- `request.body` is only a real request body (`null` for a GET).
 
 | `step`                                               | Request                                                                                                                       | `result`                                                                   |
 | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | `token`                                              | `POST /oauth2/default/token` (client credentials, signed assertion)                                                           | `ok`, or `failed`                                                          |
-| `patient-search`                                     | `GET /apis/default/fhir/Patient`, body `{"identifier": ...}`                                                                  | `found` or `not-found`                                                     |
+| `patient-search`                                     | `GET /apis/default/fhir/Patient`, query `{"identifier": ...}`                                                                 | `found` or `not-found`                                                     |
 | `patient-create`                                     | only after `not-found`: `POST /apis/default/fhir/Patient` with `patient_for_sharing(stored)`                                  | `ok` or `failed`                                                           |
-| `encounter-search`                                   | `GET /apis/default/fhir/Encounter`, body `{"patient": <uuid>, "date": <reading's day>}`                                       | `found` (reused) or `not-found`                                            |
+| `encounter-search`                                   | `GET /apis/default/fhir/Encounter`, query `{"patient": <uuid>, "date": "<YYYY-MM-DD>"}`                                       | `found` (reused) or `not-found`                                            |
 | `encounter-create`                                   | only after `not-found`: `POST /apis/default/fhir/Encounter`                                                                   | `ok` or `failed`                                                           |
 | `observation-create`                                 | `POST /apis/default/fhir/Observation` (subject and encounter OpenEMR's; no `performer`, `device`, `meta`, `identifier`, `id`) | `ok` (201), `already-shared` (OpenEMR's "already exists" 400), or `failed` |
 | `patient-read`, `encounter-read`, `observation-read` | `GET /apis/default/fhir/<Type>/<id>`                                                                                          | `ok` or `failed`                                                           |
 
-Reusing ONE Encounter per patient and reading day matters: OpenEMR refuses a repeated reading
-only within the same Encounter (same code, encounter and time), so a new Encounter per share
-would let a repeat through as a duplicate. An `already-shared` step names the existing
-Observation (S1: the 400 text carries its id), which is what `observation-read` then reads.
+**Redaction (final rule).** Values are replaced by `"[not shown]"`, at any depth, comparing key
+names without regard to case:
+
+- in the `token` step's request and response bodies: every OAuth 2.0 / JWT-bearer credential
+  parameter, `authorization`, `client_secret`, `client_assertion`, `assertion`, `password`,
+  `token`, `access_token`, `refresh_token`, `id_token`, `code`, `code_verifier`, `private_key`,
+  `registration_access_token`;
+- in every other step (FHIR bodies): only names that cannot collide with a FHIR element,
+  `access_token`, `refresh_token`, `id_token`, `client_assertion`, `client_secret`, `assertion`,
+  `private_key`, `password`, `authorization`, `registration_access_token`.
+
+So FHIR codes (`Observation.code`, `Coding.code`, `issue.code`) stay visible in the trace. (Today
+T14's helper hides every `code` and `token` key; T15 changes it to this rule.) The page's note
+under the trace says only "Credentials are replaced by "[not shown]"."
+
+**Encounter day rule.** The Encounter is reused per patient and UTC calendar day of the reading
+(`effectiveDateTime`, or `effectivePeriod.start` for a heart-rate window), found with
+`Encounter?patient=<id>&date=<YYYY-MM-DD>` (the `encounter-search` step's query). If several are
+found, the oldest is reused and the step's label says so; if none, one is created for that day.
+
+**Repeats.** A repeat never creates a second Patient (the Patient is searched for before it is
+created) and reuses that day's Encounter. OpenEMR refuses a repeated reading within the same
+Encounter (same code, encounter and time) with its "already exists" 400, which names the
+existing Observation; the step's `result` is then `already-shared`, `observation-read` reads
+that Observation, and the answer is a 200 `already-shared`. Spike S1 saw that refusal for a
+blood-pressure reading only; for a heart rate (a period with components) it is not verified, and
+the page says so. T15 must handle `already-shared` for both.
 
 **200** (the reading is in OpenEMR):
 
@@ -619,24 +653,28 @@ Observation (S1: the 400 text carries its id), which is what `observation-read` 
   "outcome": "shared",
   "steps": [
     {
-      "step": "token",
-      "label": "...",
+      "step": "patient-search",
+      "label": "Search Patient by identifier",
       "request": {
-        "method": "POST",
-        "url": "/oauth2/default/token",
-        "body": { "client_assertion": "[not shown]" }
+        "method": "GET",
+        "url": "/apis/default/fhir/Patient",
+        "query": { "identifier": "<PT identifier>" },
+        "body": null
       },
-      "response": { "status": 200, "body": { "access_token": "[not shown]" } },
-      "result": "ok",
+      "response": {
+        "status": 200,
+        "body": { "resourceType": "Bundle", "type": "searchset", "total": 1 }
+      },
+      "result": "found",
       "durationMs": 120
     }
   ],
   "readBack": {
-    "patient": {
-      "sent": { "resourceType": "Patient" },
-      "stored": { "resourceType": "Patient", "id": "..." }
+    "patient": { "sent": null, "stored": { "resourceType": "Patient", "id": "..." } },
+    "encounter": {
+      "sent": { "resourceType": "Encounter" },
+      "stored": { "resourceType": "Encounter", "id": "..." }
     },
-    "encounter": { "sent": null, "stored": { "resourceType": "Encounter", "id": "..." } },
     "observation": {
       "sent": { "resourceType": "Observation" },
       "stored": { "resourceType": "Observation", "id": "..." }
@@ -645,37 +683,38 @@ Observation (S1: the 400 text carries its id), which is what `observation-read` 
 }
 ```
 
-- `outcome`: `shared` or `already-shared`; anything else is read as an unreadable answer (502 on
-  the page), so never send a 200 for a share that did not end with the reading in OpenEMR.
-- `readBack.<x>.sent`: the resource exactly as sent (it holds no credential, so it is not
-  redacted), or `null` when nothing was sent (the Patient was found; the Encounter reused).
-  `stored`: the resource read back by id, or `null` when that read failed (its step is `failed`;
-  the outcome is still `shared`). The page shows the two side by side with the differences in
-  words (D13).
+- `outcome`: `shared` or `already-shared`; anything else (and a 200 body the page cannot read) is
+  read as an unreadable answer, so never send a 200 for a share that did not end with the reading
+  in OpenEMR.
+- `readBack.<x>.sent`: the resource exactly as sent (no credential in it, not redacted), or
+  `null` when nothing was sent (the Patient was found; the Encounter reused). `stored`: the
+  resource read back by id, or `null` when that read failed (its step is `failed`; the outcome is
+  still `shared`). The page shows the two side by side with the differences in words (D13).
 
-**Errors** (each an OperationOutcome from `Problem`, reason code in `details.coding`):
+**Errors.** Every error body is an OperationOutcome built by `Problem` (reason code in
+`issue[0].details.coding[0]`), with ONE documented exception, the 502/504 envelope:
 
-| Status | Reason                                                                     | When                                                                                                                                                                         | Body                                                                                              |
-| ------ | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| 400    | `invalid-body`                                                             | not exactly `{"observationId": <FHIR id>}`                                                                                                                                   | OperationOutcome                                                                                  |
-| 404    | `not-found`                                                                | no such Observation, or another patient's (answered alike)                                                                                                                   | OperationOutcome                                                                                  |
-| 422    | `observation-not-final`, `observation-not-shareable`, `patient-incomplete` | before OpenEMR is called: not `final` (for example `amended`); not a heart rate or blood-pressure panel; the stored Patient incomplete (`diagnostics` names what is missing) | OperationOutcome                                                                                  |
-| 502    | `openemr-unreachable`, `openemr-refused`                                   | OpenEMR could not be reached, or refused a step unexpectedly                                                                                                                 | `{"operationOutcome": OperationOutcome, "steps": [steps completed so far, the failing one last]}` |
-| 504    | `openemr-timeout`                                                          | OpenEMR did not answer within the request budget                                                                                                                             | the same envelope; a step that got no answer has `response.status` 0                              |
-| 503    | `share-not-configured`                                                     | T15's variables or key are missing                                                                                                                                           | OperationOutcome                                                                                  |
+| Status | Reason                                                                     | When                                                                                                                                                                         | Body                                                                                                                                                        |
+| ------ | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 400    | `invalid-body`                                                             | not exactly `{"observationId": <FHIR id>}`                                                                                                                                   | OperationOutcome                                                                                                                                            |
+| 404    | `not-found`                                                                | no such Observation, or another patient's (answered alike)                                                                                                                   | OperationOutcome                                                                                                                                            |
+| 422    | `observation-not-final`, `observation-not-shareable`, `patient-incomplete` | before OpenEMR is called: not `final` (for example `amended`); not a heart rate or blood-pressure panel; the stored Patient incomplete (`diagnostics` names what is missing) | OperationOutcome                                                                                                                                            |
+| 503    | `share-not-configured`                                                     | T15's variables or key are missing                                                                                                                                           | OperationOutcome                                                                                                                                            |
+| 502    | `openemr-unreachable`, `openemr-refused`                                   | OpenEMR could not be reached, or refused a step unexpectedly                                                                                                                 | envelope, `Content-Type: application/json`: `{"operationOutcome": <exactly as Problem builds it>, "steps": [steps completed so far, the failing one last]}` |
+| 504    | `openemr-timeout`                                                          | OpenEMR did not answer within the request budget                                                                                                                             | the same envelope; a step that got no answer has `response.status` 0                                                                                        |
 
-Why an envelope for 502/504: an OperationOutcome cannot carry the steps without members FHIR
-does not define, and the steps are the point of the panel (what did and did not happen). The
-client reads both forms (`ShareError.steps`). A repeat share is not an error: it is a 200
-`already-shared`.
+Why the envelope: an OperationOutcome cannot carry the steps without members FHIR does not
+define, and the steps are what tells the user what did and did not happen.
 
-**Awkward for the page, reported to T14/T15:** `extensions.SECRET_KEYS` contains `code` and
-`token`, so `redact` hides EVERY FHIR `code` element at any depth (`Observation.code`, each
-`Coding.code`, an OperationOutcome's `issue.code`) in the step bodies. The trace then shows a
-reading's LOINC code as `"[not shown]"`. The mock copies this behaviour so the page shows what
-the proxy will send, and the trace says why; the read-back (`sent`/`stored`) is not redacted, so
-the codes are visible there. Narrowing the list for FHIR bodies (or redacting only the token
-step's bodies) would fix it.
+**What the page concludes from a failure.** Only a 400, 404, 422 or 503 whose body is the proxy's
+OperationOutcome, with no steps, means the share was refused before OpenEMR was called, and only
+then does the page say "Nothing was sent to the clinic" (`ShareError.nothingSent`). Everything
+else may come after the proxy had already created the Patient, the Encounter or the reading at
+the clinic, so the page says it is not known what reached the clinic, that sharing again is safe
+(it finds and reuses what exists), and announces `'share'` so the others re-check: no answer at
+all (status 0), any 5xx without the envelope (a bare OperationOutcome when the proxy's budget
+runs out, a 500), a non-JSON body (Firebase Hosting's own HTML 504 at its 60 s limit), and a 200
+the page cannot read. With the envelope it says, step by step, what was done.
 
 ### Wire shape and parsed shape
 
@@ -790,7 +829,9 @@ For T19, from the cuff side:
   attempt that is in T18's readings list (this session's sends), the cuff panel highlights it,
   loads its trace, marks the selection "being checked against its stored trace." while that
   loads, and then re-sets the selection from its own data (summary, Observation, reason). An
-  attempt not sent in this session has no row there, so the cuff trace stays empty.
+  attempt not sent in this session has no row there; since T19's review the cuff panel then loads
+  its trace from the proxy and shows it from the trace alone (framing and MSA-2 shown as unknown),
+  re-setting the selection from it.
 - **The two acknowledgment levels need the same explanation in the log.** The store answers in
   HL7's original acknowledgment mode (AA or AE in MSA-1); "commit-level acknowledgment" and
   "application-level outcome" are PulseBridge's names, after HL7's enhanced mode (MSH-15/16),

@@ -33,8 +33,15 @@ step-by-step trace of the share (`share-trace`) and the "As stored in OpenEMR" r
 - **Read-back.** For the reading, the Patient and the Encounter: what was sent beside what OpenEMR
   stored, and the differences in words (dropped, added, changed, by path).
 - **Failures** say what did and did not happen, from the steps completed so far (for example
-  "a Patient was created in OpenEMR; the reading was not sent", or that it is not known whether
-  the reading was stored after a timeout, and that sharing again is safe).
-- `notifyDataChanged('share')` after a share, and after a failure that reached OpenEMR.
+  "a Patient was created in OpenEMR; the reading was not sent"). Only the proxy's own refusal
+  before OpenEMR (a 400, 404, 422 or 503 with its OperationOutcome, no steps) may say "Nothing
+  was sent to the clinic" (`ShareError.nothingSent`). No connection, a 5xx without the steps
+  envelope, the hosting layer's HTML 504 or a 200 that cannot be read say it is not known what
+  reached the clinic and that sharing again is safe.
+- `notifyDataChanged('share')` after a share, and after every failure except a refusal before
+  OpenEMR.
+- **Repeats.** The confirm says a repeat creates no second Patient and reuses the day's
+  Encounter; OpenEMR's refusal of a repeated reading was seen for blood pressure only, and the
+  note says that for heart rate it is not verified.
 
 The route's contract, which T15 implements, is in `web/README.md`, "For T15: the share route".
