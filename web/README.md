@@ -60,6 +60,19 @@ Two more switches exist for browser tests, in mock builds only (both are parsed 
 - `?mock-audit=build|write`: every cuff send fails to record its AuditEvent
   (`MockClientOptions.auditFailure`), so "not recorded" rows can be seen in the browser.
 
+T19 added four more (all parsed by `mockSwitchesFromSearch` in `src/api/mock-data.ts`, which the
+bundle check's markers cover; a check of the HTTP build for the switch names finds none):
+
+- `?mock-lookup=not-found|failed`: the HL7v2 store does not have (or cannot be asked for) the
+  name of any accepted send (`messageLookup`); with `not-found` an MLLP message nobody claims is
+  a store-only row with a `possibleDuplicateOf` hint.
+- `?mock-log=partial`: every messages-log page says `partial: true`.
+- `?mock-status=openemr-not-checked|counts-unknown|health-sync-timeout|not-configured`: the
+  status (or, for `not-configured`, a 503 `login-not-configured` on every route but login) the
+  proxy sends in that state.
+- `?mock-share=patient-incomplete|not-configured|openemr-unreachable|encounter-refused|observation-timeout|read-back`:
+  where a share is refused or stops.
+
 Put a local value in `web/.env.local` (git-ignored); `.env.example` shows the format. Vite copies
 every `VITE_` variable into the public bundle, so **never put a secret in one**. The mode (mock or
 HTTP) is not a variable: it is `vite --mode mock`, fixed at build time, and an HTTP build does not
@@ -94,14 +107,14 @@ width: header, cuff side, watch side, share, log.
 T17, T18 and T19 run in parallel, so every file has exactly one owner (orchestrator decision after
 the T16 review):
 
-| Path                                                                                                                                                                 | Owner                                                           | Rule for the others                                                                               |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `src/heart-rate/`                                                                                                                                                    | T17 (T34 made the edits a contract change needed, listed below) | do not edit                                                                                       |
-| `src/cuff/`                                                                                                                                                          | T18                                                             | do not edit                                                                                       |
-| `src/share/`, `src/messages/`                                                                                                                                        | T19                                                             | do not edit                                                                                       |
-| `package.json`, `package-lock.json`                                                                                                                                  | T17, **only** to add the chart library (D5)                     | T18 and T19 add no dependencies                                                                   |
-| `src/api/` (contract, wire parsing `parse.ts`, errors, HTTP client, mock client, mock data, T31 example copies)                                                      | the shell (T16, then T34)                                       | a task that needs a contract or mock change **reports it to the orchestrator** instead of editing |
-| `src/shell/`, `src/ui/`, `src/state/`, `src/styles/`, `e2e/` (shell and mock-data browser tests), configs, `scripts/` (bundle check and its rules, mock-sample sync) | the shell (T16, then T34)                                       | same: report, do not edit                                                                         |
+| Path                                                                                                                                                                 | Owner                                                                                                                                     | Rule for the others                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `src/heart-rate/`                                                                                                                                                    | T17 (T34 made the edits a contract change needed, listed below)                                                                           | do not edit                                                                                       |
+| `src/cuff/`                                                                                                                                                          | T18                                                                                                                                       | do not edit                                                                                       |
+| `src/share/`, `src/messages/`                                                                                                                                        | T19 (which, to follow T14's proxy, also edited `src/api/`, this README and parts of `src/cuff/` and `src/shell/`: see "What T19 changed") | do not edit                                                                                       |
+| `package.json`, `package-lock.json`                                                                                                                                  | T17, **only** to add the chart library (D5)                                                                                               | T18 and T19 add no dependencies                                                                   |
+| `src/api/` (contract, wire parsing `parse.ts`, errors, HTTP client, mock client, mock data, T31 example copies)                                                      | the shell (T16, then T34)                                                                                                                 | a task that needs a contract or mock change **reports it to the orchestrator** instead of editing |
+| `src/shell/`, `src/ui/`, `src/state/`, `src/styles/`, `e2e/` (shell and mock-data browser tests), configs, `scripts/` (bundle check and its rules, mock-sample sync) | the shell (T16, then T34)                                                                                                                 | same: report, do not edit                                                                         |
 
 ### Mounting
 
@@ -176,6 +189,18 @@ const observations = await client.searchObservations(
   joins the issues: `systolic: is required; diastolic: is required`. Any other status (for example
   a 502 from the proxy) stays a plain `ApiError`.
 
+- **The share's failures are typed.** `share` rejects with `ShareError` (`src/api/errors.ts`):
+  `reason` is the proxy's code (`not-found`, `observation-not-final`, `patient-incomplete`,
+  `openemr-unreachable`, `openemr-refused`, `openemr-timeout`, `share-not-configured`, ...),
+  and `steps` the trace steps completed before it stopped (empty when refused before OpenEMR).
+- **A 503 on every route** (`isServiceNotConfigured(error)`): the proxy's password secret is
+  missing, so no token can be checked (amendment 11). It is not a 401: the session stays, and
+  the page says the service is not configured.
+- **Final trace answers** (`isFinalTraceAnswer(error)`): 404, 410 and 422 (an unreadable
+  AuditEvent, amendment 12). Retrying cannot change them.
+- `proxyReason(outcome)` reads the proxy's reason code (`issue[0].details.coding`, system
+  `urn:pulsebridge:fhir-proxy:reason`).
+
 - **`Retry-After`** is read only in its delay-seconds form (digits only, RFC 9110 section
   10.2.3). Anything else (negative, decimal, `10abc`, an HTTP-date) gives `retryAfterSeconds: null`,
   for the cuff route and for login alike.
@@ -228,11 +253,11 @@ with `notifyDataChanged(kind)`; a feature that **shows** data listens with
 `onDataChanged(listener, signal)` and re-fetches what it shows through the client. The event
 carries no data on purpose: the server is the source of truth (`src/state/data-changed.ts`).
 
-| Kind          | Who calls it                                                                                  | Who listens                                   |
-| ------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| `'cuff-send'` | T18, after `submitCuffReading` returns (whatever the ACK)                                     | T19 messages log; the status strip (built in) |
-| `'share'`     | T19, after `share` returns                                                                    | T19 if it lists shares; the status strip      |
-| `'sync'`      | the status strip (built in), when the newest watch data time changes between two status loads | T17 chart                                     |
+| Kind          | Who calls it                                                                                  | Who listens                                                       |
+| ------------- | --------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `'cuff-send'` | T18, after `submitCuffReading` returns (whatever the ACK)                                     | T19 messages log; the status strip (built in)                     |
+| `'share'`     | T19, after `share` returns, and after a failure that reached OpenEMR                          | T19 messages log; T18 (re-checks its selection); the status strip |
+| `'sync'`      | the status strip (built in), when the newest watch data time changes between two status loads | T17 chart; T19 messages log                                       |
 
 A listener is not called at subscribe time; load your data once in the mount function.
 
@@ -262,8 +287,10 @@ labels it (D7), usually seconds. The feature that shows a pending item polls for
 `pollUntil(check, { signal })` from `src/state/poll.ts`: every 3 s, only while the tab is visible,
 stopping when nothing shown is pending, after 2 minutes (leave it shown as "pending", which is a
 real state: the mapper may have failed), or when the signal aborts. T18 polls
-`getCuffAttemptTrace` for the reading it just sent; T19 polls `listMessages` while a visible row
-is pending. Nobody else polls.
+`getCuffAttemptTrace` for the reading it just sent; T19 polls `listMessages` while a row it shows
+is pending and the strip is open. Nobody else polls. A row whose stored message the proxy could
+not find or check (`messageLookup` `not-found` or `failed`) is not pending: both stop polling
+for it and say so.
 
 ### Rendering data
 
@@ -388,8 +415,35 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
   with `AA` and then mapped to `error` / `out-of-range`, as T12 does.
 - `new MockClient({ auditFailure: 'build' | 'write' })` makes every send fail to record its
   AuditEvent: `build` gives `attemptId: null`, `write` an id with nothing stored under it (the trace
-  is a 404). The send result still says what the store answered, and the attempt is not in the log.
-  (The proxy may later show such a stored message as a `store-only` row; the mock does not.)
+  is a 404). The send result still says what the store answered, and the attempt is not in the log
+  as an attempt; its stored message is listed as a `store-only` row, as the proxy lists it.
+- **The messages log is assembled as the proxy assembles it** (T19; services/fhir-proxy
+  `messages.py`): every attempt row has `messageLookup` (one seeded accepted MLLP attempt has a
+  wrong derived name: `not-found`, no outcome, no Observation); store-only rows (that attempt's
+  real message, with `possibleDuplicateOf` pointing at it, and a message sent straight to the
+  adapter, with no hint and transport `null`); two unreadable rows (one with id `""` and no
+  time, sorted last); transaction rows from health-sync, v2-to-fhir (one per mapped cuff
+  message), the seeder and an unknown writer, `httpStatus` always null, resources only
+  Observations and Provenances. Order is newest first by send time (store-only rows by
+  createTime), ties by id. Pages are 25 rows by default, at most 50, cut BEFORE the kind and
+  outcome filters, so a filtered page can be short or empty while `nextCursor` is set; the
+  outcome filter matches only rows with that outcome. The cursor is opaque and a foreign one is
+  a 400 `invalid-cursor`. A page holding a `failed` lookup is `partial`.
+- **Refusals are the proxy's**: a refused search is 400 `not-supported`; the trace of an
+  unreadable AuditEvent is 422; a store-only name as a trace id is 400 `invalid-id`; with
+  `?mock-status=not-configured` every route but login is 503 `login-not-configured`. Each error
+  carries an OperationOutcome with the proxy's reason code.
+- **Status**: `lastSyncAt` in UTC with milliseconds; `observationCounts` null when not known
+  (switch); OpenEMR reachable (as with T15's probe) or `not-checked` (switch, the proxy before T15).
+- **The share walks T15's specified sequence** (see "For T15: the share route"): token, Patient
+  search then create only if absent, Encounter search for the reading's day then create only if
+  none, the Observation POST (a repeat in the same Encounter gets OpenEMR's "already exists" 400
+  and is reported as `already-shared`), then the three reads by id. Trace steps are redacted with
+  a copy of T14's `SECRET_KEYS` (so the assertion and token never appear; nor, as the helper is
+  written, any `code` element). The mock OpenEMR's read-back differs from what was sent the way
+  spike S1 saw (its own `id` and `meta.profile`, `type` on references, rewritten displays and
+  unit texts, times in `+00:00`), and for a heart rate it keeps no components or period: that last
+  part is this mock's assumption, not measured.
 - **Heart-rate data arrives at sync runs**: the mock's health-sync runs every 15 minutes (minute 2,
   17, 32, 47). Windows, their `preliminary`/`final` status (T10's 30-minute cutoff at that run) and
   `watchSync.lastSyncAt` change together, once per run, so the status strip's `'sync'`
@@ -436,8 +490,8 @@ Every version is pinned exactly in `package.json` (`.npmrc` sets `save-exact`), 
 | -------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `uplot` 1.6.32 | The heart-rate chart (D5, chosen by T17; see `src/heart-rate/README.md`). MIT, no dependencies. | its own chunk, 50,990 B (22.24 kB gzip), loaded by `import()` on first draw; its stylesheet is in the page's CSS |
 
-For comparison, our own code is the main chunk, 46,619 B (17.25 kB gzip), and the CSS is 13,741 B
-(3.52 kB gzip) including uPlot's. **uPlot must stay out of the main chunk**, so the login form
+For comparison, our own code is the main chunk, 124,521 B (40.68 kB gzip) after T19, and the CSS
+is 24,678 B (5.02 kB gzip) including uPlot's. **uPlot must stay out of the main chunk**, so the login form
 never waits for it: `scripts/check-bundle.mjs` reads Vite's build manifest (`dist/.vite/manifest.json`,
 `build.manifest: true`) and fails the build if the entry chunk, or any chunk it imports statically,
 is uPlot's or contains uPlot's code (`scripts/bundle-rules.mjs`, tested on hand-made manifests).
@@ -469,34 +523,158 @@ resolving the whole tree from scratch with no lockfile. So add packages with
 `npx npm@11.21.1 install --save-dev --save-exact <pkg>@<version>`, which keeps the lockfile diff to
 the new package. `npm ci` from the lockfile works with npm 10 and 11.
 
-## HTTP contract (proposal for T14 and T15)
+## HTTP contract (as built by T14; the share route specified for T15)
 
-`fhir-proxy` does not exist yet. These are the routes the HTTP client (`src/api/http-client.ts`)
-calls; the TypeScript types in `src/api/contract.ts` are the normative shapes. Paths are relative
-to the base URL (default `/api`). Where the data is FHIR, the body is FHIR (`application/fhir+json`);
-the other bodies are views the proxy assembles (`application/json`). T14 and T15 decide finally.
+`fhir-proxy` (T14) is the authority: its README's "Routes as built" and "Contract amendments"
+(services/fhir-proxy/README.md). T19 brought the contract, the client, the parser and the mock
+in line with it (table "What T19 changed" below). The TypeScript types in `src/api/contract.ts`
+are the parsed shapes. Paths are relative to the base URL (default `/api`).
 
 **Authentication.** Every route except `POST /auth/login` requires `Authorization: Bearer <token>`
-and answers `401` when it is missing, expired, altered or signed under a previous password. That
-includes `GET /fhir/metadata` (the CapabilityStatement): T14's criterion "unauthenticated requests
-are rejected" is simplest to state and test with exactly one exception, and the page never reads
-the CapabilityStatement. Errors carry a FHIR `OperationOutcome` body where possible; the client
-shows its first `issue.diagnostics`.
+and answers `401` when it is missing, expired, altered or signed under a previous password,
+including `GET /fhir/metadata` and unknown paths. When the proxy's password secret is missing,
+EVERY route answers `503` `login-not-configured`. Every error body is an `OperationOutcome` with
+a fixed `diagnostics` sentence and a reason code in `issue[0].details.coding[0]` (system
+`urn:pulsebridge:fhir-proxy:reason`); the client shows the sentence.
 
-| Method and path                                                                                          | Client method          | Request                                                                                                                                                                                   | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| -------------------------------------------------------------------------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /auth/login`                                                                                       | `login`                | `{"password": "..."}`                                                                                                                                                                     | `200 {"token", "expires_at"}`; `401` wrong password; `429` with `Retry-After`; `503` not configured                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `GET /status`                                                                                            | `getStatus`            |                                                                                                                                                                                           | `StatusSummary`: `watchSync` is health-sync's `/status` (`state`: its `googleHealth`, `connected` \| `reconnect-needed` \| `not-configured` \| `unknown`; `reason`; `notes` (`backfill-needed`, `refresh-token-rotated`); `strandedPreliminary` number \| null; `checkedAt`) plus `lastSyncAt` (ISO \| null, derived by the proxy, open question 9); `observationCounts {watch, cuff}`; `fhirStore` and `openemr` `{reachable, checkedAt, detail}`. Always 200 from health-sync, so `unknown` means "the check could not finish", not "down"                                                                                                                                                                                                                         |
-| `GET /fhir/Observation?code=http://loinc.org\|8867-4&date=gt<start>&date=lt<end>&_sort=date&_count=1000` | `searchObservations`   | FHIR search; `code` is a token (`system\|code`); also `85354-9`. Date rule below                                                                                                          | `Bundle` (`searchset`) of Observations, oldest first; `link[next]` to the next page, under the same base URL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `GET /trace/heart-rate/{observationId}`                                                                  | `getHeartRateTrace`    |                                                                                                                                                                                           | `{"resources": Bundle (collection: Observation, Provenance, Device), "source": {"kind": "reconstructed" \| "original", "window": <Google Health roll-up window>} \| null}`. The client converts it (below)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `GET /cuff/samples`                                                                                      | `listMalformedSamples` |                                                                                                                                                                                           | cuff-sim's list as it returns it: `[{name, label, class, transports}]`, every T07 sample except class `valid`, `label` = the manifest's `description`; bad-framing samples list only `mllp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| `POST /cuff/readings`                                                                                    | `submitCuffReading`    | `{systolic?, diastolic?, transport: "mllp" \| "https", sendMalformed: <sample name> \| null}`: integers 1 to 400 mm[Hg], systolic above diastolic, required unless `sendMalformed` is set | `200 CuffSendResult` (forwarded to cuff-sim, D10, body unchanged): `{attemptId (string \| null), sentAt, transport, controlId, sample, messageSent, framing, messageName, messageNameSource, result, ack, audit}`; `ack` is `{received: true, code, controlId, reason, raw}` or `{received: false, why: timeout \| connection-closed \| api-error \| unreadable-reply, httpStatus, detail, replyPrefixBase64}`. `400` not a JSON object; `413` over 16 KiB; `422` a wrong field (bounds, type, unknown field or sample, sample not for this transport); `429` + `Retry-After`; `500` built message failed validation or a bug; all with an OperationOutcome naming the field in `issue.expression`, and nothing sent. `504` if cut off upstream (may have been sent) |
-| `GET /trace/cuff-attempts/{attemptId}`                                                                   | `getCuffAttemptTrace`  |                                                                                                                                                                                           | `{"attempt": SendAttemptEntry, "messageSent": "<ER7>" \| null, "resources": Bundle (collection: AuditEvent as stored, Observation?, Provenance?)}`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `GET /messages?kind=&outcome=&count=&cursor=`                                                            | `listMessages`         | `kind`: `cuff-send` \| `unreadable-send-attempt` \| `fhir-transaction`; `outcome`: `accepted` \| `error` \| `pending`                                                                     | `{"entries": [...], "nextCursor": string \| null, "unreadable": number}`, newest first. Row shapes below                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `POST /share`                                                                                            | `share`                | `{"observations": ["Observation/<id>", ...]}`                                                                                                                                             | `200 {"outcome": shared \| already-shared \| partly-shared \| failed, "steps": [ShareStep], "readBack": Bundle (collection: Patient, Encounter, Observations as OpenEMR stored them)}`. Each step: `{step, label, request {method, url (path only), body}, response {status, body}, result, durationMs}`; never the private key, the signed assertion or the access token. Failures below                                                                                                                                                                                                                                                                                                                                                                            |
+| Method and path                                    | Client method          | Answer (as built)                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /auth/login`                                 | `login`                | `{"password"}` → `200 {"token", "expires_at"}`; `401`; `429` + `Retry-After`; `503` secret missing; `400`/`413`/`415` a bad body                                                                                                                                                                                                                                                                |
+| `GET /status`                                      | `getStatus`            | always `200`: `watchSync` (`state`, `reason` (health-sync's, or the proxy's `health-sync-*` codes), `notes`, `strandedPreliminary`, `checkedAt`, `lastSyncAt` in UTC with milliseconds), `observationCounts {watch, cuff}` each a number or `null` ("not known", never 0), `fhirStore` and `openemr` `{reachable, checkedAt, detail}` (`detail` a short code; OpenEMR `not-checked` before T15) |
+| `GET /fhir/Observation?code=&date=&_sort=&_count=` | `searchObservations`   | `searchset` Bundle pinned to the configured patient; `link` `self` and `next` path-absolute; every entry has `fullUrl` (`PUBLIC_BASE_URL/fhir/Observation/<id>`); no `total`; `400` (`not-supported`/`invalid`) for anything unsupported                                                                                                                                                        |
+| `GET /fhir/Observation/{id}`                       | `getObservation`       | the Observation if it is the configured patient's, else `404`; any query parameter `400`; `ETag`, `Last-Modified`. The share area reads the selected reading with it                                                                                                                                                                                                                            |
+| `GET /trace/heart-rate/{observationId}`            | `getHeartRateTrace`    | `{"resources": Bundle (Observation, Provenance?, Device?), "source": {"kind": "reconstructed", "window"} \| null}`; `404`                                                                                                                                                                                                                                                                       |
+| `GET /trace/cuff-attempts/{attemptId}`             | `getCuffAttemptTrace`  | `{"attempt": SendAttemptEntry (with messageLookup), "messageSent": ER7 \| null, "resources": Bundle (AuditEvent as stored, Observation?, Provenance?)}`; `404`; `422` the AuditEvent is unreadable (final); `400` an id that is not a FHIR id (a store-only message name)                                                                                                                       |
+| `GET /messages?kind=&outcome=&count=&cursor=`      | `listMessages`         | `{"entries", "nextCursor", "unreadable", "partial"}`, newest first by send time; `count` default 25, cap 50; filters applied after the join (short or empty pages while `nextCursor` is set); `400` an unknown parameter or value, or `invalid-cursor`                                                                                                                                          |
+| `GET /cuff/samples`                                | `listMalformedSamples` | cuff-sim's list, forwarded                                                                                                                                                                                                                                                                                                                                                                      |
+| `POST /cuff/readings`                              | `submitCuffReading`    | forwarded to cuff-sim; its `200/400/413/422/429/500`, body and `Retry-After` unchanged; `502` cuff-sim unreachable or unusable; `504` timed out (may have been sent)                                                                                                                                                                                                                            |
+| `POST /share`                                      | `share`                | **not built yet (T15)**: specified below                                                                                                                                                                                                                                                                                                                                                        |
 
-Field names in the JSON views are camelCase, except the login response, which follows
-docs/spikes/s6.md as written (`token`, `expires_at`).
+Field names in the JSON views are camelCase, except the login response (`token`, `expires_at`).
+
+### What T19 changed to follow the proxy (the 21 amendments)
+
+| #   | Amendment                    | Dashboard before                               | After (T19)                                                                                                                                                                         | Files                                                                     |
+| --- | ---------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 1   | `messageLookup`              | absent; an unconfirmed row waited as "pending" | on every row; only `confirmed` carries an outcome and an Observation (the parser enforces it); the cuff panel and the log say "not found" / "could not be checked" and stop polling | contract, parse, mock, cuff `readings.ts`/`panel.ts`/`trace.ts`, messages |
+| 2   | `writer` seed/unknown        | two writers                                    | four, worded in the log                                                                                                                                                             | contract, parse, mock, messages                                           |
+| 3   | count 25 / cap 50            | mock 50 / 100                                  | `MESSAGES_DEFAULT_COUNT`, `MESSAGES_MAX_COUNT`; mock follows; the log asks for 25                                                                                                   | contract, mock, messages                                                  |
+| 4   | short filtered pages         | mock filtered a full list                      | mock cuts the page before filtering; the log follows `nextCursor` (at most 4 pages a load), then offers "Load more"                                                                 | mock, messages `paging.ts`                                                |
+| 5   | store-only rows              | not produced                                   | produced by the mock; shown as "Stored message, no send record", never selectable                                                                                                   | contract, parse, mock, messages                                           |
+| 6   | unreadable id `""`           | string                                         | `""` allowed; never used as an element id (generated ids only)                                                                                                                      | contract, parse, mock, messages                                           |
+| 7   | search refusal 400           | mock 422                                       | mock 400 `not-supported`                                                                                                                                                            | mock                                                                      |
+| 8   | Bundle links and `fullUrl`   | relative `next`                                | unchanged client (it resolves path-absolute links inside the base); a test with the proxy's literal links                                                                           | tests                                                                     |
+| 9   | `watchSync.reason` codes     | shown as the code                              | the strip words the proxy's `health-sync-*` codes, with the code                                                                                                                    | contract `HEALTH_SYNC_FAILURE_REASONS`, shell `status-strip.ts`           |
+| 10  | OpenEMR `not-checked`        | shown as "Unreachable"                         | "Not checked", neutral                                                                                                                                                              | contract `REACHABILITY_NOT_CHECKED`, shell `status-strip.ts`              |
+| 11  | 503 on every route           | a generic error                                | `isServiceNotConfigured`; the strip says "Service: Not configured", the log and share say so; the session stays                                                                     | errors, shell `app.ts`/`status-strip.ts`, messages, share                 |
+| 12  | trace 422 final              | only 404/410 final                             | `isFinalTraceAnswer` (404, 410, 422); the cuff trace says the record could not be read                                                                                              | errors, cuff `panel.ts`/`trace.ts`, mock                                  |
+| 13  | `lastSyncAt` milliseconds    | ISO                                            | unchanged code (compared as instants); tests with milliseconds                                                                                                                      | tests                                                                     |
+| 14  | `possibleDuplicateOf`        | absent                                         | parsed (store-only rows only); a hint linking to the attempt row, never a confirmed link                                                                                            | contract, parse, mock, messages                                           |
+| 15  | nullable counts              | `count()` made null 0                          | null kept; the strip says "unknown"                                                                                                                                                 | contract, parse, shell `status-strip.ts`                                  |
+| 16  | `partial`                    | absent                                         | parsed (anything but `false` is true; a dropped row makes it true); the log says the list may be incomplete and offers a reload                                                     | contract, parse, mock, messages                                           |
+| 17  | order by send time           | mock by `recordedAt`                           | mock by send time (store-only by createTime), ties by id; `sortTime` in the log                                                                                                     | mock, messages                                                            |
+| 18  | transactions pinned          | mock listed Patient/Device                     | mock lists only Observations and Provenances, `httpStatus` null                                                                                                                     | mock                                                                      |
+| 19  | `outcome` filter             | matched `application.outcome`                  | only rows WITH that outcome; the log's filter note says rows with none match no filter                                                                                              | contract, mock, messages                                                  |
+| 20  | `GET /fhir/Observation/{id}` | absent                                         | `getObservation`; the share's check before confirming                                                                                                                               | contract, http-client, mock, share                                        |
+| 21  | cursor 400                   | opaque                                         | the mock's cursor is opaque too and a foreign one is 400 `invalid-cursor`                                                                                                           | mock                                                                      |
+
+### For T15: the share route
+
+T19 specifies `POST /share` here; `src/api/contract.ts` (`ShareRequest`, `ShareStep`,
+`ShareResult`, `ShareFailureReason`) and `src/api/parse.ts` (`parseShareResult`) are the
+normative shapes, and `src/api/http-client-proxy.test.ts` holds literal bodies. It follows the
+proxy's conventions: the route is registered through `extensions.add_route` (token-gated, in the
+CapabilityStatement), refusals are `Problem`s (OperationOutcome with a reason code), every step
+is built with `extensions.trace_step`, and nothing secret or host-shaped reaches the page.
+
+**Request.** `{"observationId": "<FHIR id>"}`, exactly that one member (a FHIR id, the proxy's
+`SAFE_ID`), at most a few hundred bytes (read with `bodies.read_body`). Never a patient, a
+reference to another type or a URL: the proxy pins the Observation to the configured patient
+(`stores.read`, `stores.is_ours`) and builds everything it sends from its own store.
+
+**Sequence and steps** (spike S1), each step a `trace_step(...)` with a PATH-ONLY url (no host,
+no query: a search's parameters go in the step's `request.body`, for example
+`{"identifier": "<value>"}`):
+
+| `step`                                               | Request                                                                                                                       | `result`                                                                   |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `token`                                              | `POST /oauth2/default/token` (client credentials, signed assertion)                                                           | `ok`, or `failed`                                                          |
+| `patient-search`                                     | `GET /apis/default/fhir/Patient`, body `{"identifier": ...}`                                                                  | `found` or `not-found`                                                     |
+| `patient-create`                                     | only after `not-found`: `POST /apis/default/fhir/Patient` with `patient_for_sharing(stored)`                                  | `ok` or `failed`                                                           |
+| `encounter-search`                                   | `GET /apis/default/fhir/Encounter`, body `{"patient": <uuid>, "date": <reading's day>}`                                       | `found` (reused) or `not-found`                                            |
+| `encounter-create`                                   | only after `not-found`: `POST /apis/default/fhir/Encounter`                                                                   | `ok` or `failed`                                                           |
+| `observation-create`                                 | `POST /apis/default/fhir/Observation` (subject and encounter OpenEMR's; no `performer`, `device`, `meta`, `identifier`, `id`) | `ok` (201), `already-shared` (OpenEMR's "already exists" 400), or `failed` |
+| `patient-read`, `encounter-read`, `observation-read` | `GET /apis/default/fhir/<Type>/<id>`                                                                                          | `ok` or `failed`                                                           |
+
+Reusing ONE Encounter per patient and reading day matters: OpenEMR refuses a repeated reading
+only within the same Encounter (same code, encounter and time), so a new Encounter per share
+would let a repeat through as a duplicate. An `already-shared` step names the existing
+Observation (S1: the 400 text carries its id), which is what `observation-read` then reads.
+
+**200** (the reading is in OpenEMR):
+
+```json
+{
+  "outcome": "shared",
+  "steps": [
+    {
+      "step": "token",
+      "label": "...",
+      "request": {
+        "method": "POST",
+        "url": "/oauth2/default/token",
+        "body": { "client_assertion": "[not shown]" }
+      },
+      "response": { "status": 200, "body": { "access_token": "[not shown]" } },
+      "result": "ok",
+      "durationMs": 120
+    }
+  ],
+  "readBack": {
+    "patient": {
+      "sent": { "resourceType": "Patient" },
+      "stored": { "resourceType": "Patient", "id": "..." }
+    },
+    "encounter": { "sent": null, "stored": { "resourceType": "Encounter", "id": "..." } },
+    "observation": {
+      "sent": { "resourceType": "Observation" },
+      "stored": { "resourceType": "Observation", "id": "..." }
+    }
+  }
+}
+```
+
+- `outcome`: `shared` or `already-shared`; anything else is read as an unreadable answer (502 on
+  the page), so never send a 200 for a share that did not end with the reading in OpenEMR.
+- `readBack.<x>.sent`: the resource exactly as sent (it holds no credential, so it is not
+  redacted), or `null` when nothing was sent (the Patient was found; the Encounter reused).
+  `stored`: the resource read back by id, or `null` when that read failed (its step is `failed`;
+  the outcome is still `shared`). The page shows the two side by side with the differences in
+  words (D13).
+
+**Errors** (each an OperationOutcome from `Problem`, reason code in `details.coding`):
+
+| Status | Reason                                                                     | When                                                                                                                                                                         | Body                                                                                              |
+| ------ | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| 400    | `invalid-body`                                                             | not exactly `{"observationId": <FHIR id>}`                                                                                                                                   | OperationOutcome                                                                                  |
+| 404    | `not-found`                                                                | no such Observation, or another patient's (answered alike)                                                                                                                   | OperationOutcome                                                                                  |
+| 422    | `observation-not-final`, `observation-not-shareable`, `patient-incomplete` | before OpenEMR is called: not `final` (for example `amended`); not a heart rate or blood-pressure panel; the stored Patient incomplete (`diagnostics` names what is missing) | OperationOutcome                                                                                  |
+| 502    | `openemr-unreachable`, `openemr-refused`                                   | OpenEMR could not be reached, or refused a step unexpectedly                                                                                                                 | `{"operationOutcome": OperationOutcome, "steps": [steps completed so far, the failing one last]}` |
+| 504    | `openemr-timeout`                                                          | OpenEMR did not answer within the request budget                                                                                                                             | the same envelope; a step that got no answer has `response.status` 0                              |
+| 503    | `share-not-configured`                                                     | T15's variables or key are missing                                                                                                                                           | OperationOutcome                                                                                  |
+
+Why an envelope for 502/504: an OperationOutcome cannot carry the steps without members FHIR
+does not define, and the steps are the point of the panel (what did and did not happen). The
+client reads both forms (`ShareError.steps`). A repeat share is not an error: it is a 200
+`already-shared`.
+
+**Awkward for the page, reported to T14/T15:** `extensions.SECRET_KEYS` contains `code` and
+`token`, so `redact` hides EVERY FHIR `code` element at any depth (`Observation.code`, each
+`Coding.code`, an OperationOutcome's `issue.code`) in the step bodies. The trace then shows a
+reading's LOINC code as `"[not shown]"`. The mock copies this behaviour so the page shows what
+the proxy will send, and the trace says why; the read-back (`sent`/`stored`) is not redacted, so
+the codes are visible there. Narrowing the list for FHIR bodies (or redacting only the token
+step's bodies) would fix it.
 
 ### Wire shape and parsed shape
 
@@ -504,14 +682,15 @@ The HTTP client does not hand the proxy's JSON (the **wire** shape) straight to 
 converts it into the types in `src/api/contract.ts` (the **parsed** shape), in `http-client.ts`
 and `src/api/parse.ts`. Features only ever see the parsed shape, from either client.
 
-| Route                           | Wire (what the proxy sends)                           | Parsed (what a feature gets)                                                                                                   |
-| ------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `GET /trace/heart-rate/{id}`    | `{resources: Bundle, source: {kind, window} \| null}` | `HeartRateTrace {observation, provenance, device, source: {kind: 'reconstructed' \| 'original' \| 'unknown', window} \| null}` |
-| `GET /trace/cuff-attempts/{id}` | `{attempt, messageSent, resources: Bundle}`           | `CuffAttemptTrace {attempt, messageSent, auditEvent, observation, provenance}`                                                 |
-| `POST /share`                   | `{outcome, steps, readBack: Bundle}`                  | `ShareResult {outcome, steps, readBack: {patient, encounter, observations}}`                                                   |
-| `GET /status`                   | `StatusSummary`                                       | the same, with `watchSync` checked                                                                                             |
-| `POST /cuff/readings`           | cuff-sim's result                                     | the same, with `attemptId`, `framing`, `messageName` and `messageNameSource` checked                                           |
-| `GET /fhir/Observation?...`     | searchset Bundles, paged with `link[next]`            | `Observation[]`, every page followed (inside the proxy's base URL only)                                                        |
+| Route                           | Wire (what the proxy sends)                                                                      | Parsed (what a feature gets)                                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /trace/heart-rate/{id}`    | `{resources: Bundle, source: {kind, window} \| null}`                                            | `HeartRateTrace {observation, provenance, device, source: {kind: 'reconstructed' \| 'original' \| 'unknown', window} \| null}` |
+| `GET /trace/cuff-attempts/{id}` | `{attempt, messageSent, resources: Bundle}`                                                      | `CuffAttemptTrace {attempt, messageSent, auditEvent, observation, provenance}`                                                 |
+| `POST /share`                   | `{outcome, steps, readBack: {patient, encounter, observation: {sent, stored}}}`; errors as above | `ShareResult` (same shape, checked); failures `ShareError {reason, steps}`                                                     |
+| `GET /messages`                 | `{entries, nextCursor, unreadable, partial}`                                                     | the same, each row checked (`parseMessagesPage`): only a `confirmed` lookup carries an outcome; `partial` true unless `false`  |
+| `GET /status`                   | `StatusSummary`                                                                                  | the same, with `watchSync` checked                                                                                             |
+| `POST /cuff/readings`           | cuff-sim's result                                                                                | the same, with `attemptId`, `framing`, `messageName` and `messageNameSource` checked                                           |
+| `GET /fhir/Observation?...`     | searchset Bundles, paged with `link[next]`                                                       | `Observation[]`, every page followed (inside the proxy's base URL only)                                                        |
 
 The rule for checked values: **an unrecognised value never becomes a stronger claim than the
 server made.** An unknown connection state is `unknown` (not `connected`); an unknown trace source
@@ -538,17 +717,6 @@ FHIR resource today (open question 2), and because it keeps the proxy's search s
 CapabilityStatement, small. If the source JSON ends up stored as a FHIR resource (for example a
 `Binary` referenced from the Provenance), switch to the search and drop the route.
 
-**How a failed share is reported.** Consistent with the rest of the API:
-
-- refused before anything is sent to OpenEMR (nothing selected, an Observation that is not
-  `final`, or an incomplete Patient, for example "Patient incomplete: missing birthDate"): `422`
-  with an OperationOutcome (`issue.code` `required` or `invalid`, `diagnostics` naming what is
-  missing). The client throws `ApiError`; there are no steps;
-- OpenEMR unreachable before the first step: `502` with an OperationOutcome;
-- failed during the OpenEMR sequence: `200` with `outcome: failed` or `partly-shared` and the steps
-  so far, because the trace of what happened is the point of the panel; a repeated reading
-  (OpenEMR's "already exists" 400) is a step with `result: already-shared`, not a failure.
-
 **Messages log rows.** The proxy reads send-attempt AuditEvents from the **audit FHIR store**
 (D15, separate from the health-data store) and turns each into a row with T31's
 `parse_send_attempt`:
@@ -559,12 +727,14 @@ CapabilityStatement, small. If the source JSON ends up stored as a FHIR resource
   reason, `messageName`, `sample`), plus `application {outcome: accepted | error | pending,
 reason}` joined from the stored message's labels where the send was accepted, and `observation`.
   `commitAck.raw` is the `ack-message` detail **decoded** to text as a convenience; the AuditEvent
-  in the trace stays exactly as stored (base64). A stored message with no AuditEvent is a row with
-  `source: store-only`.
+  in the trace stays exactly as stored (base64). `messageLookup` says whether the store confirmed
+  the attempt's message name. A stored message that no attempt anywhere claims is a row with
+  `source: store-only` (id = the message name, `possibleDuplicateOf` a hint or null).
 - `unreadable-send-attempt`: an AuditEvent that is ours but unreadable (T31's
   `UnreadableSendAttempt`): `{id, recordedAt, problem}`. T31 tells the proxy to surface these, never
   hide them, so the page shows them as error rows, and `unreadable` counts them.
-- `fhir-transaction`: `{id, recordedAt, writer, httpStatus, resources}`.
+- `fhir-transaction`: `{id, recordedAt, writer, httpStatus (always null), resources}`, from the
+  Provenances one ingest Bundle wrote, pinned to the configured patient.
 
 Two terms used in the shapes (D7): the **commit-level acknowledgment** is the HL7v2 ACK the store
 returned (MSA-1 `AA` stored, `AE` rejected, with MSA-3 as the reason), or no ACK at all; the
@@ -640,46 +810,12 @@ the new types: `trace.ts` takes the source tab's note and code-block label from 
 `unknown`; `panel.ts` reads "has not synced yet" from `lastSyncAt === null` instead of the removed
 `never-synced` state; `panel.test.ts`'s status helper builds the new `watchSync`.
 
-### Open questions for T14, T15 and the orchestrator
+### Open questions (answered by T14)
 
-1. **Patient parameter.** The page sends no `patient` search parameter: this is a single-patient
-   PHR, and the proposal is that the proxy pins searches to the configured patient (T14's AC says
-   "search by patient"). Alternative: `/status` returns the Patient reference and the page passes it.
-2. **Source JSON for the heart-rate trace.** Settled in shape: the proxy sends
-   `source: {kind, window}`. T10 does not store the raw roll-up, so today the proxy rebuilds the
-   window from the stored Observation (period, average, minimum, maximum) and sends
-   `kind: "reconstructed"`. If a later task stores the original (for example as a `Binary`
-   referenced from the Provenance), the proxy sends `kind: "original"` and the page needs no change.
-3. **"HL7v2 as sent".** T31 never stores the message. For a malformed send the proxy can take the
-   bytes from the T07 sample named in `malformed-sample`. For a valid send it must fetch the stored
-   message (`view=RAW_ONLY`) by name. Over MLLP the AuditEvent carries cuff-sim's derived name
-   (`derived-message-name`, T33: `<store>/messages/<urlsafe-base64(sha256(bytes sent))>`), which
-   is unverified, so the proxy joins by it, confirms it with a `get`, and sends it as
-   `derivedMessageName`, never as `messageName`. A control ID is not a key (samples share them).
-4. **FHIR transaction rows.** The brief's log lists one row per FHIR transaction (Bundle, HTTP
-   status, resource ids), but no task records them. Proposal: derive them from the `Provenance`
-   each ingest Bundle writes (`recorded`, `target`); the HTTP status would then be unknown (`null`).
-5. **Date rule.** Confirm that the Cloud Healthcare FHIR store applies `gt`/`lt` to
-   `effectivePeriod` as R4 defines (overlap), so the proxy can pass the parameters through.
-6. **Share failures and the CapabilityStatement route** (above) are proposals for T15 and T14.
-7. **Forwarding cuff-sim's refusals.** The page maps 400, 413, 422, 429 (with `Retry-After`) and
-   500 from cuff-sim, and 504 for a cut-off request. T14 should forward cuff-sim's status, body and
-   `Retry-After` unchanged, keep its own forward timeout at least 90 s (cuff-sim's README), and
-   answer 502 (not 500) when cuff-sim cannot be reached, so the page does not report a cuff-sim bug.
-   **For T22 (unverified):** Firebase Hosting's rewrite to the proxy may have a shorter timeout than
-   cuff-sim's worst case (90 s); if so, that is where a 504 `no-answer` would really come from.
-   T22 should check the limit and say what it is.
-8. **`/status` from health-sync.** health-sync answers 200 in every state. T14 should send
-   `googleHealth` as `state` (the client also accepts `googleHealth` itself when `state` is absent),
-   and `reason`, `notes`, `strandedPreliminary` and `checkedAt` unchanged,
-   and report health-sync itself not answering (any non-200 or no answer) as `state: "unknown"`
-   with a `reason` such as `health-sync-unreachable`, not as a disconnection.
-9. **`lastSyncAt`.** health-sync's `/status` is stateless and has no last sync time. The page
-   needs the time of the newest heart-rate write (the strip shows it as "Newest watch data", and a
-   change announces `'sync'`). Proposal: the proxy reads it from the FHIR store, for example the
-   newest `Provenance.recorded` whose agent is health-sync, or the newest heart-rate Observation's
-   `meta.lastUpdated`, with a short cache. It moves only when data was written, which is what the
-   page wants: otherwise the chart would re-fetch for nothing.
-10. **Store-only rows.** A send whose AuditEvent was not recorded leaves a stored message without
-    an AuditEvent. The contract has `source: "store-only"` rows for these; the mock does not make
-    any. T14 decides whether to list them.
+The ten open questions T16 listed here for T14, T15 and the orchestrator are answered in
+services/fhir-proxy/README.md, "Answers to the dashboard's open questions" (patient pinning,
+the reconstructed source window, "HL7v2 as sent", transaction rows from Provenances, the date
+rule, share failures, forwarding cuff-sim's refusals and Firebase Hosting's 60 s limit,
+`/status` from health-sync, `lastSyncAt` as the newest heart-rate `meta.lastUpdated`, and
+store-only rows). The page follows those answers (the amendments table above). Question 6, how a
+failed share is reported, is now specified for T15 in "For T15: the share route".
