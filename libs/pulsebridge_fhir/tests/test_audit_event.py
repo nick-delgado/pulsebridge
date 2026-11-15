@@ -782,6 +782,7 @@ def _drop_detail(name):
         lambda r: r["entity"].append({"what": {"display": "something else"}}),
         lambda r: r["period"].update(end="2026-01-01T15:00:00Z"),
         lambda r: r.update(id="assigned-by-server"),
+        lambda r: r.update(recorded="2026-01-01T14:30:01.125000000Z"),
     ],
     ids=[
         "agents-reordered",
@@ -803,6 +804,7 @@ def _drop_detail(name):
         "extra-entity",
         "period-end",
         "server-id",
+        "nine-fraction-digits",
     ],
 )
 def test_presentation_changes_parse_to_the_same_values(change):
