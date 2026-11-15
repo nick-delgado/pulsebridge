@@ -6,6 +6,39 @@
 
 type Child = Node | string | number | null | undefined | false;
 
+/** Attributes that load or navigate to a URL. Their values must pass `isSafeUrl`. */
+const URL_ATTRIBUTES = new Set(['href', 'src', 'xlink:href', 'action', 'formaction', 'poster']);
+/** Attributes that take markup or script whatever their value. */
+const FORBIDDEN_ATTRIBUTES = new Set(['srcdoc']);
+
+/**
+ * True for a relative URL, a fragment (`#id`) or an `https:` URL. False for `javascript:`,
+ * `data:`, `http:` and every other scheme. The URL parser strips the tabs and newlines that
+ * browsers ignore, so `java\tscript:` is caught too.
+ */
+export function isSafeUrl(value: string): boolean {
+  try {
+    return new URL(value, 'https://relative.invalid/').protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Throws for an attribute that could run script: any `on…` event handler, `srcdoc`, or a URL
+ * attribute whose value is not safe. Handlers belong in `props.on` (addEventListener).
+ */
+export function assertSafeAttribute(name: string, value: string): void {
+  const lower = name.toLowerCase();
+  if (lower.startsWith('on')) {
+    throw new Error(`Refusing attribute ${name}: use props.on for event listeners.`);
+  }
+  if (FORBIDDEN_ATTRIBUTES.has(lower)) throw new Error(`Refusing attribute ${name}.`);
+  if (URL_ATTRIBUTES.has(lower) && !isSafeUrl(value)) {
+    throw new Error(`Refusing ${name}: only relative, #fragment or https: URLs are allowed.`);
+  }
+}
+
 export interface ElementProps {
   class?: string;
   id?: string;
@@ -28,7 +61,9 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   if (props.text !== undefined) node.textContent = props.text;
   for (const [name, value] of Object.entries(props.attrs ?? {})) {
     if (value === undefined || value === false) continue;
-    node.setAttribute(name, value === true ? '' : value);
+    const text = value === true ? '' : value;
+    assertSafeAttribute(name, text);
+    node.setAttribute(name, text);
   }
   for (const [type, listener] of Object.entries(props.on ?? {})) {
     const options = props.signal ? { signal: props.signal } : undefined;
@@ -65,7 +100,10 @@ export function svg<K extends keyof SVGElementTagNameMap>(
   ...children: (SVGElement | null)[]
 ): SVGElementTagNameMap[K] {
   const node = document.createElementNS(SVG_NS, tag);
-  for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, String(value));
+  for (const [name, value] of Object.entries(attrs)) {
+    assertSafeAttribute(name, String(value));
+    node.setAttribute(name, String(value));
+  }
   for (const child of children) if (child) node.appendChild(child);
   return node;
 }
