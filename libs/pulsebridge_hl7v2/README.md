@@ -43,11 +43,12 @@ from pulsebridge_hl7v2.samples import load, by_class
 | `validate_oru_r01(bytes \| str \| Message) -> Message` | hl7apy STRICT validation plus the checks hl7apy skips (OBX-5 against OBX-2, and the stricter NM rule below). Raises `HL7ValidationError` with `.problems`, one sentence each, all problems at once, for any bad input including bytes that are not UTF-8. |
 | `parse_er7(bytes \| str, *, strict=False) -> Message` | hl7apy parse with groups found (`msg.oru_r01_patient_result...`). Tolerant by default: reads what the store accepted. Raises `HL7ParseError` with `.reason`, including for an unknown or empty MSH-12 (`9.9`, or nothing), where hl7apy raises `UnsupportedVersion`. |
 | `decode_escapes(text, encoding_chars) -> str` | Turn `\F\ \S\ \T\ \R\ \E\` back into characters (hl7apy has no unescape). |
-| `parse_ack(bytes \| str) -> Ack` | Read an ACK: `code` (`AckCode.AA` ...), `acknowledged_control_id` (MSA-2 or `None`), `reason` (MSA-3, unescaped, or `None`), `accepted`, `message_type`, `ack_control_id`, `version`, `raw`. Raises `AckParseError`. Takes plain ACK bytes; remove the MLLP frame or the HTTPS base64/JSON first. |
+| `parse_ack(bytes \| str) -> Ack` | Read an ACK: `code` (`AckCode.AA` ...), `acknowledged_control_id` (MSA-2 or `None`), `reason` (MSA-3, unescaped, or `None`), `accepted`, `message_type`, `ack_control_id`, `version`, `raw`. Raises `AckParseError`, and only that, for any input bytes (a seeded fuzz test checks it). Takes plain ACK bytes; remove the MLLP frame or the HTTPS base64/JSON first. |
 | `frame(payload) -> bytes` | `0x0B` + payload + `0x1C 0x0D`. |
 | `MllpDecoder(max_frame_bytes=1 MiB).feed(chunk) -> list[bytes]` | Stream decoder: returns every frame completed by a chunk, keeps partial frames. Searches each byte once, so cost grows with the data, not its square. A frame longer than `max_frame_bytes` raises `MllpFrameTooLarge` and the buffer is dropped. |
 | `MllpReader(sock, max_frame_bytes=1 MiB).read_frame(timeout) -> bytes` | Next frame from a socket, or `MllpTimeout` (one deadline for the whole frame, even if bytes trickle in), or `MllpConnectionClosed(partial=..., reason=...)` for a close, a reset or any other socket error: the three outcomes S4 found the adapter produces. An oversized reply raises `MllpFrameTooLarge`; treat it as "no usable acknowledgment". |
 | `pulsebridge_hl7v2.samples` | Shared sample messages; see [`samples/README.md`](samples/README.md). |
+| `Sample.with_patient(patient) -> Sample`, `Sample.accepts_patient` | The sample with its PID segment rebuilt for `patient` by hl7apy (the builder's own PID code); everything else, the defect included, byte for byte. Samples whose PID cannot or must not change come back unchanged; see [`samples/README.md`](samples/README.md#another-patient-with_patient). |
 
 A typical send, as T13 would do it:
 
@@ -158,6 +159,8 @@ updates the same Observation instead of creating a second one.
 | ACK with no trailing `\r` (HTTPS ingest, S5) | parsed | tested |
 | MSH-12 `9.9` (message or ACK), or empty (message) | `UnsupportedVersion`. An ACK with an empty MSH-12 is read with hl7apy's default version | ACK: re-read with hl7apy's `parse_segments` at version 2.5.1. Message: `HL7ParseError` for the mapper to record |
 | Unescape `\E\`, `\F\` ... when reading | no | `decode_escapes`, about ten lines |
+| A header whose MSH-2 has five characters but no MSH-12 | `IndexError` from `parser._split_msh` (it reads MSH-12 to allow 2.7's truncation character without checking it exists) | `parse_ack` turns exactly that into `AckParseError`; `with_patient` leaves such a sample unchanged |
+| Whitespace as an encoding character, in a header that ends after MSH-2 | accepted by the header reader, stripped by the segment parser, then `IndexError` reading the separators | `parse_ack` first applies HL7 2.5.1 section 2.5.4: MSH-1 and MSH-2 are five distinct printable characters, none a letter, digit or space |
 
 ## Tests
 

@@ -26,6 +26,51 @@ the repository:
 python -m pulsebridge_hl7v2.samples export /tmp/hl7-samples
 ```
 
+## Another patient (`with_patient`)
+
+Every sample names T07's patient `SYN-000123`. A deployment configured for another patient (the
+cuff simulator's `PATIENT_ID`, the mapper's `patient_id`) would see a "parses but cannot be
+mapped" sample end in the mapper's `unknown-patient` instead of the reason the sample exists to
+show. `sample.with_patient(patient)` returns the sample with its **PID segment rebuilt** for a
+`pulsebridge_hl7v2.Patient`:
+
+```python
+from pulsebridge_hl7v2 import Patient
+other = Patient(identifier="PB-OTHER-0042", assigning_authority="OTHERAUTH",
+                family_name="Example", given_name="Avery")
+load("unmappable_missing_obx14").with_patient(other).segments[1]
+# 'PID|1||PB-OTHER-0042^^^OTHERAUTH^MR||Example^Avery'
+```
+
+- **Built with hl7apy, at segment level** (D3): hl7apy reads the separators from MSH-1/MSH-2 and
+  splits the payload into segments; the new PID is an hl7apy `Segment` filled by the same
+  function the ORU^R01 builder uses (`fill_pid`), so separators in a name are escaped, never
+  turned into structure. No ER7 text is split by hand.
+- **Only PID changes.** Every other segment, the terminators, the MLLP framing, the name, class
+  and expected outcomes are kept byte for byte, so the sample's deliberate defect is untouched
+  (tests compare every sample's other bytes and its validation, parse and framing outcomes).
+- **Returned unchanged** (the same object; `sample.accepts_patient` is `False`) when the PID
+  cannot or must not be replaced:
+
+| Sample | Why it is left alone |
+| --- | --- |
+| `unparseable_no_msh` | no MSH, so no separators to read: hl7apy cannot read it |
+| `unparseable_lf_terminators`, `unparseable_crlf_terminators` | hl7apy splits segments on `\r` only, so it finds no PID segment |
+| `unparseable_separator_mismatch` | hl7apy refuses the header (MSH-2 runs on into `#`-separated fields) |
+| `invalid_missing_pid3` | PID-3.1 is empty: the missing identifier **is** the defect |
+| `unmappable_msh_only`, `unmappable_bare_msh` | no PID segment |
+
+A sample is also left alone if hl7apy does not read its PID back as the same bytes (a PID
+written with other separators than MSH declares) or it has two PID segments; no shipped sample
+does either. The unparseable samples never reach the mapper (the store answers `AE`), so their
+patient does not matter there.
+
+The other twelve, including the four "send malformed" samples whose intended mapper reason the
+patient check used to hide (`unmappable_unknown_obx3_code`, `unmappable_missing_obx14`,
+`unmappable_non_numeric_obx5`, `invalid_obx14_not_hl7_date`), get the new PID. A cuff-sim test
+runs the substituted bytes through `v2-to-fhir`'s mapper configured for another patient and gets
+each sample's own `mapping_reason`.
+
 ## Why JSON and not raw `.hl7` files
 
 HL7v2 segments end with a carriage return (`\r`), and these samples must keep exactly the bytes

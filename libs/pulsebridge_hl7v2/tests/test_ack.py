@@ -253,7 +253,7 @@ def test_fuzzed_acks_raise_only_ack_parse_error():
     IndexError from inside hl7apy (both kinds the module docstring describes)."""
     import random
 
-    rng = random.Random(20261115)
+    rng = random.Random(20261115)  # noqa: S311 - reproducible test data, not security
     escaped = []
     for _ in range(4000):
         data = _mutate(rng, rng.choice(_FUZZ_SEEDS))

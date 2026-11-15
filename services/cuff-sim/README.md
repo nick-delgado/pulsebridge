@@ -128,23 +128,33 @@ the manifest's description as `label`. Bad-framing samples list only `mllp`.
 
 ### A malformed sample
 
-The sample's exact bytes from T07's loader, **not validated**. Over MLLP the sample's own
-framing is kept (`wire_bytes`), so `noack_missing_end_block` really is sent without its end
-bytes. Over HTTPS only samples whose manifest lists `https` are accepted. The control ID is the
+The sample's bytes from T07's loader, **not validated**, with its PID segment rebuilt for the
+configured patient by T07's `Sample.with_patient` (T33): PID-3.1 `PATIENT_ID`, PID-3.4
+`PATIENT_ASSIGNING_AUTHORITY`, PID-5 the configured names, exactly as in a built reading.
+Every other byte, and so the sample's defect, is T07's. Over MLLP the sample's own framing is
+kept (`wire_bytes`), so `noack_missing_end_block` really is sent without its end bytes. Over HTTPS only samples whose manifest lists `https` are accepted. The control ID is the
 sample's own MSH-10 read with hl7apy, or `null` when hl7apy cannot read the sample (no MSH,
 line-feed terminators).
 
 What to expect from samples, because their bytes are fixed:
 
-- **The patient differs between the bytes and the record.** The sample's PID-3 is T07's
-  synthetic `SYN-000123`; the AuditEvent names the configured `PATIENT_ID`, the patient the
-  simulator acts for. With any other `PATIENT_ID`, a parseable sample may end in the mapper's
-  `unknown-patient` instead of its own reason. This stays until T07 offers a way to substitute
-  the patient (`with_patient`); the change here is then one line, marked `FOLLOW-UP` in
-  `CuffSimulator.prepare` (`service.py`).
+- **The bytes name the configured patient, as the AuditEvent does**, for every sample T07 can
+  substitute. So with any `PATIENT_ID` (set the mapper's to the same value), a "parses but
+  cannot be mapped" sample ends in its own reason, not `unknown-patient`:
+  `unmappable_unknown_obx3_code` (`unknown-obx-3-code`), `unmappable_missing_obx14`
+  (`missing-obx-14`), `unmappable_non_numeric_obx5` (`non-numeric-obx-5`) and
+  `invalid_obx14_not_hl7_date` (`invalid-obx-14`) among them. `tests/test_sample_patient.py`
+  runs the bytes `prepare` returns through `v2-to-fhir`'s mapper configured for another patient.
+  T07 leaves seven samples unchanged, so they still carry `SYN-000123`:
+  `invalid_missing_pid3` (its empty PID-3 is the defect; the mapper's reason,
+  `missing-patient-identifier`, does not depend on the patient), `unmappable_msh_only` and
+  `unmappable_bare_msh` (no PID; their reasons come before the patient check), and the four
+  `unparseable_*` samples, which the store rejects with `AE` before any mapper sees them. For
+  those seven the AuditEvent's patient and the bytes still differ.
 - **Sending the same sample twice stores one message.** The store deduplicates on exact bytes
   (spike S5): the second send gets `AA` with the same message name and publishes no second
-  notification, so the mapper runs once. Two AuditEvents are recorded, differing only in their
+  notification, so the mapper runs once. (With the patient substituted, "the same bytes" means the
+  same sample and the same configured patient.) Two AuditEvents are recorded, differing only in their
   send time (and their id, which includes it).
 - **No malformed sample is mappable.** Each is rejected by the store (`AE`), gets no
   acknowledgment, or is stored and then ends with the mapper's application-level outcome
