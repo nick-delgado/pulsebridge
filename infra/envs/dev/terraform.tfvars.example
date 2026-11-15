@@ -1,0 +1,58 @@
+# dev: the quick start. Copy to terraform.tfvars (git-ignored) and replace every placeholder.
+# Nothing here is a real project, person or address. infra/envs/README.md walks through each step;
+# `terraform output -raw next_steps` prints what comes after an apply.
+#
+# dev defaults to use_synthetic_data = true: no Pixel Watch and no Google Health OAuth app needed.
+# The seeder fills the FHIR store with an invented patient; the cuff simulator works end to end.
+
+# --- Project (from infra/bootstrap, run once by the project owner) -----------------------------
+
+project_id = "your-dev-project-id" # bootstrap output project_id (dev is its own project, D1)
+
+# Optional, when a person runs Terraform: impersonate the deployer instead of using your own roles.
+# deployer_service_account_email = "terraform-deployer@your-dev-project-id.iam.gserviceaccount.com"
+
+# region = "us-central1"   # default; keep a free-tier e2-micro region that Hosting can rewrite to
+# zone   = "us-central1-a" # default; must be inside region
+
+# --- Patient (invented; one value each feeds every service and script) -------------------------
+
+patient_id                  = "SYN-0001"    # must start with SYN- while use_synthetic_data = true
+patient_assigning_authority = "PULSEBRIDGE" # any short code (1-20 characters); PID-3.4 of cuff messages
+time_zone                   = "America/New_York" # the zone the synthetic person lives in
+# No patient_family_name / patient_given_name with synthetic data: the cuff simulator sends the
+# seeder's synthetic name (Synthetic / Demo), and setting one is refused.
+
+# --- Alerts (required: a failed seeding or Scheduler attempt must reach someone) ---------------
+
+alert_email = "you@example.com"
+# alert_notification_channels = ["projects/your-dev-project-id/notificationChannels/0000000000"]
+
+# --- Ingest switch ------------------------------------------------------------------------------
+
+# false for the FIRST apply. Set true for the second apply, after the first --days 30 seeding has
+# finished (README, steps 9 and 10).
+ingest_enabled = false
+
+# --- Images, by digest (README, step 6) ---------------------------------------------------------
+# Paste the image build's "BEGIN tfvars" block here unchanged (it lists all five; health_sync_image
+# is ignored with synthetic data). Leave these out for the targeted applies of steps 3 and 4.
+# cuff_sim_image    = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/cuff-sim@sha256:<64 hex>"
+# fhir_proxy_image  = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/fhir-proxy@sha256:<64 hex>"
+# health_sync_image = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/health-sync@sha256:<64 hex>"
+# seed_image        = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/seed@sha256:<64 hex>"
+# v2_to_fhir_image  = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
+
+# --- Reviewer password (dev may set it here; prod refuses) --------------------------------------
+# Either here OR with scripts/secrets/set-reviewer-password, never both. Better than writing it in
+# this file: export TF_VAR_reviewer_password from a password manager for the apply. It is
+# write-only: never in the plan or the state. At least 16 characters.
+# reviewer_password_wo_version = 1   # raise to send a new password
+
+# --- Optional -------------------------------------------------------------------------------------
+# enable_iap_ssh     = true   # during the first-boot checklist only; set false again afterwards
+# enable_cloud_nat   = false  # BILLED HOURLY; only if the VM cannot pull through Private Google Access
+# trusted_proxy_hops = 1      # measure on the first deploy (README, step 12)
+# openemr_scopes     = ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"] # first-boot trial
+# name_prefix          = "pulsebridge" # resource names; 3-20 characters
+# identity_name_prefix = "pb"          # service account and secret IDs; at most 12 characters

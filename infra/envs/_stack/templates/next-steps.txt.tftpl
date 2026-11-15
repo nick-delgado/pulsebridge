@@ -1,0 +1,41 @@
+PulseBridge ${environment}: what to do next (full runbook with checks: infra/envs/README.md)
+Run from infra/envs/${environment}. "Deployer" = the bootstrap deployer account (or a person
+with the same roles); "owner" = the project owner. Step numbers are the README's.
+
+%{ if !ingest_enabled ~}
+You are at ingest_enabled = false: steps 8 to 10 come before the second apply.
+
+ 5. (If not done yet) secret versions, without a trailing newline:
+    ${secret_prefix}-db-root-password, ${secret_prefix}-openemr-db-password,
+    ${secret_prefix}-openemr-admin-password, ${secret_prefix}-reviewer-password.
+    Never write ${secret_prefix}-openemr-client-private-key: the VM does.
+ 8. First boot of ${vm_name} (${vm_zone}): about 15 minutes. Work through the edge-vm
+    checklist, then the openemr checklist (README, step 8). Startup log:
+      gcloud compute instances get-serial-port-output ${vm_name} --zone ${vm_zone} --project ${project_id}
+    Done when it shows "hook openemr-oauth-client: ok" and "edge VM startup: done, all steps ok".
+%{ if use_synthetic_data ~}
+ 9. First seeding (synthetic data; deployer). Wait for it to finish:
+      gcloud run jobs execute ${seed_job_name} --region ${region} --project ${project_id} \
+        --args=--days,30 --task-timeout=1800s --wait
+    NEVER run the Google Health connect script in this deployment (SYN- patient).
+%{ else ~}
+ 9. Connect Google Health (real data; you, with your own credentials):
+      terraform output -raw setup_env > ~/pulsebridge-${environment}.env   # outside the repo
+      # add your name, gender and birth date to that file (connect script README, "Run it")
+      source ~/pulsebridge-${environment}.env && scripts/connect-google-health/connect.sh
+%{ endif ~}
+10. Second apply: set ingest_enabled = true in terraform.tfvars, then terraform apply.
+    It creates the Scheduler job and switches the HL7v2 subscription to push.
+%{ else ~}
+ingest_enabled = true: the Scheduler job and the push subscription are on.
+%{ endif ~}
+11. Deploy the page (deployer, after every apply):
+      terraform output -raw firebase_json > ../../../web/firebase.json
+      (cd ../../../web && npm ci && npm run build && \
+       npx --yes firebase-tools@<pinned version> deploy --only hosting --project ${project_id} --non-interactive)
+12. First-deploy checks of the front door, hop measurement first (README, step 12).
+    Page: ${dashboard_url}   Direct proxy URL (measurement only): terraform output -raw fhir_proxy_url
+13. Ingestion checks: first and second run, alerts (README, step 13).
+14. End-to-end check (T29, tests/e2e/).
+
+Record each result in the master checklist (README, "Master checklist").
