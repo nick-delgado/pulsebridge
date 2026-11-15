@@ -305,12 +305,14 @@ exists before any ingest Bundle's conditional create looks for it (D11).
 
 - **Image (`services/seed/Dockerfile`, T35).** Same pattern as the other images: install
   `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp`, then this package; runs as UID 10001.
-  `ENTRYPOINT ["pulsebridge-seed"]` and no `CMD`: **the job supplies the arguments** as the
-  container's `args` (for example `["--days", "30"]` or `["--hours", "4"]`); do not set
-  `command`. Without args it exits 2. No port: it is a job, not a service (services/README.md,
+  `ENTRYPOINT ["pulsebridge-seed"]` and no `CMD`. **The job sets only `args`** (the
+  container's arguments, for example `["--days", "30"]` or `["--hours", "4"]`), never
+  `command`, which would replace the `pulsebridge-seed` entrypoint. Without args it exits 2.
+  No port: it is a job, not a service (services/README.md,
   "Job images"). The release build prints its digest as `seed_image`.
 - **Where it runs (T20 or T25).** A **Cloud Run job** (`google_cloud_run_v2_job`) with the
-  `seeder` service account, the environment variables above, `max_retries = 0` (the next
+  `seeder` service account, only `args` set on its container (see "Image"), the environment
+  variables above, `max_retries = 0` (the next
   scheduled execution is the retry; every write is keyed), and created only when
   `use_synthetic_data = true`.
 - **Task timeout: size it with the range.** 30 days is about 8,600 windows and 85 Bundles;

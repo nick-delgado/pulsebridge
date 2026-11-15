@@ -18,6 +18,9 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit
 from zoneinfo import ZoneInfo
@@ -201,3 +204,30 @@ def deps_for(
         now=lambda: now,
         sleep=sleeps.append if sleeps is not None else (lambda _seconds: None),
     )
+
+
+@contextmanager
+def logging_restored() -> Iterator[None]:
+    """Run a block, then put the root logger back as it was: its handlers, its level, and
+    urllib3's level.
+
+    ``pulsebridge-seed`` (``cli.main``) calls ``configure_logging``, which adds a JSON handler
+    on the root logger bound to the ``sys.stderr`` of that moment. That is right for the
+    process the command runs in, but in a test run ``sys.stderr`` is pytest's capture of one
+    test. Left behind, the handler writes later tests' records (another service's too) to a
+    closed capture, and logging prints its own error with the record's text. The seed tests
+    run inside this (``tests/conftest.py``)."""
+    root = logging.getLogger()
+    urllib3 = logging.getLogger("urllib3")
+    handlers, level, urllib3_level = list(root.handlers), root.level, urllib3.level
+    try:
+        yield
+    finally:
+        for handler in [h for h in root.handlers if h not in handlers]:
+            root.removeHandler(handler)
+            handler.close()
+        for handler in handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(level)
+        urllib3.setLevel(urllib3_level)

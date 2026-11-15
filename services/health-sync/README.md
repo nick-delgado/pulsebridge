@@ -356,6 +356,12 @@ runs twelve consecutive runs and checks no window is written more than twice.
   412 until the duplicate is removed by hand, T06 README); `skipped-for-time` (see "Deadline");
   `failed:<HTTP status or error type>` (`stored-read-failed` logged, every window written:
   reading only saves writes); `not-attempted` (the run had no windows).
+- **A search page that is not valid FHIR JSON** (since T35, the seeder's handling): an `entry`
+  that is `null` or not an array is a read error (`failed:StoredReadError`, every window
+  written), and a `component` item that is not an object is skipped (that window's min or max
+  reads as unknown, so it is written again). Before T35 an `entry` of `null`, `0` or an object
+  read as an empty page, and a number as `entry` or a non-object component failed the run as a
+  `bug`. Writing everything is the safe direction: reading only saves writes.
 - **A stranded-count failure alone** is logged (`stranded-count-failed`); the stored-window read
   and the writes go on as normal, and `stranded_preliminary` is `null`.
 - **A key found twice** in the search result (two Observations with one identifier, which should
