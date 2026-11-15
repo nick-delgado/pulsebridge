@@ -169,6 +169,13 @@ variable "edge_vm_service_account_email" {
   }
 }
 
+variable "grant_edge_vm_mirror_reader" {
+  description = "Grant edge_vm_service_account_email roles/artifactregistry.reader on the Docker Hub mirror (when create_dockerhub_mirror is true). Default true: the edge VM cannot pull MariaDB and OpenEMR without it, and then edge_vm_service_account_email must be set (a precondition checks it). Set false only when no edge VM is deployed. A plain bool, so the grant's count is known at plan time even while the account's email is not (it is unknown until the account exists)."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "enable_iap_ssh" {
   description = "Allow SSH (TCP 22) to the edge VM from Identity-Aware Proxy's TCP forwarding range only (35.235.240.0/20), for `gcloud compute ssh --tunnel-through-iap`. Off by default: nothing else in the design needs SSH. When true, the module also enables iap.googleapis.com, which IAP TCP forwarding is understood to require (not confirmed against Google's documentation)."
   type        = bool

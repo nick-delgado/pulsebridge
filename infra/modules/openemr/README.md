@@ -65,7 +65,7 @@ needs this module's hooks: a dependency cycle. So this module only **produces va
 | `edge_vm_hooks` | edge-vm `hooks` | The two hook scripts |
 | `edge_vm_secret_files` | merged into edge-vm `secret_files` | The two OpenEMR password secrets (IDs, not values) |
 | `hook_timeout_minutes` | edge-vm `hook_timeout_minutes` | 40: what OpenEMR's first boot needs |
-| `site_address`, `fhir_base_url`, `token_url`, `scopes`, `client_secret_id` | phr / fhir-proxy (T22, T15) | How to reach OpenEMR and where its client credentials are |
+| `site_address`, `fhir_base_url`, `token_url`, `scopes`, `client_secret_id` (full path), `client_secret_name` (short ID, what phr takes) | phr / fhir-proxy (T22, T15) | How to reach OpenEMR and where its client credentials are |
 
 The only input from edge-vm is `internal_ip`, which comes from edge-vm's **reserved address**
 resource, not from the instance, so Terraform's graph has no cycle (module inputs and outputs are
@@ -728,10 +728,10 @@ and adding versions to and viewing the third, and fhir-proxy reading the third.
 | `tls_certificate_days` | `3650` | validity of OpenEMR's certificate |
 | `tls_mount_targets` | the image's `selfsigned.*.pem` paths | where the certificate and key are mounted |
 | `hook_timeout_minutes` | `40` | passed through to edge-vm |
-| `scopes` | spike S1's six SMART v1 scopes | registered scopes; the narrower v2 set is documented in "Scopes" |
+| `scopes` | spike S1's six SMART v1 scopes | registered scopes (null means this default); the narrower v2 set is documented in "Scopes" |
 
 Outputs: `edge_vm_hooks`, `edge_vm_secret_files`, `hook_timeout_minutes`, `hook_metadata_keys`,
-`site_address`, `fhir_base_url`, `token_url`, `scopes`, `client_secret_id`, `image`,
+`site_address`, `fhir_base_url`, `token_url`, `scopes`, `client_secret_id`, `client_secret_name`, `image`,
 `openemr_settings`, `container_name` (descriptions in `outputs.tf`).
 
 To find the digest of a newer OpenEMR tag without pulling it: `crane digest openemr/openemr:<tag>`

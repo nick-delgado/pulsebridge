@@ -259,14 +259,26 @@ resource "google_artifact_registry_repository" "dockerhub" {
 # Read access to the Docker Hub mirror for the edge VM's service account (T21), so the VM can pull
 # MariaDB and OpenEMR through it. The grant lives here because this module owns the repository
 # (a binding lives in the module that owns the resource). It is the only IAM binding in this
-# module, it is on this one repository only, and it is created only when both the mirror exists
-# and the VM's account email is given. Additive `_iam_member`, so other readers are left alone.
+# module, it is on this one repository only, and it exists when the mirror exists and
+# grant_edge_vm_mirror_reader is true. Additive `_iam_member`, so other readers are left alone.
+#
+# The count is decided by two plain bools, never by "is the email set": a service account's
+# email is unknown until the account is created, so `email != null` would be unknown on a root's
+# first plan and Terraform would refuse it ("Invalid count argument"). The precondition checks
+# the email instead; an unknown email is checked at apply.
 resource "google_artifact_registry_repository_iam_member" "dockerhub_mirror_edge_vm_reader" {
-  count = var.create_dockerhub_mirror && var.edge_vm_service_account_email != null ? 1 : 0
+  count = var.create_dockerhub_mirror && var.grant_edge_vm_mirror_reader ? 1 : 0
 
   project    = var.project_id
   location   = google_artifact_registry_repository.dockerhub[0].location
   repository = google_artifact_registry_repository.dockerhub[0].repository_id
   role       = "roles/artifactregistry.reader"
   member     = "serviceAccount:${var.edge_vm_service_account_email}"
+
+  lifecycle {
+    precondition {
+      condition     = var.edge_vm_service_account_email != null
+      error_message = "grant_edge_vm_mirror_reader is true but edge_vm_service_account_email is null: pass the edge VM's account (module identity), or set grant_edge_vm_mirror_reader = false when no edge VM is deployed."
+    }
+  }
 }

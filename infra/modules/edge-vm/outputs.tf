@@ -44,6 +44,11 @@ output "data_disk_name" {
   value       = google_compute_disk.data.name
 }
 
+output "data_disk_snapshot_policy" {
+  description = "Name of the data disk's daily snapshot schedule, or null when data_disk_snapshot_days is 0."
+  value       = one(google_compute_resource_policy.data_snapshots[*].name)
+}
+
 output "data_disk_device" {
   description = "Stable device path of the data disk on the VM."
   value       = "/dev/disk/by-id/google-${local.data_device_name}"

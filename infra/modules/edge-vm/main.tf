@@ -186,6 +186,48 @@ resource "google_compute_disk" "data" {
   labels      = var.labels
 }
 
+# Optional daily snapshots of the data disk (data_disk_snapshot_days > 0; prod in the env roots).
+# A snapshot schedule is a Compute Engine resource policy attached to the disk. Snapshots are
+# incremental and billed as snapshot storage. on_source_disk_delete = KEEP_AUTO_SNAPSHOTS keeps
+# the snapshots when the disk is deleted (VM replacement keeps the disk anyway; a `terraform
+# destroy` deletes it), so the clinic database can be restored after an accidental destroy; the
+# cost of that is that those snapshots OUTLIVE a destroy and are billed until someone deletes
+# them (README, "Snapshots of the data disk").
+resource "google_compute_resource_policy" "data_snapshots" {
+  count = var.data_disk_snapshot_days > 0 ? 1 : 0
+
+  project     = var.project_id
+  name        = "${var.name_prefix}-edge-data-daily"
+  region      = local.region
+  description = "Daily snapshots of the PulseBridge edge VM data disk."
+
+  snapshot_schedule_policy {
+    schedule {
+      daily_schedule {
+        days_in_cycle = 1
+        start_time    = "04:00" # UTC; Compute Engine requires a full hour
+      }
+    }
+    retention_policy {
+      max_retention_days    = var.data_disk_snapshot_days
+      on_source_disk_delete = "KEEP_AUTO_SNAPSHOTS"
+    }
+    snapshot_properties {
+      labels            = var.labels
+      storage_locations = [local.region]
+    }
+  }
+}
+
+resource "google_compute_disk_resource_policy_attachment" "data_snapshots" {
+  count = var.data_disk_snapshot_days > 0 ? 1 : 0
+
+  project = var.project_id
+  zone    = var.zone
+  disk    = google_compute_disk.data.name
+  name    = google_compute_resource_policy.data_snapshots[0].name
+}
+
 # ---------------------------------------------------------------------------------------------
 # The VM
 # ---------------------------------------------------------------------------------------------

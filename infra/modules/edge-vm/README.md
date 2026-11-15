@@ -471,10 +471,33 @@ The VM is PulseBridge's only always-on resource.
 
 Nothing in this module is billed by the hour except the VM itself if it leaves the free tier
 (machine type other than e2-micro, a second e2-micro, another region, or `disk_type` other than
-`pd-standard`, which is billed per GB-month). `terraform destroy` removes the VM, both disks and
-the address: nothing billable is left. There are no snapshots of the data disk: a destroyed disk
-is gone (acceptable for synthetic dev data; add a snapshot schedule for prod if wanted, at
-snapshot storage prices).
+`pd-standard`, which is billed per GB-month). With `data_disk_snapshot_days = 0` (the default)
+`terraform destroy` removes the VM, both disks and the address: nothing billable is left, and a
+destroyed data disk is gone.
+
+### Snapshots of the data disk
+
+`data_disk_snapshot_days` above 0 creates a **snapshot schedule** (a Compute Engine resource
+policy, `google_compute_resource_policy.data_snapshots`) and attaches it to the data disk: one
+snapshot a day at 04:00 UTC, stored in the VM's region, each kept that many days. The env roots
+pass 7 in prod (real clinic data) and 0 in dev.
+
+- **Cost**: snapshot storage, billed per GB-month of changed blocks (snapshots are incremental).
+  A fresh OpenEMR database is a few hundred MB, so a week of daily snapshots is a fraction of a
+  GB: cents a month (Compute Engine snapshot pricing, standard snapshots in one region; the exact
+  rate is not confirmed here). Not covered by the free tier.
+- **They outlive a destroy, on purpose**: `on_source_disk_delete = "KEEP_AUTO_SNAPSHOTS"` keeps
+  the snapshots when the disk is deleted, so an accidental `terraform destroy` of prod can be
+  undone by creating a disk from the last snapshot. The consequence: after a deliberate destroy
+  they are **still billed** until deleted (`gcloud compute snapshots list --filter=
+  "sourceDisk~<prefix>-edge-data" --project <project>`, then `gcloud compute snapshots delete`).
+  A VM replacement (patching) keeps the disk and its schedule.
+- **Restoring**: create a disk from a snapshot with the data disk's name, then apply (Terraform
+  adopts nothing by itself: import the new disk, or restore onto the existing disk's contents by
+  hand). Not verified.
+- The deployer creates the policy and attaches it with `roles/compute.instanceAdmin.v1`
+  (bootstrap), which is understood to include `compute.resourcePolicies.create` and
+  `compute.disks.addResourcePolicies`; confirm on the first prod apply.
 
 ## Tests
 
@@ -623,7 +646,9 @@ No modules.
 |------|------|
 | [google_compute_address.internal](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_address) | resource |
 | [google_compute_disk.data](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_disk) | resource |
+| [google_compute_disk_resource_policy_attachment.data_snapshots](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_disk_resource_policy_attachment) | resource |
 | [google_compute_instance.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_instance) | resource |
+| [google_compute_resource_policy.data_snapshots](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/compute_resource_policy) | resource |
 
 ## Inputs
 
@@ -633,6 +658,7 @@ No modules.
 | <a name="input_boot_image"></a> [boot\_image](#input\_boot\_image) | Boot image: a Container-Optimized OS image or image family from the cos-cloud project. The startup script relies on COS (Docker and docker-credential-gcr preinstalled, read-only root, stateless /etc), so other images are refused. | `string` | `"projects/cos-cloud/global/images/family/cos-stable"` | no |
 | <a name="input_boot_wait_minutes"></a> [boot\_wait\_minutes](#input\_boot\_wait\_minutes) | One shared deadline, counted from the start of the startup script, for everything it waits on that can be slow on first boot: image pulls, secret versions not yet added, MariaDB becoming healthy. When it passes, the script logs an error and gives up for this boot. Every network call also has its own timeout, so the deadline is overshot by at most about a minute. Hooks have their own limit (hook\_timeout\_minutes). | `number` | `15` | no |
 | <a name="input_data_disk_size_gb"></a> [data\_disk\_size\_gb](#input\_data\_disk\_size\_gb) | Size in GB of the separate persistent disk for MariaDB and OpenEMR site data. A fresh OpenEMR database is a few hundred MB. Growing it later is done in place (the startup script grows the filesystem on the next boot); shrinking is not possible. | `number` | `10` | no |
+| <a name="input_data_disk_snapshot_days"></a> [data\_disk\_snapshot\_days](#input\_data\_disk\_snapshot\_days) | Daily snapshots of the data disk, kept this many days; 0 (default): none. Kept snapshots outlive a destroy (KEEP\_AUTO\_SNAPSHOTS) and are billed until deleted. | `number` | `0` | no |
 | <a name="input_disk_type"></a> [disk\_type](#input\_disk\_type) | Persistent disk type for both disks. pd-standard is the only type the free tier covers; pd-balanced is faster (spike S2 suspected the slow disk for the 5-minute OpenEMR first boot) but billed. | `string` | `"pd-standard"` | no |
 | <a name="input_dockerhub_mirror_url"></a> [dockerhub\_mirror\_url](#input\_dockerhub\_mirror\_url) | Registry path of the Docker Hub pull-through cache from project-base (output `dockerhub_mirror_url`, <location>-docker.pkg.dev/<project>/<repository>). MariaDB (and OpenEMR, T23) are pulled from here. Read access for the VM's account is granted by project-base, which owns the repository (set its `edge_vm_service_account_email`). | `string` | n/a | yes |
 | <a name="input_edge_subnet_id"></a> [edge\_subnet\_id](#input\_edge\_subnet\_id) | ID of the edge subnet from project-base (output `edge_subnet_id`, projects/<project>/regions/<region>/subnetworks/<name>). The subnet must have Private Google Access on: the VM has no external IP and pulls its images from Artifact Registry and gcr.io through it. | `string` | n/a | yes |
@@ -660,6 +686,7 @@ No modules.
 | Name | Description |
 |------|-------------|
 | <a name="output_boot_image"></a> [boot\_image](#output\_boot\_image) | Boot image the VM was created from, as recorded by the provider. Because the image is in ignore\_changes, this stays the creation-time image until the VM is replaced (README, "Patching the VM"). |
+| <a name="output_data_disk_snapshot_policy"></a> [data\_disk\_snapshot\_policy](#output\_data\_disk\_snapshot\_policy) | Name of the data disk's daily snapshot schedule, or null when data\_disk\_snapshot\_days is 0. |
 | <a name="output_data_disk_device"></a> [data\_disk\_device](#output\_data\_disk\_device) | Stable device path of the data disk on the VM. |
 | <a name="output_data_disk_name"></a> [data\_disk\_name](#output\_data\_disk\_name) | Name of the persistent data disk (MariaDB data, OpenEMR site files, copied secrets). |
 | <a name="output_data_mount_dir"></a> [data\_mount\_dir](#output\_data\_mount\_dir) | Where the data disk is mounted on the VM. |

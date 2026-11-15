@@ -13,7 +13,8 @@ The ground every other PulseBridge module stands on. It:
 
 It does not create service accounts (module `identity`). Its one IAM binding is
 `roles/artifactregistry.reader` on the Docker Hub mirror for the edge VM's account, made here
-because this module owns that repository, and only when `edge_vm_service_account_email` is set.
+because this module owns that repository, when `grant_edge_vm_mirror_reader` is true (the
+default; then `edge_vm_service_account_email` must be set, which a precondition checks).
 It contains no provider or backend configuration: the env root configures those.
 
 ## APIs
@@ -112,8 +113,12 @@ Spike S2 pulled images over an external IP; that path does not exist here by def
   turn on `enable_cloud_nat` (about $4.70/month plus data), or give the VM an external IP (billed
   per hour; T21's choice).
 - The VM's service account needs `roles/artifactregistry.reader` on the Docker Hub mirror. This
-  module grants it, on that repository only, when `edge_vm_service_account_email` is set (T25 must
-  set it). The `gcr.io` adapter image is public and needs no grant.
+  module grants it, on that repository only, when `grant_edge_vm_mirror_reader` is true (the
+  default), and a precondition requires `edge_vm_service_account_email` then (T25 sets it). The
+  grant's `count` uses only the two bools, never "is the email set": the email comes from module
+  identity and is unknown until the account exists, so a count on it fails a root's first plan
+  with "Invalid count argument" (found in T25; `tests/unknown_email/` is the harness that proves
+  the count is known). The `gcr.io` adapter image is public and needs no grant.
 
 ## Idle cost
 
@@ -207,6 +212,7 @@ No modules.
 | <a name="input_edge_subnet_cidr"></a> [edge\_subnet\_cidr](#input\_edge\_subnet\_cidr) | Primary IPv4 range of the edge subnet, where the e2-micro VM (OpenEMR, MariaDB, MLLP adapter) gets its internal address. Must not overlap serverless\_subnet\_cidr. | `string` | `"10.10.0.0/24"` | no |
 | <a name="input_edge_vm_service_account_email"></a> [edge\_vm\_service\_account\_email](#input\_edge\_vm\_service\_account\_email) | Email of the edge VM's service account (created by the identity module). When set, (1) firewall rules target that service account instead of the edge network tag, which is stronger: anyone allowed to edit an instance can add a tag, but attaching a service account needs IAM permission on it; and (2) the account gets roles/artifactregistry.reader on the Docker Hub mirror repository, which the edge VM needs to pull MariaDB and OpenEMR. Leave null only when no edge VM is deployed: the VM cannot pull its images without it. | `string` | `null` | no |
 | <a name="input_enable_cloud_nat"></a> [enable\_cloud\_nat](#input\_enable\_cloud\_nat) | Create a Cloud Router and Cloud NAT gateway so the edge VM can reach the public internet (apt, Docker Hub) without an external IP. Off by default because it is billed by the hour: about $0.0014 per VM per hour using the gateway, plus $0.005 per hour per NAT IP address, plus $0.045 per GiB processed (about $4.70 a month for one VM and one IP before data: 730 h x ($0.0014 + $0.005)). | `bool` | `false` | no |
+| <a name="input_grant_edge_vm_mirror_reader"></a> [grant\_edge\_vm\_mirror\_reader](#input\_grant\_edge\_vm\_mirror\_reader) | Grant edge\_vm\_service\_account\_email roles/artifactregistry.reader on the Docker Hub mirror (when create\_dockerhub\_mirror is true). Default true: the edge VM cannot pull MariaDB and OpenEMR without it, and then edge\_vm\_service\_account\_email must be set (a precondition checks it). Set false only when no edge VM is deployed. A plain bool, so the grant's count is known at plan time even while the account's email is not (it is unknown until the account exists). | `bool` | `true` | no |
 | <a name="input_enable_iap_ssh"></a> [enable\_iap\_ssh](#input\_enable\_iap\_ssh) | Allow SSH (TCP 22) to the edge VM from Identity-Aware Proxy's TCP forwarding range only (35.235.240.0/20), for `gcloud compute ssh --tunnel-through-iap`. Off by default: nothing else in the design needs SSH. When true, the module also enables iap.googleapis.com, which IAP TCP forwarding is understood to require (not confirmed against Google's documentation). | `bool` | `false` | no |
 | <a name="input_enabled_apis"></a> [enabled\_apis](#input\_enabled\_apis) | Google APIs (service names) to enable in the project. The default covers every component in<br/>the brief. Identity Platform (identitytoolkit.googleapis.com) is deliberately absent and is<br/>rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Firebase<br/>Hosting (D4) is included. | `set(string)` | <pre>[<br/>  "artifactregistry.googleapis.com",<br/>  "cloudbuild.googleapis.com",<br/>  "cloudresourcemanager.googleapis.com",<br/>  "cloudscheduler.googleapis.com",<br/>  "compute.googleapis.com",<br/>  "firebase.googleapis.com",<br/>  "firebasehosting.googleapis.com",<br/>  "health.googleapis.com",<br/>  "healthcare.googleapis.com",<br/>  "iam.googleapis.com",<br/>  "iamcredentials.googleapis.com",<br/>  "logging.googleapis.com",<br/>  "monitoring.googleapis.com",<br/>  "pubsub.googleapis.com",<br/>  "run.googleapis.com",<br/>  "secretmanager.googleapis.com",<br/>  "serviceusage.googleapis.com",<br/>  "storage.googleapis.com"<br/>]</pre> | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the resources that support them (Artifact Registry repositories). | `map(string)` | `{}` | no |
