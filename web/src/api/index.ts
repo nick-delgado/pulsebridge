@@ -19,8 +19,12 @@ export async function createClient(deps: ClientDeps): Promise<PulseBridgeApi> {
   // Compare import.meta.env.MODE here, not the API_MODE constant: Vite replaces it with a literal
   // in this module, so the bundler sees `if ("production" === "mock")` and drops the import.
   if (import.meta.env.MODE === 'mock') {
-    const { MockClient } = await import('./mock-client');
-    return new MockClient(deps);
+    const [{ MockClient }, { mockDataSetFromSearch }] = await Promise.all([
+      import('./mock-client'),
+      import('./mock-data'),
+    ]);
+    // `?mock-data=dst-new-york` picks the data set written in America/New_York (mock-data.ts).
+    return new MockClient({ ...deps, dataSet: mockDataSetFromSearch(globalThis.location.search) });
   }
   return new HttpClient({ baseUrl: proxyBaseUrl(), ...deps });
 }
