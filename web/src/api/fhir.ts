@@ -155,6 +155,8 @@ export interface OperationOutcome extends Resource {
     code: string;
     diagnostics?: string;
     details?: CodeableConcept;
+    /** FHIRPath of the element(s) the issue is about; cuff-sim puts the request field here. */
+    expression?: string[];
   }[];
 }
 

@@ -14,6 +14,7 @@ import type {
   GoogleHealthRollUpWindow,
   MalformedClass,
   MalformedSample,
+  MllpFraming,
   SendAttemptEntry,
   Transport,
 } from './contract';
@@ -41,8 +42,93 @@ export const MOCK_CUFF_REF = 'Device/mock-cuff';
 
 /** Five-minute roll-up windows (D8). */
 export const WINDOW_MS = 5 * 60 * 1000;
-/** Windows that end within this long before "now" are still `preliminary` (T10's cutoff). */
+/** Windows that end within this long before a sync run are still `preliminary` (T10's cutoff). */
 export const PRELIMINARY_MS = 30 * 60 * 1000;
+
+/**
+ * The mock's health-sync schedule: a run every 15 minutes (brief, "Ingestion, wearable"), at
+ * minute 2, 17, 32 and 47 of each hour. Data reaches the store only at a run, so the mock's
+ * heart-rate windows, their `preliminary`/`final` status and the status strip's last sync time
+ * all move together, once per run. That is what lets the status strip see a new sync during a
+ * session and announce it (`notifyDataChanged('sync')`).
+ */
+export const SYNC_INTERVAL_MS = 15 * 60 * 1000;
+export const SYNC_OFFSET_MS = 2 * 60 * 1000;
+
+/** The time of the most recent mock sync run at or before `nowMs`. */
+export function lastSyncRun(nowMs: number): number {
+  return (
+    Math.floor((nowMs - SYNC_OFFSET_MS) / SYNC_INTERVAL_MS) * SYNC_INTERVAL_MS + SYNC_OFFSET_MS
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mock data sets: the zone the heart-rate timestamps are written in.
+
+/**
+ * A mock data set, chosen with `?mock-data=<id>` on the mock page (index.ts):
+ * - `utc` (default): every `effectivePeriod` in UTC (`...Z`), so the page shows "UTC+00:00".
+ * - `dst-new-york`: every `effectivePeriod` written in the FIXED IANA zone America/New_York,
+ *   with the UTC offset in force at that instant, the way health-sync writes the user's zone
+ *   through T06's `fhir_datetime` (`2026-11-01T01:30:00-04:00`, then `...-05:00` after the
+ *   autumn change). The zone is fixed by the data set, never the browser's, so the page must show
+ *   New York times whatever zone the viewer is in. Any range that contains a New York clock change
+ *   crosses it (24 h: just after one; 30 d: four weeks after one; the browser test pins the page's
+ *   clock to 2026-11-01 12:00 EST, eleven hours after the autumn change).
+ */
+export const MOCK_DATA_SETS = {
+  utc: { id: 'utc', timeZone: null, label: 'UTC timestamps' },
+  'dst-new-york': {
+    id: 'dst-new-york',
+    timeZone: 'America/New_York',
+    label: 'America/New_York timestamps, across daylight-saving changes',
+  },
+} as const;
+
+export type MockDataSetId = keyof typeof MOCK_DATA_SETS;
+export type MockDataSet = (typeof MOCK_DATA_SETS)[MockDataSetId];
+
+/** The data set named by a page URL's query string (`?mock-data=dst-new-york`); `utc` otherwise. */
+export function mockDataSetFromSearch(search: string): MockDataSet {
+  const id = new URLSearchParams(search).get('mock-data');
+  return id !== null && Object.hasOwn(MOCK_DATA_SETS, id)
+    ? MOCK_DATA_SETS[id as MockDataSetId]
+    : MOCK_DATA_SETS.utc;
+}
+
+const zoneFormats = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * An instant as an R4 dateTime in `timeZone` with its UTC offset, seconds precision, as Python's
+ * `datetime.astimezone(ZoneInfo(zone)).isoformat()` writes it (T06's `fhir_datetime`): for
+ * example `2026-11-01T01:30:00-04:00`, and `+00:00` (not `Z`) for a zero offset. With no zone,
+ * UTC in JavaScript's own form (`toISOString`, `...000Z`), the default data set's format.
+ * Uses Intl's tz database, so the result does not depend on the zone this code runs in.
+ */
+export function formatInZone(ms: number, timeZone: string | null): string {
+  if (timeZone === null) return new Date(ms).toISOString();
+  let format = zoneFormats.get(timeZone);
+  if (!format) {
+    format = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      hourCycle: 'h23',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZoneName: 'longOffset',
+    });
+    zoneFormats.set(timeZone, format);
+  }
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    format.formatToParts(ms).find((p) => p.type === type)?.value ?? '';
+  // longOffset is "GMT-04:00", or plain "GMT" for a zero offset.
+  const gmt = part('timeZoneName').replace('GMT', '');
+  const offset = gmt === '' ? '+00:00' : gmt;
+  return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}:${part('second')}${offset}`;
+}
 
 const HR_ID_PREFIX = 'mock-hr-';
 
@@ -117,8 +203,16 @@ export function pseudoUuid(seed: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
-/** Heart-rate Observation for one roll-up window, shaped like T06's example. */
-export function heartRateObservation(window: GoogleHealthRollUpWindow, nowMs: number): Observation {
+/**
+ * Heart-rate Observation for one roll-up window, shaped like T06's example. `syncMs` is the sync
+ * run that wrote it (its status follows T10's cutoff at that run); `timeZone` is the zone its
+ * `effectivePeriod` is written in (null: UTC).
+ */
+export function heartRateObservation(
+  window: GoogleHealthRollUpWindow,
+  syncMs: number,
+  timeZone: string | null = null,
+): Observation {
   const startMs = Date.parse(window.startTime);
   const endMs = Date.parse(window.endTime);
   return {
@@ -128,11 +222,12 @@ export function heartRateObservation(window: GoogleHealthRollUpWindow, nowMs: nu
     identifier: [
       { use: 'official', system: 'urn:pulsebridge:observation', value: pseudoUuid(`hr${startMs}`) },
     ],
-    status: endMs > nowMs - PRELIMINARY_MS ? 'preliminary' : 'final',
+    status: endMs > syncMs - PRELIMINARY_MS ? 'preliminary' : 'final',
     category: [VITAL_SIGNS],
     code: loinc(LOINC.heartRate, 'Heart rate', 'Heart rate'),
     subject: { reference: MOCK_PATIENT_REF },
-    effectivePeriod: { start: window.startTime, end: window.endTime },
+    // T06 writes the window in the user's zone, so the offset is part of the data.
+    effectivePeriod: { start: formatInZone(startMs, timeZone), end: formatInZone(endMs, timeZone) },
     valueQuantity: perMinute(window.heartRate.beatsPerMinuteAvg),
     method: {
       text: "Mean of the device's samples over effectivePeriod; components give the minimum and maximum",
@@ -167,23 +262,25 @@ export function windowStartFromId(id: string): number | null {
 }
 
 /**
- * All complete windows (ending by nowMs) whose effectivePeriod overlaps the open interval
- * (startMs, endMs), oldest first. This is the R4 search rule for `date=gt<start>&date=lt<end>`
- * on a Period: `gt` matches when the period ends after start, `lt` when it starts before end.
- * A window that ends exactly at start is therefore excluded, so an aligned 24 h range gives 288.
+ * All windows stored by the sync run at `syncMs` (complete windows ending by then) whose
+ * effectivePeriod overlaps the open interval (startMs, endMs), oldest first. This is the R4
+ * search rule for `date=gt<start>&date=lt<end>` on a Period: `gt` matches when the period ends
+ * after start, `lt` when it starts before end. A window that ends exactly at start is therefore
+ * excluded, so an aligned 24 h range gives 288.
  */
 export function heartRateObservations(
   startMs: number,
   endMs: number,
-  nowMs: number,
+  syncMs: number,
+  timeZone: string | null = null,
 ): Observation[] {
   const out: Observation[] = [];
   // First window whose end (t + WINDOW_MS) is after startMs.
   const first = Math.floor(startMs / WINDOW_MS) * WINDOW_MS;
-  for (let t = first; t < endMs && t + WINDOW_MS <= nowMs; t += WINDOW_MS) {
+  for (let t = first; t < endMs && t + WINDOW_MS <= syncMs; t += WINDOW_MS) {
     if (t + WINDOW_MS <= startMs) continue;
     const window = syntheticRollUp(t);
-    if (window) out.push(heartRateObservation(window, nowMs));
+    if (window) out.push(heartRateObservation(window, syncMs, timeZone));
   }
   return out;
 }
@@ -284,6 +381,8 @@ export function openemrPatient(id: string): Patient {
 export interface MockSampleBehaviour extends MalformedSample {
   /** The payload exactly as T07 defines it (its own segment terminator). */
   er7: string;
+  /** How T07 frames it over MLLP (`mllp_framing`); cuff-sim reports it as `framing`. */
+  mllpFraming: MllpFraming;
   /** The sample's own MSH-10, or null when it has none (for example no MSH segment). */
   controlId: string | null;
   /** MSA-1 the store replies with, or null for no acknowledgment. */
@@ -298,6 +397,7 @@ interface ManifestSample {
   class: string;
   description: string;
   transports: string[];
+  mllpFraming: string;
   controlId: string | null;
   er7: string;
   expected: {
@@ -317,6 +417,7 @@ export const MOCK_SAMPLES: MockSampleBehaviour[] = (
   class: s.class as MalformedClass,
   transports: s.transports as Transport[],
   er7: s.er7,
+  mllpFraming: s.mllpFraming as MllpFraming,
   controlId: s.controlId,
   commitAck: s.expected.commit_ack as 'AA' | 'AE' | null,
   commitReason: s.expected.commit_ack_reason,
@@ -359,6 +460,22 @@ export function mockOruR01(
       `OBX|2|NM|8462-4^Diastolic blood pressure^LN||${diastolic}|${unit}|||||F|||${ts}`,
     ].join('\r') + '\r'
   );
+}
+
+/**
+ * cuff-sim's DERIVED message name for an accepted MLLP send (`derived_message_name` in
+ * services/cuff-sim/cuff_sim/message.py): `<store>/messages/<id>`, where the id is the URL-safe
+ * base64, with `=` padding, of the SHA-256 of the exact message bytes (spike S5's observation,
+ * unverified for MLLP). The ACK does not carry the name, so this is computed, not returned.
+ */
+export async function derivedMessageName(store: string, payload: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(payload)),
+  );
+  const b64 = btoa(String.fromCharCode(...digest))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_');
+  return `${store}/messages/${b64}`;
 }
 
 /** A display copy of the store's ACK. Per spike S4 its type is `ACK` and MSA-2 is empty on AE. */

@@ -487,7 +487,7 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
       if (reconnect)
         text +=
           ' Reconnect needed: the Google Health connection has expired, so no new readings arrive until the watch is reconnected.';
-      else if (status?.watchSync.state === 'never-synced') text += ' The watch has not synced yet.';
+      else if (status?.watchSync.lastSyncAt === null) text += ' The watch has not synced yet.';
       renderMessage(text, reconnect ? 'warn' : 'info');
     } else if (reconnect) {
       renderMessage(

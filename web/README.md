@@ -40,6 +40,14 @@ job, browser test included (CI installs Chromium with `npx playwright install --
 | --------------------- | ------------------------- | ------------------------------------------------------------------ |
 | `VITE_FHIR_PROXY_URL` | Base URL of `fhir-proxy`. | `/api` on the page's own origin (the Firebase Hosting rewrite, D4) |
 
+**Mock data sets.** In mock mode, `?mock-data=<id>` on the page URL picks the data set
+(`src/api/mock-data.ts`, `MOCK_DATA_SETS`): `utc` (the default) writes every heart-rate time in
+UTC; `dst-new-york` writes them in the fixed IANA zone America/New_York with the offset in force at
+each instant (`2026-11-01T01:30:00-04:00`, then `...-05:00`), as health-sync writes the user's
+zone. The zone belongs to the data, never to the browser. A range crosses a clock change when one
+falls inside it: the browser test `e2e/mock-dst.e2e.ts` pins the page's clock to 2026-11-01 12:00
+EST, eleven hours after the autumn change.
+
 Put a local value in `web/.env.local` (git-ignored); `.env.example` shows the format. Vite copies
 every `VITE_` variable into the public bundle, so **never put a secret in one**. The mode (mock or
 HTTP) is not a variable: it is `vite --mode mock`, fixed at build time, and an HTTP build does not
@@ -49,7 +57,7 @@ contain the mock client at all (`scripts/check-bundle.mjs` fails the build if it
 
 ```
 +--------------------------------------- header -----------------------------------------+
-| PulseBridge [Mock data]  status strip: last sync, counts, FHIR store, OpenEMR  Log out |
+| PulseBridge [Mock data]  status strip: newest data, counts, FHIR store, OpenEMR Log out |
 +----------------------------+--------------------------+-------------------------------+
 | Blood pressure (episodic)  |       line-art figure     | Heart rate (continuous)       |
 |                            |   <-- cuff    watch -->   |                               |
@@ -74,14 +82,14 @@ width: header, cuff side, watch side, share, log.
 T17, T18 and T19 run in parallel, so every file has exactly one owner (orchestrator decision after
 the T16 review):
 
-| Path                                                                                       | Owner                                       | Rule for the others                                                                               |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `src/heart-rate/`                                                                          | T17                                         | do not edit                                                                                       |
-| `src/cuff/`                                                                                | T18                                         | do not edit                                                                                       |
-| `src/share/`, `src/messages/`                                                              | T19                                         | do not edit                                                                                       |
-| `package.json`, `package-lock.json`                                                        | T17, **only** to add the chart library (D5) | T18 and T19 add no dependencies                                                                   |
-| `src/api/` (contract, HTTP client, mock client, mock data, T31 example copies)             | the shell (T16)                             | a task that needs a contract or mock change **reports it to the orchestrator** instead of editing |
-| `src/shell/`, `src/ui/`, `src/state/`, `src/styles/`, `e2e/shell.e2e.ts`, configs, scripts | the shell (T16)                             | same: report, do not edit                                                                         |
+| Path                                                                                                                                                                 | Owner                                                           | Rule for the others                                                                               |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `src/heart-rate/`                                                                                                                                                    | T17 (T34 made the edits a contract change needed, listed below) | do not edit                                                                                       |
+| `src/cuff/`                                                                                                                                                          | T18                                                             | do not edit                                                                                       |
+| `src/share/`, `src/messages/`                                                                                                                                        | T19                                                             | do not edit                                                                                       |
+| `package.json`, `package-lock.json`                                                                                                                                  | T17, **only** to add the chart library (D5)                     | T18 and T19 add no dependencies                                                                   |
+| `src/api/` (contract, wire parsing `parse.ts`, errors, HTTP client, mock client, mock data, T31 example copies)                                                      | the shell (T16, then T34)                                       | a task that needs a contract or mock change **reports it to the orchestrator** instead of editing |
+| `src/shell/`, `src/ui/`, `src/state/`, `src/styles/`, `e2e/` (shell and mock-data browser tests), configs, `scripts/` (bundle check and its rules, mock-sample sync) | the shell (T16, then T34)                                       | same: report, do not edit                                                                         |
 
 ### Mounting
 
@@ -107,7 +115,9 @@ signature `(context: FeatureContext<Slot>) => void` (`src/shell/features.ts`). T
   nothing outlives the dashboard and no request answers after the next login.
 - `notifyDataChanged(kind)` and `onDataChanged(listener, signal)`: see "Telling each other data changed".
 - `refreshStatus()`: reload the header's status strip. Rarely needed: the strip already reloads
-  on every data change.
+  on every data change, every 5 minutes while the tab is visible (`STATUS_REFRESH_MS`) and when
+  the tab becomes visible again (unless a load started in the last minute), and announces
+  `'sync'` itself when the time of the newest watch data changes.
 
 If a mount function throws, the shell logs it and shows "This area failed to load" in that
 feature's first slot; the rest of the page keeps working. Split your code into more files inside
@@ -136,6 +146,28 @@ const observations = await client.searchObservations(
 - Other failures reject with `ApiError` (`status`, `message`, `outcome`, the FHIR
   `OperationOutcome` when the proxy sent one, and `retryAfterSeconds` on a 429). Status 0 means
   the network failed. Show `error.message` to the user.
+- **The cuff route's refusals are typed.** `submitCuffReading` rejects with `CuffSendError`
+  (`src/api/errors.ts`, a subclass of `ApiError`) whose `reason` is cuff-sim's documented case:
+
+  | Status | `reason`        | When (services/cuff-sim/README.md)                                                               | Sent? |
+  | ------ | --------------- | ------------------------------------------------------------------------------------------------ | ----- |
+  | 400    | `invalid-body`  | the body is not a JSON object                                                                    | no    |
+  | 413    | `too-large`     | the body is over 16 KiB                                                                          | no    |
+  | 422    | `invalid-input` | bounds, a type, an unknown field or sample, a sample not for this transport; `fields` names them | no    |
+  | 429    | `rate-limited`  | over the per-instance limit; `retryAfterSeconds` from `Retry-After`                              | no    |
+  | 500    | `server-error`  | a built message failed HL7v2 validation, or a bug                                                | no    |
+  | 504    | `no-answer`     | cut off upstream (Cloud Run's request timeout): it **may** have been sent, unrecorded            | maybe |
+
+  `error.fields` lists the request fields the OperationOutcome names (`systolic`, `diastolic`,
+  `sendMalformed`, `transport`, or `body`). cuff-sim's `diagnostics` are fragments with the field
+  only in `expression` ("is required"), so `error.message` puts each field before its fragment and
+  joins the issues: `systolic: is required; diastolic: is required`. Any other status (for example
+  a 502 from the proxy) stays a plain `ApiError`.
+
+- **`Retry-After`** is read only in its delay-seconds form (digits only, RFC 9110 section
+  10.2.3). Anything else (negative, decimal, `10abc`, an HTTP-date) gives `retryAfterSeconds: null`,
+  for the cuff route and for login alike.
+
 - Never call `fetch` yourself: the page has one backend and one client.
 
 ### Using the selection store
@@ -170,6 +202,9 @@ selection.subscribe((current) => {
   null: nothing selected, a cuff reading that produced no Observation, or a selection with an
   `unshareableReason`. The button is enabled exactly when it is non-null, and otherwise its
   description (the hint under it) says why.
+- **For T18:** a send whose AuditEvent could not even be built has `attemptId: null`. It has no
+  trace to look up and is not in the messages log, so show its result as returned and do not put
+  it in the selection (which needs an `attemptId`).
 - **For T17:** the selection does not carry the Observation's `status`, so set
   `unshareableReason` yourself for any window whose status is not `final` (the newest windows are
   `preliminary` until the next sync, T10). Re-set the selection if a refresh finalises it.
@@ -181,13 +216,34 @@ with `notifyDataChanged(kind)`; a feature that **shows** data listens with
 `onDataChanged(listener, signal)` and re-fetches what it shows through the client. The event
 carries no data on purpose: the server is the source of truth (`src/state/data-changed.ts`).
 
-| Kind          | Who calls it                                              | Who listens                                   |
-| ------------- | --------------------------------------------------------- | --------------------------------------------- |
-| `'cuff-send'` | T18, after `submitCuffReading` returns (whatever the ACK) | T19 messages log; the status strip (built in) |
-| `'share'`     | T19, after `share` returns                                | T19 if it lists shares; the status strip      |
-| `'sync'`      | anyone who learns of a new sync (none today)              | T17 chart; the status strip                   |
+| Kind          | Who calls it                                                                                  | Who listens                                   |
+| ------------- | --------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| `'cuff-send'` | T18, after `submitCuffReading` returns (whatever the ACK)                                     | T19 messages log; the status strip (built in) |
+| `'share'`     | T19, after `share` returns                                                                    | T19 if it lists shares; the status strip      |
+| `'sync'`      | the status strip (built in), when the newest watch data time changes between two status loads | T17 chart                                     |
 
 A listener is not called at subscribe time; load your data once in the mount function.
+
+**What `lastSyncAt` means.** Despite its name, `watchSync.lastSyncAt` is the time of the **newest
+heart-rate write** to the FHIR store, not the time of the last sync run: health-sync writes only
+windows that changed, so while the watch is off the wrist the time stays where it was. The strip
+labels it "Newest watch data" for that reason. (The field kept its name so T17's code did not
+change.)
+
+**How `'sync'` is announced.** The strip compares each status load's `watchSync.lastSyncAt` with
+the previous load's (`src/shell/sync-watch.ts`): it announces on a change, but not on the first
+load, not when the time is unchanged (compared as instants) and not when it becomes null (a later
+real time is announced again). A load that answers after a newer one started is ignored. The strip
+does not reload on its own announcement, and a reload that finds the same time announces nothing,
+so the two cannot loop; only the strip's own `'sync'` is skipped, and any other change reported
+meanwhile still reloads it. With health-sync running every 15 minutes and the strip reloading every
+5, new data is noticed within 5 minutes, and a window that was provisional can become final during
+a session.
+
+**What the polling costs.** About 12 status loads an hour per visible tab (one every 5 minutes,
+plus at most one per minute when the tab becomes visible again), and none while it is hidden. A
+session lasts at most 8 hours (the token's lifetime), so one tab left open makes at most about 100
+loads. Each is one proxy call; health-sync caches its own answer for 60 s.
 
 **Waiting for "pending".** After a cuff send the stored message is `pending` until `v2-to-fhir`
 labels it (D7), usually seconds. The feature that shows a pending item polls for it, with
@@ -218,6 +274,28 @@ is pending. Nobody else polls.
   arrow-key support; fill `tabs.panel(id)`.
 - No inline `style="..."` attributes and no inline scripts: the Content-Security-Policy blocks
   them. Setting `element.style.x` from script is allowed. Charts that draw to `<canvas>` or SVG are fine.
+
+### Element ids
+
+One document holds the shell and four features built in parallel, so an id must say who owns it:
+
+| Owner               | Id prefix | Example                             |
+| ------------------- | --------- | ----------------------------------- |
+| T17 heart rate      | `hr-`     | `hr-summary`                        |
+| T18 cuff            | `cuff-`   | `cuff-systolic`                     |
+| T19 share           | `share-`  | `share-hint`                        |
+| T19 messages log    | `log-`    | `log-filter`                        |
+| the shell           | `shell-`  | `shell-messages-log`                |
+| the shell's helpers | `ui-`     | `ui-tabs-3-tab-fhir` (`createTabs`) |
+
+- Every id you create starts with your feature's prefix, and is used once. For ids that repeat
+  (one per row), use `uniqueId('cuff-row')` from `src/ui/dom.ts`.
+- Ids made by `createTabs` start with `ui-` and are unique by construction; use them as they are.
+- `main` (the skip link's target) and the login form's `login-` ids are the only shell exceptions.
+- `src/shell/element-ids.test.ts` mounts the real features against the mock and fails on a
+  duplicate id, or an id inside a feature's slot without that feature's prefix. Run it after a merge.
+- Prefer `aria-labelledby` and `aria-controls` with these ids over global selectors; tests should
+  find elements by role and name where they can.
 
 ### Styling tokens
 
@@ -267,6 +345,39 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
   (copied into `src/api/t31-examples/`) and a test compares them element by element.
 - The mock share strips `id`, `meta`, `identifier` and `device` from the Observation before
   "posting" it, as T06 says the real share must.
+- **A cuff send is checked as cuff-sim checks it**: integers from 1 to 400 mm[Hg], systolic above
+  diastolic, both required unless `sendMalformed` is set (then still checked if present), a known
+  sample that lists the transport; refusals are `CuffSendError` 422 with one OperationOutcome issue
+  per wrong field. The **rate limit** is cuff-sim's token bucket (burst 3, 6 a minute, per
+  instance), checked after the input, answering 429 with `retryAfterSeconds`; pass
+  `rateLimit: null` to `MockClient` in a test that sends many readings.
+- **A send result has cuff-sim's fields**: `result`, `framing` (`standard` for a built reading
+  over MLLP, the sample's own `mllp_framing` from T07 for a malformed one, null over HTTPS),
+  `messageName` with `messageNameSource`: from the "ingest response" over HTTPS, and over MLLP the
+  **derived** name `<store>/messages/<urlsafe-base64(sha256(bytes))>`, computed exactly as
+  cuff-sim's `derived_message_name` (a test checks fixed vectors cuff-sim computed for T07's sample
+  bytes). A real derived name is over the bytes actually sent: on a deployment cuff-sim (T33)
+  substitutes the configured patient into samples with a usable PID, so for those samples the name
+  differs from the manifest's. As in cuff-sim, the derived name is not written into the AuditEvent,
+  so the log row's `messageName` stays null over MLLP.
+- **Refusals use cuff-sim's exact texts**: the field in `expression`, a fragment in `diagnostics`
+  ("is required", "must be from 1 to 400 mm[Hg]", "must be greater than diastolic"), `code`
+  `invalid`, every issue collected before refusing; an absent `transport` is `mllp`; a null value
+  counts as absent; an unknown field is a `body` issue; a body that is not an object is 400.
+  `audit.detail` uses cuff-sim's sentences.
+- A reading inside cuff-sim's limits but outside the mapper's (`MAPPER_PLAUSIBLE_RANGE`) is stored
+  with `AA` and then mapped to `error` / `out-of-range`, as T12 does.
+- `new MockClient({ auditFailure: 'build' | 'write' })` makes every send fail to record its
+  AuditEvent: `build` gives `attemptId: null`, `write` an id with nothing stored under it (the trace
+  is a 404). The send result still says what the store answered, and the attempt is not in the log.
+  (The proxy may later show such a stored message as a `store-only` row; the mock does not.)
+- **Heart-rate data arrives at sync runs**: the mock's health-sync runs every 15 minutes (minute 2,
+  17, 32, 47). Windows, their `preliminary`/`final` status (T10's 30-minute cutoff at that run) and
+  `watchSync.lastSyncAt` change together, once per run, so the status strip's `'sync'`
+  announcement and the chart's re-fetch can be seen in mock mode.
+- The status is health-sync's shape (`connected`, no notes, `strandedPreliminary` 0); the strip's
+  other states and notes are covered by unit tests.
+- The trace's `source` is `{kind: 'reconstructed', window}`: what the proxy is expected to send.
 
 ## Security basics
 
@@ -298,8 +409,24 @@ base-uri 'none'; form-action 'none'; object-src 'none'`. A mock build has `conne
 ## Dependencies
 
 Every version is pinned exactly in `package.json` (`.npmrc` sets `save-exact`), and
-`package-lock.json` is committed. All are development dependencies; the shipped page has **no**
-runtime dependencies (about 20 kB of our own JavaScript before gzip).
+`package-lock.json` is committed.
+
+### Runtime dependencies (shipped in the page)
+
+| Package        | Why                                                                                             | Size in the HTTP build (`npm run build`, Vite's report)                                                          |
+| -------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `uplot` 1.6.32 | The heart-rate chart (D5, chosen by T17; see `src/heart-rate/README.md`). MIT, no dependencies. | its own chunk, 50,990 B (22.24 kB gzip), loaded by `import()` on first draw; its stylesheet is in the page's CSS |
+
+For comparison, our own code is the main chunk, 46,619 B (17.25 kB gzip), and the CSS is 13,741 B
+(3.52 kB gzip) including uPlot's. **uPlot must stay out of the main chunk**, so the login form
+never waits for it: `scripts/check-bundle.mjs` reads Vite's build manifest (`dist/.vite/manifest.json`,
+`build.manifest: true`) and fails the build if the entry chunk, or any chunk it imports statically,
+is uPlot's or contains uPlot's code (`scripts/bundle-rules.mjs`, tested on hand-made manifests).
+The manifest lists only the build's public file names. It is written into `dist/.vite/` with the
+build; **for T22:** Firebase Hosting's default `ignore` (`**/.*`) skips dot-directories, so it is
+not deployed. Keep that default.
+
+### Development dependencies
 
 | Package                                     | Why                                                                                                                                                                                   |
 | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -311,9 +438,6 @@ runtime dependencies (about 20 kB of our own JavaScript before gzip).
 | `eslint`, `@eslint/js`, `typescript-eslint` | Linting, including type-aware rules.                                                                                                                                                  |
 | `eslint-plugin-no-unsanitized`              | Mozilla's rules against passing strings to HTML sinks (added after review).                                                                                                           |
 | `prettier`                                  | Formatting.                                                                                                                                                                           |
-
-The chart library (D5) is T17's choice and will be the first runtime dependency; T17 is the only
-task that may change `package.json` and the lockfile.
 
 Known: `npm audit` reports a moderate advisory in `minimatch`, pulled in by typescript-eslint
 (development only; it affects glob patterns from untrusted input, which lint never sees). It
@@ -340,20 +464,45 @@ are rejected" is simplest to state and test with exactly one exception, and the 
 the CapabilityStatement. Errors carry a FHIR `OperationOutcome` body where possible; the client
 shows its first `issue.diagnostics`.
 
-| Method and path                                                                                          | Client method          | Request                                                                                                               | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------------------------------------------------------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `POST /auth/login`                                                                                       | `login`                | `{"password": "..."}`                                                                                                 | `200 {"token", "expires_at"}`; `401` wrong password; `429` with `Retry-After`; `503` not configured                                                                                                                                                                                                                                                                                                                                                                |
-| `GET /status`                                                                                            | `getStatus`            |                                                                                                                       | `StatusSummary`: `watchSync {state: ok \| reconnect-needed \| never-synced \| error, lastSyncAt, detail}`, `observationCounts {watch, cuff}`, `fhirStore` and `openemr` `{reachable, checkedAt, detail}`                                                                                                                                                                                                                                                           |
-| `GET /fhir/Observation?code=http://loinc.org\|8867-4&date=gt<start>&date=lt<end>&_sort=date&_count=1000` | `searchObservations`   | FHIR search; `code` is a token (`system\|code`); also `85354-9`. Date rule below                                      | `Bundle` (`searchset`) of Observations, oldest first; `link[next]` to the next page, under the same base URL                                                                                                                                                                                                                                                                                                                                                       |
-| `GET /trace/heart-rate/{observationId}`                                                                  | `getHeartRateTrace`    |                                                                                                                       | `{"resources": Bundle (collection: Observation, Provenance, Device), "source": <Google Health roll-up window> \| null}`                                                                                                                                                                                                                                                                                                                                            |
-| `GET /cuff/samples`                                                                                      | `listMalformedSamples` |                                                                                                                       | `[{name, label, class, transports}]`, names and classes exactly as in `libs/pulsebridge_hl7v2/samples/samples.json`                                                                                                                                                                                                                                                                                                                                                |
-| `POST /cuff/readings`                                                                                    | `submitCuffReading`    | `{systolic, diastolic, transport: "mllp" \| "https", sendMalformed: <sample name> \| null}`                           | `200 CuffSendResult` (forwarded to the cuff simulator, D10): `{attemptId, sentAt, transport, controlId, sample, messageSent, messageName, ack, audit}` where `ack` is `{received: true, code, controlId, reason, raw}` or `{received: false, why: timeout \| connection-closed \| api-error \| unreadable-reply, httpStatus, detail, replyPrefixBase64}`. `422` + OperationOutcome for out-of-bounds input (nothing sent); `429` + `Retry-After` when rate-limited |
-| `GET /trace/cuff-attempts/{attemptId}`                                                                   | `getCuffAttemptTrace`  |                                                                                                                       | `{"attempt": SendAttemptEntry, "messageSent": "<ER7>" \| null, "resources": Bundle (collection: AuditEvent as stored, Observation?, Provenance?)}`                                                                                                                                                                                                                                                                                                                 |
-| `GET /messages?kind=&outcome=&count=&cursor=`                                                            | `listMessages`         | `kind`: `cuff-send` \| `unreadable-send-attempt` \| `fhir-transaction`; `outcome`: `accepted` \| `error` \| `pending` | `{"entries": [...], "nextCursor": string \| null, "unreadable": number}`, newest first. Row shapes below                                                                                                                                                                                                                                                                                                                                                           |
-| `POST /share`                                                                                            | `share`                | `{"observations": ["Observation/<id>", ...]}`                                                                         | `200 {"outcome": shared \| already-shared \| partly-shared \| failed, "steps": [ShareStep], "readBack": Bundle (collection: Patient, Encounter, Observations as OpenEMR stored them)}`. Each step: `{step, label, request {method, url (path only), body}, response {status, body}, result, durationMs}`; never the private key, the signed assertion or the access token. Failures below                                                                          |
+| Method and path                                                                                          | Client method          | Request                                                                                                                                                                                   | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------------------------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /auth/login`                                                                                       | `login`                | `{"password": "..."}`                                                                                                                                                                     | `200 {"token", "expires_at"}`; `401` wrong password; `429` with `Retry-After`; `503` not configured                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `GET /status`                                                                                            | `getStatus`            |                                                                                                                                                                                           | `StatusSummary`: `watchSync` is health-sync's `/status` (`state`: its `googleHealth`, `connected` \| `reconnect-needed` \| `not-configured` \| `unknown`; `reason`; `notes` (`backfill-needed`, `refresh-token-rotated`); `strandedPreliminary` number \| null; `checkedAt`) plus `lastSyncAt` (ISO \| null, derived by the proxy, open question 9); `observationCounts {watch, cuff}`; `fhirStore` and `openemr` `{reachable, checkedAt, detail}`. Always 200 from health-sync, so `unknown` means "the check could not finish", not "down"                                                                                                                                                                                                                         |
+| `GET /fhir/Observation?code=http://loinc.org\|8867-4&date=gt<start>&date=lt<end>&_sort=date&_count=1000` | `searchObservations`   | FHIR search; `code` is a token (`system\|code`); also `85354-9`. Date rule below                                                                                                          | `Bundle` (`searchset`) of Observations, oldest first; `link[next]` to the next page, under the same base URL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `GET /trace/heart-rate/{observationId}`                                                                  | `getHeartRateTrace`    |                                                                                                                                                                                           | `{"resources": Bundle (collection: Observation, Provenance, Device), "source": {"kind": "reconstructed" \| "original", "window": <Google Health roll-up window>} \| null}`. The client converts it (below)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `GET /cuff/samples`                                                                                      | `listMalformedSamples` |                                                                                                                                                                                           | cuff-sim's list as it returns it: `[{name, label, class, transports}]`, every T07 sample except class `valid`, `label` = the manifest's `description`; bad-framing samples list only `mllp`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `POST /cuff/readings`                                                                                    | `submitCuffReading`    | `{systolic?, diastolic?, transport: "mllp" \| "https", sendMalformed: <sample name> \| null}`: integers 1 to 400 mm[Hg], systolic above diastolic, required unless `sendMalformed` is set | `200 CuffSendResult` (forwarded to cuff-sim, D10, body unchanged): `{attemptId (string \| null), sentAt, transport, controlId, sample, messageSent, framing, messageName, messageNameSource, result, ack, audit}`; `ack` is `{received: true, code, controlId, reason, raw}` or `{received: false, why: timeout \| connection-closed \| api-error \| unreadable-reply, httpStatus, detail, replyPrefixBase64}`. `400` not a JSON object; `413` over 16 KiB; `422` a wrong field (bounds, type, unknown field or sample, sample not for this transport); `429` + `Retry-After`; `500` built message failed validation or a bug; all with an OperationOutcome naming the field in `issue.expression`, and nothing sent. `504` if cut off upstream (may have been sent) |
+| `GET /trace/cuff-attempts/{attemptId}`                                                                   | `getCuffAttemptTrace`  |                                                                                                                                                                                           | `{"attempt": SendAttemptEntry, "messageSent": "<ER7>" \| null, "resources": Bundle (collection: AuditEvent as stored, Observation?, Provenance?)}`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `GET /messages?kind=&outcome=&count=&cursor=`                                                            | `listMessages`         | `kind`: `cuff-send` \| `unreadable-send-attempt` \| `fhir-transaction`; `outcome`: `accepted` \| `error` \| `pending`                                                                     | `{"entries": [...], "nextCursor": string \| null, "unreadable": number}`, newest first. Row shapes below                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `POST /share`                                                                                            | `share`                | `{"observations": ["Observation/<id>", ...]}`                                                                                                                                             | `200 {"outcome": shared \| already-shared \| partly-shared \| failed, "steps": [ShareStep], "readBack": Bundle (collection: Patient, Encounter, Observations as OpenEMR stored them)}`. Each step: `{step, label, request {method, url (path only), body}, response {status, body}, result, durationMs}`; never the private key, the signed assertion or the access token. Failures below                                                                                                                                                                                                                                                                                                                                                                            |
 
 Field names in the JSON views are camelCase, except the login response, which follows
 docs/spikes/s6.md as written (`token`, `expires_at`).
+
+### Wire shape and parsed shape
+
+The HTTP client does not hand the proxy's JSON (the **wire** shape) straight to the features. It
+converts it into the types in `src/api/contract.ts` (the **parsed** shape), in `http-client.ts`
+and `src/api/parse.ts`. Features only ever see the parsed shape, from either client.
+
+| Route                           | Wire (what the proxy sends)                           | Parsed (what a feature gets)                                                                                                   |
+| ------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `GET /trace/heart-rate/{id}`    | `{resources: Bundle, source: {kind, window} \| null}` | `HeartRateTrace {observation, provenance, device, source: {kind: 'reconstructed' \| 'original' \| 'unknown', window} \| null}` |
+| `GET /trace/cuff-attempts/{id}` | `{attempt, messageSent, resources: Bundle}`           | `CuffAttemptTrace {attempt, messageSent, auditEvent, observation, provenance}`                                                 |
+| `POST /share`                   | `{outcome, steps, readBack: Bundle}`                  | `ShareResult {outcome, steps, readBack: {patient, encounter, observations}}`                                                   |
+| `GET /status`                   | `StatusSummary`                                       | the same, with `watchSync` checked                                                                                             |
+| `POST /cuff/readings`           | cuff-sim's result                                     | the same, with `attemptId`, `framing`, `messageName` and `messageNameSource` checked                                           |
+| `GET /fhir/Observation?...`     | searchset Bundles, paged with `link[next]`            | `Observation[]`, every page followed (inside the proxy's base URL only)                                                        |
+
+The rule for checked values: **an unrecognised value never becomes a stronger claim than the
+server made.** An unknown connection state is `unknown` (not `connected`); an unknown trace source
+`kind` is `unknown`, which the trace panel shows without saying "original" or "reconstructed"; a
+`source` that is not a roll-up window is null; an unknown `messageNameSource` is treated as
+`derived-sha256-unverified` (only the store's own answer is presented as confirmed); an unknown
+`framing` is null; unknown `notes` are dropped; a `strandedPreliminary` that is not a whole number
+is null ("not known"), never zero; an unknown `result` is worked out from the ACK (T31's mapping);
+a `/status` body that is not an object (even JSON `null`) does not throw: it reads as `unknown`,
+unreachable and zero counts. `googleHealth` is read as the state when `state` is absent.
 
 **Date rule for heart-rate windows.** The page sends `date=gt<start>&date=lt<end>`. On a Period
 (`effectivePeriod`), R4 defines `gt` as "the period ends after the value" and `lt` as "the period
@@ -403,28 +552,85 @@ returned (MSA-1 `AA` stored, `AE` rejected, with MSA-3 as the reason), or no ACK
 **application-level outcome** is what `v2-to-fhir` made of a stored message, from its
 `application_outcome` and `reason` labels, or `pending` when it has no label yet.
 
-### Open questions for T14, T15, T13 and the orchestrator
+### What T14, T18 and T19 must know (contract changes made by T34)
+
+T34 brought the contract in line with the services T13 (cuff-sim) and T10 (health-sync) built.
+Code written against the old shapes no longer type-checks, on purpose.
+
+| Type or value                          | Before (T16)                                                                    | After (T34)                                                                                                                                                                   | Who must follow |
+| -------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------- |
+| `CuffReadingRequest`                   | `{systolic, diastolic, transport, sendMalformed: string \| null}`, all required | a union: built reading `{systolic, diastolic, transport, sendMalformed: null}`, or malformed `{systolic?, diastolic?, transport, sendMalformed: string}`                      | T18, T14        |
+| `CUFF_BOUNDS` (60-250 / 30-150)        | presented as the bounds                                                         | **removed**. `CUFF_SERVICE_LIMITS` = cuff-sim's 1 to 400 mm[Hg], systolic above diastolic; `MAPPER_PLAUSIBLE_RANGE` = T12's 50-300 / 20-200 (information only)                | T18             |
+| `CuffSendResult.attemptId`             | `string`                                                                        | `string \| null` (null: the AuditEvent could not be built; no trace, not in the log)                                                                                          | T18             |
+| `CuffSendResult` new fields            |                                                                                 | `result` (`accepted` \| `rejected` \| `no-acknowledgment`), `framing` (`MllpFraming \| null`), `messageNameSource` (`ingest-response` \| `derived-sha256-unverified` \| null) | T18, T14        |
+| `CuffSendResult.messageName`           | HTTPS only; null over MLLP                                                      | also set over MLLP for an accepted send, but **derived**: show it labelled as derived and unconfirmed (`isDerivedMessageName(result)`), never as the stored message's name    | T18             |
+| Cuff refusals                          | `ApiError` 422 / 429                                                            | `CuffSendError` with `reason` for 400, 413, 422, 429, 500, 504; `fields`; `retryAfterSeconds`                                                                                 | T18             |
+| `MalformedSample`                      | `{name, label, class, transports}`                                              | unchanged, now documented as cuff-sim's list (`label` = the manifest's description)                                                                                           | T18             |
+| `StatusSummary.watchSync.state`        | `ok` \| `reconnect-needed` \| `never-synced` \| `error`                         | health-sync's `connected` \| `reconnect-needed` \| `not-configured` \| `unknown`; "never synced" is `lastSyncAt === null`                                                     | T14, T17 (done) |
+| `StatusSummary.watchSync` other fields | `lastSyncAt`, `detail`                                                          | `reason`, `notes`, `strandedPreliminary` (number \| null), `checkedAt`, `lastSyncAt` (`detail` removed)                                                                       | T14             |
+| `StatusSummary.watchSync.lastSyncAt`   | "last sync"                                                                     | the time of the newest heart-rate write (does not move while the watch is off); the strip says "Newest watch data"                                                            | T14             |
+| `HeartRateTrace.source`                | `GoogleHealthRollUpWindow \| null`                                              | `{kind: 'reconstructed' \| 'original' \| 'unknown', window} \| null`; on the wire `{kind, window}`                                                                            | T14, T17 (done) |
+| `OperationOutcome.issue`               |                                                                                 | `expression?: string[]` (cuff-sim names the field there)                                                                                                                      | T18             |
+| `'sync'` data change                   | "anyone who learns of a new sync (none today)"                                  | announced by the status strip; features only listen                                                                                                                           | T17 (done), T19 |
+| Shell element ids                      | `cuff-heading`, `share-heading`, `messages-log`, `tabs-N`, ...                  | `shell-...` and `ui-...`; features use their own prefix (see "Element ids")                                                                                                   | T18, T19        |
+
+For T18 in short: offer inputs inside `CUFF_SERVICE_LIMITS` (a narrower form range is fine, but
+do not call it the service's); let a malformed send leave the values out; show `result`, the
+commit-level ACK and, once mapped, the application-level outcome; label a derived message name as
+derived; handle `attemptId: null`; on `CuffSendError` mark `error.fields` and, for
+`rate-limited`, say when to retry from `retryAfterSeconds`; and expect 429 after three quick sends
+in mock mode too.
+
+For T19 in short: an attempt whose AuditEvent was not recorded is not in the log; the log row's
+`messageName` is null over MLLP (the derived name is not in the AuditEvent); prefix ids with
+`share-` and `log-`.
+
+The minimal edits T34 made in `src/heart-rate/` to keep T17's code compiling and honest against
+the new types: `trace.ts` takes the source tab's note and code-block label from `source.kind`
+(and shows `source.window`); `trace.test.ts` uses the new shape and adds a test for `original` and
+`unknown`; `panel.ts` reads "has not synced yet" from `lastSyncAt === null` instead of the removed
+`never-synced` state; `panel.test.ts`'s status helper builds the new `watchSync`.
+
+### Open questions for T14, T15 and the orchestrator
 
 1. **Patient parameter.** The page sends no `patient` search parameter: this is a single-patient
    PHR, and the proposal is that the proxy pins searches to the configured patient (T14's AC says
    "search by patient"). Alternative: `/status` returns the Patient reference and the page passes it.
-2. **Source JSON for the heart-rate trace.** The right trace panel shows the Google Health roll-up
-   window an Observation came from, but T10 does not store it. Options: T10 keeps it (for example
-   as a `Binary` or a Provenance entity), or the proxy rebuilds it from the Observation (min, mean,
-   max and the period), labelled as reconstructed. Until decided, `source` may be null.
+2. **Source JSON for the heart-rate trace.** Settled in shape: the proxy sends
+   `source: {kind, window}`. T10 does not store the raw roll-up, so today the proxy rebuilds the
+   window from the stored Observation (period, average, minimum, maximum) and sends
+   `kind: "reconstructed"`. If a later task stores the original (for example as a `Binary`
+   referenced from the Provenance), the proxy sends `kind: "original"` and the page needs no change.
 3. **"HL7v2 as sent".** T31 never stores the message. For a malformed send the proxy can take the
    bytes from the T07 sample named in `malformed-sample`. For a valid send it must fetch the stored
-   message (`view=RAW_ONLY`) by name; over MLLP the ACK does not carry the name, so the proxy needs
-   a way to find it (for example by the control ID in MSH-10, if the store can filter on it).
+   message (`view=RAW_ONLY`) by name. Over MLLP the AuditEvent carries no name; cuff-sim's derived
+   name (`<store>/messages/<urlsafe-base64(sha256(bytes))>`) is unverified, so the proxy should
+   confirm it (or search by MSH-10, if the store can filter on it) before it presents a name as the
+   stored message's.
 4. **FHIR transaction rows.** The brief's log lists one row per FHIR transaction (Bundle, HTTP
    status, resource ids), but no task records them. Proposal: derive them from the `Provenance`
    each ingest Bundle writes (`recorded`, `target`); the HTTP status would then be unknown (`null`).
-5. **Cuff bounds.** `CUFF_BOUNDS` (systolic 60–250, diastolic 30–150, systolic above diastolic) is
-   a proposal; T13 owns the real limits, and `/cuff/samples` could return them too.
-6. **A network failure over HTTPS** (no HTTP status at all, for example DNS or a reset connection)
-   has no dedicated reason in T31's closed set (`timeout`, `connection-closed`, `api-error` with a
-   status, `unreadable-reply`). T13 must map it to one of these (probably `connection-closed`, or
-   `timeout` when the client gave up waiting) and say which.
-7. **Date rule.** Confirm that the Cloud Healthcare FHIR store applies `gt`/`lt` to
+5. **Date rule.** Confirm that the Cloud Healthcare FHIR store applies `gt`/`lt` to
    `effectivePeriod` as R4 defines (overlap), so the proxy can pass the parameters through.
-8. **Share failures and the CapabilityStatement route** (above) are proposals for T15 and T14.
+6. **Share failures and the CapabilityStatement route** (above) are proposals for T15 and T14.
+7. **Forwarding cuff-sim's refusals.** The page maps 400, 413, 422, 429 (with `Retry-After`) and
+   500 from cuff-sim, and 504 for a cut-off request. T14 should forward cuff-sim's status, body and
+   `Retry-After` unchanged, keep its own forward timeout at least 90 s (cuff-sim's README), and
+   answer 502 (not 500) when cuff-sim cannot be reached, so the page does not report a cuff-sim bug.
+   **For T22 (unverified):** Firebase Hosting's rewrite to the proxy may have a shorter timeout than
+   cuff-sim's worst case (90 s); if so, that is where a 504 `no-answer` would really come from.
+   T22 should check the limit and say what it is.
+8. **`/status` from health-sync.** health-sync answers 200 in every state. T14 should send
+   `googleHealth` as `state` (the client also accepts `googleHealth` itself when `state` is absent),
+   and `reason`, `notes`, `strandedPreliminary` and `checkedAt` unchanged,
+   and report health-sync itself not answering (any non-200 or no answer) as `state: "unknown"`
+   with a `reason` such as `health-sync-unreachable`, not as a disconnection.
+9. **`lastSyncAt`.** health-sync's `/status` is stateless and has no last sync time. The page
+   needs the time of the newest heart-rate write (the strip shows it as "Newest watch data", and a
+   change announces `'sync'`). Proposal: the proxy reads it from the FHIR store, for example the
+   newest `Provenance.recorded` whose agent is health-sync, or the newest heart-rate Observation's
+   `meta.lastUpdated`, with a short cache. It moves only when data was written, which is what the
+   page wants: otherwise the chart would re-fetch for nothing.
+10. **Store-only rows.** A send whose AuditEvent was not recorded leaves a stored message without
+    an AuditEvent. The contract has `source: "store-only"` rows for these; the mock does not make
+    any. T14 decides whether to list them.

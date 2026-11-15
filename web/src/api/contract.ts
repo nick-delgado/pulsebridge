@@ -39,16 +39,65 @@ export interface Reachability {
   detail: string | null;
 }
 
+/**
+ * The Google Health connection state, exactly as health-sync's `GET /status` names it
+ * (`googleHealth`, services/health-sync/README.md). health-sync answers HTTP 200 in every state:
+ * - `connected`: a token refresh just succeeded;
+ * - `reconnect-needed`: the refresh token expired or was revoked, the OAuth client was refused,
+ *   or the scope was not granted (T10); the deployer must re-run the connect script (T11);
+ * - `not-configured`: a Google Health secret is missing or unusable (for example no connect yet);
+ * - `unknown`: the check could not finish (Google's token endpoint busy or unreachable). This is
+ *   not an error of ours and not a disconnection; the last sync time still stands.
+ * The HTTP client turns any other value into `unknown`, so a new state cannot claim "connected".
+ */
+export type GoogleHealthConnection =
+  'connected' | 'reconnect-needed' | 'not-configured' | 'unknown';
+
+/**
+ * Non-fatal facts from health-sync's `/status` `notes` that the status strip shows:
+ * - `backfill-needed`: `strandedPreliminary` windows are still `preliminary` but older than any
+ *   future run's range (runs were missed); `health-sync-backfill` finalises them;
+ * - `refresh-token-rotated`: Google issued a new refresh token that health-sync cannot store;
+ *   reconnecting soon keeps the connection working.
+ * Unknown note codes are dropped by the HTTP client (they would have no words to show).
+ */
+export type WatchSyncNote = 'backfill-needed' | 'refresh-token-rotated';
+
+export interface WatchSyncStatus {
+  /**
+   * health-sync's `googleHealth`. The proxy should send it as `state`; the HTTP client also
+   * reads `googleHealth` when `state` is absent, so health-sync's body can be passed through.
+   */
+  state: GoogleHealthConnection;
+  /**
+   * health-sync's `reason` code, for example `refresh-token-invalid` or
+   * `secrets-missing:<names>`; null when connected. A code, not a sentence: shown as detail text.
+   */
+  reason: string | null;
+  notes: WatchSyncNote[];
+  /**
+   * How many windows the most recent sync run on that health-sync instance found stranded as
+   * `preliminary`. Null when no run has counted since the instance started (normal after a cold
+   * start with scale to zero) or the count failed; null is "not known", never zero.
+   */
+  strandedPreliminary: number | null;
+  /** When health-sync checked the connection (its `checkedAt`), ISO 8601. */
+  checkedAt: string;
+  /**
+   * The time of the NEWEST HEART-RATE WRITE to the FHIR store, ISO 8601; null when there has
+   * been none. It is not the time of the last sync run: health-sync writes only windows that
+   * changed, so while the watch is off the wrist (or a run finds nothing new) this does not
+   * move. The strip therefore labels it "Newest watch data". NOT part of health-sync's
+   * `/status` (which is stateless): the proxy derives it from the store (README open question
+   * 9). The field keeps its name so T17's code is unchanged; read it as "last data written".
+   * The status strip announces a `sync` data change when it changes between two loads, which
+   * is exactly when there is new data to re-fetch.
+   */
+  lastSyncAt: string | null;
+}
+
 export interface StatusSummary {
-  watchSync: {
-    /**
-     * `reconnect-needed`: the Google refresh token expired or was revoked (T10), and the deployer
-     * must re-run the connect script (T11).
-     */
-    state: 'ok' | 'reconnect-needed' | 'never-synced' | 'error';
-    lastSyncAt: string | null;
-    detail: string | null;
-  };
+  watchSync: WatchSyncStatus;
   /** Observations in the FHIR store, per source. */
   observationCounts: { watch: number; cuff: number };
   fhirStore: Reachability;
@@ -83,12 +132,37 @@ export interface GoogleHealthRollUpWindow {
   heartRate: { beatsPerMinuteMin: number; beatsPerMinuteAvg: number; beatsPerMinuteMax: number };
 }
 
+/**
+ * Where the roll-up window in a trace came from:
+ * - `reconstructed`: rebuilt by the proxy from the stored Observation (its effectivePeriod,
+ *   average, minimum and maximum), in the shape the API returns. Today's only case: PulseBridge
+ *   keeps no raw Google Health responses (README open question 2).
+ * - `original`: the window exactly as the Google Health API returned it, if a later task stores
+ *   it (for example as a `Binary` referenced from the Provenance).
+ * - `unknown`: the proxy sent a value this page does not know (or none). The page must then make
+ *   no claim either way. Only the HTTP client produces it; the proxy never sends it.
+ */
+export type GoogleHealthSourceKind = 'reconstructed' | 'original' | 'unknown';
+
+/** The Google Health side of a heart-rate trace, as the page uses it (the PARSED shape). */
+export interface GoogleHealthSource {
+  kind: GoogleHealthSourceKind;
+  window: GoogleHealthRollUpWindow;
+}
+
+/**
+ * A heart-rate trace as the client returns it (the PARSED shape). On the wire the proxy sends
+ * `{"resources": Bundle, "source": {"kind": "reconstructed" | "original", "window": {...}} | null}`
+ * and the HTTP client converts it: the Bundle's entries become `observation`, `provenance` and
+ * `device`, and an unrecognised `kind` becomes `unknown` (see web/README.md, "Wire shape and
+ * parsed shape").
+ */
 export interface HeartRateTrace {
   observation: Observation;
   provenance: Provenance | null;
   device: Device | null;
-  /** Null when the proxy cannot supply the source JSON (open question in the README). */
-  source: GoogleHealthRollUpWindow | null;
+  /** Null when the proxy cannot supply the source window, or sent one that is not a window. */
+  source: GoogleHealthSource | null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -96,10 +170,31 @@ export interface HeartRateTrace {
 
 export type Transport = 'mllp' | 'https';
 
-/** Proposed input bounds; T13 owns the final numbers and rejects anything outside them. */
-export const CUFF_BOUNDS = {
-  systolic: { min: 60, max: 250 },
-  diastolic: { min: 30, max: 150 },
+/**
+ * The limits the cuff simulator itself enforces (services/cuff-sim/README.md, "POST
+ * /cuff/readings"), which are T07's builder limits: JSON integers, each 1 to 400 mm[Hg], and
+ * systolic strictly above diastolic. Anything else is refused with 422 and nothing is sent.
+ *
+ * These are deliberately wide. The mapper (T12) accepts only systolic 50-300 and diastolic
+ * 20-200 (`MAPPER_PLAUSIBLE_RANGE`): a reading between the two is sent, stored with `AA`, and
+ * then gets the application-level outcome `error` with reason `out-of-range`, one of the D7
+ * layers the demo can show. A form may offer narrower inputs, but must not call them the
+ * service's limits.
+ */
+export const CUFF_SERVICE_LIMITS = {
+  /** mm[Hg], inclusive, for both values. */
+  min: 1,
+  max: 400,
+  systolicAboveDiastolic: true,
+} as const;
+
+/**
+ * The mapper's plausibility bounds (T12, `pulsebridge_fhir.inputs` SYSTOLIC_RANGE and
+ * DIASTOLIC_RANGE), inclusive, mm[Hg]. Information only: the cuff simulator does not enforce them.
+ */
+export const MAPPER_PLAUSIBLE_RANGE = {
+  systolic: { min: 50, max: 300 },
+  diastolic: { min: 20, max: 200 },
 } as const;
 
 /**
@@ -109,23 +204,32 @@ export const CUFF_BOUNDS = {
 export type MalformedClass =
   'structurally_invalid' | 'unparseable' | 'no_acknowledgment' | 'parses_but_cannot_map';
 
-/** A synthetic sample from libs/pulsebridge_hl7v2/samples that "send malformed" can send. */
+/**
+ * A synthetic sample from libs/pulsebridge_hl7v2/samples that "send malformed" can send: one row
+ * of cuff-sim's `GET /cuff/samples`, `[{"name", "label", "class", "transports"}]`, which lists
+ * every T07 sample except the `valid` class.
+ */
 export interface MalformedSample {
   /** Sample name exactly as in samples.json, for example `unparseable_no_msh`. */
   name: string;
+  /** The manifest's `description`, a sentence saying what is wrong with the sample. */
   label: string;
   class: MalformedClass;
   /** Bad-framing samples exist only on MLLP. */
   transports: Transport[];
 }
 
-export interface CuffReadingRequest {
-  systolic: number;
-  diastolic: number;
-  transport: Transport;
-  /** A sample name to send instead of the built message (bypasses validation), or null. */
-  sendMalformed: string | null;
-}
+/**
+ * The body of `POST /cuff/readings`, forwarded unchanged to the cuff simulator (D10).
+ * - A built reading: `systolic` and `diastolic` are required integers within
+ *   `CUFF_SERVICE_LIMITS`, and `sendMalformed` is null.
+ * - A malformed sample: `sendMalformed` is the exact sample name from `listMalformedSamples`
+ *   (one that lists this transport). `systolic` and `diastolic` may be left out; they are
+ *   ignored, but the service still checks them if present.
+ */
+export type CuffReadingRequest =
+  | { systolic: number; diastolic: number; transport: Transport; sendMalformed: null }
+  | { systolic?: number; diastolic?: number; transport: Transport; sendMalformed: string };
 
 /**
  * MSA-1 acknowledgment code (HL7 table 0008). AA/AE/AR are the original-mode codes the store
@@ -189,23 +293,68 @@ export interface ApplicationOutcome {
   reason: string | null;
 }
 
-/** The result of one send, in T13's single result shape for both transports. */
+/**
+ * The MLLP framing a send used (cuff-sim's `framing`): `standard` (start block, message, end
+ * block and carriage return), or a malformed sample's deliberately broken framing, sent as T07
+ * defines it so the adapter's "no acknowledgment" path can be shown.
+ */
+export type MllpFraming = 'standard' | 'missing_end_block' | 'missing_final_cr';
+
+/**
+ * Where `messageName` came from (cuff-sim's `messageNameSource`):
+ * - `ingest-response`: the HL7v2 store returned it (HTTPS `messages:ingest`, accepted). Confirmed.
+ * - `derived-sha256-unverified`: over MLLP the ACK carries no name, so for an accepted send the
+ *   simulator COMPUTES `<store>/messages/<urlsafe-base64(sha256(message bytes))>` (spike S5
+ *   observed this rule on one HTTPS message). It is a derived name, not confirmed by the store:
+ *   show it as such, never as the stored message's name (see `isDerivedMessageName`).
+ * The HTTP client reads any other value as `derived-sha256-unverified`: only the store's own
+ * answer is presented as confirmed.
+ */
+export type MessageNameSource = 'ingest-response' | 'derived-sha256-unverified';
+
+/** T31's result for a send (cuff-sim's `result`): from the commit-level acknowledgment. */
+export type SendResultKind = 'accepted' | 'rejected' | 'no-acknowledgment';
+
+/**
+ * The result of one send, in T13's single result shape for both transports
+ * (services/cuff-sim/README.md, "The 200 result"). A 200 means a send happened, whatever the
+ * store said; refusals before sending are `CuffSendError`s (errors.ts).
+ */
 export interface CuffSendResult {
-  /** Id of the AuditEvent recording this attempt (D12); used for trace lookups. */
-  attemptId: string;
+  /**
+   * Id of the AuditEvent recording this attempt (D12), used for trace lookups. Null only when
+   * the AuditEvent could not even be built: there is then nothing to look up, and the attempt
+   * is not in the messages log; show this result as it is.
+   */
+  attemptId: string | null;
   sentAt: string;
   transport: Transport;
-  /** MSH-10 of the message sent. */
+  /** MSH-10 of the message sent; null for a sample hl7apy cannot read (no MSH, LF terminators). */
   controlId: string | null;
   /** The malformed sample sent, or null for a built reading. */
   sample: string | null;
-  /** The message as sent, ER7 with "\r" between segments. */
+  /** The message as sent, ER7 with the sample's own terminators ("\r" for a built reading). */
   messageSent: string;
-  /** HL7v2 store message name from the HTTPS ingest response; null over MLLP or when rejected. */
+  /** The MLLP framing used; null over HTTPS (no frame). */
+  framing: MllpFraming | null;
+  /**
+   * HL7v2 store message name. Over HTTPS: from the ingest response when accepted. Over MLLP: a
+   * DERIVED name for an accepted (AA) send (`messageNameSource`). Null when rejected or not
+   * acknowledged.
+   */
   messageName: string | null;
+  /** Null exactly when `messageName` is null. */
+  messageNameSource: MessageNameSource | null;
+  /** accepted (AA/CA), rejected (AE/AR/CE/CR) or no-acknowledgment. */
+  result: SendResultKind;
   ack: CommitAck;
   /** Whether the AuditEvent was written. A failure never hides the send result (T13). */
   audit: { recorded: true } | { recorded: false; detail: string };
+}
+
+/** True when the result's message name was computed by the simulator, not returned by the store. */
+export function isDerivedMessageName(result: Pick<CuffSendResult, 'messageNameSource'>): boolean {
+  return result.messageNameSource === 'derived-sha256-unverified';
 }
 
 export interface CuffAttemptTrace {
@@ -238,7 +387,7 @@ export interface SendAttemptEntry {
   /** MSH-10 of the message sent; null for a sample with no MSH. */
   controlId: string | null;
   /** T31's result: AA/CA accepted; AE/AR/CE/CR rejected; anything else no-acknowledgment. */
-  result: 'accepted' | 'rejected' | 'no-acknowledgment';
+  result: SendResultKind;
   /** The AuditEvent's R4 outcome code: 0 accepted, 4 rejected, 8 no acknowledgment. */
   outcome: '0' | '4' | '8';
   /** The malformed sample sent (`malformed-sample`), or null. */
@@ -362,11 +511,15 @@ export interface PulseBridgeApi {
   searchObservations(query: ObservationQuery, options?: CallOptions): Promise<Observation[]>;
   getHeartRateTrace(observationId: string, options?: CallOptions): Promise<HeartRateTrace>;
 
+  /** The samples exactly as cuff-sim's `GET /cuff/samples` lists them (every non-valid T07 sample). */
   listMalformedSamples(options?: CallOptions): Promise<MalformedSample[]>;
   /**
-   * Throws `ApiError` 422 (with an OperationOutcome) for inputs outside bounds; nothing is sent.
-   * The route is rate-limited: 429 with `Retry-After` becomes `ApiError` with
-   * `retryAfterSeconds`.
+   * One send. Resolves for every send that happened (AA, AE or no acknowledgment). Rejects with
+   * `CuffSendError` (a subclass of `ApiError`, errors.ts) when the proxy or the simulator
+   * refused before sending: 400 `invalid-body`, 413 `too-large`, 422 `invalid-input` (bounds,
+   * types, unknown or wrong-transport sample; `fields` names them), 429 `rate-limited` (with
+   * `retryAfterSeconds` from `Retry-After`), 500 `server-error`; and 504 `no-answer`, where the
+   * attempt may have been sent but not recorded. Nothing is sent for 400, 413, 422 and 429.
    */
   submitCuffReading(request: CuffReadingRequest, options?: CallOptions): Promise<CuffSendResult>;
   getCuffAttemptTrace(attemptId: string, options?: CallOptions): Promise<CuffAttemptTrace>;

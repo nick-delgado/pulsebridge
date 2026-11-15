@@ -89,11 +89,15 @@ export default defineConfig(({ mode }) => {
       // Inline nothing as data: URIs, so img-src/font-src need no `data:`.
       assetsInlineLimit: 0,
       sourcemap: false,
+      // dist/.vite/manifest.json: which chunk imports which, statically or with import(). The
+      // bundle check reads it to prove the chart library is not loaded with the entry. It lists
+      // only the public file names of the build; the hosting layer (T22) may leave it out.
+      manifest: true,
     },
     server: { port: 5173, strictPort: true },
     test: {
       environment: 'jsdom',
-      include: ['src/**/*.test.ts'],
+      include: ['src/**/*.test.ts', 'scripts/**/*.test.mjs'],
       restoreMocks: true,
     },
   };

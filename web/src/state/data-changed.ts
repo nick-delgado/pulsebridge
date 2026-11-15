@@ -8,7 +8,9 @@
  *   kind         notified by                         typical listeners
  *   'cuff-send'  T18, after submitCuffReading       T19 messages log, the status strip
  *   'share'      T19, after share()                 T19 log (if it shows shares), status strip
- *   'sync'       anyone who learns of a new sync    T17 chart, status strip
+ *   'sync'       the status strip, when the watch's  T17 chart
+ *                last sync time moves between two
+ *                status loads (shell/sync-watch.ts)
  *
  * Same shape as the selection store: framework-free, `subscribe` returns an unsubscribe function
  * and also accepts an AbortSignal. Unlike the selection, a new listener is NOT called at once.

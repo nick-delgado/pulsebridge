@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import heartRateExample from '../../../libs/pulsebridge_fhir/examples/observation-heart-rate.json';
 import bloodPressureExample from '../../../libs/pulsebridge_fhir/examples/observation-blood-pressure.json';
 import type { SendAttemptEntry } from './contract';
-import { ApiError, LoginError, UnauthorizedError } from './errors';
+import { ApiError, CuffSendError, LoginError, UnauthorizedError } from './errors';
 import { LOINC, type Observation } from './fhir';
 import { MockClient } from './mock-client';
 import { mockControlId, mockOruR01 } from './mock-data';
@@ -154,8 +154,10 @@ describe('MockClient', () => {
       });
       const trace = await client.getHeartRateTrace(obs?.id ?? '');
       expect(trace.observation).toEqual(obs);
-      expect(trace.source?.startTime).toBe(obs?.effectivePeriod?.start);
-      expect(trace.source?.heartRate.beatsPerMinuteAvg).toBe(obs?.valueQuantity?.value);
+      // The proxy will rebuild the window from the stored reading and say so (open question 2).
+      expect(trace.source?.kind).toBe('reconstructed');
+      expect(trace.source?.window.startTime).toBe(obs?.effectivePeriod?.start);
+      expect(trace.source?.window.heartRate.beatsPerMinuteAvg).toBe(obs?.valueQuantity?.value);
       expect(trace.provenance?.target[0]?.reference).toBe(`Observation/${obs?.id ?? ''}`);
     });
   });
@@ -241,10 +243,13 @@ describe('MockClient', () => {
     it('rejects values outside bounds with 422 and an OperationOutcome; nothing is logged', async () => {
       const before = (await client.listMessages({ kind: 'cuff-send' })).entries.length;
       const error = (await client
-        .submitCuffReading({ systolic: 400, diastolic: 80, transport: 'mllp', sendMalformed: null })
-        .catch((e: unknown) => e)) as ApiError;
+        .submitCuffReading({ systolic: 401, diastolic: 80, transport: 'mllp', sendMalformed: null })
+        .catch((e: unknown) => e)) as CuffSendError;
+      expect(error).toBeInstanceOf(CuffSendError);
       expect(error).toBeInstanceOf(ApiError);
       expect(error.status).toBe(422);
+      expect(error.reason).toBe('invalid-input');
+      expect(error.fields).toEqual(['systolic']);
       expect(error.outcome?.resourceType).toBe('OperationOutcome');
       expect((await client.listMessages({ kind: 'cuff-send' })).entries).toHaveLength(before);
     });
@@ -260,12 +265,12 @@ describe('MockClient', () => {
       expect(result.messageSent).toContain('OBX|1|NM|8480-6');
       expect(result.messageName).not.toBeNull();
 
-      let trace = await client.getCuffAttemptTrace(result.attemptId);
+      let trace = await client.getCuffAttemptTrace(result.attemptId ?? '');
       expect(trace.attempt.application?.outcome).toBe('pending');
       expect(trace.observation).toBeNull();
 
       now += 5000;
-      trace = await client.getCuffAttemptTrace(result.attemptId);
+      trace = await client.getCuffAttemptTrace(result.attemptId ?? '');
       expect(trace.attempt.application?.outcome).toBe('accepted');
       expect(trace.observation?.component?.[0]?.valueQuantity?.value).toBe(131);
     });
