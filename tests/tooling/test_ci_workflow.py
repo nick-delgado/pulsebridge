@@ -49,7 +49,19 @@ def test_runs_on_pull_requests(workflow: dict) -> None:
 
 
 @pytest.mark.parametrize(
-    "command", ["make lint", "make test", "make tf-validate", "make tf-test", "make secret-scan"]
+    "command",
+    [
+        "make lint",
+        "make test",
+        "make tf-validate",
+        "make tf-test",
+        "make secret-scan",
+        # The dashboard job (T16).
+        "make web-lint",
+        "make web-test",
+        "make web-build",
+        "make web-browser-test",
+    ],
 )
 def test_required_command_runs_as_a_step(workflow: dict, command: str) -> None:
     steps = steps_running(workflow, command)
