@@ -432,7 +432,7 @@ caller could then not choose its own key. Not built; it needs the ranges Hosting
 
 - The proxy's own budget: `REQUEST_BUDGET_SECONDS=50` for every route but the cuff send,
   `CUFF_FORWARD_TIMEOUT_SECONDS=55` for the cuff send. Set the Cloud Run request timeout to
-  `REQUEST_TIMEOUT_SECONDS` (120) as the hard stop above both.
+  `REQUEST_TIMEOUT_SECONDS` (default 120; module `phr` sets 70) as the hard stop above both.
 - **cuff-sim must fit in 55 s.** Its worst case (services/cuff-sim/README.md, "Time limits";
   T = its `HTTPS_TIMEOUT_SECONDS`, each call up to 2 × T, doubled by a token refresh and 401
   retry): MLLP `MLLP_TIMEOUT_SECONDS + 4 × T`, HTTPS `8 × T`. With its defaults (5 s, T = 10)
@@ -449,7 +449,7 @@ process and the image runs one worker, so the real per-address limit is up to 5 
 minute and the total up to 60 × instances. Do not raise `--workers`. Set Cloud Run's
 **per-instance concurrency to the thread count (8)**: each request holds one gunicorn thread
 for its whole life, and a slow unauthenticated client trickling a body holds one until the body
-is complete or Cloud Run's request timeout (`REQUEST_TIMEOUT_SECONDS`, 120 s) ends it. That is
+is complete or Cloud Run's request timeout (`REQUEST_TIMEOUT_SECONDS`: 120 s by default, 70 s as deployed by module `phr`) ends it. That is
 what bounds it: at most 8 such requests per instance, for at most the request timeout each;
 with a higher concurrency Cloud Run would queue requests inside a busy instance instead of
 starting another one. (The body itself is capped at 16 KiB.)
