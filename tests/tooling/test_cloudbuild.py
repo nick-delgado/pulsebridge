@@ -88,6 +88,9 @@ elif args[:1] == ["push"]:
     if ref not in local:
         sys.exit(1)
     registry[ref] = local[ref]
+    if ref == os.environ.get("FAKE_DOCKER_PUSH_ELSEWHERE"):
+        # Simulates the tag ending up on another image during the run (another writer).
+        registry[ref] = "sha256:" + "e" * 64
 elif args[:3] == ["buildx", "imagetools", "inspect"]:
     ref = args[3]
     if ref not in registry:
@@ -412,6 +415,16 @@ def test_tags_naming_different_images_are_refused(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "different images" in result.stderr
     assert builds(calls) == []
+
+
+def test_the_report_checks_both_tags_name_one_image(tmp_path: Path) -> None:
+    # Checked again after the pushes, not only in the plan: the block must never pair a release
+    # tag with a digest the commit tag does not name.
+    tree = make_tree(tmp_path / "repo", {"alpha": True})
+    result, _ = run_build(tree, tmp_path, FAKE_DOCKER_PUSH_ELSEWHERE=f"{REGISTRY}/alpha:v1.2.3")
+    assert result.returncode != 0
+    assert "different images" in result.stderr
+    assert "BEGIN tfvars" not in result.stdout
 
 
 def test_an_unreadable_digest_fails_the_build(tmp_path: Path) -> None:
