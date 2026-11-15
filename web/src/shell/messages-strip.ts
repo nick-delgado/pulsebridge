@@ -21,7 +21,7 @@ export function messagesStrip(signal: AbortSignal): MessagesStrip {
   const log = el('div', {
     id: 'messages-log',
     class: 'messages-strip__body',
-    attrs: { 'data-slot': 'messages-log', role: 'region', 'aria-label': 'Messages log entries' },
+    attrs: { 'data-slot': 'messages-log' },
   });
   const chevron = el('span', {
     class: 'messages-strip__chevron',
@@ -45,7 +45,8 @@ export function messagesStrip(signal: AbortSignal): MessagesStrip {
   );
   const root = el(
     'section',
-    { class: 'messages-strip', attrs: { 'aria-labelledby': 'messages-heading' } },
+    // A fixed name: labelling by the heading would fold the changing summary text into it.
+    { class: 'messages-strip', attrs: { 'aria-label': 'Messages log' } },
     el('h2', { id: 'messages-heading', class: 'messages-strip__heading' }, toggle),
     log,
   );

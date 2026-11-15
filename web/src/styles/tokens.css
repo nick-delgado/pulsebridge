@@ -13,6 +13,8 @@
   --color-text: #1b1f24;
   --color-text-muted: #5a6370;
   --color-border: #d9dde3;
+  /* Boundary of an input or other control: at least 3:1 against the surface (WCAG 1.4.11). */
+  --color-control-border: #7b8490;
   --color-focus: #1f6feb;
 
   /* The two sides: episodic (cuff, left) and continuous (watch, right) */
@@ -61,6 +63,7 @@
     --color-text: #e4e7eb;
     --color-text-muted: #9aa3ae;
     --color-border: #2c333c;
+    --color-control-border: #737c88;
     --color-focus: #58a6ff;
 
     --color-episodic: #e08a5f;

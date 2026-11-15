@@ -21,6 +21,14 @@ describe('messages strip', () => {
     expect(strip.log.hidden).toBe(true);
   });
 
+  it('has a fixed accessible name and no nested region inside it', () => {
+    const strip = messagesStrip(new AbortController().signal);
+    strip.summary.textContent = '3 errors';
+    expect(strip.root.getAttribute('aria-label')).toBe('Messages log');
+    expect(strip.root.hasAttribute('aria-labelledby')).toBe(false);
+    expect(strip.log.getAttribute('role')).toBeNull();
+  });
+
   it('keeps the summary slot inside the toggle so T19 can show counts', () => {
     const strip = messagesStrip(new AbortController().signal);
     expect(strip.root.querySelector('button')?.contains(strip.summary)).toBe(true);

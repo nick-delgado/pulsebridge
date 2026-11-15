@@ -10,6 +10,7 @@
  *   src/messages/index.ts    mountMessages   slots: log, summary           (T19)
  */
 import type { PulseBridgeApi } from '../api/contract';
+import type { DataChangeKind } from '../state/data-changed';
 import type { SelectionStore } from '../state/selection';
 
 export interface FeatureContext<Slot extends string> {
@@ -24,8 +25,18 @@ export interface FeatureContext<Slot extends string> {
    * addEventListener, subscribe() and fetch-like calls so nothing outlives the dashboard.
    */
   signal: AbortSignal;
-  /** Asks the header to reload the status strip, for example after a cuff send. */
+  /** Asks the header to reload the status strip. Rarely needed: it already listens to changes. */
   refreshStatus(): void;
+  /**
+   * Tell the other features that server data changed, after a call of yours that changed it
+   * (T18 after a cuff send: 'cuff-send'; T19 after a share: 'share'). See state/data-changed.ts.
+   */
+  notifyDataChanged(kind: DataChangeKind): void;
+  /**
+   * Run `listener` after any feature reports a change; re-fetch what you show there. Not called
+   * at once. Unsubscribed when `signal` aborts (pass the context's signal).
+   */
+  onDataChanged(listener: (kind: DataChangeKind) => void, signal: AbortSignal): void;
 }
 
 export type MountFeature<Slot extends string> = (context: FeatureContext<Slot>) => void;

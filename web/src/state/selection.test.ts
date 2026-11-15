@@ -1,8 +1,19 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createSelectionStore, shareableObservation, type Selection } from './selection';
 
-const watch: Selection = { source: 'watch', observationId: 'hr-1', summary: 'HR 60' };
-const cuff: Selection = { source: 'cuff', attemptId: 'a-1', observationId: 'bp-1', summary: 'BP' };
+const watch: Selection = {
+  source: 'watch',
+  observationId: 'hr-1',
+  summary: 'HR 60',
+  unshareableReason: null,
+};
+const cuff: Selection = {
+  source: 'cuff',
+  attemptId: 'a-1',
+  observationId: 'bp-1',
+  summary: 'BP',
+  unshareableReason: null,
+};
 
 describe('selection store', () => {
   it('calls a new subscriber at once, then on every change', () => {
@@ -23,6 +34,15 @@ describe('selection store', () => {
     store.subscribe(listener);
     store.set({ ...watch });
     expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it('notifies when the same point becomes unshareable (status changed)', () => {
+    const store = createSelectionStore();
+    const seen: (Selection | null)[] = [];
+    store.set(watch);
+    store.subscribe((sel) => seen.push(sel));
+    store.set({ ...watch, unshareableReason: 'preliminary' });
+    expect(seen).toHaveLength(2);
   });
 
   it('one selection for the page: a cuff reading replaces a heart-rate point', () => {
@@ -51,5 +71,6 @@ describe('selection store', () => {
     expect(shareableObservation(watch)).toBe('Observation/hr-1');
     expect(shareableObservation(cuff)).toBe('Observation/bp-1');
     expect(shareableObservation({ ...cuff, observationId: null })).toBeNull();
+    expect(shareableObservation({ ...watch, unshareableReason: 'preliminary' })).toBeNull();
   });
 });

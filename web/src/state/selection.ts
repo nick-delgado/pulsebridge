@@ -16,6 +16,12 @@ export type Selection =
       observationId: string;
       /** Short text for the share area, for example "Heart rate 68 /min, 09:05-09:10". */
       summary: string;
+      /**
+       * Null when the Observation may be shared. Otherwise the reason it may not, shown next to
+       * the disabled button. T06/T15 share only `final` Observations, so T17 sets this for a
+       * window whose status is not `final` (the newest windows are `preliminary`).
+       */
+      unshareableReason: string | null;
     }
   | {
       source: 'cuff';
@@ -24,6 +30,8 @@ export type Selection =
       /** The resulting blood-pressure Observation, or null when nothing was stored or mapped. */
       observationId: string | null;
       summary: string;
+      /** As for a heart-rate point; null when the reading's Observation may be shared. */
+      unshareableReason: string | null;
     };
 
 export type SelectionListener = (selection: Selection | null) => void;
@@ -64,6 +72,7 @@ export function createSelectionStore(): SelectionStore {
 
 function sameSelection(a: Selection | null, b: Selection | null): boolean {
   if (a === null || b === null) return a === b;
+  if (a.summary !== b.summary || a.unshareableReason !== b.unshareableReason) return false;
   if (a.source === 'watch' && b.source === 'watch') return a.observationId === b.observationId;
   if (a.source === 'cuff' && b.source === 'cuff') {
     return a.attemptId === b.attemptId && a.observationId === b.observationId;
@@ -71,8 +80,13 @@ function sameSelection(a: Selection | null, b: Selection | null): boolean {
   return false;
 }
 
-/** The Observation the Share button would send for this selection, or null if there is none. */
+/**
+ * The Observation the Share button would send for this selection, or null if there is none:
+ * nothing selected, a cuff reading that produced no Observation, or a selection marked
+ * not shareable (`unshareableReason`).
+ */
 export function shareableObservation(selection: Selection | null): string | null {
   if (selection === null || selection.observationId === null) return null;
+  if (selection.unshareableReason !== null) return null;
   return `Observation/${selection.observationId}`;
 }

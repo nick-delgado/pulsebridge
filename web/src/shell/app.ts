@@ -17,6 +17,7 @@ import { mountCuff } from '../cuff/index';
 import { mountHeartRate } from '../heart-rate/index';
 import { mountMessages } from '../messages/index';
 import { mountShare } from '../share/index';
+import { createDataChangeBus } from '../state/data-changed';
 import { createSelectionStore } from '../state/selection';
 import { el, placeholder, replaceChildren } from '../ui/dom';
 import type { FeatureContext, Features, MountFeature } from './features';
@@ -91,10 +92,11 @@ export async function startApp(options: AppOptions): Promise<App> {
     const { signal } = controller;
     const layout = dashboardLayout({ mode: client.mode, signal });
     const selection = createSelectionStore();
+    const dataChanges = createDataChangeBus();
 
     const refreshStatus = () => {
       layout.status.render({ kind: 'loading' });
-      client.getStatus().then(
+      client.getStatus({ signal }).then(
         (status) => {
           if (!signal.aborted) layout.status.render({ kind: 'ready', status, now: now() });
         },
@@ -111,6 +113,9 @@ export async function startApp(options: AppOptions): Promise<App> {
     layout.logoutButton.addEventListener(
       'click',
       () => {
+        // Abort first: every request the dashboard still has in flight is cancelled before the
+        // token goes, so none of them can answer after the next login.
+        leaveDashboard();
         client.logout();
         showLogin();
       },
@@ -122,7 +127,19 @@ export async function startApp(options: AppOptions): Promise<App> {
       fn: MountFeature<S>,
       slots: Record<S, HTMLElement>,
     ) => {
-      const context: FeatureContext<S> = { client, selection, slots, signal, refreshStatus };
+      const context: FeatureContext<S> = {
+        client,
+        selection,
+        slots,
+        signal,
+        refreshStatus,
+        notifyDataChanged: (kind) => {
+          dataChanges.notify(kind);
+        },
+        onDataChanged: (listener, listenerSignal) => {
+          dataChanges.subscribe(listener, listenerSignal);
+        },
+      };
       try {
         fn(context);
       } catch (error) {
@@ -133,6 +150,9 @@ export async function startApp(options: AppOptions): Promise<App> {
           replaceChildren(firstSlot, placeholder(`This area failed to load (${name}).`));
       }
     };
+
+    // The status strip shows counts and the last sync, so any change refreshes it.
+    dataChanges.subscribe(refreshStatus, signal);
 
     replaceChildren(root, layout.root);
     mount('heart rate', features.heartRate, layout.slots.heartRate);

@@ -37,6 +37,8 @@ function side(opts: {
   kind: string;
   panel: HTMLElement;
   trace: HTMLElement;
+  /** Prefix for the trace region's accessible name, for example "Blood-pressure". */
+  traceName: string;
 }): HTMLElement {
   const headingId = `${opts.key}-heading`;
   const traceHeadingId = `${opts.key}-trace-heading`;
@@ -53,7 +55,14 @@ function side(opts: {
     el(
       'section',
       { class: 'card trace', attrs: { 'aria-labelledby': traceHeadingId } },
-      el('h3', { id: traceHeadingId, class: 'trace__title', text: 'Trace' }),
+      // Visible text "Trace"; the hidden prefix gives each region a distinct accessible name
+      // ("Blood-pressure trace", "Heart-rate trace") in a screen reader's landmark list.
+      el(
+        'h3',
+        { id: traceHeadingId, class: 'trace__title' },
+        el('span', { class: 'visually-hidden', text: `${opts.traceName} ` }),
+        'Trace',
+      ),
       opts.trace,
     ),
   );
@@ -146,6 +155,7 @@ export function dashboardLayout(options: {
       key: 'cuff',
       title: 'Blood pressure',
       kind: 'Episodic · simulated cuff · HL7v2',
+      traceName: 'Blood-pressure',
       panel: slots.cuff.panel,
       trace: slots.cuff.trace,
     }),
@@ -153,6 +163,7 @@ export function dashboardLayout(options: {
       key: 'watch',
       title: 'Heart rate',
       kind: 'Continuous · watch · Google Health',
+      traceName: 'Heart-rate',
       panel: slots.heartRate.panel,
       trace: slots.heartRate.trace,
     }),

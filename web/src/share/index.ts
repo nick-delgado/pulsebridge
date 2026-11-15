@@ -5,7 +5,8 @@
  * `slots.readback`.
  *
  * Rule: the button is enabled only when the selection has an Observation to send
- * (`shareableObservation`); a cuff reading that was never stored or mapped has none.
+ * (`shareableObservation`): a cuff reading that was never stored or mapped has none, and a
+ * selection with an `unshareableReason` (for example a `preliminary` window) is not sent.
  */
 import type { FeatureContext, ShareSlot } from '../shell/features';
 import { shareableObservation } from '../state/selection';
@@ -46,11 +47,14 @@ export function mountShare({ slots, selection, signal }: FeatureContext<ShareSlo
   selection.subscribe((current) => {
     const target = shareableObservation(current);
     button.disabled = target === null;
-    hint.textContent =
-      current === null
-        ? 'Select a heart-rate point or a cuff reading first.'
-        : target === null
-          ? `${current.summary}: no Observation was stored for this reading, so there is nothing to share.`
-          : `Selected: ${current.summary}`;
+    // The hint is the button's description (aria-describedby), so a disabled button says why.
+    let text: string;
+    if (current === null) text = 'Select a heart-rate point or a cuff reading first.';
+    else if (current.observationId === null)
+      text = `${current.summary}: no Observation was stored for this reading, so there is nothing to share.`;
+    else if (current.unshareableReason !== null)
+      text = `${current.summary}: ${current.unshareableReason}`;
+    else text = `Selected: ${current.summary}`;
+    hint.textContent = text;
   }, signal);
 }

@@ -74,17 +74,57 @@ test('login, regions, share button, log strip, no console errors', async ({ page
   expect(errors).toEqual([]);
 });
 
-test('keyboard: the skip link and controls are reachable in order', async ({ page }) => {
+test('keyboard order: skip link, Log out, cuff side, heart-rate side, share, log', async ({
+  page,
+}) => {
   const errors = watchErrors(page);
   await logIn(page);
-  await page.keyboard.press('Tab');
-  await expect(page.getByRole('link', { name: 'Skip to dashboard' })).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(page.getByRole('button', { name: 'Log out' })).toBeFocused();
-  // Share is disabled, so the next stop is the messages-log toggle.
-  await page.keyboard.press('Tab');
-  await expect(page.getByRole('button', { name: /Messages log/ })).toBeFocused();
+  // Tab through the page and record which area each focus stop is in. Any number of controls
+  // inside a feature area is fine (T17 and T18 will add some); only the ORDER of areas is fixed.
+  const AREAS = ['skip', 'header', 'cuff', 'watch', 'share', 'log'];
+  const visited: string[] = [];
+  for (let i = 0; i < 80; i++) {
+    await page.keyboard.press('Tab');
+    const area = await page.evaluate(() => {
+      const el = document.activeElement;
+      if (!el || el === document.body) return 'none';
+      if (el.closest('.skip-link')) return 'skip';
+      if (el.closest('.app-header')) return 'header';
+      if (el.closest('.side--cuff')) return 'cuff';
+      if (el.closest('.side--watch')) return 'watch';
+      if (el.closest('.share')) return 'share';
+      if (el.closest('.messages-strip')) return 'log';
+      return `other:${el.tagName}`;
+    });
+    visited.push(area);
+    if (area === 'log') break;
+  }
+  expect(visited[0]).toBe('skip');
+  expect(visited).toContain('header');
+  expect(visited.at(-1)).toBe('log');
+  expect(visited.filter((a) => !AREAS.includes(a))).toEqual([]);
+  const ranks = visited.map((a) => AREAS.indexOf(a));
+  expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
   expect(errors).toEqual([]);
+});
+
+test('the figure is line art: no shape in the silhouette is filled', async ({ page }) => {
+  await logIn(page);
+  const fills = await page.evaluate(() =>
+    [
+      ...document.querySelectorAll('.figure__svg :is(path, rect, circle, ellipse, polygon, line)'),
+    ].map((shape) => getComputedStyle(shape).fill),
+  );
+  expect(fills.length).toBeGreaterThan(5);
+  expect(new Set(fills)).toEqual(new Set(['none']));
+});
+
+test('landmark names are distinct and stable', async ({ page }) => {
+  await logIn(page);
+  await expect(page.getByRole('region', { name: 'Blood-pressure trace' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Heart-rate trace' })).toBeVisible();
+  await expect(page.getByRole('region', { name: 'Messages log', exact: true })).toBeAttached();
+  await expect(page.getByRole('region', { name: 'Trace', exact: true })).toHaveCount(0);
 });
 
 test('phone width: everything stacks in one column without horizontal scroll', async ({ page }) => {

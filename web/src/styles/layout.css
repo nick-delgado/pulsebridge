@@ -361,7 +361,7 @@
 .login__input {
   font: inherit;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-control-border);
   border-radius: var(--radius);
   background: var(--color-surface-sunken);
   color: var(--color-text);
