@@ -192,7 +192,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | done |
-| T15 | FHIR proxy: share to OpenEMR | T14, T19, T23, S1 | `services/fhir-proxy/fhir_proxy/share/`, `services/fhir-proxy/tests/share/`, `fhir_proxy/extensions.py` (trace redaction and `request.query`), the proxy's configuration and README for the OpenEMR settings, and the `openemr` wiring in `infra/modules/phr/` if variable names change | todo |
+| T15 | FHIR proxy: share to OpenEMR | T14, T19, T23, S1 | `services/fhir-proxy/fhir_proxy/share/`, `services/fhir-proxy/tests/share/`, `fhir_proxy/extensions.py` (trace redaction and `request.query`), the proxy's configuration and README for the OpenEMR settings, and the `openemr` wiring in `infra/modules/phr/` if variable names change | in-progress |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
