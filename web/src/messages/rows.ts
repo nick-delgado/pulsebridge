@@ -207,8 +207,11 @@ function messageFact(e: SendAttemptEntry): Fact {
           : 'It could not be checked.';
     return {
       term,
-      label: 'Name derived by the simulator (unconfirmed)',
-      detail: `${e.derivedMessageName} (the SHA-256 of the bytes sent, because an MLLP acknowledgment carries no name). ${check}`,
+      label:
+        e.messageLookup === 'confirmed'
+          ? 'Name derived by the simulator, confirmed by the store'
+          : 'Name derived by the simulator (unconfirmed)',
+      detail: `${e.derivedMessageName} (from the SHA-256 of the bytes sent, because an MLLP acknowledgment carries no name). ${check}`,
       tone: e.messageLookup === 'confirmed' ? 'neutral' : 'warn',
     };
   }
@@ -292,6 +295,11 @@ function unreadableFacts(e: UnreadableSendAttemptEntry): Fact[] {
   ];
 }
 
+/** "1 row", "3 rows": a count with its noun, singular for exactly one. */
+export function plural(n: number, noun: string, nouns = `${noun}s`): string {
+  return `${String(n)} ${n === 1 ? noun : nouns}`;
+}
+
 /** "3 Observations, 3 Provenances". */
 export function resourceCount(resources: string[]): string {
   const counts = new Map<string, number>();
@@ -300,7 +308,7 @@ export function resourceCount(resources: string[]): string {
     counts.set(type, (counts.get(type) ?? 0) + 1);
   }
   if (counts.size === 0) return 'None listed';
-  return [...counts].map(([type, n]) => `${n} ${type}${n === 1 ? '' : 's'}`).join(', ');
+  return [...counts].map(([type, n]) => plural(n, type)).join(', ');
 }
 
 /** True for a row the log should keep checking: stored, confirmed, and not labelled yet. */

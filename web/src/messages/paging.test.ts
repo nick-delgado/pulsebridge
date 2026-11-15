@@ -58,6 +58,17 @@ describe('gather: following short pages, bounded (amendment 4)', () => {
     expect(g).toMatchObject({ nextCursor: null, partial: true, pagesRead: 2 });
   });
 
+  it('a later page failing returns what was gathered, the error, and the failed page’s cursor', async () => {
+    const boom = new Error('page 2 failed');
+    const s = source({ '': page([row(1)], 'c1') });
+    const g = await gather(s.fetch, undefined, 25, 4);
+    expect(g.entries.map((e) => e.id)).toEqual(['a1']);
+    expect(g.nextCursor).toBe('c1');
+    expect(String(g.error)).toContain('no page c1');
+    // The first page failing is thrown: there is nothing to show.
+    await expect(gather(() => Promise.reject(boom), undefined)).rejects.toBe(boom);
+  });
+
   it('starts from a cursor for "load more"', async () => {
     const s = source({ x: page([row(9)], null) });
     await gather(s.fetch, 'x');
@@ -79,10 +90,23 @@ describe('mergeRefresh: keyed, keeps older rows already loaded', () => {
       nextCursor: 'fresh-cursor',
       partial: false,
       pagesRead: 1,
+      error: null,
     };
     const merged = mergeRefresh(shown, fresh);
     expect(merged.entries.map((e) => e.id)).toEqual(['a0', 'a1', 'a2', 'a3', 'a4', '']);
     expect(merged.entries[2]).toBe(updated);
+    expect(merged.nextCursor).toBe('old-cursor');
+  });
+
+  it('a refresh that found no row but has a cursor keeps everything shown, and its cursor', () => {
+    const merged = mergeRefresh(shown, {
+      entries: [],
+      nextCursor: 'c9',
+      partial: false,
+      pagesRead: 4,
+      error: null,
+    });
+    expect(merged.entries.map((e) => e.id)).toEqual(['a1', 'a2', 'a3', 'a4', '']);
     expect(merged.nextCursor).toBe('old-cursor');
   });
 
@@ -92,6 +116,7 @@ describe('mergeRefresh: keyed, keeps older rows already loaded', () => {
       nextCursor: null,
       partial: false,
       pagesRead: 1,
+      error: null,
     });
     expect(merged.entries.map((e) => e.id)).toEqual(['a1']);
     expect(merged.nextCursor).toBeNull();
@@ -100,7 +125,7 @@ describe('mergeRefresh: keyed, keeps older rows already loaded', () => {
   it('partial stays true while kept rows came from a partial page', () => {
     const merged = mergeRefresh(
       { ...shown, partial: true },
-      { entries: [row(1)], nextCursor: 'c', partial: false, pagesRead: 1 },
+      { entries: [row(1)], nextCursor: 'c', partial: false, pagesRead: 1, error: null },
     );
     expect(merged.partial).toBe(true);
     const fresh = mergeRefresh(shown, {
@@ -108,11 +133,17 @@ describe('mergeRefresh: keyed, keeps older rows already loaded', () => {
       nextCursor: 'c',
       partial: true,
       pagesRead: 1,
+      error: null,
     });
     expect(fresh.partial).toBe(true);
     expect(
-      mergeRefresh(shown, { entries: [row(1)], nextCursor: 'c', partial: false, pagesRead: 1 })
-        .partial,
+      mergeRefresh(shown, {
+        entries: [row(1)],
+        nextCursor: 'c',
+        partial: false,
+        pagesRead: 1,
+        error: null,
+      }).partial,
     ).toBe(false);
   });
 

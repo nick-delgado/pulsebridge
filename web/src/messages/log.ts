@@ -34,6 +34,7 @@ import {
   isProblemRow,
   LOG_SCOPE,
   logTime,
+  plural,
   resourceCount,
   rowFacts,
   rowKey,
@@ -506,7 +507,7 @@ export function createMessagesLog(
     moreButton.disabled = busy;
     const bound =
       lastGather?.stoppedAtBound && shown.nextCursor !== null
-        ? `Searched ${lastGather.pagesRead} pages and found ${lastGather.found} matching rows; there may be more.`
+        ? `Searched ${plural(lastGather.pagesRead, 'page')} and found ${plural(lastGather.found, 'matching row')}; there may be more.`
         : '';
     setText(moreNote, moreButton.hidden ? '' : bound);
     if (shown.partial) {
@@ -533,7 +534,7 @@ export function createMessagesLog(
     } else partialNote.hidden = true;
     const pending = shown.entries.filter(isPendingRow).length;
     const problems = shown.entries.filter(isProblemRow).length;
-    const parts = [`${n} row${n === 1 ? '' : 's'} loaded`];
+    const parts = [`${plural(n, 'row')} loaded`];
     if (pending > 0) parts.push(`${pending} pending`);
     if (problems > 0) parts.push(`${problems} with a problem`);
     setText(summary, loaded ? parts.join(' · ') : 'loading');
@@ -570,6 +571,35 @@ export function createMessagesLog(
         text: 'Try again',
         attrs: { type: 'button' },
         on: { click: retry },
+        signal,
+      }),
+    );
+  };
+
+  /**
+   * After a load that kept some rows but could not read a later page: the rows stay, and the
+   * notice offers to continue from the page that failed.
+   */
+  const afterGather = (g: { error: unknown }) => {
+    if (g.error === null) {
+      replaceChildren(alert);
+      return;
+    }
+    replaceChildren(
+      alert,
+      el('p', {
+        class: 'log-note log-note--error',
+        text: `Loading stopped early, so the rows below may not be all of them. ${errorText(g.error)}`,
+      }),
+      el('button', {
+        class: 'button',
+        text: 'Try again',
+        attrs: { type: 'button' },
+        on: {
+          click: () => {
+            loadMore();
+          },
+        },
         signal,
       }),
     );
@@ -628,8 +658,8 @@ export function createMessagesLog(
       shown = { entries: uniqueRows(g.entries), nextCursor: g.nextCursor, partial: g.partial };
       loaded = true;
       noteGather(g.entries.length, g.pagesRead, g.nextCursor);
-      replaceChildren(alert);
-      setText(status, `Messages log loaded: ${shown.entries.length} rows.`);
+      afterGather(g);
+      setText(status, `Messages log loaded: ${plural(shown.entries.length, 'row')}.`);
       render();
       maybePoll();
     });
@@ -638,7 +668,9 @@ export function createMessagesLog(
   /** The newest rows again, merged into what is shown (data changes and polling). */
   function refresh(): Promise<void> {
     if (!loaded) {
-      if (!busy) reload();
+      // A change during the first load is not lost: it runs once that load has ended.
+      if (busy) refreshQueued = true;
+      else reload();
       return Promise.resolve();
     }
     if (busy) {
@@ -651,7 +683,7 @@ export function createMessagesLog(
           const g = await gather(fetchPage(c), undefined, pageRows, maxAutoPages);
           if (c.signal.aborted || gen !== generation) return;
           shown = mergeRefresh(shown, g);
-          replaceChildren(alert);
+          afterGather(g);
           render();
           maybePoll();
         } finally {
@@ -674,8 +706,8 @@ export function createMessagesLog(
         partial: shown.partial || g.partial,
       };
       noteGather(g.entries.length, g.pagesRead, g.nextCursor);
-      replaceChildren(alert);
-      setText(status, `${g.entries.length} more rows loaded.`);
+      afterGather(g);
+      setText(status, `${plural(g.entries.length, 'more row')} loaded.`);
       render();
       maybePoll();
     });

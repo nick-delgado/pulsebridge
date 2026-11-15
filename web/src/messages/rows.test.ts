@@ -8,6 +8,7 @@ import {
   isProblemRow,
   LOG_SCOPE,
   logTime,
+  plural,
   resourceCount,
   rowFacts,
   rowKey,
@@ -76,14 +77,28 @@ describe('the two acknowledgment levels of a v2 row (D7)', () => {
 });
 
 describe('other row facts', () => {
-  it('derived name labelled as derived and unconfirmed, with what the store said', () => {
+  it('derived name: "confirmed by the store" only when it was, otherwise "unconfirmed"', () => {
     const facts = rowFacts(attempt());
     expect(fact(facts, 'Stored message')?.label).toBe(
-      'Name derived by the simulator (unconfirmed)',
+      'Name derived by the simulator, confirmed by the store',
     );
     expect(fact(facts, 'Stored message')?.detail).toContain('The store confirmed it.');
     const nf = rowFacts(attempt({ messageLookup: 'not-found', application: null }));
     expect(fact(nf, 'Stored message')?.detail).toContain('The store does not have it.');
+    expect(fact(nf, 'Stored message')?.label).toBe('Name derived by the simulator (unconfirmed)');
+    const failed = rowFacts(attempt({ messageLookup: 'failed', application: null }));
+    expect(fact(failed, 'Stored message')?.label).toBe(
+      'Name derived by the simulator (unconfirmed)',
+    );
+  });
+
+  it('plurals: one row, two rows', () => {
+    expect(plural(1, 'row')).toBe('1 row');
+    expect(plural(2, 'row')).toBe('2 rows');
+    expect(plural(0, 'matching row')).toBe('0 matching rows');
+    expect(resourceCount(['Observation/a', 'Provenance/p', 'Provenance/q'])).toBe(
+      '1 Observation, 2 Provenances',
+    );
   });
 
   it('transport and control ID; a store-only row says its transport is not known', () => {

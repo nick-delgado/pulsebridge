@@ -286,7 +286,7 @@ describe('paging (amendments 3, 4, 16)', () => {
     const more = m.q('#log-more') as HTMLButtonElement;
     expect(more.hidden).toBe(false);
     expect(m.q('#log-more-note').textContent).toBe(
-      'Searched 3 pages and found 1 matching rows; there may be more.',
+      'Searched 3 pages and found 1 matching row; there may be more.',
     );
     more.click();
     expect(m.calls[3]?.query).toEqual({ count: 25, cursor: 'c3' });
@@ -384,18 +384,64 @@ describe('refreshing (data changes, polling) without losing focus', () => {
     expect(row?.textContent).toContain('Accepted');
   });
 
-  it('a refresh asked for while a request runs waits for it, then runs once', async () => {
+  it('a data change during the FIRST load is queued and runs once that load ends', async () => {
     const m = mount();
     m.bus.notify('share');
     m.bus.notify('cuff-send');
     expect(m.calls).toHaveLength(1);
     await m.answer(page([attempt()]));
-    expect(m.calls).toHaveLength(1); // the first load was not yet loaded: nothing queued
+    // One refresh for both changes, after the first load.
+    expect(m.calls).toHaveLength(2);
+    await m.answer(
+      page([attempt({ id: 'att-new', sentAt: '2026-03-10T14:20:00.000Z' }), attempt()]),
+    );
+    expect(m.rows()).toHaveLength(2);
+    expect(m.calls).toHaveLength(2);
+  });
+
+  it('a refresh asked for while a later request runs waits for it, then runs once', async () => {
+    const m = mount();
+    await m.answer(page([attempt()]));
     m.bus.notify('share');
     m.bus.notify('cuff-send');
     expect(m.calls).toHaveLength(2);
     await m.answer(page([attempt()]));
     expect(m.calls).toHaveLength(3);
+  });
+
+  it('a filtered refresh that finds nothing but has a cursor keeps the rows shown and their cursor', async () => {
+    const m = mount({ maxAutoPages: 1 });
+    m.select('log-filter-outcome', 'error');
+    await m.answer(
+      page(
+        [rejected(), attempt({ id: 'e2', application: { outcome: 'error', reason: 'x' } })],
+        'old-cursor',
+      ),
+      1,
+    );
+    expect(m.rows()).toHaveLength(2);
+    m.bus.notify('sync');
+    // An empty page with a cursor: the bound (one page here) is reached with nothing found.
+    await m.answer(page([], 'c0'));
+    expect(m.rows()).toHaveLength(2);
+    (m.q('#log-more') as HTMLButtonElement).click();
+    expect(m.calls.at(-1)?.query).toMatchObject({ cursor: 'old-cursor' });
+  });
+
+  it('a later page failing keeps the rows gathered, says so, and "Try again" continues from it', async () => {
+    const m = mount();
+    await m.answer(page([], 'c1'));
+    await m.answer(page([attempt()], 'c2'));
+    m.calls[2]?.answer.reject(new ApiError(504, 'The stores did not answer in time.'));
+    await flush();
+    expect(m.rows()).toHaveLength(1);
+    expect(m.q('#log-alert').textContent).toContain('Loading stopped early');
+    expect(m.q('#log-alert').textContent).toContain('The stores did not answer in time.');
+    m.q('#log-alert').querySelector('button')?.click();
+    expect(m.calls[3]?.query).toEqual({ count: 25, cursor: 'c2' });
+    await m.answer(page([rejected()], null));
+    expect(m.rows()).toHaveLength(2);
+    expect(m.q('#log-alert').textContent).toBe('');
   });
 
   it('polls while a row is pending, stops when it settles', async () => {

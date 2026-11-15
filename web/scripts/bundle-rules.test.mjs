@@ -1,7 +1,12 @@
 // Tests for the chart-chunk rule over hand-made Vite manifests (the shape of
 // dist/.vite/manifest.json), so each way the rule can break is checked without a build.
 import { describe, expect, it } from 'vitest';
-import { CHART_MARKER, chartChunkProblems } from './bundle-rules.mjs';
+import {
+  CHART_MARKER,
+  chartChunkProblems,
+  MOCK_MARKERS,
+  mockMarkerProblems,
+} from './bundle-rules.mjs';
 
 const UPLOT_CODE = `var p=\`${CHART_MARKER}\`;export{p as default}`;
 const OUR_CODE = 'console.log("dashboard")';
@@ -90,5 +95,32 @@ describe('chart chunk rule', () => {
     const build = goodBuild();
     build.manifest['index.html'].isEntry = false;
     expect(check(build)).toEqual(['the build manifest has no entry chunk']);
+  });
+});
+
+describe('mock markers: no mock code in an HTTP build', () => {
+  it('lists every mock switch name', () => {
+    for (const name of ['mock-audit', 'mock-lookup', 'mock-log', 'mock-status', 'mock-share']) {
+      expect(MOCK_MARKERS).toContain(name);
+    }
+  });
+
+  it('a clean HTTP build passes', () => {
+    expect(mockMarkerProblems(OUR_CODE, 'http')).toEqual([]);
+  });
+
+  it.each(MOCK_MARKERS)('a planted "%s" fails the HTTP build', (marker) => {
+    const bundle = `${OUR_CODE};const q=new URLSearchParams(location.search).get("${marker}");`;
+    expect(mockMarkerProblems(bundle, 'http')).toEqual([
+      `HTTP build contains mock code ("${marker}")`,
+    ]);
+  });
+
+  it('a mock build missing a marker says the list is stale', () => {
+    const all = MOCK_MARKERS.join(' ');
+    expect(mockMarkerProblems(all, 'mock')).toEqual([]);
+    expect(mockMarkerProblems(all.replace('mock-share', ''), 'mock')).toEqual([
+      'mock build is missing "mock-share"; is the check stale?',
+    ]);
   });
 });

@@ -21,10 +21,17 @@ export const MAX_AUTO_PAGES = 4;
 
 export interface Gathered {
   entries: MessagesLogEntry[];
+  /** Where to continue: after the last page read, or the page that failed (so a retry re-asks it). */
   nextCursor: string | null;
   /** True if any page read said `partial`. */
   partial: boolean;
   pagesRead: number;
+  /**
+   * Set when a page after the first failed: the rows gathered before it are kept and returned,
+   * and `nextCursor` names the page that failed. A failure of the FIRST page is thrown instead
+   * (there is nothing to show).
+   */
+  error: unknown;
 }
 
 /**
@@ -43,13 +50,20 @@ export async function gather(
   let partial = false;
   let pagesRead = 0;
   do {
-    const page = await fetchPage(next ?? undefined);
+    let page: MessagesLogPage;
+    try {
+      page = await fetchPage(next ?? undefined);
+    } catch (error) {
+      // The first page failing leaves nothing to show; a later one keeps what was gathered.
+      if (pagesRead === 0) throw error;
+      return { entries, nextCursor: next ?? null, partial, pagesRead, error };
+    }
     pagesRead++;
     entries.push(...page.entries);
     partial ||= page.partial;
     next = page.nextCursor;
   } while (next !== null && entries.length < want && pagesRead < maxPages);
-  return { entries, nextCursor: next, partial, pagesRead };
+  return { entries, nextCursor: next, partial, pagesRead, error: null };
 }
 
 /** Rows with duplicate keys removed (the first wins), so one row is never shown twice. */
@@ -88,9 +102,12 @@ export function mergeRefresh(shown: Shown, fresh: Gathered): Shown {
   const oldest = times.length > 0 ? Math.min(...times.map((t) => Date.parse(t))) : null;
   const tail = shown.entries.filter((e) => {
     if (keys.has(rowKey(e))) return false;
+    // A refresh that found no dated row (a filtered page can be empty while more pages exist)
+    // reached nothing below the top: everything already shown stays, with its cursor.
+    if (oldest === null) return true;
     const t = sortTime(e);
     if (t === null) return true; // undated rows are always last
-    return oldest !== null && Date.parse(t) <= oldest;
+    return Date.parse(t) <= oldest;
   });
   return {
     entries: uniqueRows([...fresh.entries, ...tail]),

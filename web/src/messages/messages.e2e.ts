@@ -44,7 +44,7 @@ test('every row kind, both acknowledgment levels in words, and the summary in th
 }) => {
   const errors = await watchErrors(page);
   await logIn(page);
-  await expect(toggle(page)).toContainText(/\d+ rows loaded/);
+  await expect(toggle(page)).toContainText(/\d+ rows? loaded/);
   await openLog(page);
   // A note that no longer applies keeps its text but is hidden: `hidden` must win over the
   // note's CSS display (a partial page that a reload filled in leaves its text behind).
