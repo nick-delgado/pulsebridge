@@ -269,3 +269,22 @@ def test_failing_sends_leave_no_file_descriptors_open(h):
     finally:
         for fake in adapters:
             fake.stop()
+
+
+def test_deadline_used_up_by_connect_is_a_write_timeout(adapter, monkeypatch):
+    real = mllp_client._connect
+
+    def slow(host, port, deadline):
+        sock = real(host, port, deadline)
+        time.sleep(0.3)  # past the 0.2 s deadline before anything is written
+        return sock
+
+    monkeypatch.setattr(mllp_client, "_connect", slow)
+    outcome = send(adapter.port, timeout=0.2)
+    assert outcome.why == "timeout" and "written" in outcome.detail
+    assert not adapter.connections[0].received  # nothing was sent
+
+
+def test_no_address_at_all_is_connection_closed(monkeypatch):
+    monkeypatch.setattr(mllp_client.socket, "getaddrinfo", lambda *_a, **_k: [])
+    assert send(1, host="adapter.internal").why == "connection-closed"

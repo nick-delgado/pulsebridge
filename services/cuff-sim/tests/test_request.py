@@ -107,3 +107,22 @@ def test_framing_samples_do_not_apply_over_https(name):
 def test_other_samples_apply_over_https():
     request = parse_request({"sendMalformed": "unparseable_lf_terminators", "transport": "https"})
     assert request.sample_name == "unparseable_lf_terminators"
+
+
+@pytest.mark.parametrize(
+    "name", ["UNPARSEABLE_NO_MSH", "Unparseable_No_Msh", "unparseable_no_msh "]
+)
+def test_sample_names_match_exactly_in_the_request(name):
+    with pytest.raises(RequestError) as caught:
+        parse_request({"sendMalformed": name})
+    assert caught.value.issues == [
+        ("sendMalformed", "must be the name of a malformed sample, or null")
+    ]
+
+
+def test_find_sample_matches_names_exactly():
+    from cuff_sim.message import find_sample
+
+    assert find_sample("unparseable_no_msh", "mllp").name == "unparseable_no_msh"
+    for name in ("UNPARSEABLE_NO_MSH", "Unparseable_No_Msh", " unparseable_no_msh"):
+        assert find_sample(name, "mllp") is None
