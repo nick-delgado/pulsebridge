@@ -101,7 +101,7 @@ client ID never appears in the terminal.
 | Flag | Environment variable | Default | Meaning |
 | --- | --- | --- | --- |
 | `--project` | `GCP_PROJECT_ID` | required | project of the secrets and the FHIR store |
-| `--name-prefix` | `NAME_PREFIX` | `pb` | the identity module's `name_prefix` (secret names) |
+| `--name-prefix` | `PULSEBRIDGE_NAME_PREFIX` | `pb` | the identity module's `name_prefix` (secret names) |
 | `--scope` | `GOOGLE_HEALTH_SCOPE` | `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly` | scope requested; same default as `health-sync` |
 | `--location` | `HEALTHCARE_LOCATION` | required* | dataset region |
 | `--dataset` | `HEALTHCARE_DATASET_ID` | required* | dataset id |

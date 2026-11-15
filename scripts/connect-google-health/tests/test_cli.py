@@ -308,6 +308,7 @@ def test_a_token_response_without_scope_is_accepted():
     h.google.add("POST", "/token", token_response(scope=None))
     h.google.add("GET", "/v4/users/me/identity", json_response(200, {"healthUserId": "u1"}))
     assert run(h) == cli.EXIT_OK
+    assert "did not list the granted scopes" in h.out.getvalue()
 
 
 # ---- after the token is stored --------------------------------------------------------------

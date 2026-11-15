@@ -74,7 +74,7 @@ def test_required_values(missing):
         ("PATIENT_BIRTH_DATE", "2999-01-01", "past"),
         ("FHIR_STORE_ID", "fhir/../other", "not valid"),
         ("HEALTHCARE_LOCATION", "US Central", "not valid"),
-        ("NAME_PREFIX", "PB", "name_prefix"),
+        ("PULSEBRIDGE_NAME_PREFIX", "PB", "name_prefix"),
         ("GOOGLE_HEALTH_SCOPE", "two  spaces", "scope"),
         ("PATIENT_ID", " PB-SYN-0001", "Patient configuration"),  # T06 refuses padding
     ],

@@ -171,3 +171,18 @@ def test_unexpected_exception_shows_type_and_place_only():
     err = harness.err.getvalue()
     assert "Unexpected error: RuntimeError at test_no_leaks.py:" in err
     assert "boom" not in err
+
+
+def test_a_credentials_error_gets_the_gcloud_hint():
+    class RefreshError(Exception):  # the name google.auth uses
+        pass
+
+    class Expired:
+        def access_latest(self, secret):
+            raise RefreshError(f"Reauthentication is needed {CLIENT_SECRET}")
+
+    harness = Harness(store=Expired())
+    assert cli.main_with_config(config(), harness.deps()) == cli.EXIT_NOT_CONNECTED
+    err = harness.err.getvalue()
+    assert "gcloud auth application-default login" in err
+    assert CLIENT_SECRET not in err and "Reauthentication" not in err

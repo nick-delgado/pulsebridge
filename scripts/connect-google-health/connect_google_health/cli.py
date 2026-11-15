@@ -120,7 +120,10 @@ class Config:
 # value is the same (GCP_PROJECT_ID, HEALTHCARE_*, FHIR_STORE_ID, PATIENT_ID, GOOGLE_HEALTH_SCOPE).
 ENVIRONMENT = {
     "project": ("GCP_PROJECT_ID", "GCP project that holds the secrets and the FHIR store"),
-    "name_prefix": ("NAME_PREFIX", f"identity module name_prefix (default {DEFAULT_PREFIX!r})"),
+    "name_prefix": (
+        "PULSEBRIDGE_NAME_PREFIX",
+        f"identity module name_prefix (default {DEFAULT_PREFIX!r})",
+    ),
     "scope": ("GOOGLE_HEALTH_SCOPE", "OAuth scope to request"),
     "location": ("HEALTHCARE_LOCATION", "Healthcare dataset region"),
     "dataset": ("HEALTHCARE_DATASET_ID", "Healthcare dataset id"),
@@ -202,7 +205,7 @@ def load_config(argv: list[str], env: Mapping[str, str]) -> Config:
     try:
         prefix = check_prefix(_value(args, env, "name_prefix") or DEFAULT_PREFIX)
     except ValueError as exc:
-        raise UsageError(f"--name-prefix / NAME_PREFIX: {exc}") from None
+        raise UsageError(f"--name-prefix / PULSEBRIDGE_NAME_PREFIX: {exc}") from None
     scope = _value(args, env, "scope") or oauth.DEFAULT_SCOPE
     if not re.fullmatch(r"[!-~]+( [!-~]+)*", scope, re.ASCII):
         raise UsageError("--scope / GOOGLE_HEALTH_SCOPE must be space-separated scope strings")
@@ -379,7 +382,9 @@ def receive_code(
                     except Exception:  # noqa: BLE001 - any browser failure means "open by hand"
                         opened = False
                 if opened:
-                    _say(deps, "  A browser was opened at this local link (open it by hand if not):")
+                    _say(
+                        deps, "  A browser was opened at this local link (open it by hand if not):"
+                    )
                 else:
                     _say(deps, "  Open this link in a browser on THIS computer:")
                 _say(deps, f"    {listener.start_url}")
@@ -464,6 +469,8 @@ def run(config: Config, deps: Dependencies) -> int:
     missing = [
         s for s in config.scope.split() if tokens.scopes is not None and s not in tokens.scopes
     ]
+    if tokens.scopes is None:
+        _say(deps, "  Note: Google did not list the granted scopes; continuing.")
     if missing:
         raise Abort(
             "Access was granted without the requested scope (its box on the consent screen was "
@@ -512,11 +519,24 @@ def run(config: Config, deps: Dependencies) -> int:
     return EXIT_OK
 
 
+# google.auth's errors when Application Default Credentials are missing or expired. Matched by
+# name so this module does not import google.auth.
+_CREDENTIAL_ERRORS = frozenset(
+    {"DefaultCredentialsError", "RefreshError", "ReauthFailError", "TransportError"}
+)
+
+
 def _unexpected(exc: BaseException) -> str:
     """Where it failed, without the exception's message (which could quote anything)."""
     frames = traceback.extract_tb(exc.__traceback__)
     where = f" at {os.path.basename(frames[-1].filename)}:{frames[-1].lineno}" if frames else ""
-    return f"Unexpected error: {type(exc).__name__}{where}. Nothing more is shown on purpose."
+    hint = ""
+    if type(exc).__name__ in _CREDENTIAL_ERRORS:
+        hint = (
+            " Your Google Cloud credentials could not be used: run "
+            "`gcloud auth application-default login` and try again."
+        )
+    return f"Unexpected error: {type(exc).__name__}{where}. Nothing more is shown on purpose.{hint}"
 
 
 def main_with_config(config: Config, deps: Dependencies) -> int:
