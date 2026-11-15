@@ -229,7 +229,6 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     attrs: {
       type: 'checkbox',
       'aria-controls': 'cuff-samples',
-      'aria-expanded': 'false',
       'aria-describedby': 'cuff-malformed-help',
     },
   });
@@ -538,7 +537,6 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
   const onMalformedToggle = () => {
     const on = malformed.checked;
     samplesBox.hidden = !on;
-    malformed.setAttribute('aria-expanded', String(on));
     pressures.disabled = on;
     malformedNotice.hidden = !on;
     clearFieldErrors();
@@ -551,7 +549,8 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     renderSamples();
     // A sample not offered over the new transport is unchosen, and the user is told why.
     if (before !== '' && chosenSample() === '') {
-      sampleError.textContent = `${before} can only be sent over MLLP; choose another sample or switch back to MLLP.`;
+      const only = (samples.find((s) => s.name === before)?.transports ?? []).map(transportName);
+      sampleError.textContent = `${before} can only be sent over ${only.join(' or ')}; choose another sample or switch back.`;
     } else sampleError.textContent = '';
   };
   mllp.input.addEventListener('change', onTransportChange, { signal });

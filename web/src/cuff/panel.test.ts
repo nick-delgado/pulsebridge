@@ -283,7 +283,7 @@ describe('samples and transports', () => {
     expect(m.input('cuff-sample-noack_missing_end_block').checked).toBe(false);
     expect(m.input('cuff-sample-unparseable_no_msh').disabled).toBe(false);
     expect(m.q('#cuff-sample-error').textContent).toBe(
-      'noack_missing_end_block can only be sent over MLLP; choose another sample or switch back to MLLP.',
+      'noack_missing_end_block can only be sent over MLLP; choose another sample or switch back.',
     );
     m.check('cuff-transport-mllp');
     expect(m.input('cuff-sample-noack_missing_end_block').disabled).toBe(false);
@@ -342,6 +342,17 @@ describe('refusals', () => {
     expect(m.q('#cuff-form-message').getAttribute('role')).toBe('alert');
     expect(m.rows()).toHaveLength(0);
     expect(m.notified).toEqual([]);
+  });
+
+  it('hostile diagnostics are shown as text, never markup', async () => {
+    const m = await mount();
+    m.submit();
+    const evil = '<img src=x onerror=alert(1)><script>alert(2)</script>';
+    m.sends[0]?.answer.reject(refusal(422, [['systolic', evil]]));
+    await flush();
+    expect(m.slots.panel.querySelectorAll('img, script')).toHaveLength(0);
+    expect(m.q('#cuff-systolic-error').textContent).toBe(`The simulator says: ${evil}`);
+    expect(m.message()).toContain(evil);
   });
 
   it('422 on sendMalformed is shown by the sample picker', async () => {
@@ -825,6 +836,33 @@ describe('selection and later data changes', () => {
       );
     },
   );
+
+  it('two re-checks overlap: the older answer, arriving last, is ignored', async () => {
+    const m = await selectedAccepted();
+    m.bus.notify('sync'); // traces[1]
+    m.bus.notify('share'); // traces[2] replaces it
+    expect(m.traces[1]?.signal.aborted).toBe(true);
+    m.traces[2]?.answer.resolve(
+      attemptTrace(
+        sendResult(),
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-1', 'entered-in-error') },
+      ),
+    );
+    await flush();
+    // The older request answers last, with the older (final) copy: it must not make it shareable.
+    m.traces[1]?.answer.resolve(
+      attemptTrace(
+        sendResult(),
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-1') },
+      ),
+    );
+    await flush();
+    expect(shareableObservation(m.selection.get())).toBeNull();
+    expect(m.selection.get()?.unshareableReason).toContain('status entered-in-error');
+    expect(m.slots.trace.textContent).toContain('"status": "entered-in-error"');
+  });
 
   it('a re-check that finds the attempt gone clears the selection and says so', async () => {
     const m = await selectedAccepted();
