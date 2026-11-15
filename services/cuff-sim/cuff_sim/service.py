@@ -183,11 +183,11 @@ class CuffSimulator:
             message_name = source = None
             log_fields["send_error_type"] = type(exc).__name__
 
-        # The AuditEvent carries a message name only when the store itself returned it (T31:
-        # "HTTPS 200 only"); the derived MLLP name stays out of the permanent record until
-        # the derivation is confirmed and T31 has a field for a derived name.
-        # FOLLOW-UP (one line): pass the derived name to that new field here.
+        # The store's own name (HTTPS) goes into the AuditEvent as the message; the name we
+        # derived (MLLP) goes into its own field, which T31's builder writes as a detail marked
+        # "derived", so nobody takes it for a name the store confirmed (T33).
         audit_name = message_name if source == NAME_FROM_INGEST else None
+        derived_name = message_name if source == NAME_DERIVED else None
         audit = record_attempt(
             self.client,
             self.config.audit_fhir_store_id,
@@ -200,6 +200,7 @@ class CuffSimulator:
                 agent=SERVICE_NAME,
                 destination=self.store_name,
                 message_name=audit_name,
+                derived_message_name=derived_name,
                 sample_name=outgoing.sample_name,
             ),
             recorded=max(self._clock(), sent_at),

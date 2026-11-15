@@ -23,6 +23,8 @@ EXPECTED = {
     "auditevent-send-rejected.json",
     "auditevent-send-no-ack.json",
     "auditevent-send-unreadable-reply.json",
+    # T33: an accepted MLLP send, with the message name the simulator derived.
+    "auditevent-send-accepted-mllp.json",
 }
 
 

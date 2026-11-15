@@ -162,12 +162,13 @@ What to expect from samples, because their bytes are fixed:
 - **Samples share control IDs.** For example `invalid_missing_pid3` and
   `invalid_obx14_not_hl7_date` both carry `SYN-BAD-0001`, and every `unparseable` sample has
   none. A sample's control ID is not a key for anything.
-- **Same-millisecond collision.** T31's AuditEvent id is derived from the sender, the
-  transport, MSH-10 and the send time in milliseconds. Two sends of samples with the same
-  control ID (or none) on the same transport in the same millisecond, for example from two
-  instances, get one id, and the second write replaces the first (T31: "last write wins"; the
-  store's history keeps both versions). Built readings cannot collide: each has a new control
-  ID.
+- **Same-millisecond sends.** T31's AuditEvent id is derived from the sender, the transport,
+  MSH-10, the send time in milliseconds and (T33) the sample name. So two *different* samples
+  with the same control ID (or none), sent on one transport in the same millisecond, for
+  example by two instances, get two ids. Only the *same* sample sent twice in one millisecond
+  shares an id; those are the same bytes to the same store, which keeps one message, and the
+  audit store's history keeps both versions ("last write wins"). Built readings cannot
+  collide: each has a new control ID.
 
 ### MLLP
 
@@ -202,9 +203,12 @@ on one message ingested over HTTPS, that the id after `/messages/` is the URL-sa
 SHA-256 of the message bytes. For an accepted (AA) MLLP send the service returns
 `<store>/messages/<urlsafe-b64(sha256(bytes inside the frame))>` with
 `messageNameSource: "derived-sha256-unverified"`. It is **unverified** beyond that one message
-and for the MLLP path; confirm on the first deployment (T25) by listing the store. It is not
-written into the AuditEvent until T31 has a field for a derived name; that is then a one-line
-change, marked `FOLLOW-UP` in `CuffSimulator.send` (`service.py`).
+and for the MLLP path; confirm on the first deployment (T25) by listing the store. The
+AuditEvent records it **marked as derived** (T33): T31's `derived_message_name`, written as the
+detail `derived-message-name` and never as the message entity's `what`, which holds only a name
+the store returned. `parse_send_attempt` gives it back as `derived_message_name` with
+`message_name_source == "derived"`, so the messages log (T14) can join the attempt to its
+stored message by it, confirm it with a `get`, and show it as derived.
 
 ### HTTPS
 
@@ -244,7 +248,7 @@ service never accepts or forwards FHIR from a caller.
 
 | Attempt | `outcome` | Details on `entity[1]` |
 | --- | --- | --- |
-| AA | `0` | `transport`, `MSH-10`, `MSA-1` AA, `ack-message` (base64), `what` = stored message name (HTTPS only) |
+| AA | `0` | `transport`, `MSH-10`, `MSA-1` AA, `ack-message` (base64); HTTPS: `what` = the stored message name the ingest response returned; MLLP: `derived-message-name` = the name derived from the bytes (no `what`) |
 | AE | `4` | the same, plus `MSA-3` with the store's reason; no message name |
 | no acknowledgment | `8` | `no-ack-reason`, `http-status` for `api-error`, `unreadable-reply-bytes` for `unreadable-reply` |
 | any malformed sample | as above | plus `malformed-sample` = the sample name |

@@ -63,6 +63,7 @@ def build_attempt(
     destination: str,
     message_name: str | None,
     sample_name: str | None,
+    derived_message_name: str | None = None,
 ) -> SendAttempt:
     return SendAttempt(
         sent_at=sent_at,
@@ -74,6 +75,7 @@ def build_attempt(
         destination=destination,
         message_name=message_name,
         sample_name=sample_name,
+        derived_message_name=derived_message_name,
     )
 
 
