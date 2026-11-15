@@ -38,7 +38,12 @@ finish() {
 TMP=$(mktemp -d)
 SB=""
 # shellcheck disable=SC2317 # called through the EXIT trap
-cleanup() { rm -rf "$TMP"; }
+cleanup() {
+  # The fake seeds sites/ read-only, as the image ships it (dr-x------). Root can remove that tree;
+  # a non-root user (CI's runner) must first make it writable. Only inside this run's own TMP.
+  chmod -R u+rwX "$TMP" 2> /dev/null || true
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 
 # ---- 1. Render the hooks with Terraform ---------------------------------------------------------
@@ -310,7 +315,7 @@ if [ "$(id -u)" = 0 ]; then
 else
   echo "WARN: not root, so the fake cannot give the seed the image's owner; owner check skipped"
 fi
-expect_calls '^timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh --mount type=bind,source='"$SB"'/mnt/disks/edge/\.openemr-sites-seed,target=/seed .* -c cp -a /swarm-pieces/sites /seed/sites$' 1 "the seed copies the image's pristine sites into a temporary directory first"
+expect_calls '^timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh --mount type=bind,source='"$SB"'/mnt/disks/edge/\.openemr-sites-seed,target=/seed .* -c cp -a /swarm-pieces/sites/\. /seed/ && chown ' 1 "the seed copies the image's pristine sites into a staging directory next to the final one"
 expect_log "first-time setup is complete" "checks that OpenEMR's first-time setup finished"
 if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "no seed directory left behind"; else fail "the seed directory was left behind"; fi
 expect_eq "$("$REAL_OPENSSL" x509 -in "$SB/mnt/disks/edge/openemr-tls/server.crt" -noout -ext subjectAltName | tail -n 1 | tr -d ' ')" "IPAddress:$IP" "the certificate names the VM's address"
@@ -701,6 +706,16 @@ run_hook openemr
 expect_rc 0 "$RC" "interrupted seed, next boot"
 if [ -s "$SB/mnt/disks/edge/openemr/default/config.php" ]; then pass "interrupted seed, next boot: seeded completely"; else fail "interrupted seed, next boot: not seeded"; fi
 if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "interrupted seed, next boot: the temporary directory is gone"; else fail "interrupted seed, next boot: the temporary directory is left"; fi
+
+echo "== a populated sites directory is never seeded over"
+new_sandbox
+mkdir -p "$SB/mnt/disks/edge/openemr/default"
+echo "clinic site files" > "$SB/mnt/disks/edge/openemr/default/existing.php"
+run_hook openemr
+expect_calls '^timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh' 0 "populated sites: no seed container is run"
+expect_eq "$(cat "$SB/mnt/disks/edge/openemr/default/existing.php")" "clinic site files" "populated sites: the existing files are untouched"
+expect_log 'has files; not seeding' "populated sites: says it is not seeding"
+if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "populated sites: no staging directory is made"; else fail "populated sites: a staging directory was made"; fi
 
 echo "== first-time setup interrupted (configured, but no ACL and no setup marker)"
 new_sandbox

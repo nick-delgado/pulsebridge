@@ -208,22 +208,24 @@ fake_docker_run() {
         return "$rc"
         ;;
       sh)
-        # The sites-directory seed: cp -a /swarm-pieces/sites /seed/sites. Like cp -a run as root,
-        # the copy keeps the image's owner and mode: in the 8.5.0 image /swarm-pieces/sites is
-        # dr-x------ 1000:101 (apache) and sites/default drwx------ 1000:101.
+        # The sites-directory seed, as the hook sends it: copy the contents of /swarm-pieces/sites
+        # into /seed, then give /seed itself the image's owner and mode for that directory. In the
+        # 8.5.0 image /swarm-pieces/sites is dr-x------ 1000:101 (apache) and sites/default
+        # drwx------ 1000:101. Ownership can only be set when the tests run as root.
         local seed
         seed=$(map_paths mounts /seed)
-        [ "${*: -1}" = "cp -a /swarm-pieces/sites /seed/sites" ] || return 1
-        mkdir -p "$seed/sites/default"
-        echo "<?php \$config = 0; // fake image sites/default/sqlconf.php" > "$seed/sites/default/sqlconf.php"
+        # shellcheck disable=SC2016 # the hook's literal command, compared as text
+        [ "${*: -1}" = 'cp -a /swarm-pieces/sites/. /seed/ && chown "$(stat -c %u:%g /swarm-pieces/sites)" /seed && chmod "$(stat -c %a /swarm-pieces/sites)" /seed' ] || return 1
+        mkdir -p "$seed/default"
+        echo "<?php \$config = 0; // fake image sites/default/sqlconf.php" > "$seed/default/sqlconf.php"
         if [ "${FAKE_SEED_FAIL:-0}" = 1 ]; then
-          echo "cp: error writing '/seed/sites/default/LBF': No space left on device" >&2
+          echo "cp: error writing '/seed/default/LBF': No space left on device" >&2
           return 1
         fi
-        echo "fake image config" > "$seed/sites/default/config.php"
-        chmod 700 "$seed/sites/default"
-        chmod 500 "$seed/sites"
-        if [ "$(id -u)" = 0 ]; then chown -R 1000:101 "$seed/sites"; fi
+        echo "fake image config" > "$seed/default/config.php"
+        chmod 700 "$seed/default"
+        if [ "$(id -u)" = 0 ]; then chown -R 1000:101 "$seed"; fi
+        chmod 500 "$seed"
         return 0
         ;;
       *) return 1 ;;

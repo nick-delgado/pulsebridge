@@ -41,10 +41,17 @@ check_prerequisites() {
 # A bind mount does not copy the image's files the way an empty Docker volume does, and the
 # image's openemr.sh restores an empty sites directory only in swarm mode (from /swarm-pieces/sites,
 # its pristine copy, with `rsync --owner --group --perms`). So the first boot copies that directory
-# onto the data disk itself, with `cp -a`, keeping the image's owner and mode (dr-x------ apache,
-# uid 1000, gid 101): the hook's own umask is 077, and a directory made by the hook would be
-# root's, unreadable for Apache. It is copied into a temporary directory and moved into place, so
-# an interrupted copy never leaves a sites directory that looks populated.
+# onto the data disk itself:
+#   - into a staging directory NEXT TO the final one ($EDGE_DATA_DIR/.openemr-sites-seed), with
+#     `cp -a`, which keeps the owner and mode of everything inside; the staging directory itself
+#     then gets the image's owner and mode for its sites directory (dr-x------, uid 1000 apache,
+#     gid 101), read from the image with stat. The hook's own umask is 077, so a directory left as
+#     the hook made it would be root's and unreadable for Apache;
+#   - then renamed onto the (empty) final directory. Both have the same parent, so the rename is
+#     atomic and needs no write permission on the renamed directory (a rename to a different parent
+#     must rewrite the directory's ".." entry, and the image's sites directory is read-only).
+# An interrupted copy therefore never leaves a sites directory that looks populated, and a
+# directory that already has files is never seeded over.
 seed_sites_dir() {
   local tmp="$EDGE_DATA_DIR/.openemr-sites-seed"
   if [ -n "$(ls -A "$EDGE_OPENEMR_DIR")" ]; then
@@ -54,15 +61,15 @@ seed_sites_dir() {
   log "sites directory is empty: copying the image's sites directory onto the data disk (first boot)"
   rm -rf "$tmp"
   mkdir -p "$tmp"
+  # shellcheck disable=SC2016 # the $(stat ...) are expanded by sh inside the container, not here
   timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh \
     --mount "type=bind,source=$tmp,target=/seed" \
-    "$OPENEMR_IMAGE" -c "cp -a /swarm-pieces/sites /seed/sites"
-  if [ ! -d "$tmp/sites" ] || [ -z "$(ls -A "$tmp/sites")" ]; then
+    "$OPENEMR_IMAGE" -c 'cp -a /swarm-pieces/sites/. /seed/ && chown "$(stat -c %u:%g /swarm-pieces/sites)" /seed && chmod "$(stat -c %a /swarm-pieces/sites)" /seed'
+  if [ -z "$(ls -A "$tmp")" ]; then
     die "copying the image's sites directory produced nothing"
   fi
   rmdir "$EDGE_OPENEMR_DIR"
-  mv "$tmp/sites" "$EDGE_OPENEMR_DIR"
-  rm -rf "$tmp"
+  mv "$tmp" "$EDGE_OPENEMR_DIR"
   log "sites directory seeded"
 }
 
