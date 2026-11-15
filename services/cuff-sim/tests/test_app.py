@@ -480,7 +480,9 @@ def test_unexpected_audit_write_error_is_reported_not_raised(
     assert body["attemptId"]
 
 
-def test_audit_build_failure_is_reported_not_raised(http, adapter, audit_ok, monkeypatch, h):
+def test_audit_build_failure_is_reported_not_raised(
+    http, adapter, audit_ok, monkeypatch, h, caplog
+):
     from cuff_sim import audit
 
     def refuse(*_a, **_k):
@@ -490,10 +492,13 @@ def test_audit_build_failure_is_reported_not_raised(http, adapter, audit_ok, mon
 
     monkeypatch.setattr(audit, "build_send_attempt_audit_event", refuse)
     adapter.reply(h.S4_AA)
-    response, body = post(http, **READING)
+    with caplog.at_level(logging.INFO):
+        response, body = post(http, **READING)
     assert response.status_code == 200 and body["result"] == "accepted"
     assert body["audit"]["recorded"] is False and body["attemptId"] is None
     assert not [r for r in audit_ok.requests if r.method == "PUT"]
+    failed = next(f for f in logged_fields(caplog) if f["event"] == "audit-write-failed")
+    assert failed["failure"] == "build-failed"  # T31 refused a value: not a bug
 
 
 # ---- Rate limit -----------------------------------------------------------------------------
@@ -757,7 +762,7 @@ def test_fuzzed_replies_never_give_a_5xx_and_are_always_recorded(config, transpo
         assert body["audit"] == {"recorded": True}, (i, replies[i])
 
 
-def test_audit_build_bug_is_reported_not_raised(http, adapter, audit_ok, monkeypatch, h):
+def test_audit_build_bug_is_reported_not_raised(http, adapter, audit_ok, monkeypatch, h, caplog):
     from cuff_sim import audit
 
     def bug(*_a, **_k):
@@ -765,7 +770,10 @@ def test_audit_build_bug_is_reported_not_raised(http, adapter, audit_ok, monkeyp
 
     monkeypatch.setattr(audit, "build_send_attempt_audit_event", bug)
     adapter.reply(h.S4_AA)
-    response, body = post(http, **READING)
+    with caplog.at_level(logging.INFO):
+        response, body = post(http, **READING)
+    failed = next(f for f in logged_fields(caplog) if f["event"] == "audit-write-failed")
+    assert failed["failure"] == "build-error"  # anything else: a bug, logged by its own code
     assert response.status_code == 200 and body["result"] == "accepted"
     assert body["audit"] == {
         "recorded": False,

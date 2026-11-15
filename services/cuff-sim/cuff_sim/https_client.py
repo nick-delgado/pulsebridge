@@ -63,9 +63,7 @@ def _no_response(exc: RetryableError) -> NoAck:
     return NoAck("connection-closed", "no HTTP response from the ingest API")
 
 
-def _api_error(status: int | None) -> NoAck:
-    if status is None:
-        return NoAck("connection-closed", "no HTTP response from the ingest API")
+def _api_error(status: int) -> NoAck:
     if not 400 <= status <= 599:
         # A status the API does not document for errors (a 3xx): not an answer we can read.
         return NoAck("unreadable-reply", f"the ingest API answered HTTP {status}")
