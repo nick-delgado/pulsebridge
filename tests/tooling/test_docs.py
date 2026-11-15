@@ -440,7 +440,7 @@ def test_readme_has_a_mermaid_architecture_diagram() -> None:
     edges = set()
     for line in diagram.split("\n"):
         m = re.match(
-            r"\s*(\w+)(?:\[[^\]]*\]|\(\[[^\]]*\]\))?\s*(?:-->|-- .*? -->|-\. .*? \.->)\s*(\w+)",
+            r"\s*(\w+)(?:\[[^\]]*\])?\s*(?:-->|-\.->)(?:\|[^|]*\|)?\s*(\w+)",
             line,
         )
         if m:

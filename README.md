@@ -39,31 +39,34 @@ delegated to a managed mapping service:
 flowchart LR
   subgraph wearable["Wearable path"]
     watch["Pixel Watch"] --> gh["Google Health API"]
-    sched["Cloud Scheduler<br/>every 15 min"] -- "OIDC" --> hs["health-sync<br/>Cloud Run"]
-    gh -- "rollUp, OAuth refresh token" --> hs
+    sched["Cloud Scheduler<br/>every 15 min"] -->|"OIDC"| hs["health-sync<br/>Cloud Run"]
+    gh -->|"rollUp, OAuth refresh token"| hs
   end
 
   subgraph device["Device path"]
-    cuff["cuff-sim<br/>Cloud Run, internal"] -- "ORU^R01 over MLLP :2575" --> mllp["MLLP adapter<br/>e2-micro VM"]
-    cuff -. "HTTPS messages:ingest" .-> hl7["HL7v2 store"]
-    mllp -- "ingest; ACK back" --> hl7
-    hl7 -- "notification" --> ps["Pub/Sub topic"]
-    ps -- "push, OIDC" --> v2f["v2-to-fhir<br/>Cloud Run"]
-    v2f -- "GET raw message,<br/>PATCH outcome labels" --> hl7
-    cuff -- "AuditEvent per send" --> audit["Audit FHIR store"]
+    cuff["cuff-sim<br/>Cloud Run, internal"] -->|"ORU^R01 over MLLP :2575"| mllp["MLLP adapter<br/>e2-micro VM"]
+    cuff -.->|"HTTPS messages:ingest"| hl7["HL7v2 store"]
+    mllp -->|"ingest, ACK back"| hl7
+    hl7 -->|"notification"| ps["Pub/Sub topic"]
+    ps -->|"push, OIDC"| v2f["v2-to-fhir<br/>Cloud Run"]
+    v2f -->|"GET raw message,<br/>PATCH outcome labels"| hl7
+    cuff -->|"AuditEvent per send"| audit["Audit FHIR store"]
   end
 
-  hs -- "transaction Bundle" --> fhir[("FHIR R4 store")]
-  v2f -- "transaction Bundle" --> fhir
+  subgraph record["System of record"]
+    fhir[("FHIR R4 store")]
+  end
+  hs -->|"transaction Bundle"| fhir
+  v2f -->|"transaction Bundle"| fhir
 
   subgraph front["Presentation and sharing"]
     browser["Browser"] --> hosting["Firebase Hosting<br/>static page"]
-    hosting -- "rewrite /api/**" --> proxy["fhir-proxy<br/>Cloud Run, public"]
-    proxy -- "read" --> fhir
-    proxy -- "read" --> audit
-    proxy -- "read" --> hl7
-    proxy -- "OIDC" --> cuff
-    proxy -- "OAuth2 client credentials,<br/>FHIR over HTTPS :443" --> emr["OpenEMR + MariaDB<br/>same e2-micro VM"]
+    hosting -->|"rewrite /api/**"| proxy["fhir-proxy<br/>Cloud Run, public"]
+    proxy -->|"read"| fhir
+    proxy -->|"read"| audit
+    proxy -->|"read"| hl7
+    proxy -->|"OIDC"| cuff
+    proxy -->|"OAuth2 client credentials,<br/>FHIR over HTTPS :443"| emr["OpenEMR + MariaDB<br/>same e2-micro VM"]
   end
 ```
 
