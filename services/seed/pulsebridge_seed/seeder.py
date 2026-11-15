@@ -334,9 +334,7 @@ def run(
             _record_entry_statuses(report, bundle, response)
             report.setup_written = True
             for batch in batches(generated.items, config.batch_windows):
-                bundle = ingest_bundle(
-                    config, batch, recorded=deps.now(), complete_before=cutoff
-                )
+                bundle = ingest_bundle(config, batch, recorded=deps.now(), complete_before=cutoff)
                 response = _with_retries(
                     config,
                     deps,
