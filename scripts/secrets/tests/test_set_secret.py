@@ -540,7 +540,9 @@ def test_explicitly_empty_project_or_prefix_refused(sandbox, fake, args):
 def test_generated_admin_password_says_how_to_read_it_back(sandbox):
     r = sandbox.run(SCRIPT, "--generate", "openemr-admin-password")
     assert r.rc == 0, r.err
-    assert "/mnt/disks/edge/secrets/openemr-admin-password" in r.err
+    # The generic pick-up text names the file for every secret; this sentence is specific.
+    assert "admin password was not shown" in r.err
+    assert "Reading a generated admin password back" in r.err
     other = sandbox.run(SCRIPT, "--generate", "openemr-db-password")
     assert "admin password was not shown" not in other.err
 
