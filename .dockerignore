@@ -1,0 +1,39 @@
+# Build context for the service images (services/*/Dockerfile), which are built from the
+# repository root. Allow-list: everything is excluded, then only what an image needs comes back.
+# Docker applies the LAST pattern that matches a path, so the exclusions after the `!` lines win.
+# tests/tooling/test_container_images.py checks this file.
+
+# 1. Nothing by default: .git, .worktrees, .venv, web/ (and web/node_modules), infra/ (Terraform
+#    state, plans, .terraform, tfvars), scripts/, docs/ and the root files stay out.
+*
+
+# 2. The only inputs an image installs: the shared libraries and the services.
+!libs/
+!services/
+
+# 3. Never inside libs/ or services/ either: secrets and key files, local environments, caches,
+#    build output and tests (images do not run tests).
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*credentials*.json
+**/*service-account*.json
+**/*sa-key*.json
+**/client_secret*.json
+**/*.tfstate
+**/*.tfstate.*
+**/*.tfvars
+**/*.tfplan
+**/.venv
+**/node_modules
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/*.egg-info
+**/build
+**/dist
+**/tests
+**/Dockerfile
