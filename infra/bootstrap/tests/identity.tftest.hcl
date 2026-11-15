@@ -89,6 +89,17 @@ run "default_deployer_roles_are_not_basic_roles" {
   command = plan
 
   assert {
+    # Module ingestion creates log-based metrics on every apply, and alert policies and an
+    # email channel when asked; without these the deployer's apply fails there.
+    condition = length(setsubtract(toset([
+      "roles/logging.configWriter",
+      "roles/monitoring.alertPolicyEditor",
+      "roles/monitoring.notificationChannelEditor",
+    ]), toset(keys(google_project_iam_member.deployer)))) == 0
+    error_message = "The default deployer roles must include the logging and monitoring roles module ingestion needs."
+  }
+
+  assert {
     condition     = length(setintersection(toset(keys(google_project_iam_member.deployer)), toset(["roles/owner", "roles/editor", "roles/viewer"]))) == 0
     error_message = "The default deployer roles must not include a basic role."
   }

@@ -68,6 +68,7 @@ on exactly that resource, for the account `module.identity.service_account_email
 | `edge-vm` | `roles/healthcare.hl7V2Ingest` | the HL7v2 store | `healthcare` (T05) | The MLLP adapter forwards messages to the store (S4). Its only Healthcare permission. |
 | `edge-vm` | `roles/logging.logWriter` | the project | **this module** | Startup-script output (including the adapter crash-loop check, T21) reaches Cloud Logging. Log writing has no narrower resource. |
 | `scheduler-invoker` | `roles/run.invoker` | Cloud Run service `health-sync` | `ingestion` (T20) | The identity in the Scheduler job's OIDC token. It can do nothing else. |
+| `scheduler-invoker` (synthetic data) | `roles/run.invoker` | Cloud Run job `seed` | `ingestion` (T20) | The identity in the OAuth token Scheduler uses to call `jobs.run` on the seeder job (`run.jobs.run`). health-sync and the seeder never exist together, so it holds one of the two grants. |
 | `pubsub-push` | `roles/run.invoker` | Cloud Run service `v2-to-fhir` | `ingestion` (T20) | The identity in the push subscription's OIDC token (`push_service_account_email` in T05). It can do nothing else. |
 | `seeder` (only if `create_seeder_account`) | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T05) | T09 writes synthetic Observations. |
 | Pub/Sub service agent `service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com` (`grant_pubsub_token_creator`, default true) | `roles/iam.serviceAccountTokenCreator` | the `pubsub-push` account only | **this module** (single owner) | Lets Pub/Sub sign the push OIDC token. Required in projects created before 8 April 2021; harmless in newer ones, and scoped to one account. |
@@ -126,6 +127,7 @@ These are open in other tasks. Each may add a row to the table above; none is gr
 | The browser (anyone) | `fhir-proxy` | Public: `roles/run.invoker` for `allUsers`; the reviewer password and signed token (D9) are the gate | `phr` (T22) |
 | `fhir-proxy` | `cuff-sim` | OIDC token for `fhir-proxy`; `cuff-sim` is **not** public and has no other invoker | `phr` (T22) |
 | Cloud Scheduler job | `health-sync` | OIDC token for `scheduler-invoker` | `ingestion` (T20) |
+| Cloud Scheduler job (synthetic data) | seeder Cloud Run job, via the Cloud Run Admin API `jobs.run` | OAuth token for `scheduler-invoker` | `ingestion` (T20) |
 | Pub/Sub push subscription | `v2-to-fhir` | OIDC token for `pubsub-push` | `ingestion` (T20) |
 | `cuff-sim` | MLLP adapter on the edge VM | Network only: firewall rule from the Cloud Run egress address (no IAM) | `edge-vm` (T21) |
 | MLLP adapter (as `edge-vm`) | HL7v2 store | `roles/healthcare.hl7V2Ingest` on the store | `healthcare` (T05) |
