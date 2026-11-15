@@ -211,11 +211,27 @@ def test_fhir_workflow_sets_up_java_and_caches_by_validator_version(fhir_workflo
     assert "steps.pin.outputs.version" in cache["with"]["key"]
     [pin_step] = [s for s in steps if s.get("id") == "pin"]
     assert "scripts/fhir-validate.sh --validator-version" in pin_step["run"]
-    # The cached directory is the script's default cache directory.
+    # Only the checksummed jar is cached, at the script's default cache directory: the FHIR
+    # package cache has no pinned checksum and would freeze the "latest" terminology packages.
     script = (REPO_ROOT / "scripts" / "fhir-validate.sh").read_text()
     assert "${XDG_CACHE_HOME:-$HOME/.cache}/pulsebridge/fhir-validator" in script
-    assert cache["with"]["path"] == "~/.cache/pulsebridge/fhir-validator"
+    assert 'jar="$cache/validator_cli-${VALIDATOR_VERSION}.jar"' in script
+    assert cache["with"]["path"] == (
+        "~/.cache/pulsebridge/fhir-validator/validator_cli-${{ steps.pin.outputs.version }}.jar"
+    )
     # All steps that matter come before the validator runs.
     order = [s.get("id") or s.get("uses", "").split("@")[0] or s.get("run") for s in steps]
     assert order.index("actions/setup-java") < order.index("make fhir-validate")
     assert order.index("actions/cache") < order.index("make fhir-validate")
+
+
+def test_fhir_workflow_keeps_its_weekly_schedule(fhir_workflow: dict) -> None:
+    # The schedule is what notices drift no commit causes (terminology server, new packages).
+    on = triggers(fhir_workflow)
+    crons = [entry["cron"] for entry in on.get("schedule") or []]
+    assert crons, "fhir-validate.yml must keep a schedule"
+    for cron in crons:
+        fields = cron.split()
+        assert len(fields) == 5, f"bad cron {cron!r}"
+        assert fields[2] == "*" and fields[3] == "*", f"{cron!r} is not at least weekly"
+        assert fields[4] != "*" or fields[1] != "*", f"{cron!r} runs more than daily"
