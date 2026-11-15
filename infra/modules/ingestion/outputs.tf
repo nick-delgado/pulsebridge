@@ -52,11 +52,16 @@ output "scheduler_job_names" {
 }
 
 output "log_metric_names" {
-  description = "Log-based metric names by alert key (failed-run, reconnect-needed); empty with synthetic data. In Monitoring they are logging.googleapis.com/user/<name>."
-  value       = { for k, m in google_logging_metric.health_sync : k => m.name }
+  description = "Log-based metric names by alert key (health-sync-failed-run, health-sync-not-connected, seed-run-failed, scheduler-attempt-failed; those of the deployed mode). In Monitoring they are logging.googleapis.com/user/<name>."
+  value       = { for k, m in google_logging_metric.this : k => m.name }
 }
 
 output "alert_policy_names" {
-  description = "Alert policy resource names by alert key; empty when notification_channels is empty or with synthetic data."
-  value       = { for k, p in google_monitoring_alert_policy.health_sync : k => p.name }
+  description = "Alert policy resource names by alert key; empty when neither alert_email nor notification_channels is set (metrics only)."
+  value       = { for k, p in google_monitoring_alert_policy.this : k => p.name }
+}
+
+output "alert_email_channel" {
+  description = "Name of the email notification channel created from alert_email, or null."
+  value       = one(google_monitoring_notification_channel.email[*].name)
 }

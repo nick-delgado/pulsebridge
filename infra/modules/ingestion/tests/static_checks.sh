@@ -14,7 +14,8 @@
 #   7. a project is hardcoded: a literal `project = "..."`, a literal projects/<id>/ path, a
 #      service account email or an Artifact Registry path with a literal project;
 #   8. a `module` block is declared (resources could hide in a child module);
-#   9. the push endpoint output lost its depends_on on the invoker binding (ordering).
+#   9. the push endpoint output lost its depends_on on the invoker binding, or a Scheduler job
+#      lost its depends_on on the grant it needs (ordering: terraform test cannot see depends_on).
 #
 # Usage: infra/modules/ingestion/tests/static_checks.sh [module dir]   (needs bash, grep, sed, awk)
 
@@ -114,5 +115,22 @@ else
   echo "FAIL: output v2_to_fhir_push_endpoint must have depends_on = [google_cloud_run_v2_service_iam_member.invoker]"
   fail=1
 fi
+
+# Each Scheduler job must wait for the grant that lets its token in, or its first attempts fail.
+sched_dep() { # sched_dep <file> <scheduler resource name> <required dependency>
+  local block
+  block="$(awk -v r="resource \"google_cloud_scheduler_job\" \"$2\"" 'index($0, r) == 1 {f=1} f {print} f && /^}/ {exit}' "$here/$1" | sed -e 's/#.*$//')"
+  if [[ -z "$block" ]]; then
+    echo "FAIL: google_cloud_scheduler_job.$2 not found in $1"
+    fail=1
+  elif printf '%s\n' "$block" | grep -qE "depends_on[[:space:]]*=[[:space:]]*\[[^]]*$3"; then
+    echo "ok:   google_cloud_scheduler_job.$2 depends on $3"
+  else
+    echo "FAIL: google_cloud_scheduler_job.$2 must have depends_on = [$3]"
+    fail=1
+  fi
+}
+sched_dep health_sync.tf health_sync 'google_cloud_run_v2_service_iam_member\.invoker'
+sched_dep seeder.tf seed 'google_cloud_run_v2_job_iam_member\.seed_runner'
 
 exit "$fail"

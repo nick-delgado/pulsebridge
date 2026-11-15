@@ -32,8 +32,8 @@ variable "name_prefix" {
 
   validation {
     # Cloud Run service and job names: lowercase letters, digits and hyphens, starting with a
-    # letter, at most 49 characters. The longest suffix here is "-health-sync-reconnect-needed"
-    # (29 characters, a log metric name), so 20 leaves every name valid.
+    # letter, at most 49 characters. The longest suffix here is "-scheduler-attempt-failed"
+    # (25 characters, a log metric name), so 20 leaves every name valid.
     condition     = can(regex("^[a-z][a-z0-9-]{0,18}[a-z0-9]$", var.name_prefix))
     error_message = "name_prefix must be 2-20 characters of lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen."
   }
@@ -183,6 +183,13 @@ variable "healthcare_project_id" {
     condition     = var.healthcare_project_id == null || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", coalesce(var.healthcare_project_id, "x")))
     error_message = "healthcare_project_id must be a valid GCP project ID."
   }
+  validation {
+    # Pub/Sub push counts as "internal" ingress only from the same project (or VPC Service
+    # Controls perimeter). The ingest subscription lives with the dataset, so a dataset in
+    # another project would have every push refused by internal-only ingress.
+    condition     = var.healthcare_project_id == null || var.healthcare_project_id == var.project_id || var.v2_to_fhir_ingress == "INGRESS_TRAFFIC_ALL"
+    error_message = "With the Healthcare dataset (and so the push subscription) in another project, Pub/Sub push is not internal traffic: use the same project, or set v2_to_fhir_ingress = \"INGRESS_TRAFFIC_ALL\" (IAM still admits only pubsub-push)."
+  }
 }
 
 variable "patient_id" {
@@ -224,7 +231,7 @@ variable "patient_assigning_authority" {
 }
 
 variable "time_zone" {
-  description = "The user's IANA time zone, such as \"America/New_York\" or \"Europe/Amsterdam\" (TIME_ZONE for health-sync and the seeder). Fixed offsets (\"UTC-5\", \"Etc/GMT+5\", \"+02:00\") are refused, as the services refuse them: they ignore daylight saving time. \"UTC\" itself is allowed."
+  description = "The user's IANA time zone, such as \"America/New_York\" or \"Europe/Amsterdam\" (TIME_ZONE for health-sync and the seeder). Fixed offsets (\"UTC-5\", \"Etc/GMT+5\", \"+02:00\") are refused, as the services refuse them: they ignore daylight saving time. \"UTC\" itself is allowed. Only the SHAPE is checked here: a well-formed but unknown name (\"America/Newyork\") passes validation, health-sync and the seeder then refuse to start, and health-sync's HTTP startup probe makes that deploy fail (README, \"What a bad configuration does\")."
   type        = string
 
   validation {
@@ -383,7 +390,7 @@ variable "deletion_protection" {
 # ---------------------------------------------------------------------------------------------
 
 variable "notification_channels" {
-  description = "Cloud Monitoring notification channels (\"projects/<project>/notificationChannels/<id>\", created by hand or in the env root) for the health-sync alerts. Empty (default): the log-based metrics are created and can be charted, but no alert policy exists, so nothing is sent and nothing is billed for alerting. Non-empty needs the Monitoring API (monitoring.googleapis.com) enabled, which module project-base does not enable by default."
+  description = "Existing Cloud Monitoring notification channels (\"projects/<project>/notificationChannels/<id>\", made by hand or in the env root) the alerts are sent to, in addition to alert_email. With neither set there are log-based metrics only: they can be charted, but no alert policy exists and nobody is told. Alert policies and charts need the Monitoring API (monitoring.googleapis.com, in project-base's default list)."
   type        = list(string)
   default     = []
   nullable    = false
@@ -391,5 +398,16 @@ variable "notification_channels" {
   validation {
     condition     = alltrue([for c in var.notification_channels : can(regex("^projects/[^/]+/notificationChannels/[^/]+$", c))])
     error_message = "Each notification channel must be a full name: projects/<project>/notificationChannels/<id>."
+  }
+}
+
+variable "alert_email" {
+  description = "Optional email address the alerts are sent to: creates a Cloud Monitoring email notification channel in this module, used together with notification_channels. No default and never hardcoded: set it in the env root's tfvars (T25). It is stored in the Terraform state and on the channel. null (default) creates no channel."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.alert_email == null || can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", coalesce(var.alert_email, "x")))
+    error_message = "alert_email must be an email address."
   }
 }

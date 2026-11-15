@@ -41,8 +41,8 @@ run "seeder_instead_of_health_sync" {
     condition = (
       length(google_cloud_run_v2_service.health_sync) == 0 &&
       length(google_cloud_scheduler_job.health_sync) == 0 &&
-      length(google_logging_metric.health_sync) == 0 &&
-      length(google_monitoring_alert_policy.health_sync) == 0
+      !contains(keys(google_logging_metric.this), "health-sync-failed-run") &&
+      !contains(keys(google_logging_metric.this), "health-sync-not-connected")
     )
     error_message = "use_synthetic_data = true must create nothing of health-sync (service, trigger, metrics, alerts)."
   }
@@ -74,8 +74,8 @@ run "seeder_job_settings" {
     error_message = "The job must run seed_image by digest."
   }
   assert {
-    condition     = google_cloud_run_v2_job.seed[0].template[0].template[0].containers[0].args == tolist(["--hours", "4"]) && google_cloud_run_v2_job.seed[0].template[0].template[0].containers[0].command == tolist(["pulsebridge-seed"])
-    error_message = "The scheduled execution must run pulsebridge-seed --hours 4."
+    condition     = google_cloud_run_v2_job.seed[0].template[0].template[0].containers[0].args == tolist(["--hours", "4"]) && google_cloud_run_v2_job.seed[0].template[0].template[0].containers[0].command == null
+    error_message = "The scheduled execution must pass --hours 4 and leave the entrypoint (pulsebridge-seed) to the image."
   }
   assert {
     condition     = google_cloud_run_v2_job.seed[0].template[0].template[0].timeout == "1800s"
@@ -148,5 +148,32 @@ run "hourly_trigger_when_ingest_enabled" {
       length(google_cloud_scheduler_job.seed[0].http_target[0].oidc_token) == 0
     )
     error_message = "A Google API call takes an OAuth token (not OIDC) for scheduler-invoker."
+  }
+}
+
+run "seeder_alerts" {
+  command = apply
+  variables {
+    alert_email = "alerts@example.com"
+  }
+  assert {
+    condition     = toset(keys(google_logging_metric.this)) == toset(["seed-run-failed", "scheduler-attempt-failed"]) && length(google_monitoring_alert_policy.this) == 2
+    error_message = "With synthetic data there must be the seeder-run and Scheduler-attempt metrics, each with a policy."
+  }
+  assert {
+    condition     = google_logging_metric.this["seed-run-failed"].filter == "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"pulsebridge-seed\" AND jsonPayload.event=\"seed-run\" AND severity>=WARNING"
+    error_message = "The seeder metric must count the seeder job's unsuccessful seed-run lines."
+  }
+  assert {
+    condition     = strcontains(google_logging_metric.this["scheduler-attempt-failed"].filter, "resource.labels.job_id=\"pulsebridge-seed-hourly\"")
+    error_message = "With synthetic data the Scheduler metric must watch the seeder's trigger."
+  }
+}
+
+run "seeder_job_is_destroyable_by_default" {
+  command = apply
+  assert {
+    condition     = google_cloud_run_v2_job.seed[0].deletion_protection == false
+    error_message = "By default the job must be destroyable (deletion_protection = false)."
   }
 }

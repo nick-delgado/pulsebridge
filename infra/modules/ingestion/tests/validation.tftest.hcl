@@ -245,3 +245,34 @@ run "rejects_unsupported_ingress_value" {
   }
   expect_failures = [var.v2_to_fhir_ingress]
 }
+
+run "rejects_healthcare_in_another_project_with_internal_ingress" {
+  command = plan
+  variables {
+    healthcare_project_id = "other-project"
+  }
+  expect_failures = [var.healthcare_project_id]
+}
+
+run "allows_healthcare_in_another_project_with_all_ingress" {
+  command = plan
+  variables {
+    healthcare_project_id = "other-project"
+    v2_to_fhir_ingress    = "INGRESS_TRAFFIC_ALL"
+  }
+}
+
+run "allows_healthcare_in_the_same_project" {
+  command = plan
+  variables {
+    healthcare_project_id = "example-project"
+  }
+}
+
+run "rejects_bad_alert_email" {
+  command = plan
+  variables {
+    alert_email = "not an email"
+  }
+  expect_failures = [var.alert_email]
+}

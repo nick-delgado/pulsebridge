@@ -69,6 +69,26 @@ resource "google_cloud_run_v2_service" "health_sync" {
         startup_cpu_boost = false
       }
 
+      # Proves the app really started. gunicorn's master opens port 8080 before its worker
+      # builds the app, so Cloud Run's default TCP probe can pass while the worker crashes on a
+      # bad configuration (for example an unknown TIME_ZONE). GET /status answers 200 in every
+      # state once create_app() has succeeded, and nothing at all otherwise. Probes come from
+      # Cloud Run inside the instance, not through the service URL, so IAM and ingress do not
+      # apply. /status makes one token request to Google when the secrets exist (README
+      # "GET /status"); the probe stops at its first success, so that is once per instance
+      # start. Cloud Run: "Any 2XX or 3XX response is a success"; timeout must not exceed the
+      # period; failureThreshold x periodSeconds must not exceed 600 s.
+      startup_probe {
+        initial_delay_seconds = 5
+        period_seconds        = 25
+        timeout_seconds       = 22 # /status's own budget is 20 s
+        failure_threshold     = 5  # 5 + 5 x 25 = 130 s for a cold start
+        http_get {
+          path = "/status"
+          port = 8080
+        }
+      }
+
       # /secrets/<secret key>/value, one directory per secret.
       dynamic "volume_mounts" {
         for_each = local.google_health_secrets
@@ -87,6 +107,7 @@ resource "google_cloud_run_v2_service" "health_sync" {
           {
             TIME_ZONE             = var.time_zone
             SYNC_INTERVAL_MINUTES = tostring(local.sync_interval_minutes)
+            RUN_DEADLINE_SECONDS  = tostring(local.sync_run_deadline_seconds)
           },
           { for key, env_name in local.google_health_secrets : env_name => "/secrets/${key}/value" },
         )
@@ -115,7 +136,7 @@ resource "google_cloud_scheduler_job" "health_sync" {
 
   # Scheduler waits this long for the answer (180 s is the HTTP-target default, stated
   # explicitly because health-sync's run budget is sized to it).
-  attempt_deadline = "180s"
+  attempt_deadline = "${local.sync_attempt_deadline_seconds}s"
 
   # No retries: the next scheduled run is the retry, and its range overlaps this one. A retry
   # could also start a second run while the first is still writing.

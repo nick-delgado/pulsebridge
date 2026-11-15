@@ -3,7 +3,8 @@
 The compute that brings data into the FHIR store: the **`v2-to-fhir`** Cloud Run service (the
 cuff path, always deployed), and for the wearable path either the **`health-sync`** Cloud Run
 service (real Google Health data) or the **seeder** Cloud Run job (synthetic data), each with
-its **Cloud Scheduler** trigger, plus **log-based alerting** for `health-sync`.
+its **Cloud Scheduler** trigger, plus **log-based alerting** on the wearable path and on
+Scheduler's own attempts.
 
 ```
                       module healthcare                         this module
@@ -12,7 +13,7 @@ HL7v2 store ──notification──> ingest topic ──push, OIDC as pubsub-pu
 Cloud Scheduler, every 15 min ──OIDC as scheduler-invoker──> health-sync  /sync     ┐ use_synthetic_data
 fhir-proxy (module phr) ───────OIDC as fhir-proxy─────────> health-sync  /status   ┘ = false
                                                                 │
-                              log lines ──> log-based metrics ──> alert policies (if channels given)
+     service and Scheduler log lines ──> log-based metrics ──> alert policies (if alert_email or channels)
 
 Cloud Scheduler, hourly ──OAuth as scheduler-invoker──> Cloud Run Admin API jobs.run ─┐ use_synthetic_data
                                                          seeder job: pulsebridge-seed --hours 4 ┘ = true
@@ -78,7 +79,9 @@ module "ingestion" {
   service_account_emails = module.identity.service_account_emails
   secret_ids             = module.identity.secret_ids
 
-  notification_channels = var.alert_notification_channels # [] = metrics only
+  # Set at least one, or the alerts are metrics only and nobody is told.
+  alert_email           = var.alert_email                 # creates an email channel
+  notification_channels = var.alert_notification_channels # existing channels, may be []
 
   # The secret accessor grants (module identity) must exist before health-sync deploys.
   depends_on = [module.identity]
@@ -97,6 +100,10 @@ module "identity" {
 }
 ```
 
+Keep the Healthcare dataset in the same project (`module.healthcare.project_id ==
+var.project_id`): Pub/Sub push counts as internal traffic only from the same project, so a
+validation refuses another project while `v2_to_fhir_ingress` is internal-only.
+
 There is no dependency cycle: this module reads only the *names* of the stores (known from
 module healthcare's variables), and module healthcare reads this module's URL only for the
 subscription's push config. `depends_on = [module.identity]` is safe because module identity
@@ -107,14 +114,15 @@ depends on nothing.
 | Resource | Exists when | What and why |
 | --- | --- | --- |
 | `google_cloud_run_v2_service.v2_to_fhir` | always | The HL7v2-to-FHIR mapper (T12). Pub/Sub pushes each new message's name to `POST /pubsub/hl7v2`. Runs as `v2-to-fhir`; environment from the variables (see "Environment"); scale to zero, at most `v2_to_fhir_max_instances` (2); request timeout 60 s, Pub/Sub's ack deadline. |
-| `google_cloud_run_v2_service.health_sync` | `use_synthetic_data = false` | The Google Health puller (T10). Runs as `health-sync`; the three Google Health secrets mounted as files; `min 0`, **`max 1`** (its one-run-at-a-time lock is per instance, so one instance makes it per service); request timeout 300 s (at least the 180 s attempt deadline). |
+| `google_cloud_run_v2_service.health_sync` | `use_synthetic_data = false` | The Google Health puller (T10). Runs as `health-sync`; the three Google Health secrets mounted as files; `min 0`, **`max 1`** (its one-run-at-a-time lock is per instance, so one instance makes it per service); request timeout 300 s (at least the 180 s attempt deadline); `RUN_DEADLINE_SECONDS` 150 (attempt deadline minus 30 s); HTTP startup probe on `GET /status`. |
 | `google_cloud_run_v2_service_iam_member.invoker` | always (one per row of the invoker table) | `roles/run.invoker` on one service for one caller. The whole invoker policy lives in `local.service_invokers` (main.tf). |
 | `google_cloud_scheduler_job.health_sync` | real data **and** `ingest_enabled` | `POST /sync` every 15 minutes with an OIDC token for `scheduler-invoker`, audience the service URL; `retry_count = 0`, `attempt_deadline = 180s`. |
-| `google_cloud_run_v2_job.seed` | `use_synthetic_data = true` | The seeder (T09): `pulsebridge-seed --hours 4`, runs as `seeder`, `max_retries = 0`, one task, task timeout `seed_task_timeout` (1800 s). Exists even while ingest is off, because the first seeding runs it by hand. |
+| `google_cloud_run_v2_job.seed` | `use_synthetic_data = true` | The seeder (T09): args `--hours 4` to the image's `pulsebridge-seed` entrypoint (no `command` here: the image is the single source of the entrypoint), runs as `seeder`, `max_retries = 0`, one task, task timeout `seed_task_timeout` (1800 s). Exists even while ingest is off, because the first seeding runs it by hand. |
 | `google_cloud_run_v2_job_iam_member.seed_runner` | synthetic data | `roles/run.invoker` on **that job only** for `scheduler-invoker`, which gives it `run.jobs.run` there and nowhere else. |
 | `google_cloud_scheduler_job.seed` | synthetic data **and** `ingest_enabled` | Hourly (minute 7) `POST https://run.googleapis.com/v2/projects/<p>/locations/<r>/jobs/<job>:run` with an OAuth token for `scheduler-invoker`; no retries. |
-| `google_logging_metric.health_sync["failed-run"]`, `["reconnect-needed"]` | real data | Counters over health-sync's `sync-run` log lines (see "Alerts"). |
-| `google_monitoring_alert_policy.health_sync[...]` | real data **and** `notification_channels` non-empty | Notifies when a counter is above 0 in a 15-minute window. |
+| `google_logging_metric.this[...]` | always (keys per mode, see "Alerts") | Counters over the services' own log lines and Cloud Scheduler's attempt logs. |
+| `google_monitoring_notification_channel.email` | `alert_email` set | An email notification channel for that address. |
+| `google_monitoring_alert_policy.this[...]` | `alert_email` or `notification_channels` set | One per metric: notifies when the counter is above 0 in a 15-minute window. |
 
 **Not created here, on purpose:**
 
@@ -134,29 +142,43 @@ Both services default to `INGRESS_TRAFFIC_INTERNAL_ONLY` (`v2_to_fhir_ingress`,
 `health_sync_ingress`). The URL exists, but a request from the open internet is refused at the
 network edge before IAM is even consulted, so a leaked token alone would not get in.
 
-| Caller | Counts as internal? | Basis |
+Google's "Private networking and Cloud Run" page
+(https://docs.cloud.google.com/run/docs/securing/private-networking), read directly:
+
+> Requests from BigQuery, Cloud Scheduler, Cloud Tasks, Dialogflow CX, Eventarc, Pub/Sub,
+> synthetic monitors (including uptime checks), and Workflows in the same project or VPC Service
+> Controls perimeter are recognized as "internal." Requests from Cloud Run or App Engine that are
+> sent from within the same project or VPC Service Controls perimeter all require additional
+> configuration before they are recognized as "internal."
+
+> When your destination Cloud Run resource receives traffic from other Cloud Run resources […]
+> the traffic must use the VPC network to be considered internal. […] Configure the source
+> resource to route all traffic through the VPC network and enable Private Google Access on the
+> subnet associated with Direct VPC egress or the connector.
+
+| Caller | Internal? | Consequence |
 | --- | --- | --- |
-| Pub/Sub push from a subscription **in the same project** (module healthcare) | yes | Google's Cloud Run private-networking page lists Pub/Sub, Cloud Scheduler, Cloud Tasks, Eventarc, Workflows and others "in the same project or VPC Service Controls perimeter" as internal (read through search-result summaries; see "Documentation relied on"). |
-| Cloud Scheduler in the same project | yes | same page |
-| `fhir-proxy` (another Cloud Run service) calling health-sync `/status` | **only if routed through the VPC** | The same page says requests from Cloud Run "require additional configuration" to count as internal: the caller must send them through a VPC network (Direct VPC egress). |
+| Pub/Sub push from module healthcare's subscription | yes, **if the dataset is in the same project** | A dataset in another project would have every push refused; a validation on `healthcare_project_id` refuses that combination unless `v2_to_fhir_ingress = "INGRESS_TRAFFIC_ALL"`. |
+| Cloud Scheduler in the same project | yes | |
+| `fhir-proxy` calling health-sync `/status` | only if routed through the VPC | See "For T22". |
 
-**What module phr (T22) must do for `/status`.** With project-base's suggested
-`vpc_access.egress = "PRIVATE_RANGES_ONLY"`, a request to health-sync's `*.run.app` address
-(a public Google address) leaves fhir-proxy directly, not through the VPC, and internal ingress
-refuses it. Two options:
+### For T22 (module phr)
 
-1. fhir-proxy uses `egress = "ALL_TRAFFIC"` on the serverless subnet (which has Private Google
-   Access). Then everything it sends, Google APIs included, goes through the VPC. That works
-   with no NAT as long as fhir-proxy only talks to Google APIs and the edge VM, which is the
-   design. Recommended.
-2. Set `health_sync_ingress = "INGRESS_TRAFFIC_ALL"`. IAM still admits only `scheduler-invoker`
-   and `fhir-proxy`; only the network lock is given up.
+fhir-proxy should use Direct VPC egress on project-base's `serverless` subnet with
+**`egress = "ALL_TRAFFIC"`** (not the `PRIVATE_RANGES_ONLY` project-base suggests for other
+services). Then its calls to `*.run.app` go through the VPC, and the subnet has Private Google
+Access, so they count as internal: health-sync and the cuff simulator can both stay
+internal-only. Google APIs are reached the same way; no Cloud NAT is needed, so it costs nothing.
+That holds as long as fhir-proxy talks only to Google APIs and the edge VM, which is the design.
+Its OIDC audience for `/status` is `health_sync_url`.
 
-Not verified: none of this has been applied. If pushes are refused at the network level on the
-first apply (a 404 or 403 *before* the container logs anything), set
-`v2_to_fhir_ingress = "INGRESS_TRAFFIC_ALL"`; IAM still admits only `pubsub-push`.
+Fallback, if T22 keeps `PRIVATE_RANGES_ONLY`: set `health_sync_ingress = "INGRESS_TRAFFIC_ALL"`.
+IAM still admits only `scheduler-invoker` and `fhir-proxy`; only the network lock is given up.
 
-`INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` is not offered: nothing here sits behind a load balancer.
+If pushes are refused at the network level on the first apply (an error *before* the container
+logs anything), set `v2_to_fhir_ingress = "INGRESS_TRAFFIC_ALL"`; IAM still admits only
+`pubsub-push`. `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` is not offered: nothing here sits behind
+a load balancer.
 
 ## Who may invoke what
 
@@ -179,10 +201,15 @@ the two never exist together.
 `v2-to-fhir` runs v2-to-fhir, `health-sync` runs health-sync, `seeder` runs the job.
 
 **Why `roles/run.invoker` on the job** and not `roles/run.jobsExecutor` or
-`roles/run.jobsExecutorWithOverrides`: Google's IAM reference lists `run.jobs.run` and
-`run.routes.invoke` in Invoker; `jobsExecutor` adds `run.executions.cancel`, and
-`…WithOverrides` adds `run.jobs.runWithOverrides`. Invoker granted on one job is the smallest
-that lets Scheduler start it. (Read through search-result summaries; confirm on first apply.)
+`roles/run.jobsExecutorWithOverrides`: Google's "Cloud Run roles and permissions" page
+(https://docs.cloud.google.com/iam/docs/roles-permissions/run) lists Invoker as "Can invoke Cloud
+Run services, instances and execute Cloud Run jobs" with `run.instances.invoke`, `run.jobs.run`
+and `run.routes.invoke`, grantable on a job; `jobsExecutor` is `run.executions.cancel` and
+`run.jobs.run`; `…WithOverrides` adds `run.jobs.runWithOverrides`. On a job, Invoker's only
+effective permission is `run.jobs.run`, which is exactly what Scheduler needs. "Execute jobs on
+a schedule" (https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule) uses the same
+target: `--uri="https://run.googleapis.com/v2/projects/PROJECT_ID/locations/CLOUD_RUN_REGION/jobs/JOB:run"`
+with `--oauth-service-account-email`.
 
 ## Environment and secrets
 
@@ -199,6 +226,7 @@ From each service's README, "Configuration". `PORT` is not set: Cloud Run sets i
 | `PATIENT_ASSIGNING_AUTHORITY` | if set | | | `patient_assigning_authority` |
 | `TIME_ZONE` | | yes | yes | `time_zone` |
 | `SYNC_INTERVAL_MINUTES` | | `15` | | the Scheduler interval, one constant for both |
+| `RUN_DEADLINE_SECONDS` | | `150` | | the attempt deadline (180 s) minus 30 s, so a run answers before Scheduler gives up |
 | `GOOGLE_HEALTH_*_FILE` | | the three file paths | | the mounts below |
 
 **health-sync's secrets are files, never environment variables.** Each Google Health secret is
@@ -216,13 +244,45 @@ when the instance starts. With files, a reconnect (a new refresh-token version) 
 the next run without a redeploy, and no secret value is in the service's configuration, the plan
 or the state: only the secret's *name* and the word `latest` are.
 
-**A bad configuration fails the deploy (v2-to-fhir).** `create_app()` builds the store resource
-names from the environment at start-up and raises on an ID that cannot form one. gunicorn then
-exits, Cloud Run's default TCP startup probe never sees port 8080 open, the revision never
-becomes Ready, and the apply reports the failed revision instead of a broken revision taking
-pushes. The variables' own validation catches most such IDs earlier, at plan time. health-sync
-deliberately does *not* fail on missing secret files (so it can deploy before the connect step
-and report `not-configured`); it does fail on a bad environment variable.
+### What a bad configuration does
+
+**At plan time** the variables refuse most bad values before anything is deployed: store,
+dataset and project IDs that could not form a resource name, a patient ID outside the services'
+character set or with the wrong `SYN-` prefix, a malformed or fixed-offset time zone, an image
+without a digest. **Not** caught at plan time: a well-shaped but unknown time zone
+(`America/Newyork`, `Mars/Olympus`), because a validation cannot carry the tz database.
+
+**At run time** both services check their configuration in `create_app()` and raise. That alone
+does not fail a deploy: gunicorn's master process opens port 8080 *before* its worker builds the
+app, so Cloud Run's default TCP startup probe ("If you don't explicitly configure a TCP startup
+probe […] Cloud Run automatically configures a TCP startup probe", Cloud Run "Configure
+container health checks") can pass while the worker crashes. What each service does about it:
+
+- **health-sync** has an **HTTP startup probe on `GET /status`**. `/status` answers 200 in every
+  state once the app exists, and nothing at all if `create_app()` failed. Cloud Run: "Any 2XX or
+  3XX response is a success, everything else indicates failure. If a startup probe does not
+  succeed within the specified time (failureThreshold * periodSeconds), which cannot exceed 600
+  seconds […], the container is shut down." The settings: 5 s initial delay, period 25 s,
+  timeout 22 s ("This value cannot exceed the value specified for periodSeconds"; `/status`
+  budgets itself 20 s), 5 failures, so about 130 s for a cold start. Probes come from Cloud Run
+  inside the instance, not through the URL, so ingress and IAM do not block them. Side effect:
+  when the secrets exist, `/status` makes one token request to Google; the probe stops at its
+  first success, so that is once per instance start. An unknown `TIME_ZONE` therefore ends in
+  a revision that never becomes Ready. It does *not* fail on missing secret files: health-sync
+  starts and reports `not-configured`, by design, so it can deploy before the connect step.
+- **v2-to-fhir** still relies on the default TCP probe: its only route is `POST /pubsub/hl7v2`,
+  and a probe's `GET` there answers 405, which counts as failure. A cheap `GET` route (for
+  example `/healthz`) has been asked for in the service; until then, a v2-to-fhir whose
+  `create_app()` fails can pass the deploy. Its pushes then get no answer, are retried, and are
+  dead-lettered after about 40 minutes (see "Dead-lettered and pending"). The image-side fix
+  (gunicorn `--preload`, so the master builds the app before opening the port) belongs to the
+  container task. All of v2-to-fhir's environment is validated at plan time, so this path should
+  not be reachable with values that passed the variables.
+- **Seeder**: a job has no startup probe; a configuration error makes the execution exit with
+  code 2 and log `seed-run` at WARNING, which the `seed-run-failed` alert reports.
+
+Whether a revision that never becomes Ready makes `terraform apply` fail (the provider waits for
+the service's Ready condition) is not verified.
 
 ## The two switches
 
@@ -238,7 +298,15 @@ and would then race the setup step), and module healthcare's push stays off if T
 module's `ingest_enabled` output to its `push_enabled`. Notifications then wait in the pull
 subscription (up to 7 days) and are delivered once push is switched on.
 
-Why the switch exists (D11, T25): the setup step writes the full Patient once. If an ingest Bundle
+**Switching `use_synthetic_data` on an existing deployment** destroys one set of workloads
+and creates the other (health-sync, its trigger and metrics; or the seeder job, its trigger and
+metric). The destroy fails if `deletion_protection = true`; set it false first. It also means a
+different patient: `SYN-` identifiers are allowed only with synthetic data and refused without, so
+`patient_id` changes too. In practice switch on a fresh FHIR store (a new dev stack, or after
+destroying module healthcare's store), because the store would otherwise hold both the real and
+the synthetic patient, and the seeder refuses to touch a store whose Patient is not its own.
+
+Why `ingest_enabled` exists (D11, T25): the setup step writes the full Patient once. If an ingest Bundle
 got there first, its conditional create would make an identifier-only Patient, and two ingests at
 first contact could make two.
 
@@ -261,6 +329,13 @@ first contact could make two.
    runs never need it. (`terraform output` here is the env root's, if T25 re-exports these.)
 3. `terraform apply` with `ingest_enabled = true`: the trigger appears here, and push is switched
    on in module healthcare.
+
+**If the first apply fails at health-sync on its secrets.** Cloud Run's documentation does not
+say whether a secret volume on a secret with **no versions yet** passes a deploy (Cloud Run is
+documented not to check volume secrets at start-up, but the deploy-time check is undocumented).
+If the first apply stops at `google_cloud_run_v2_service.health_sync` with a secret error, run
+the connect script (step 2) now: it needs only the FHIR store and Secret Manager, which the
+failed apply has already created. Then run `terraform apply` again.
 
 **Sizing the seeder's task timeout.** About 10 s per Bundle is an estimate (not measured on
 Cloud Healthcare), 100 windows per Bundle, 288 windows a day:
@@ -304,12 +379,14 @@ while msg="$(gcloud pubsub subscriptions pull "$DL_SUB" --limit=1 --format=json)
       [ "$(printf '%s' "$msg" | jq 'length')" -gt 0 ]; do
   name="$(printf '%s' "$msg" | jq -r '.[0].message.data' | base64 -d)"   # the stored message's name
   msg_type="$(printf '%s' "$msg" | jq -r '.[0].message.attributes.msgType // ""')"
-  gcloud pubsub topics publish "$TOPIC" --message="$name" --attribute="msgType=${msg_type}" &&
-    gcloud pubsub subscriptions ack "$DL_SUB" --ack-ids="$(printf '%s' "$msg" | jq -r '.[0].ackId')"
+  gcloud pubsub topics publish "$TOPIC" --message="$name" --attribute="msgType=${msg_type}" || break
+  gcloud pubsub subscriptions ack "$DL_SUB" --ack-ids="$(printf '%s' "$msg" | jq -r '.[0].ackId')" || break
 done
 ```
 
-A message whose publish fails is not acknowledged and comes back on a later pull. One whose
+A publish or acknowledgment that fails stops the loop (`|| break`), so a persistent failure (no
+permission, wrong topic) cannot spin forever; fix it and run the loop again. A message whose
+publish failed was not acknowledged and comes back on a later pull. One whose
 acknowledgment fails after a successful publish is replayed twice, which is harmless (keyed
 writes). Keep `msgType`: v2-to-fhir skips `ACK` notifications by it. Not verified: whether
 `gcloud … pull --format=json` returns `message.data` base64-encoded (the REST API does); if it is
@@ -318,40 +395,78 @@ already decoded, drop the `base64 -d`.
 **B. Find every "pending" message in the store** (also those older than the dead-letter
 retention): list messages without an outcome label, then publish each name to the topic as in A.
 
+The REST `messages.list` call filters on the server. Its reference
+(https://docs.cloud.google.com/healthcare-api/docs/reference/rest/v1/projects.locations.datasets.hl7V2Stores.messages/list)
+documents `labels.x` and "The operator `:*` can be used to assert the existence of a label",
+and "You can prepend the NOT operator to an expression to negate it":
+
 ```bash
-gcloud healthcare hl7v2-messages list \
-  --dataset=<dataset> --hl7v2-store=<store> --location=<location> \
-  --filter='NOT labels.application_outcome:*' --format='value(name)'
+STORE="projects/<project>/locations/<location>/datasets/<dataset>/hl7V2Stores/<store>"  # module.healthcare.hl7v2_store_id
+curl -sS -G -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://healthcare.googleapis.com/v1/${STORE}/messages" \
+  --data-urlencode 'filter=NOT labels."application_outcome":*' \
+  --data-urlencode 'pageSize=1000' |
+  jq -r '.hl7V2Messages[]?.name'
 ```
 
+The default view (`BASIC`) returns names only, no message content. Follow `nextPageToken`
+(`--data-urlencode "pageToken=<token>"`) if there are more than 1,000. If the filter is refused,
+fall back to filtering in `jq`: add `--data-urlencode 'view=FULL'` (needed to see labels) and
+replace the `jq` with
+`jq -r '.hl7V2Messages[]? | select((.labels.application_outcome // "") == "") | .name'`.
+`FULL` returns each message's content, so pipe it straight into `jq` and never save it to a
+file. The `gcloud healthcare hl7v2-messages list --filter=...` variant is **not verified**:
+`--filter` may be applied by gcloud on the client, over a view that has no labels.
+
 A message mapped a moment ago may not be labelled yet; look again after a minute before
-replaying. The label filter syntax is not verified against the API; if it is refused, list
-with `--format=json` and select messages without `labels.application_outcome` with `jq`. The
-dashboard's messages log shows the same set as "pending".
+replaying. The dashboard's messages log shows the same set as "pending".
 
 Replaying needs `pubsub.topics.publish` on the ingest topic (the deployer has `roles/pubsub.admin`;
 no workload account has it).
 
 ## Alerts
 
-From services/health-sync/README.md, "Alerts (for T20)", scoped to this module's health-sync
-service (`resource.type="cloud_run_revision" AND resource.labels.service_name="<prefix>-health-sync"`):
+Each signal is a log-based metric (a counter of matching log entries); each gets an alert
+policy that fires when its count summed over 15 minutes is above 0 and closes after an hour
+without a match. **Where alerts go**: `alert_email` (this module creates an email notification
+channel for it) and/or `notification_channels` (channels made elsewhere). T25 should set one of
+them. **With neither, there are metrics only: no alert policy exists and nobody is told** when
+ingestion breaks; the counters can still be charted in Metrics Explorer as
+`logging.googleapis.com/user/<metric name>` (charting needs the Monitoring API, enabled by
+project-base).
 
-| Metric | Filter (after the scope) | Means |
-| --- | --- | --- |
-| `<prefix>-health-sync-failed-run` | `(jsonPayload.event="sync-run" AND jsonPayload.http_status>=500) OR jsonPayload.event="bug"` | A run needs a person (permissions, a missing store, a refused Bundle), or Google/FHIR was down for a whole run. `bug` adds the one failure that writes no `sync-run` line: an exception in the handler. |
-| `<prefix>-health-sync-reconnect-needed` | `jsonPayload.event="sync-run" AND jsonPayload.outcome="reconnect-needed"` | The refresh token no longer works; run the connect script again. |
+| Metric (`<prefix>-…`) | Mode | Counts | Means |
+| --- | --- | --- | --- |
+| `health-sync-failed-run` | real data | health-sync's `sync-run` lines with `http_status >= 500`, or its `bug` line whose message starts with `sync failed` | A run needs a person (permissions, a missing store, a refused Bundle), Google or FHIR was down for a whole run, or the sync handler crashed. The `/status` handler's own `bug` line ("status check failed: …") is deliberately not counted: it is not a run. |
+| `health-sync-not-connected` | real data | `sync-run` lines with `outcome` `reconnect-needed` or `not-configured` | Both answer 200 at WARNING: the refresh token no longer works (run the connect script again), or a secret is missing or unusable (for example a disabled version). |
+| `seed-run-failed` | synthetic | the seeder job's `seed-run` lines at WARNING or above | An execution did not end as `seeded` (exit 1, 2, 3 or 4, or `bug`). |
+| `scheduler-attempt-failed` | both | Cloud Scheduler's own `AttemptFinished` entries for this mode's trigger at ERROR | Failures that write no line of the service's own: ingress refusal, a 403 from IAM, a 504 at the request timeout, a crash-looping container, a refused `jobs.run` call. |
 
-Cloud Run turns each JSON line a service prints into a log entry with the fields under
-`jsonPayload`, which is what the filters match. With `notification_channels` set, one alert
-policy per metric fires when the count over 15 minutes is above 0, and closes after an hour
-without a match. With none (the default) only the metrics exist: chart them in Metrics Explorer
-as `logging.googleapis.com/user/<metric name>`.
+All service filters are scoped to this module's workloads (`resource.type="cloud_run_revision"`
+and `service_name`, or `cloud_run_job` and `job_name`). Cloud Run turns each JSON line on stdout
+or stderr into a log entry with its fields under `jsonPayload` (Cloud Run "Logging and viewing
+logs"), which is what the filters match.
 
-Not covered: a run that never logs at all (Cloud Run killing the request at its timeout, or
-Scheduler failing to reach the service). Scheduler logs those attempts itself; an alert on
-Scheduler's own logs would be the next step. The README's optional `stranded-preliminary` alert
-is not created.
+**The Scheduler signal, and how sure it is.** Field names from Google's pages, read directly:
+the monitored resource `cloud_scheduler_job` has labels `project_id`, `location` and `job_id`
+(https://docs.cloud.google.com/logging/docs/api/v2/resource-list); Scheduler "publishes logs at
+the start of each execution and at the end of each execution"
+(https://docs.cloud.google.com/scheduler/docs/viewing-logs); the entries are
+`type.googleapis.com/google.cloud.scheduler.logging.AttemptStarted` and `…AttemptFinished`, and a
+failed attempt's entry carries `debugInfo` such as "URL_ERROR-ERROR_OTHER. Original HTTP response
+code number = 403" (https://docs.cloud.google.com/scheduler/docs/troubleshooting). That a
+**failed** `AttemptFinished` is logged at severity ERROR comes from community reports, not
+Google's pages; if it is not, this alert never fires. Check on the first deployment by looking
+at one failed attempt's entry. A metric-absence condition on the `sync-run` lines was the
+alternative; it was not chosen because the field names above are documented, and absence
+alerting would also fire whenever ingest is intentionally off.
+
+**A failed seeder execution** is not covered by the Scheduler signal: Scheduler only sees whether
+`jobs.run` accepted the execution, not how the container ended. That is why `seed-run-failed`
+exists. A seeder container killed before it logs anything (out of memory, the task timeout) is
+not covered by either.
+
+Not created: the health-sync README's optional `stranded-preliminary` alert.
 
 ## Cost
 
@@ -359,24 +474,37 @@ is not created.
 
 | Item | Billed for | At PulseBridge's volume |
 | --- | --- | --- |
-| Cloud Run services | request time and instances while serving; `min_instance_count = 0`, `cpu_idle = true` (CPU only during requests) | about 96 short health-sync runs a day plus one push per cuff reading: inside Cloud Run's monthly free tier |
+| Cloud Run services | request time and instances while serving; `min_instance_count = 0`, `cpu_idle = true` (CPU only during requests) | about 96 short health-sync runs a day plus one push per cuff reading: inside Cloud Run's monthly free tier (general knowledge, not checked) |
 | Cloud Run job | seconds of each execution | 24 executions of a few seconds a day (synthetic only) |
-| Cloud Scheduler | per job per month; the first 3 jobs per billing account are free | 1 job (either the sync or the seeder trigger); $0 unless the billing account already has 3 others, then about $0.10 a month |
-| Log-based metrics | ingested metric data; small free monthly allotment | two counters with a handful of points a day: $0 |
-| Alert policies (only with channels) | per condition per month | Google's pricing page lists $0.10 per condition per month (charging starts no sooner than 1 May 2026; another Google page cites $1.50); 2 conditions: $0.20 to $3 a month. $0 without channels |
-| Logs | Cloud Logging ingestion beyond the free 50 GiB a month | a few MB a month |
+| Cloud Scheduler | $0.10 per job per month; "Each Google billing account gets 3 jobs per month free" (https://cloud.google.com/scheduler/pricing) | 1 job: $0 unless the billing account already has 3 others |
+| Log-based metrics | metric data ingested; "First 150 MiB per billing account" free | three counters with a handful of points a day: $0 |
+| Alert policies (only with `alert_email` or channels) | "Starting no sooner than September 1, 2027 […] $0.35 per month for each metric reference in an alerting policy" and $0.50 per million points returned (https://cloud.google.com/products/observability/pricing) | $0 until then; afterwards 3 policies with one metric reference each: about $1.05 a month |
+| Email notification channel | nothing | $0 |
+| Logs | Cloud Logging ingestion beyond the free monthly allotment | a few MB a month |
 
-Alerting and metric pricing comes from search-result summaries of Google's pricing pages, not
-read directly; the Cloud Scheduler and Cloud Run free tiers are from general knowledge of
-Google's pricing, not checked in this task.
+## For T25: what to wire
 
-## What T25 must wire, and what other modules must provide
+```hcl
+module "healthcare" {
+  push_enabled               = module.ingestion.ingest_enabled
+  push_endpoint              = module.ingestion.v2_to_fhir_push_endpoint
+  push_service_account_email = module.identity.service_account_emails["pubsub-push"]
+  project_id                 = var.project_id # the same project as module ingestion
+}
+module "identity" {
+  create_seeder_account = var.use_synthetic_data
+}
+module "ingestion" {
+  depends_on  = [module.identity] # secret accessor grants before health-sync deploys
+  alert_email = var.alert_email   # or notification_channels; with neither, metrics only
+}
+```
 
 **Outputs consumed from other modules** (exact names):
 
 | This module's variable | From |
 | --- | --- |
-| `healthcare_project_id` | `module.healthcare.project_id` |
+| `healthcare_project_id` | `module.healthcare.project_id` (must equal `project_id` while ingress is internal-only) |
 | `healthcare_location` | `module.healthcare.location` |
 | `healthcare_dataset_id` | `module.healthcare.dataset_name` |
 | `fhir_store_id` | `module.healthcare.fhir_store_name` |
@@ -395,43 +523,33 @@ Google's pricing, not checked in this task.
 
 **Variables T25 sets from its own tfvars:** `project_id`, `region`, `use_synthetic_data`,
 `ingest_enabled`, `v2_to_fhir_image`, `health_sync_image` or `seed_image`, `patient_id`,
-`time_zone`, optionally `notification_channels`, `name_prefix`, `labels`,
-`patient_assigning_authority`, `deletion_protection`.
+`time_zone`, `alert_email` and/or `notification_channels`; optionally `name_prefix`, `labels`,
+`patient_assigning_authority`, `deletion_protection`, the two ingress variables.
 
-**Needed outside this module** (not changed here):
-
-- **Deployer roles (bootstrap, T02).** `deployer_roles` has `roles/run.admin`,
-  `roles/cloudscheduler.admin` and `roles/iam.serviceAccountUser` (to deploy as the workload
-  accounts and give Scheduler its token identity), but not `roles/logging.configWriter` (log-based
-  metrics) or, with channels, `roles/monitoring.alertPolicyEditor` (alert policies). Without them
-  the apply fails at the metrics.
-- **Monitoring API (project-base, T03).** Only with `notification_channels`: add
-  `monitoring.googleapis.com` to `enabled_apis`. Log-based metrics need only the Logging API,
-  which is enabled.
-- **fhir-proxy's egress (phr, T22)**: see "Ingress".
-- **Module identity's description** of `scheduler-invoker` says "Can only invoke health-sync"; in a
-  synthetic deployment it runs the seeder job instead. Only the wording is out of date.
+**Provided by other modules:** the deployer's `roles/logging.configWriter`,
+`roles/monitoring.alertPolicyEditor` and `roles/monitoring.notificationChannelEditor`
+(bootstrap); `monitoring.googleapis.com` in project-base's API list; fhir-proxy's
+`ALL_TRAFFIC` egress (phr, see "For T22").
 
 ## Not verified
 
-Nothing in this module has been applied: every statement about Google's behaviour comes from
-documentation (much of it through search-result summaries, because Google's documentation host
-is not reachable from the build session) and every test runs against a mocked provider.
-Confirm on the first apply (T25, T29):
+Nothing in this module has been applied, and every test runs against a mocked provider. The
+Google facts quoted above were read on Google's pages; what remains to confirm on the first
+apply (T25, T29):
 
-- Pub/Sub push and Cloud Scheduler reach internal-only services in the same project.
-- fhir-proxy's `/status` call passes internal ingress with `ALL_TRAFFIC` egress.
-- A failing v2-to-fhir start-up fails the apply (the provider waits for the revision to become
-  Ready and reports the failure) rather than leaving a failed revision behind a successful apply.
-- health-sync deploys while the secrets have no version yet (before the connect step); Cloud Run
-  is documented not to check volume secrets at start-up.
-- `roles/run.invoker` on the job is enough for Scheduler's `jobs.run`, and the v2 Admin API URL
-  works as the Scheduler target.
+- Pub/Sub push and Cloud Scheduler reach the internal-only services; fhir-proxy's `/status`
+  passes with `ALL_TRAFFIC` egress.
+- A revision that never becomes Ready (health-sync with an unknown time zone) makes the apply
+  fail; the HTTP startup probe on `/status` passes on a healthy cold start within its window.
+- health-sync deploys while its secrets have no version yet (otherwise see "First run").
+- `roles/run.invoker` on the job lets Scheduler's OAuth call to `jobs.run` through.
 - The OIDC audience (the bare service URL) is accepted by Cloud Run.
-- The log filters match health-sync's real log entries (`jsonPayload.event`, `http_status`,
-  `outcome`), and the alert policy's threshold and aggregation fire as intended.
-- The `gcloud healthcare hl7v2-messages list` label filter in "Dead-lettered and pending".
-- All role contents and prices above.
+- The log filters match the real entries (`jsonPayload.event`, `http_status`, `outcome`,
+  `jsonPayload.message` for the `bug` line, the seeder's lines on stderr), and failed Scheduler
+  attempts are logged at ERROR.
+- The email channel delivers without further confirmation, and the policies fire as intended.
+- The replay commands: whether `gcloud … pull --format=json` returns `message.data`
+  base64-encoded, and the `messages.list` filter in practice.
 
 ## Tests
 
@@ -441,10 +559,10 @@ environment, then runs `tests/static_checks.sh`.
 
 | File | Checks |
 | --- | --- |
-| `real_data.tftest.hcl` | health-sync and no seeder; exact invokers, nothing public, IAM check on, internal ingress; scale to zero, `max_instance_count = 1`, timeout ≥ 180 s; images and service accounts; exact environments; secrets as volumes at `latest`, one directory each, none in environment variables; metrics without channels, policies with; the trigger (15 min, `retry_count = 0`, `attempt_deadline = 180s`, OIDC, audience); no trigger while `ingest_enabled = false`; outputs |
-| `synthetic.tftest.hcl` | the seeder job and nothing of health-sync; job account, retries, image, args, timeout, environment; the narrow job grant; no trigger until `ingest_enabled`, then hourly with OAuth to `jobs.run` |
-| `validation.tftest.hcl` | tag-only, tag-plus-digest, short-digest and `latest` images refused; required images per mode; `SYN-` required with and refused without synthetic data; patient ID characters; fixed-offset and malformed time zones; required accounts and secrets per mode; full paths for store IDs; short timeouts; bad channels; unsupported ingress |
-| `static_checks.sh` | reads the `.tf` files and fails on any public principal, any `min_instance_count` other than 0 or `manual_instance_count`, any `_iam_binding`/`_iam_policy` or project IAM, any service account key, any other IAM member resource or member not built from `var.service_account_emails`, `invoker_iam_disabled` other than `false`, secrets in environment variables, a hardcoded project (argument, path, service account email, registry path), a child module, and a missing `depends_on` on the push endpoint output |
+| `real_data.tftest.hcl` | health-sync and no seeder; exact invokers, nothing public, IAM check on, internal ingress; scale to zero, `max_instance_count = 1`, timeout ≥ 180 s; v2-to-fhir timeout ≤ the 60 s ack deadline and concurrency 4; `deletion_protection` false by default; images and service accounts; exact environments (with `RUN_DEADLINE_SECONDS = 150`); secrets as volumes at `latest`, one directory each, none in environment variables; the HTTP startup probe on `/status` and its timing limits; the three metrics and their filters (including the sync handler's `bug` clause and `not-configured`); no policy or channel without a destination; policies with channels: one per metric, threshold, aggregation, labels; `alert_email` creates the email channel and is used alone or with channels; the trigger (15 min, `retry_count = 0`, `attempt_deadline = 180s`, OIDC, audience); no trigger while `ingest_enabled = false`; outputs |
+| `synthetic.tftest.hcl` | the seeder job and nothing of health-sync; job account, retries, image, args, no `command`, timeout, environment, `deletion_protection`; the narrow job grant; the seeder and Scheduler metrics; no trigger until `ingest_enabled`, then hourly with OAuth to `jobs.run` |
+| `validation.tftest.hcl` | tag-only, tag-plus-digest, short-digest and `latest` images refused; required images per mode; `SYN-` required with and refused without synthetic data; patient ID characters; fixed-offset and malformed time zones; required accounts and secrets per mode; full paths for store IDs; a dataset in another project with internal ingress; short timeouts; bad channels and alert addresses; unsupported ingress |
+| `static_checks.sh` | reads the `.tf` files and fails on any public principal, any `min_instance_count` other than 0 or `manual_instance_count`, any `_iam_binding`/`_iam_policy` or project IAM, any service account key, any other IAM member resource or member not built from `var.service_account_emails`, `invoker_iam_disabled` other than `false`, secrets in environment variables, a hardcoded project (argument, path, service account email, registry path), a child module, and a missing `depends_on` on the push endpoint output or on either Scheduler job |
 
 ```bash
 make tf-test                      # from the repository root (credential-free)
@@ -453,23 +571,41 @@ tests/static_checks.sh            # from this directory, or pass the module path
 
 ## Documentation relied on
 
-- Terraform provider `hashicorp/google` 8.11 (the schema from `terraform providers schema` for
-  the pinned version, and the provider docs on GitHub, `website/docs/r/`):
-  `cloud_run_v2_service` (`ingress` values, `deletion_protection` defaults to true,
-  `invoker_iam_disabled`, `template.scaling`, secret volume `items.version` "latest"),
-  `cloud_run_v2_job`, `cloud_scheduler_job` (`paused` defaults to enabled; OIDC `audience`
-  defaults to the target URI; OAuth `scope` defaults to cloud-platform; HTTP `attempt_deadline`
-  15 s to 30 min), `cloud_run_v2_service_iam_member`, `cloud_run_v2_job_iam_member`,
-  `logging_metric`, `monitoring_alert_policy`.
-- Google Cloud documentation, through search-result summaries (docs.cloud.google.com is not
-  reachable from the build session): Cloud Run "Private networking and Cloud Run" (internal
-  sources); Cloud Run "Execute jobs on a schedule" (Scheduler HTTP target to `jobs/<job>:run`
-  with an OAuth service account; `roles/run.invoker`); IAM "Cloud Run roles and permissions"
-  (`run.invoker`: `run.jobs.run`, `run.routes.invoke`); Cloud Scheduler roles; Google Cloud
-  Observability pricing and "Manage alerting costs".
-- The services' READMEs (health-sync "For T20", "Alerts (for T20)", "Secrets: what T20 must
-  mount"; v2-to-fhir "Acknowledge or retry", "Configuration"; seed "For T20, T22, T24 and T25";
-  services "Container images"), and modules healthcare and identity.
+Read directly (with `curl`) unless marked otherwise:
+
+- Terraform provider `hashicorp/google` 8.11: the schema from `terraform providers schema` for
+  the pinned version (including `startup_probe.http_get.path/port`, `timeout_seconds`,
+  `period_seconds`, `failure_threshold`; `google_monitoring_notification_channel` `type`,
+  `labels`), and the provider docs on GitHub, `website/docs/r/`: `cloud_run_v2_service`
+  (`ingress` values, `deletion_protection` defaults to true, `invoker_iam_disabled`,
+  `template.scaling`, secret volume `items.version` "latest"), `cloud_scheduler_job` (`paused`
+  defaults to enabled; OIDC `audience` defaults to the target URI; OAuth `scope` defaults to
+  cloud-platform; HTTP `attempt_deadline` 15 s to 30 min).
+- Cloud Run "Configure container health checks"
+  (https://docs.cloud.google.com/run/docs/configuring/healthchecks): HTTP probe success is 2XX
+  or 3XX; timeout must not exceed the period; `failureThreshold * periodSeconds` at most 600 s;
+  the default TCP startup probe; "HTTP health check endpoints are externally accessible".
+- Cloud Run "Private networking and Cloud Run"
+  (https://docs.cloud.google.com/run/docs/securing/private-networking): internal sources.
+- Cloud Run "Execute jobs on a schedule"
+  (https://docs.cloud.google.com/run/docs/execute/jobs-on-schedule) and IAM "Cloud Run roles and
+  permissions" (https://docs.cloud.google.com/iam/docs/roles-permissions/run).
+- Cloud Run "Logging and viewing logs" (https://docs.cloud.google.com/run/docs/logging): stdout
+  and stderr are collected; single-line JSON goes to `jsonPayload`.
+- Cloud Logging monitored resources
+  (https://docs.cloud.google.com/logging/docs/api/v2/resource-list): `cloud_scheduler_job`,
+  `cloud_run_job`, `cloud_run_revision` and their labels.
+- Cloud Scheduler "View logs" (https://docs.cloud.google.com/scheduler/docs/viewing-logs) and
+  "Troubleshooting" (https://docs.cloud.google.com/scheduler/docs/troubleshooting):
+  `AttemptStarted`/`AttemptFinished`, `debugInfo`. ERROR severity of a failed attempt: community
+  reports only (Google Developer forums, search results).
+- Cloud Healthcare `hl7V2Stores.messages.list`
+  (https://docs.cloud.google.com/healthcare-api/docs/reference/rest/v1/projects.locations.datasets.hl7V2Stores.messages/list):
+  label filters, `:*`, `NOT`, `view`.
+- Pricing: Google Cloud Observability (https://cloud.google.com/products/observability/pricing),
+  Cloud Scheduler (https://cloud.google.com/scheduler/pricing).
+- The services' READMEs and code (health-sync `app.py` and `logs.py`, the seeder's `cli.py`, the
+  seeder Dockerfile on the T35 branch), and modules healthcare and identity.
 
 <!-- BEGIN_TF_DOCS -->
 ## Requirements
@@ -500,13 +636,15 @@ No modules.
 | [google_cloud_run_v2_service_iam_member.invoker](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_run_v2_service_iam_member) | resource |
 | [google_cloud_scheduler_job.health_sync](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_scheduler_job) | resource |
 | [google_cloud_scheduler_job.seed](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/cloud_scheduler_job) | resource |
-| [google_logging_metric.health_sync](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/logging_metric) | resource |
-| [google_monitoring_alert_policy.health_sync](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/monitoring_alert_policy) | resource |
+| [google_logging_metric.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/logging_metric) | resource |
+| [google_monitoring_alert_policy.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/monitoring_alert_policy) | resource |
+| [google_monitoring_notification_channel.email](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/monitoring_notification_channel) | resource |
 
 ## Inputs
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
+| <a name="input_alert_email"></a> [alert\_email](#input\_alert\_email) | Optional email address the alerts are sent to: creates a Cloud Monitoring email notification channel in this module, used together with notification\_channels. No default and never hardcoded: set it in the env root's tfvars (T25). It is stored in the Terraform state and on the channel. null (default) creates no channel. | `string` | `null` | no |
 | <a name="input_deletion_protection"></a> [deletion\_protection](#input\_deletion\_protection) | Refuse to destroy the Cloud Run services and the job (the provider's deletion\_protection, which defaults to true). false (default) here, because they hold no data and dev is destroyed nightly; the data lives in module healthcare, which has its own deletion\_policy. | `bool` | `false` | no |
 | <a name="input_fhir_store_id"></a> [fhir\_store\_id](#input\_fhir\_store\_id) | Short ID of the main (health-data) FHIR store (module.healthcare.fhir\_store\_name), not the audit store. Becomes FHIR\_STORE\_ID. | `string` | n/a | yes |
 | <a name="input_health_sync_image"></a> [health\_sync\_image](#input\_health\_sync\_image) | health-sync image by digest (same form as v2\_to\_fhir\_image). Required when use\_synthetic\_data is false; ignored, and may be null, when it is true. | `string` | `null` | no |
@@ -519,7 +657,7 @@ No modules.
 | <a name="input_ingest_enabled"></a> [ingest\_enabled](#input\_ingest\_enabled) | Whether anything may start ingestion on a schedule. false (default): no Scheduler job<br/>exists, so neither health-sync nor the seeder ever runs by itself. Turn it on only after<br/>the setup step has written the Patient (D11): the connect script (T11) for a real<br/>deployment, or the first seeding (`--days 30`) for a synthetic one. Both run outside<br/>`terraform apply`; see the README, "First run". The cuff path's push subscription lives in<br/>module healthcare: feed this module's `ingest_enabled` output to its push\_enabled so one<br/>switch controls both. | `bool` | `false` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the Cloud Run services and the job (Scheduler jobs and log metrics take no labels). | `map(string)` | `{}` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every resource name in this module: "<prefix>-v2-to-fhir", "<prefix>-health-sync", "<prefix>-seed" and so on. Lets two stacks share one project without colliding. | `string` | `"pulsebridge"` | no |
-| <a name="input_notification_channels"></a> [notification\_channels](#input\_notification\_channels) | Cloud Monitoring notification channels ("projects/<project>/notificationChannels/<id>", created by hand or in the env root) for the health-sync alerts. Empty (default): the log-based metrics are created and can be charted, but no alert policy exists, so nothing is sent and nothing is billed for alerting. Non-empty needs the Monitoring API (monitoring.googleapis.com) enabled, which module project-base does not enable by default. | `list(string)` | `[]` | no |
+| <a name="input_notification_channels"></a> [notification\_channels](#input\_notification\_channels) | Existing Cloud Monitoring notification channels ("projects/<project>/notificationChannels/<id>", made by hand or in the env root) the alerts are sent to, in addition to alert\_email. With neither set there are log-based metrics only: they can be charted, but no alert policy exists and nobody is told. Alert policies and charts need the Monitoring API (monitoring.googleapis.com, in project-base's default list). | `list(string)` | `[]` | no |
 | <a name="input_patient_assigning_authority"></a> [patient\_assigning\_authority](#input\_patient\_assigning\_authority) | Optional. If set, v2-to-fhir also requires PID-3.4.1 of the matching PID-3 to equal it (PATIENT\_ASSIGNING\_AUTHORITY). null (default) leaves the variable unset. | `string` | `null` | no |
 | <a name="input_patient_id"></a> [patient\_id](#input\_patient\_id) | The one configured patient identifier (value in the urn:pulsebridge:patient system), the<br/>same one the setup step writes (D11) and every service uses. Becomes PATIENT\_ID. Letters,<br/>digits, '.', '\_' and '-', at most 64 characters (the services' own rule). With<br/>use\_synthetic\_data it must start with "SYN-" (the seeder refuses anything else); without<br/>it, it must not, so a real deployment can never be mistaken for a synthetic one (T25).<br/>It is an identifier, not a secret, but never commit a real one: it comes from tfvars. | `string` | n/a | yes |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the GCP project the Cloud Run services, the job, the Scheduler jobs and the log-based metrics are created in. Comes from the env root; never hardcoded. | `string` | n/a | yes |
@@ -528,7 +666,7 @@ No modules.
 | <a name="input_seed_image"></a> [seed\_image](#input\_seed\_image) | Seeder image by digest (same form as v2\_to\_fhir\_image). Required when use\_synthetic\_data is true; ignored, and may be null, when it is false. | `string` | `null` | no |
 | <a name="input_seed_task_timeout"></a> [seed\_task\_timeout](#input\_seed\_task\_timeout) | Time limit of one seeder job execution (a duration such as "1800s"). The hourly top-up (--hours 4) is one Bundle and takes seconds; the first --days 30 seeding is about 85 Bundles, roughly 15 minutes at an assumed 10 s per Bundle, so the default 1800 s leaves twice that. A longer first seeding sets its own limit with --task-timeout (README, "First run"). Only seconds used are billed. | `string` | `"1800s"` | no |
 | <a name="input_service_account_emails"></a> [service\_account\_emails](#input\_service\_account\_emails) | Module identity's map of workload name to service account email, passed as it is<br/>(module.identity.service\_account\_emails). Keys used:<br/>  v2-to-fhir        runs v2-to-fhir                              (always)<br/>  pubsub-push       the only invoker of v2-to-fhir               (always)<br/>  health-sync       runs health-sync                             (real data)<br/>  scheduler-invoker invokes health-sync /sync, or runs the seeder job (Scheduler's token)<br/>  fhir-proxy        the only other invoker of health-sync (/status) (real data)<br/>  seeder            runs the seeder job                          (synthetic data)<br/>Other keys are ignored. Bindings are chosen by key name only, so the plan knows which exist<br/>even while the emails are unknown. | `map(string)` | n/a | yes |
-| <a name="input_time_zone"></a> [time\_zone](#input\_time\_zone) | The user's IANA time zone, such as "America/New\_York" or "Europe/Amsterdam" (TIME\_ZONE for health-sync and the seeder). Fixed offsets ("UTC-5", "Etc/GMT+5", "+02:00") are refused, as the services refuse them: they ignore daylight saving time. "UTC" itself is allowed. | `string` | n/a | yes |
+| <a name="input_time_zone"></a> [time\_zone](#input\_time\_zone) | The user's IANA time zone, such as "America/New\_York" or "Europe/Amsterdam" (TIME\_ZONE for health-sync and the seeder). Fixed offsets ("UTC-5", "Etc/GMT+5", "+02:00") are refused, as the services refuse them: they ignore daylight saving time. "UTC" itself is allowed. Only the SHAPE is checked here: a well-formed but unknown name ("America/Newyork") passes validation, health-sync and the seeder then refuse to start, and health-sync's HTTP startup probe makes that deploy fail (README, "What a bad configuration does"). | `string` | n/a | yes |
 | <a name="input_use_synthetic_data"></a> [use\_synthetic\_data](#input\_use\_synthetic\_data) | Which wearable source this deployment has. false (default): the real Google Health<br/>connection, so health-sync is deployed with its Scheduler job and alerts, and the seeder<br/>is not. true: the synthetic-data seeder (T09) runs as a Cloud Run job instead, and nothing<br/>of health-sync is created. The two never exist together. The cuff path (v2-to-fhir) is<br/>deployed either way. patient\_id must start with "SYN-" when this is true and must not<br/>when it is false. | `bool` | `false` | no |
 | <a name="input_v2_to_fhir_image"></a> [v2\_to\_fhir\_image](#input\_v2\_to\_fhir\_image) | v2-to-fhir image by digest, as the build prints it: "<region>-docker.pkg.dev/<project>/<repository>/v2-to-fhir@sha256:<64 hex>". A tag (":v1") is refused, with or without a digest. | `string` | n/a | yes |
 | <a name="input_v2_to_fhir_ingress"></a> [v2\_to\_fhir\_ingress](#input\_v2\_to\_fhir\_ingress) | Ingress of v2-to-fhir. "INGRESS\_TRAFFIC\_INTERNAL\_ONLY" (default): only internal sources reach it, and a Pub/Sub push from a subscription in the same project counts as internal (README, "Ingress"). "INGRESS\_TRAFFIC\_ALL" is the fallback if the first apply shows pushes refused at the network level; IAM still lets only pubsub-push invoke it. | `string` | `"INGRESS_TRAFFIC_INTERNAL_ONLY"` | no |
@@ -539,11 +677,12 @@ No modules.
 
 | Name | Description |
 |------|-------------|
-| <a name="output_alert_policy_names"></a> [alert\_policy\_names](#output\_alert\_policy\_names) | Alert policy resource names by alert key; empty when notification\_channels is empty or with synthetic data. |
+| <a name="output_alert_email_channel"></a> [alert\_email\_channel](#output\_alert\_email\_channel) | Name of the email notification channel created from alert\_email, or null. |
+| <a name="output_alert_policy_names"></a> [alert\_policy\_names](#output\_alert\_policy\_names) | Alert policy resource names by alert key; empty when neither alert\_email nor notification\_channels is set (metrics only). |
 | <a name="output_health_sync_service_name"></a> [health\_sync\_service\_name](#output\_health\_sync\_service\_name) | Name of the health-sync Cloud Run service, or null with synthetic data. |
 | <a name="output_health_sync_url"></a> [health\_sync\_url](#output\_health\_sync\_url) | Base URL of health-sync, or null with synthetic data. fhir-proxy (module phr) calls <url>/status with an OIDC token whose audience is this URL. |
 | <a name="output_ingest_enabled"></a> [ingest\_enabled](#output\_ingest\_enabled) | Echo of ingest\_enabled. Feed it to module healthcare's push\_enabled, so one switch turns on the Scheduler job here and the push subscription there. |
-| <a name="output_log_metric_names"></a> [log\_metric\_names](#output\_log\_metric\_names) | Log-based metric names by alert key (failed-run, reconnect-needed); empty with synthetic data. In Monitoring they are logging.googleapis.com/user/<name>. |
+| <a name="output_log_metric_names"></a> [log\_metric\_names](#output\_log\_metric\_names) | Log-based metric names by alert key (health-sync-failed-run, health-sync-not-connected, seed-run-failed, scheduler-attempt-failed; those of the deployed mode). In Monitoring they are logging.googleapis.com/user/<name>. |
 | <a name="output_region"></a> [region](#output\_region) | Region of the services, the job and the Scheduler jobs (for the gcloud commands in the README). |
 | <a name="output_scheduler_job_names"></a> [scheduler\_job\_names](#output\_scheduler\_job\_names) | Names of the Scheduler jobs that exist (empty while ingest\_enabled is false). |
 | <a name="output_seed_job_name"></a> [seed\_job\_name](#output\_seed\_job\_name) | Name of the seeder Cloud Run job, or null without synthetic data. The first seeding runs it by hand: gcloud run jobs execute <name> --region <region> --args=--days,30 --wait. |

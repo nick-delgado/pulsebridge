@@ -11,6 +11,10 @@ mock_provider "google" {
     target = google_cloud_run_v2_service.health_sync
     values = { uri = "https://pulsebridge-health-sync-abc123-uc.a.run.app" }
   }
+  override_resource {
+    target = google_monitoring_notification_channel.email
+    values = { name = "projects/example-project/notificationChannels/999" }
+  }
 }
 
 variables {
@@ -186,6 +190,7 @@ run "health_sync_secrets_are_files_at_latest" {
       PATIENT_ID                       = "PB-EXAMPLE-0001"
       TIME_ZONE                        = "America/New_York"
       SYNC_INTERVAL_MINUTES            = "15"
+      RUN_DEADLINE_SECONDS             = "150"
       GOOGLE_HEALTH_CLIENT_ID_FILE     = "/secrets/google-health-client-id/value"
       GOOGLE_HEALTH_CLIENT_SECRET_FILE = "/secrets/google-health-client-secret/value"
       GOOGLE_HEALTH_REFRESH_TOKEN_FILE = "/secrets/google-health-refresh-token/value"
@@ -198,16 +203,39 @@ run "alert_metrics_without_channel" {
   command = apply
 
   assert {
-    condition     = length(google_logging_metric.health_sync) == 2 && length(google_monitoring_alert_policy.health_sync) == 0
-    error_message = "Without notification channels there must be the two log metrics and no alert policy."
+    condition     = toset(keys(google_logging_metric.this)) == toset(["health-sync-failed-run", "health-sync-not-connected", "scheduler-attempt-failed"])
+    error_message = "With real data there must be the failed-run, not-connected and Scheduler-attempt metrics."
   }
   assert {
-    condition     = strcontains(google_logging_metric.health_sync["failed-run"].filter, "jsonPayload.event=\"sync-run\" AND jsonPayload.http_status>=500") && strcontains(google_logging_metric.health_sync["failed-run"].filter, "resource.labels.service_name=\"pulsebridge-health-sync\"")
+    condition     = length(google_monitoring_alert_policy.this) == 0 && length(google_monitoring_notification_channel.email) == 0 && output.alert_email_channel == null
+    error_message = "With neither alert_email nor notification_channels there must be no alert policy and no channel (metrics only)."
+  }
+  assert {
+    condition = (
+      strcontains(google_logging_metric.this["health-sync-failed-run"].filter, "resource.labels.service_name=\"pulsebridge-health-sync\"") &&
+      strcontains(google_logging_metric.this["health-sync-failed-run"].filter, "(jsonPayload.event=\"sync-run\" AND jsonPayload.http_status>=500)")
+    )
     error_message = "The failed-run metric must use the README's filter, scoped to health-sync."
   }
   assert {
-    condition     = strcontains(google_logging_metric.health_sync["reconnect-needed"].filter, "jsonPayload.event=\"sync-run\" AND jsonPayload.outcome=\"reconnect-needed\"") && strcontains(google_logging_metric.health_sync["reconnect-needed"].filter, "resource.labels.service_name=\"pulsebridge-health-sync\"")
-    error_message = "The reconnect-needed metric must use the README's filter, scoped to health-sync."
+    condition     = strcontains(google_logging_metric.this["health-sync-failed-run"].filter, "OR (jsonPayload.event=\"bug\" AND jsonPayload.message=~\"^sync failed\")")
+    error_message = "The failed-run metric must also match the sync handler's own crash (event bug, message \"sync failed: ...\") and only that one."
+  }
+  assert {
+    condition = (
+      strcontains(google_logging_metric.this["health-sync-not-connected"].filter, "resource.labels.service_name=\"pulsebridge-health-sync\"") &&
+      strcontains(google_logging_metric.this["health-sync-not-connected"].filter, "jsonPayload.event=\"sync-run\" AND (jsonPayload.outcome=\"reconnect-needed\" OR jsonPayload.outcome=\"not-configured\")")
+    )
+    error_message = "The not-connected metric must count reconnect-needed and not-configured sync runs of health-sync."
+  }
+  assert {
+    condition = google_logging_metric.this["scheduler-attempt-failed"].filter == join(" AND ", [
+      "resource.type=\"cloud_scheduler_job\"",
+      "resource.labels.job_id=\"pulsebridge-health-sync-every-15-min\"",
+      "jsonPayload.@type=\"type.googleapis.com/google.cloud.scheduler.logging.AttemptFinished\"",
+      "severity>=ERROR",
+    ])
+    error_message = "The Scheduler metric must count failed AttemptFinished entries of the sync trigger."
   }
 }
 
@@ -215,18 +243,110 @@ run "alert_policies_with_channel" {
   command = apply
   variables {
     notification_channels = ["projects/example-project/notificationChannels/123"]
+    labels                = { env = "test" }
   }
   assert {
-    condition     = length(google_monitoring_alert_policy.health_sync) == 2
+    condition     = toset(keys(google_monitoring_alert_policy.this)) == toset(keys(google_logging_metric.this)) && length(google_monitoring_alert_policy.this) == 3
     error_message = "A notification channel must add one alert policy per metric."
   }
   assert {
     condition = alltrue([
-      for k, p in google_monitoring_alert_policy.health_sync :
+      for k, p in google_monitoring_alert_policy.this :
       p.notification_channels == tolist(["projects/example-project/notificationChannels/123"]) &&
-      strcontains(p.conditions[0].condition_threshold[0].filter, "logging.googleapis.com/user/${google_logging_metric.health_sync[k].name}")
+      p.conditions[0].condition_threshold[0].filter == "metric.type=\"logging.googleapis.com/user/${google_logging_metric.this[k].name}\""
     ])
     error_message = "Each policy must notify the channel and watch its own log metric."
+  }
+  assert {
+    condition = alltrue([
+      for k, p in google_monitoring_alert_policy.this :
+      p.conditions[0].condition_threshold[0].comparison == "COMPARISON_GT" &&
+      p.conditions[0].condition_threshold[0].threshold_value == 0 &&
+      p.conditions[0].condition_threshold[0].duration == "0s" &&
+      p.conditions[0].condition_threshold[0].aggregations[0].alignment_period == "900s" &&
+      p.conditions[0].condition_threshold[0].aggregations[0].per_series_aligner == "ALIGN_SUM" &&
+      p.conditions[0].condition_threshold[0].aggregations[0].cross_series_reducer == "REDUCE_SUM"
+    ])
+    error_message = "Each policy must fire when its counter summed over 15 minutes is above 0."
+  }
+  assert {
+    condition     = alltrue([for p in google_monitoring_alert_policy.this : p.user_labels == tomap({ env = "test" })])
+    error_message = "Alert policies must carry the module's labels."
+  }
+}
+
+run "alert_email_creates_a_channel" {
+  command = apply
+  variables {
+    alert_email           = "alerts@example.com"
+    notification_channels = ["projects/example-project/notificationChannels/123"]
+  }
+  assert {
+    condition = (
+      length(google_monitoring_notification_channel.email) == 1 &&
+      google_monitoring_notification_channel.email[0].type == "email" &&
+      google_monitoring_notification_channel.email[0].labels["email_address"] == "alerts@example.com"
+    )
+    error_message = "alert_email must create one email notification channel for that address."
+  }
+  assert {
+    condition = alltrue([
+      for p in google_monitoring_alert_policy.this :
+      p.notification_channels == tolist(["projects/example-project/notificationChannels/123", "projects/example-project/notificationChannels/999"])
+    ]) && length(google_monitoring_alert_policy.this) == 3
+    error_message = "Every policy must notify both the passed-in channels and the email channel."
+  }
+}
+
+run "alert_email_alone_creates_policies" {
+  command = apply
+  variables {
+    alert_email = "alerts@example.com"
+  }
+  assert {
+    condition = length(google_monitoring_alert_policy.this) == 3 && alltrue([
+      for p in google_monitoring_alert_policy.this : p.notification_channels == tolist(["projects/example-project/notificationChannels/999"])
+    ])
+    error_message = "alert_email alone must be enough for the alert policies."
+  }
+}
+
+run "health_sync_startup_probe_proves_the_app_started" {
+  command = apply
+  assert {
+    condition = (
+      google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].http_get[0].path == "/status" &&
+      google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].http_get[0].port == 8080 &&
+      length(google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].tcp_socket) == 0
+    )
+    error_message = "health-sync must have an HTTP startup probe on GET /status, port 8080."
+  }
+  assert {
+    condition = (
+      google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].timeout_seconds <= google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].period_seconds &&
+      google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].timeout_seconds >= 20 &&
+      google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].failure_threshold * google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].period_seconds <= 600 &&
+      google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].failure_threshold * google_cloud_run_v2_service.health_sync[0].template[0].containers[0].startup_probe[0].period_seconds >= 60
+    )
+    error_message = "The probe timeout must cover /status's 20 s budget and not exceed the period; the window must be 60-600 s."
+  }
+}
+
+run "v2_to_fhir_timeout_concurrency_and_destroyable" {
+  command = apply
+  assert {
+    # Module healthcare's ack_deadline_seconds defaults to 60: Pub/Sub retries a push that is
+    # unanswered by then, so a longer request timeout only lets two copies run at once.
+    condition     = tonumber(trimsuffix(google_cloud_run_v2_service.v2_to_fhir.template[0].timeout, "s")) <= 60
+    error_message = "v2-to-fhir's default request timeout must not exceed the push ack deadline (60 s)."
+  }
+  assert {
+    condition     = google_cloud_run_v2_service.v2_to_fhir.template[0].max_instance_request_concurrency == 4 && google_cloud_run_v2_service.health_sync[0].template[0].max_instance_request_concurrency == 4
+    error_message = "Concurrency must match gunicorn's four threads."
+  }
+  assert {
+    condition     = google_cloud_run_v2_service.v2_to_fhir.deletion_protection == false && google_cloud_run_v2_service.health_sync[0].deletion_protection == false
+    error_message = "By default the services must be destroyable (deletion_protection = false)."
   }
 }
 

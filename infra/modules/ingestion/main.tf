@@ -37,6 +37,14 @@ locals {
   # (the service checks LOOKBACK >= FINAL_AFTER + SYNC_INTERVAL), so both come from here.
   sync_interval_minutes = 15
 
+  # How long Scheduler waits for POST /sync, and the run budget derived from it. health-sync
+  # cuts every request to the time left before RUN_DEADLINE_SECONDS, so with a 30 s margin a
+  # run has answered before Scheduler gives up and could start the next one (health-sync
+  # README, "Deadline: one run at a time"). Set here rather than assumed from the service's
+  # default, so the two numbers cannot drift apart.
+  sync_attempt_deadline_seconds = 180
+  sync_run_deadline_seconds     = local.sync_attempt_deadline_seconds - 30
+
   # The three Google Health secrets health-sync mounts, one directory each (Cloud Run refuses two
   # secret volumes in one directory). Key = identity's secret key = volume name; the file inside
   # is always "value"; env is the variable that tells the service where the file is.

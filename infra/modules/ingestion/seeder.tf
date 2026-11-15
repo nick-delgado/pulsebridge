@@ -37,10 +37,10 @@ resource "google_cloud_run_v2_job" "seed" {
       containers {
         image = var.seed_image
 
-        # The image's console script (T09/T35). The scheduled run uses these args; the first
-        # seeding overrides them with --days 30 (README, "First run").
-        command = ["pulsebridge-seed"]
-        args    = local.seed_scheduled_args
+        # No `command`: the image's ENTRYPOINT is pulsebridge-seed (T35), the single source of
+        # the entrypoint; Terraform sets only the arguments. The first seeding overrides them
+        # with --days 30 (README, "First run").
+        args = local.seed_scheduled_args
 
         resources {
           limits = {
