@@ -469,9 +469,15 @@ class SendAttempt:
     - ``agent``: the sending service's name, e.g. ``cuff-sim`` (configuration).
     - ``destination``: the HL7v2 store's resource name
       ``projects/<p>/locations/<l>/datasets/<d>/hl7V2Stores/<s>`` (configuration).
-    - ``message_name``: the stored message's resource name from the ingest response; only with an
-      accepting ACK (a rejected message is not stored), and it must be in ``destination``.
+    - ``message_name``: the stored message's resource name **as the store returned it** (the
+      HTTPS ingest response); only with an accepting ACK (a rejected message is not stored), and
+      it must be in ``destination``.
     - ``sample_name``: the T07 malformed sample sent when "send malformed" was used.
+    - ``derived_message_name``: a resource name the **sender computed**, not one the store
+      returned: over MLLP the ACK carries no name, so T13 derives it from the message bytes
+      (spike S5's one observation; unverified). The same rules as ``message_name``, and the two
+      are exclusive: an attempt has a confirmed name, a derived one, or none. It is written to
+      a differently named detail, never to the entity's ``what`` (see the README).
 
     There is deliberately no field for the message itself: an accepted message is in the HL7v2
     store, and a malformed one is a fixed synthetic sample identified by name.
@@ -486,6 +492,7 @@ class SendAttempt:
     destination: str
     message_name: str | None = None
     sample_name: str | None = None
+    derived_message_name: str | None = None
 
     def __post_init__(self) -> None:
         where = "send attempt"
@@ -538,20 +545,28 @@ class SendAttempt:
                 f"{where}: destination must be an HL7v2 store name, "
                 "projects/<p>/locations/<l>/datasets/<d>/hl7V2Stores/<s>"
             )
-        if self.message_name is not None:
+        if self.message_name is not None and self.derived_message_name is not None:
+            raise FhirInputError(
+                f"{where}: message_name (returned by the store) and derived_message_name "
+                "(computed by the sender) are exclusive; pass the one you have"
+            )
+        for field_name in ("message_name", "derived_message_name"):
+            name = getattr(self, field_name)
+            if name is None:
+                continue
             if not (isinstance(self.result, Acknowledged) and self.result.accepted):
                 raise FhirInputError(
-                    f"{where}: message_name is only for an accepted message; "
+                    f"{where}: {field_name} is only for an accepted message; "
                     "a rejected or unacknowledged message is not stored"
                 )
             prefix = self.destination + "/messages/"
             if (
-                not isinstance(self.message_name, str)
-                or not self.message_name.startswith(prefix)
-                or not _MESSAGE_ID.fullmatch(self.message_name[len(prefix) :])
+                not isinstance(name, str)
+                or not name.startswith(prefix)
+                or not _MESSAGE_ID.fullmatch(name[len(prefix) :])
             ):
                 raise FhirInputError(
-                    f"{where}: message_name must be <destination>/messages/<id> in the same store"
+                    f"{where}: {field_name} must be <destination>/messages/<id> in the same store"
                 )
 
     @property

@@ -10,6 +10,8 @@ Callers decide what to do with a failure by its class, not by reading status cod
 - :class:`ClientError` (any other 4xx): the request was refused as it stands; sending the same
   request again will not help.
 - :class:`RetryableError` (408, 429, 5xx, a network failure, a token refresh failure): retry.
+  Its subclass :class:`TimedOutError` is the one network failure a caller may need to tell
+  apart: no response arrived within the timeout, so the request may have been processed.
 - :class:`MalformedResponseError`: a 2xx whose body is not what the API documents; a bug or a
   contract change.
 
@@ -79,6 +81,19 @@ class ConflictError(ClientError):
 class RetryableError(HealthcareApiError):
     """A failure that may pass if the same request is sent again later: HTTP 408 (timeout),
     429 (quota), any 5xx, a network error, or a failure to obtain an access token."""
+
+
+class TimedOutError(RetryableError):
+    """No HTTP response arrived within the request's timeout (``status`` is ``None``).
+
+    A connect timeout means nothing was sent; a read timeout means the request was sent and may
+    have been processed (for HL7v2 ingest: the message may have been stored). Either way there
+    was no answer, which is different from a refused or reset connection, a DNS failure or a
+    token refresh failure (a plain :class:`RetryableError` with ``status`` ``None``). An HTTP 408
+    is an answer from the server: a plain :class:`RetryableError` with ``status`` 408.
+
+    A subclass, so ``except RetryableError`` still catches it.
+    """
 
 
 class MalformedResponseError(HealthcareApiError):

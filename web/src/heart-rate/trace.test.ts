@@ -28,9 +28,12 @@ function trace(over: Partial<HeartRateTrace> = {}): HeartRateTrace {
       deviceName: [{ name: 'Synthetic watch', type: 'user-friendly-name' }],
     },
     source: {
-      startTime: '2026-01-01T14:05:00Z',
-      endTime: '2026-01-01T14:10:00Z',
-      heartRate: { beatsPerMinuteMin: 64, beatsPerMinuteAvg: 68.2, beatsPerMinuteMax: 75 },
+      kind: 'reconstructed',
+      window: {
+        startTime: '2026-01-01T14:05:00Z',
+        endTime: '2026-01-01T14:10:00Z',
+        heartRate: { beatsPerMinuteMin: 64, beatsPerMinuteAvg: 68.2, beatsPerMinuteMax: 75 },
+      },
     },
     ...over,
   };
@@ -87,7 +90,24 @@ describe('right trace panel', () => {
     panel.render({ kind: 'ready', trace: t });
     const source = panelFor(slot, 'Google Health JSON it came from');
     expect(source?.textContent).toContain('Reconstructed from the stored reading');
-    expect(source?.querySelector('pre code')?.textContent).toBe(JSON.stringify(t.source, null, 2));
+    expect(source?.querySelector('pre code')?.textContent).toBe(
+      JSON.stringify(t.source?.window, null, 2),
+    );
+  });
+
+  it('takes the label from the trace: original, or no claim when the kind is unknown', () => {
+    const { slot, panel } = setup();
+    const window = trace().source?.window;
+    if (!window) throw new Error('fixture has no window');
+    panel.render({ kind: 'ready', trace: trace({ source: { kind: 'original', window } }) });
+    const tab = () => panelFor(slot, 'Google Health JSON it came from')?.textContent ?? '';
+    expect(tab()).toContain('The original response');
+    expect(tab()).not.toMatch(/reconstruct/i);
+
+    panel.render({ kind: 'ready', trace: trace({ source: { kind: 'unknown', window } }) });
+    expect(tab()).toContain('did not say whether');
+    expect(tab()).not.toContain('Reconstructed from');
+    expect(tab()).not.toContain('The original response');
   });
 
   it('says so when the server returns no source window, Provenance or Device', () => {

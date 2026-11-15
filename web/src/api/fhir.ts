@@ -90,6 +90,8 @@ export interface Observation extends Resource {
   encounter?: Reference;
   effectiveDateTime?: string;
   effectivePeriod?: Period;
+  /** T06 (T33): the Patient, the same reference as `subject` (the readings are self-measured). */
+  performer?: Reference[];
   valueQuantity?: Quantity;
   method?: CodeableConcept;
   device?: Reference;
@@ -155,6 +157,8 @@ export interface OperationOutcome extends Resource {
     code: string;
     diagnostics?: string;
     details?: CodeableConcept;
+    /** FHIRPath of the element(s) the issue is about; cuff-sim puts the request field here. */
+    expression?: string[];
   }[];
 }
 

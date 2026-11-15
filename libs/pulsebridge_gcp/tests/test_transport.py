@@ -3,7 +3,7 @@
 import google.auth.exceptions
 import pytest
 import requests
-from pulsebridge_gcp import RequestsTransport, RetryableError
+from pulsebridge_gcp import RequestsTransport, RetryableError, TimedOutError
 
 
 class _Response:
@@ -56,6 +56,8 @@ def test_passes_the_request_through_and_lowercases_headers():
     [
         requests.ConnectionError("reset"),
         requests.Timeout("slow"),
+        requests.ConnectTimeout("connect slow"),  # also a ConnectionError: still a timeout
+        requests.ReadTimeout("read slow"),
         google.auth.exceptions.RefreshError("metadata server did not answer"),
     ],
 )
@@ -63,5 +65,7 @@ def test_no_response_at_all_is_retryable(failure):
     with pytest.raises(RetryableError) as caught:
         _send(RequestsTransport(_Session(failure)))
     assert caught.value.status is None
+    # Only a timeout is a TimedOutError (T33): readable without inspecting __cause__.
+    assert isinstance(caught.value, TimedOutError) is isinstance(failure, requests.Timeout)
     # The URL's query string is not repeated in the error.
     assert "y=1" not in str(caught.value)

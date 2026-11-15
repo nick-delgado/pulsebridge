@@ -1,0 +1,8 @@
+# Input for requirements.lock (see README, "Installing with hashes"). The three direct pins must
+# equal pyproject.toml's; hatchling is the build backend of this tool and of libs/, installed from
+# the lock so connect.sh can build them without build isolation (which would fetch unhashed
+# packages).
+google-cloud-secret-manager==2.31.0
+google-auth==2.62.0
+requests==2.34.2
+hatchling==1.32.4

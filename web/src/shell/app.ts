@@ -23,8 +23,19 @@ import { el, placeholder, replaceChildren } from '../ui/dom';
 import type { FeatureContext, Features, MountFeature } from './features';
 import { dashboardLayout } from './layout';
 import { loginView } from './login';
+import { createSyncWatch } from './sync-watch';
 
 export const SESSION_ENDED = 'Your session has ended. Log in again.';
+
+/**
+ * How often the status strip reloads while the tab is visible. health-sync runs every 15
+ * minutes, so a new sync shows (and is announced) within 5 minutes. Each load is one cheap
+ * proxy call; health-sync caches its own answer for 60 s.
+ */
+export const STATUS_REFRESH_MS = 5 * 60 * 1000;
+
+/** A visibility change reloads the status only if no load started this recently. */
+export const VISIBILITY_RELOAD_MIN_GAP_MS = 60 * 1000;
 
 export const DEFAULT_FEATURES: Features = {
   heartRate: mountHeartRate,
@@ -94,14 +105,40 @@ export async function startApp(options: AppOptions): Promise<App> {
     const selection = createSelectionStore();
     const dataChanges = createDataChangeBus();
 
+    // The status strip. Each load replaces the last one's answer; a load that answers after a
+    // newer one started is ignored, so an old answer can neither overwrite a newer one nor make
+    // the sync check below compare against a stale time.
+    const syncWatch = createSyncWatch();
+    let statusLoads = 0;
+    let shown = false;
+    let announcing = false;
+    let lastLoadStartedAt = Number.NEGATIVE_INFINITY;
     const refreshStatus = () => {
-      layout.status.render({ kind: 'loading' });
+      const load = ++statusLoads;
+      lastLoadStartedAt = now();
+      // "Loading…" only before the first answer; a reload keeps the last answer on screen.
+      if (!shown) layout.status.render({ kind: 'loading' });
       client.getStatus({ signal }).then(
         (status) => {
-          if (!signal.aborted) layout.status.render({ kind: 'ready', status, now: now() });
+          if (signal.aborted || load !== statusLoads) return;
+          shown = true;
+          layout.status.render({ kind: 'ready', status, now: now() });
+          // A new sync since the last load: tell the features, so they re-fetch (T17's chart
+          // reloads and a window that was provisional can become final). Our own listener below
+          // skips this announcement, so it cannot loop: and a reload with the same time is not
+          // a change anyway.
+          if (syncWatch.changed(status.watchSync.lastSyncAt)) {
+            announcing = true;
+            try {
+              dataChanges.notify('sync');
+            } finally {
+              announcing = false;
+            }
+          }
         },
         (error: unknown) => {
-          if (signal.aborted || error instanceof UnauthorizedError) return;
+          if (signal.aborted || load !== statusLoads || error instanceof UnauthorizedError) return;
+          shown = false;
           layout.status.render({
             kind: 'error',
             message: error instanceof Error ? error.message : 'unknown error',
@@ -109,6 +146,29 @@ export async function startApp(options: AppOptions): Promise<App> {
         },
       );
     };
+
+    // Reload the status every few minutes while the tab is visible, and when it becomes visible
+    // again, so a sync run (every 15 minutes) is noticed during a session without any action.
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') refreshStatus();
+    }, STATUS_REFRESH_MS);
+    signal.addEventListener('abort', () => {
+      clearInterval(timer);
+    });
+    document.addEventListener(
+      'visibilitychange',
+      () => {
+        // Coming back to the tab reloads, unless a load started within the last minute
+        // (switching tabs back and forth must not hammer the proxy).
+        if (
+          document.visibilityState === 'visible' &&
+          now() - lastLoadStartedAt >= VISIBILITY_RELOAD_MIN_GAP_MS
+        ) {
+          refreshStatus();
+        }
+      },
+      { signal },
+    );
 
     layout.logoutButton.addEventListener(
       'click',
@@ -151,8 +211,13 @@ export async function startApp(options: AppOptions): Promise<App> {
       }
     };
 
-    // The status strip shows counts and the last sync, so any change refreshes it.
-    dataChanges.subscribe(refreshStatus, signal);
+    // The status strip shows counts and the last sync, so any change refreshes it, except the
+    // strip's own 'sync' announcement (it has just loaded the status).
+    dataChanges.subscribe((kind) => {
+      // Only the strip's own 'sync' is skipped: any other change, even one a 'sync' listener
+      // reports while the announcement is running, reloads the strip.
+      if (!(announcing && kind === 'sync')) refreshStatus();
+    }, signal);
 
     replaceChildren(root, layout.root);
     mount('heart rate', features.heartRate, layout.slots.heartRate);

@@ -19,6 +19,9 @@ const samples = manifest.samples
     class: s.class,
     description: s.description,
     transports: s.transports,
+    // How the sample is framed over MLLP (`standard`, or a deliberate defect such as
+    // `missing_end_block`); cuff-sim reports it as `framing` in its send result.
+    mllpFraming: s.mllp_framing,
     // The sample's own MSH-10, picked by position from its first segment for the mock's
     // display only (null when the sample has no MSH, or an empty MSH-10). Not an HL7v2 parser:
     // T13 sends the bytes and T31 records whatever control ID the sender knew.

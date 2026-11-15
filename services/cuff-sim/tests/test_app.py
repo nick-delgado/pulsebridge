@@ -12,6 +12,7 @@ import pytest
 from cuff_sim import message as message_module
 from cuff_sim.app import READINGS_PATH, SAMPLES_PATH, create_app
 from cuff_sim.ratelimit import TokenBucket
+from pulsebridge_fhir import parse_send_attempt
 from pulsebridge_gcp import RetryableError
 from pulsebridge_gcp.testing import json_response
 from pulsebridge_hl7v2 import HL7ValidationError, parse_er7
@@ -129,8 +130,13 @@ def test_valid_reading_over_mllp(http, adapter, audit_ok, h):
     assert d["MSH-10"] == control_id and d["MSA-1"] == "AA"
     assert base64.b64decode(d["ack-message"]) == h.ack_for(control_id)
     assert "malformed-sample" not in d and "no-ack-reason" not in d
-    # The derived name is not written into the permanent record.
+    # The derived name is recorded, marked as derived (T33): a detail of its own, never the
+    # entity's "what", which is kept for a name the store returned.
+    assert d["derived-message-name"] == body["messageName"]
     assert "what" not in event["entity"][1]
+    record = parse_send_attempt(event)
+    assert (record.message_name, record.derived_message_name) == (None, body["messageName"])
+    assert record.message_name_source == "derived"
     assert not [r for r in audit_ok.requests if "hl7V2Stores" in r.path]  # MLLP: no ingest
 
 
@@ -172,6 +178,7 @@ def test_valid_reading_over_https(http, adapter, audit_ok, h):
         "system": "urn:pulsebridge:source-record:hl7v2-message",
         "value": f"{h.STORE_NAME}/messages/stored-id=",
     }
+    assert "derived-message-name" not in details(event)  # returned, not derived
 
 
 def test_nack_over_https_is_returned_as_the_commit_level_ack(http, audit_ok, h):
@@ -421,6 +428,8 @@ def test_no_derived_name_for_a_nack_over_mllp(http, adapter, audit_ok, h):
     _response, body = post(http, sendMalformed="unparseable_no_msh")
     assert body["result"] == "rejected"
     assert body["messageName"] is None and body["messageNameSource"] is None
+    _id, event = only_audit_put(audit_ok, h)
+    assert "derived-message-name" not in details(event)
 
 
 # ---- Recording failure ----------------------------------------------------------------------

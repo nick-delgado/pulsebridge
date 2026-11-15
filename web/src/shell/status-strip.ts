@@ -1,10 +1,12 @@
 /**
  * The header's status strip (brief, "Single page"): last watch sync, Observation count per source,
- * and whether the FHIR store and OpenEMR are reachable. When the Google Health token has expired
- * or been revoked it says "Reconnect needed" instead of a sync time. Every state is spelled out in
- * words, not only by colour.
+ * and whether the FHIR store and OpenEMR are reachable. The watch part follows health-sync's
+ * `/status` (services/health-sync/README.md): "Reconnect needed" or "Not connected" replace the
+ * sync time when the Google Health connection cannot work, an `unknown` check keeps the last sync
+ * time but says the check did not finish, and the `backfill-needed` and `refresh-token-rotated`
+ * notes are shown as items of their own. Every state is spelled out in words, not only by colour.
  */
-import type { Reachability, StatusSummary } from '../api/contract';
+import type { Reachability, StatusSummary, WatchSyncStatus } from '../api/contract';
 import { el, replaceChildren } from '../ui/dom';
 
 export function statusStrip(): { root: HTMLElement; render(state: StripState): void } {
@@ -31,27 +33,10 @@ function items(state: StripState): HTMLLIElement[] {
   if (state.kind === 'loading') return [item('neutral', 'Status', 'Loading…')];
   if (state.kind === 'error') return [item('warn', 'Status', `Unavailable: ${state.message}`)];
   const { status, now } = state;
-  const sync = status.watchSync;
-  const syncItem =
-    sync.state === 'reconnect-needed'
-      ? item(
-          'warn',
-          'Watch sync',
-          'Reconnect needed',
-          sync.detail ?? 'The Google Health token has expired.',
-        )
-      : sync.state === 'never-synced' || sync.lastSyncAt === null
-        ? item('neutral', 'Watch sync', 'Never synced')
-        : item(
-            sync.state === 'error' ? 'warn' : 'ok',
-            'Last sync',
-            relativeTime(sync.lastSyncAt, now),
-            sync.state === 'error' ? (sync.detail ?? 'The last sync failed.') : undefined,
-            sync.lastSyncAt,
-          );
   const fmt = new Intl.NumberFormat();
   return [
-    syncItem,
+    syncItem(status.watchSync, now),
+    ...noteItems(status.watchSync),
     item(
       'neutral',
       'Observations',
@@ -60,6 +45,75 @@ function items(state: StripState): HTMLLIElement[] {
     reach('FHIR store', status.fhirStore),
     reach('OpenEMR', status.openemr),
   ];
+}
+
+/** health-sync's reason code as detail text, for example "(refresh-token-invalid)". */
+const because = (reason: string | null) => (reason ? ` (${reason})` : '');
+
+function syncItem(sync: WatchSyncStatus, now: number): HTMLLIElement {
+  if (sync.state === 'reconnect-needed') {
+    return item(
+      'warn',
+      'Watch sync',
+      'Reconnect needed',
+      `The Google Health connection no longer works${because(sync.reason)}: re-run the connect script.`,
+    );
+  }
+  if (sync.state === 'not-configured') {
+    return item(
+      'warn',
+      'Watch sync',
+      'Not connected',
+      `Google Health is not set up on the server${because(sync.reason)}.`,
+    );
+  }
+  // `unknown` is not a failure of the connection: the check could not finish (for example
+  // Google's token endpoint was busy), so the last sync time still stands.
+  const unknown =
+    sync.state === 'unknown'
+      ? `The connection check could not finish${because(sync.reason)}; it is retried on the next load.`
+      : undefined;
+  if (sync.lastSyncAt === null) {
+    return item('neutral', 'Watch data', 'None yet', unknown);
+  }
+  return item(
+    unknown ? 'neutral' : 'ok',
+    // `lastSyncAt` is the newest heart-rate WRITE, not the last run: health-sync writes only
+    // what changed, so while the watch is off the wrist this time stays put (contract.ts).
+    'Newest watch data',
+    relativeTime(sync.lastSyncAt, now),
+    unknown,
+    sync.lastSyncAt,
+  );
+}
+
+function noteItems(sync: WatchSyncStatus): HTMLLIElement[] {
+  const out: HTMLLIElement[] = [];
+  if (sync.notes.includes('backfill-needed')) {
+    const windows =
+      sync.strandedPreliminary === null
+        ? 'Some windows'
+        : `${new Intl.NumberFormat().format(sync.strandedPreliminary)} windows`;
+    out.push(
+      item(
+        'warn',
+        'Watch data',
+        'Backfill needed',
+        `${windows} from missed sync runs are still provisional; running the backfill finalises them.`,
+      ),
+    );
+  }
+  if (sync.notes.includes('refresh-token-rotated') && sync.state !== 'reconnect-needed') {
+    out.push(
+      item(
+        'warn',
+        'Watch sync',
+        'Reconnect needed soon',
+        'Google issued a new refresh token that the server cannot store; reconnect soon to keep syncing.',
+      ),
+    );
+  }
+  return out;
 }
 
 function reach(label: string, r: Reachability): HTMLLIElement {

@@ -40,6 +40,7 @@ from pulsebridge_fhir.examples import (
     SYNTHETIC_HL7V2_STORE,
     SYNTHETIC_PATIENT_REF,
     SYNTHETIC_SEND_ACCEPTED,
+    SYNTHETIC_SEND_ACCEPTED_MLLP,
     SYNTHETIC_SEND_NO_ACK,
     SYNTHETIC_SEND_REJECTED,
     SYNTHETIC_SEND_UNREADABLE_REPLY,
@@ -414,6 +415,7 @@ def test_input_has_no_slot_for_the_message_or_a_name():
         "destination",
         "message_name",
         "sample_name",
+        "derived_message_name",
     ]
     assert [f.name for f in dataclasses.fields(Acknowledged)] == ["code", "raw_ack", "reason"]
     assert [f.name for f in dataclasses.fields(NotAcknowledged)] == [
@@ -521,6 +523,26 @@ def test_sanitised_reason_reaches_both_detail_and_outcome_desc():
             "message_name must be <destination>/messages/<id>",
         ),
         (lambda: rejected(message_name=STORE + "/messages/x"), "only for an accepted message"),
+        (
+            lambda: rejected(derived_message_name=STORE + "/messages/x"),
+            "derived_message_name is only for an accepted message",
+        ),
+        (
+            lambda: no_ack(derived_message_name=STORE + "/messages/x"),
+            "derived_message_name is only for an accepted message",
+        ),
+        (
+            lambda: attempt(message_name=None, derived_message_name=STORE[:-1] + "X/messages/x"),
+            "derived_message_name must be <destination>/messages/<id>",
+        ),
+        (
+            lambda: attempt(message_name=None, derived_message_name=STORE + "/messages/a b"),
+            "derived_message_name must be <destination>/messages/<id>",
+        ),
+        (
+            lambda: attempt(derived_message_name=STORE + "/messages/y"),
+            "exclusive",
+        ),
         (lambda: no_ack(message_name=STORE + "/messages/x"), "only for an accepted message"),
         (lambda: no_ack(why="api-error", http_status=500), "api-error happens only over https"),
         (lambda: Acknowledged(code="NA", raw_ack=S5_ACK), "code 'NA' is not one of"),
@@ -577,12 +599,16 @@ def test_builder_needs_a_send_attempt():
 def test_example_ids_are_pinned():
     """Literal values: changing how the id is derived would make a re-recorded attempt a second
     AuditEvent instead of replacing the first."""
+    # Built readings (no sample): unchanged since T31.
     assert send_attempt_key(SYNTHETIC_SEND_ACCEPTED) == "69ec535d-bb94-5c1e-927c-96a189a17a59"
-    assert send_attempt_key(SYNTHETIC_SEND_REJECTED) == "914007c0-02fc-5df7-9571-d9a91edae82b"
-    assert send_attempt_key(SYNTHETIC_SEND_NO_ACK) == "ba24b13a-bed7-55ea-879e-60bd9cab12ca"
     assert (
         send_attempt_key(SYNTHETIC_SEND_UNREADABLE_REPLY) == "c7eedc53-9fda-5be6-92a5-1d2528376107"
     )
+    assert send_attempt_key(SYNTHETIC_SEND_ACCEPTED_MLLP) == "3507bd7c-a683-5683-af50-1a30c1f7bee7"
+    # Malformed samples: the sample name joined the key in T33 (they were 914007c0-... and
+    # ba24b13a-... before).
+    assert send_attempt_key(SYNTHETIC_SEND_REJECTED) == "6bd9ab02-8d00-5bb4-8237-ababc6b77f26"
+    assert send_attempt_key(SYNTHETIC_SEND_NO_ACK) == "0baec9e8-9fa9-5b2c-9b49-b159285e466f"
 
 
 def test_same_attempt_twice_is_one_audit_event():
@@ -612,6 +638,7 @@ def test_same_instant_in_another_offset_is_the_same_attempt():
         {"transport": "mllp"},
         {"control_id": "MSG-SYN-0011"},
         {"agent": "cuff-sim-2"},
+        {"sample_name": "unmappable_missing_obx14"},
     ],
 )
 def test_key_parts_each_change_the_id(changes):
@@ -624,6 +651,30 @@ def test_result_and_destination_are_not_key_parts():
     assert send_attempt_key(no_ack(transport="https")) == base
     other_store = STORE.replace("example-store", "other-store")
     assert send_attempt_key(attempt(destination=other_store, message_name=None)) == base
+
+
+def test_two_samples_sharing_a_control_id_in_one_millisecond_are_two_attempts():
+    # invalid_missing_pid3 and invalid_obx14_not_hl7_date both carry MSH-10 SYN-BAD-0001; two
+    # instances could send them in the same millisecond.
+    one = no_ack(control_id="SYN-BAD-0001", sample_name="invalid_missing_pid3")
+    two = no_ack(control_id="SYN-BAD-0001", sample_name="invalid_obx14_not_hl7_date")
+    assert send_attempt_key(one) != send_attempt_key(two)
+
+
+def test_two_samples_without_a_control_id_in_one_millisecond_are_two_attempts():
+    one = rejected(sample_name="unparseable_no_msh")
+    two = rejected(sample_name="unparseable_lf_terminators")
+    assert send_attempt_key(one) != send_attempt_key(two)
+
+
+def test_a_built_reading_key_has_no_sample_part():
+    # The T31 derivation, written out: a built reading's id did not change in T33.
+    from pulsebridge_fhir.keys import deterministic_uuid
+
+    a = attempt()
+    assert send_attempt_key(a) == deterministic_uuid(
+        "AuditEvent", "cuff-send-attempt", "cuff-sim", "https", "MSG-SYN-0010", a.sent_at_utc
+    )
 
 
 def test_missing_control_id_does_not_collide_with_a_real_one():
@@ -724,7 +775,9 @@ def test_record_fields_for_each_result_shape():
     assert (none.ack_code, none.raw_ack, none.reason) == (None, None, None)
 
 
-@pytest.mark.parametrize("name", ["accepted", "rejected", "no-ack", "unreadable-reply"])
+@pytest.mark.parametrize(
+    "name", ["accepted", "accepted-mllp", "rejected", "no-ack", "unreadable-reply"]
+)
 def test_round_trip_resource_to_record_to_resource(name):
     stored = json.loads((EXAMPLES / f"auditevent-send-{name}.json").read_text())
     record = parse_send_attempt(stored)
@@ -1132,3 +1185,69 @@ def test_a_built_resource_cannot_be_retyped_into_a_write():
 def test_replace_does_not_bypass_validation():
     with pytest.raises(FhirInputError, match="transport"):
         replace(attempt(), transport="ftp")
+
+
+# --- T33: a message name the sender derived, marked as derived -----------------------------------
+
+DERIVED = STORE + "/messages/c3ludGhldGljLWRlcml2ZWQtbWVzc2FnZS0wMDEwLTA="
+
+
+def mllp_accept(**changes) -> SendAttempt:
+    return attempt(transport="mllp", message_name=None, derived_message_name=DERIVED, **changes)
+
+
+def test_a_derived_name_is_a_detail_and_never_the_entity_what():
+    entity = message_entity(build(mllp_accept()))
+    assert "what" not in entity  # what = "this entity IS that stored message": store-confirmed
+    assert entity["detail"][-1] == {"type": "derived-message-name", "valueString": DERIVED}
+    # The store-returned name is never written as a derived-message-name detail.
+    confirmed = message_entity(build(attempt()))
+    assert "derived-message-name" not in json.dumps(confirmed)
+    assert confirmed["what"]["identifier"]["value"] == STORE + "/messages/synthetic-message-0010"
+
+
+def test_parse_returns_a_derived_name_with_its_marker_and_no_confirmed_name():
+    record = parse_send_attempt(build(mllp_accept()))
+    assert (record.message_name, record.derived_message_name) == (None, DERIVED)
+    assert record.message_name_source == "derived"
+    assert record.attempt == mllp_accept()
+    confirmed = parse_send_attempt(build(attempt()))
+    assert (confirmed.message_name_source, confirmed.derived_message_name) == ("store", None)
+    assert parse_send_attempt(build(rejected())).message_name_source is None
+
+
+def test_a_derived_name_in_the_what_slot_cannot_be_read_as_derived():
+    # Moving a derived name into entity.what makes it a confirmed name; the reader must say so
+    # by the field it fills, not by guessing from its shape.
+    resource = build(mllp_accept())
+    entity = message_entity(resource)
+    entity["detail"] = [d for d in entity["detail"] if d["type"] != "derived-message-name"]
+    entity["what"] = {"identifier": {"system": "urn:pulsebridge:source-record:hl7v2-message",
+                                     "value": DERIVED}}  # fmt: skip
+    record = parse_send_attempt(resource)
+    assert (record.message_name_source, record.derived_message_name) == ("store", None)
+
+
+def test_a_stored_record_with_both_names_is_unreadable():
+    resource = build(mllp_accept())
+    message_entity(resource)["what"] = {
+        "identifier": {"system": "urn:pulsebridge:source-record:hl7v2-message", "value": DERIVED}
+    }
+    with pytest.raises(UnreadableSendAttempt, match="exclusive"):
+        parse_send_attempt(resource)
+
+
+def test_a_derived_name_on_a_rejected_record_is_unreadable():
+    resource = build(rejected())
+    message_entity(resource)["detail"].append(
+        {"type": "derived-message-name", "valueString": DERIVED}
+    )
+    with pytest.raises(UnreadableSendAttempt, match="only for an accepted message"):
+        parse_send_attempt(resource)
+
+
+def test_the_derived_name_does_not_change_the_id_or_the_format_version():
+    assert send_attempt_key(mllp_accept()) == send_attempt_key(
+        attempt(transport="mllp", message_name=None)
+    )
+    assert VERSION_1 in message_entity(build(mllp_accept()))["detail"]

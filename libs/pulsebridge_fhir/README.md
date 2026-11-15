@@ -132,17 +132,17 @@ Fallback, matching decision D11 (not implemented):
 | `patient_for_sharing(stored)` | The Patient to send to OpenEMR: PT identifier, official name, gender, birth date only. |
 | `build_ingest_bundle`, `build_setup_bundle` | The only two ways to make a Bundle (see above). |
 | `Write` (`UPDATE`, `CREATE_IF_ABSENT`), `request_for(resource, write)` | The two write modes, and the request each implies for a resource. |
-| `heart_rate_transaction(points, *, patient, device, data_source, tz, recorded, complete_before, assembler="PulseBridge health-sync")` | `health-sync`: roll-up JSON to an ingest Bundle. |
-| `heart_rate_resources(windows, *, patient, device, data_source, tz, recorded, complete_before, assembler=…)` | The same, as a list of built Observations and Provenance, for a caller assembling its own ingest Bundle. |
+| `heart_rate_transaction(points, *, patient, device, data_source, tz, recorded, complete_before, amended=(), assembler="PulseBridge health-sync")` | `health-sync`: roll-up JSON to an ingest Bundle. `amended`: start times of windows to write `amended` (T33). |
+| `heart_rate_resources(windows, *, patient, device, data_source, tz, recorded, complete_before, amended=(), assembler=…)` | The same, as a list of built Observations and Provenance, for a caller assembling its own ingest Bundle. |
 | `blood_pressure_transaction(reading, *, patient, device, source, recorded, assembler="PulseBridge v2-to-fhir", status="final")` | `v2-to-fhir`: one cuff reading to an ingest Bundle. |
 | `patient_setup_transaction(patient, *, devices=())` | Setup: the full Patient as an upsert. |
 | `window_from_rollup(point)`, `parse_google_utc_offset("-18000s")`, `window_status(window, complete_before)` | Google helpers. |
 | `GoogleDataSource(*, platform, recording_method)`, `rollup_source(window, data_source)` | Provenance source for a roll-up window. No defaults. |
 | `heart_rate_key`, `blood_pressure_key` | The idempotency keys. |
-| `SendAttempt(*, sent_at, transport, control_id, result, patient_id, agent, destination, message_name=None, sample_name=None)` | One cuff send attempt (T31). `result` is `Acknowledged(*, code, raw_ack, reason=None)` or `NotAcknowledged(*, why, http_status=None)`. |
+| `SendAttempt(*, sent_at, transport, control_id, result, patient_id, agent, destination, message_name=None, sample_name=None, derived_message_name=None)` | One cuff send attempt (T31). `result` is `Acknowledged(*, code, raw_ack, reason=None)` or `NotAcknowledged(*, why, http_status=None)`. `message_name` is a name the store returned; `derived_message_name` one the sender computed (T33); at most one of the two. |
 | `build_send_attempt_audit_event(attempt, *, recorded)` | The AuditEvent for one attempt; a `BuiltResource`. |
 | `audit_event_write(built)` | The single-resource write: `{method: "PUT", url: "AuditEvent/<id>", content_type, body}`. AuditEvent only. |
-| `parse_send_attempt(resource)` | An AuditEvent read back from the audit store, as a `SendAttemptRecord`. Raises `NotASendAttempt` (not ours) or `UnreadableSendAttempt` (ours, a value cannot be read); both are `FhirInputError`s. |
+| `parse_send_attempt(resource)` | An AuditEvent read back from the audit store, as a `SendAttemptRecord` (`.message_name` store-returned, `.derived_message_name` derived, `.message_name_source` `"store"` / `"derived"` / `None`). Raises `NotASendAttempt` (not ours) or `UnreadableSendAttempt` (ours, a value cannot be read); both are `FhirInputError`s. |
 | `is_send_attempt(resource)` | The "is it ours" check alone. |
 | `now_ms()`, `truncate_to_ms(dt)` | The current UTC time, or `dt`, in whole milliseconds, as `sent_at` and `recorded` require. |
 | `send_attempt_search_params(*, count=50, since=None, before=None)` | Query parameters to list attempts newest first. |
@@ -178,6 +178,7 @@ bundle = heart_rate_transaction(
     tz=ZoneInfo(configured_time_zone),              # IANA zone, e.g. "America/New_York"
     recorded=now_ms(),                              # pulsebridge_fhir.now_ms: UTC, whole ms
     complete_before=start_of_next_overlap,          # windows ending later are "preliminary"
+    amended=changed_final_starts,                   # stored final, values changed (T33)
 )
 ```
 
@@ -217,8 +218,9 @@ needs (spike S1).
 
 Share only Observations with `status: final`. A `preliminary` window can still change in our
 store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observation, replace
-`subject` with OpenEMR's Patient, add `encounter`, and drop `device`, `meta` and `identifier`
-(OpenEMR discards them). Units are already exactly `/min` and `mm[Hg]`.
+`subject` with OpenEMR's Patient, add `encounter`, and **drop** `performer`, `device`, `meta`
+and `identifier`. OpenEMR discards them (spike S1), and `performer` (T33) names the Patient in
+our store, so dropping it means no internal Patient reference leaves PulseBridge. Units are already exactly `/min` and `mm[Hg]`.
 
 ## Design decisions
 
@@ -231,7 +233,7 @@ store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observa
 | Observation (HR) | `PUT Observation?identifier=urn:pulsebridge:observation\|<uuid>` | not written | UUIDv5(patient, `8867-4`, window start UTC) |
 | Observation (BP) | same | not written | UUIDv5(patient, `85354-9`, source key) |
 | Provenance | `PUT Provenance/<uuid>` | not written | UUIDv5(the Observation's key) |
-| AuditEvent | not written (refused as a record) | not written | written alone, `PUT AuditEvent/<uuid>`: UUIDv5(sender, transport, MSH-10, sent time) |
+| AuditEvent | not written (refused as a record) | not written | written alone, `PUT AuditEvent/<uuid>`: UUIDv5(sender, transport, MSH-10, sent time, and the sample name for a malformed sample) |
 
 - Observations are conditional updates on purpose: a window that was only partly synced has new
   values and must replace the old ones. The key leaves out the window end and the values.
@@ -249,7 +251,13 @@ store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observa
 - Systems are URNs owned by this software (`urn:pulsebridge:…`, all in `codes.py`): the same in
   every clone, so nothing identifies the author.
 - `Patient.identifier[0]`: `use: official`, `type` v2-0203 `PT` (Patient external identifier).
-  The matching key, and what T15 searches OpenEMR by.
+  The matching key, and what T15 searches OpenEMR by. **`PT` is deliberate, and the validator
+  warns about it** (expected): R4 binds `Identifier.type` *extensibly* to the `IdentifierType`
+  value set, a short subset of v2-0203 that lacks `PT`. An extensible binding means "use a code
+  from this set if one fits; otherwise another code is allowed". The near candidate in the set,
+  `MR` (medical record number), would claim a hospital record number, which this is not, and
+  OpenEMR (spike S1) looks a patient up by its `PT`-typed identifier, so the share (T15) depends
+  on it.
 - `Patient.identifier[1]`: Google's `healthUserId`, `use: secondary`, written by setup only.
 - `Observation.identifier`: `use: official`, the deterministic key.
 - `Device.identifier`: derived (UUIDv5 of patient and display name), because Google sends only a
@@ -281,6 +289,18 @@ A five-minute window can still gain samples after a sync (the watch uploads late
 pass `None` only to declare every window complete): a window whose end is after that instant is
 written `preliminary`. T10 should pass the start of the overlap it will re-request on its next
 run; that run rewrites the same Observation (same key) as `final` once the window is complete.
+
+`amended`: "Subsequent to being Final, the observation has been modified". A window that was
+already written `final` can still change (a sample uploaded hours late). `amended=` (T33, on
+`heart_rate_transaction` and `heart_rate_resources`) takes the start times of such windows, as
+time-zone-aware datetimes compared as UTC instants, and writes them `amended` instead of
+`final`, under the same key. The library cannot know what is stored, so the caller says which
+windows those are. Two kinds of start are **refused** (`FhirInputError`), not ignored, because
+ignoring them would write `final` and hide the caller's mistake:
+
+- a start that is **not a window of this batch** (the caller meant a different batch);
+- a start whose window would be **`preliminary`** (ends after `complete_before`): a window that
+  is still filling has not been final, and `amended` would claim its data is settled.
 
 ### Heart rate: value, components and the LOINC codes
 
@@ -332,6 +352,25 @@ CodeableConcept must mean the same thing), and `Observation.method` (a good fit,
 acceptance criterion places the recording method in Provenance, and `method` already says the
 value is a mean).
 
+### Performer: the patient (T33)
+
+`Observation.performer` is the Patient, the same reference as `subject`, on both heart-rate and
+blood-pressure Observations. R4 defines performer as "who was responsible for asserting the
+observed value as 'true'" and allows a Patient there. These readings are self-measured: the
+person wearing the watch, or putting on the cuff, is the one they are about and the one who took
+them. The devices are recorded where devices belong (`Observation.device`, and the Provenance
+`performer` agent). Without a performer the validator adds a best-practice warning ("all
+observations should have a performer"). The copy shared with the clinic drops it (see "Share to
+OpenEMR").
+
+### No narrative (`text`)
+
+None of the resources this library builds has a `Resource.text` narrative (the human-readable
+XHTML summary). R4 makes `text` optional, and the invariant the validator reports, `dom-6`
+("A resource should have narrative for robust management"), is a guideline (a "should"), not a
+rule. The dashboard renders the data itself, and a generated narrative would be a second copy
+of every value to keep in step. Expect one `dom-6` warning per resource.
+
 ### Category
 
 `category` carries `http://terminology.hl7.org/CodeSystem/observation-category#vital-signs`: the
@@ -360,6 +399,7 @@ Checked against the R4 (4.0.1) StructureDefinitions `vitalsigns`, `heartrate` an
 | `component.value[x]` bound **required** to ucum-vitals-common | followed (`/min`, `mm[Hg]`) |
 | `component.code` bound **extensible** to observation-vitalsignresult | **deliberate divergence** for the heart-rate min/max components: that 13-code value set has no min/max codes, which is when an extensible binding allows another code. Expect a validator warning. |
 | `urn:pulsebridge:*` code systems | local, undefined; the validator may report it cannot check them. |
+| `performer` 0..* (best practice: present) | followed since T33: the Patient (self-measured) |
 
 ## AuditEvent for a cuff send attempt (T31)
 
@@ -396,7 +436,7 @@ the search) is relative to the audit store's base URL.
 | `agent[1]` | DICOM `110152` Destination Role ID, `who` = `{type: Device, identifier: urn:pulsebridge:hl7v2-store\|<store name>}`, `requestor: false` | The receiver. Over MLLP it is reached through the adapter, but the store is the destination. |
 | `source.observer` | `{type: Device, identifier: urn:pulsebridge:service\|cuff-sim}`; `source.type` security-source-type `4` Application Server | R4 requires an observer: the system that reports the event, here the simulator itself (a Cloud Run service). |
 | `entity[0]` | the patient: `what` = `{type: Patient, identifier: urn:pulsebridge:patient\|<id>}`; `type` audit-entity-type `1` Person; `role` object-role `1` Patient | What the reading was about. **The patient is not an agent**: they took no part in sending it. |
-| `entity[1]` | the message: `what` = `urn:pulsebridge:source-record:hl7v2-message\|<stored name>` when stored; `type` `2` System Object; `role` `3` Report; `detail` (below) | An ORU^R01 is an unsolicited observation report. Its identifier system is the one T06's Provenance uses for the same message, so the trace panel can join the two. |
+| `entity[1]` | the message: `what` = `urn:pulsebridge:source-record:hl7v2-message\|<stored name>` when **the store returned** the name; `type` `2` System Object; `role` `3` Report; `detail` (below) | An ORU^R01 is an unsolicited observation report. Its identifier system is the one T06's Provenance uses for the same message, so the trace panel can join the two. A name the sender only derived is a `detail`, never `what` (see "A derived message name"). |
 
 `Reference.type`: `Device` on the sender, the store and the observer, because in R4 a Device can
 be software, which both are. The patient's is `Patient`. The message's `what` has **no** `type`:
@@ -414,6 +454,13 @@ interactions only, and this is an HL7v2 send.
 Not used: `entity.lifecycle` (R4's DICOM lifecycle code system is marked "not currently used",
 and the element is optional) and `purposeOfEvent`.
 
+**The `R01` subtype is deliberate, and the validator warns about it** (expected). R4 binds
+`AuditEvent.subtype` *extensibly* to `audit-event-sub-type`, which holds the DICOM audit event
+codes (application start and stop, login, security alerts and similar) and the FHIR REST
+interactions (`read`, `create`, ...). None of them names an HL7v2 message send, which is when an
+extensible binding allows another code; HL7 table 0003 (event type) names exactly the
+transaction attempted. `parse_send_attempt` and the listing search rely on it.
+
 `entity[1].detail` is a list of name/value pairs. In R4 `detail.type` is a plain string, so no
 code system is involved. HL7v2 field names are used where the value is an HL7v2 field, as IHE's
 audit messages for HL7v2 transactions do for MSH-10.
@@ -430,6 +477,33 @@ audit messages for HL7v2 transactions do for MSH-10.
 | `http-status` | for example `"503"` | `api-error` only |
 | `unreadable-reply-bytes` | the first bytes of a reply that was not a readable ACK, `valueBase64Binary` | `unreadable-reply`, when the caller kept them |
 | `malformed-sample` | the T07 sample name, for example `unparseable_no_msh` | "send malformed" was used |
+| `derived-message-name` | a stored message name the **sender derived**, not one the store returned | an accepted MLLP send (T13 computes it from the message bytes; T33) |
+
+### A derived message name (T33)
+
+Over MLLP the adapter relays only the store's ACK, which does not carry the stored message's
+resource name. The cuff simulator derives one from the message bytes (spike S5 observed, on one
+message, that the id is the URL-safe base64 of their SHA-256; unverified beyond that). That name
+is useful to the messages log (T14 joins the attempt to its stored message by it, then confirms
+it with a `get`), but it is a guess until confirmed, and a record must not present a guess as a
+fact. So the two kinds are kept apart at every level:
+
+- **In the AuditEvent**: a name the store returned goes in `entity[1].what` (a reference, which
+  asserts "this entity is that stored message"). A derived name goes in its own detail,
+  `derived-message-name`, and never in `what`. A reader that knows nothing of that detail sees
+  no message name at all, rather than an unverified name it would take as confirmed.
+- **In the input**: `SendAttempt.message_name` (returned) and `SendAttempt.derived_message_name`
+  (derived) are separate fields, exclusive, both only for an accepted message and both
+  `<destination>/messages/<id>`.
+- **In the record read back**: `SendAttemptRecord.message_name` is only ever a store-returned
+  name and `.derived_message_name` only a derived one; `.message_name_source` is `"store"`,
+  `"derived"` or `None`. A stored record with both is unreadable.
+
+Considered and rejected: the derived name in `what` with a second identifier system or an
+`Identifier.use` (the R4 codes `usual`, `official`, `temp`, `secondary`, `old` say nothing about
+certainty, and a reader matching on the value alone would still take it as confirmed); a
+`meta.tag` (the server owns `meta`). Adding an optional detail needs no format-version bump: a
+reader of format 1 that predates it simply sees no name.
 
 ### Code systems
 
@@ -551,14 +625,23 @@ identifier only. So, as for Provenance, the AuditEvent is written by a determini
 `PUT AuditEvent/<uuid>` ("update as create", which needs the store's `enableUpdateCreate`, T05).
 
 The id is UUIDv5 of `["AuditEvent", "cuff-send-attempt", <agent>, <transport>, <MSH-10 or "">,
-<sent time, UTC, milliseconds>]`:
+<sent time, UTC, milliseconds>]`, with `<sample name>` appended for a malformed sample (T33):
 
 - **Sent time**: the same control ID can legitimately be sent twice (a resend reuses MSH-10), and
   those are two attempts with two AuditEvents.
 - **Agent and transport** keep two simulators, or an MLLP and an HTTPS send at the same
   millisecond, apart.
-- **Not the result, the destination or `recorded`**: they are what is recorded about the
-  attempt.
+- **Sample name** (T33), only for a malformed sample: samples share control IDs
+  (`SYN-BAD-0001` is in two of them) or have none (every `unparseable_*` sample), so two
+  different samples sent on one transport in the same millisecond (for example by two
+  instances) would otherwise get one id, and the second write would replace the first. The name,
+  not a digest of the bytes: this library holds no message bytes (on purpose), and the name
+  already says which bytes were sent. A built reading has no sample name and a fresh MSH-10,
+  so its id is derived exactly as before T33. The same sample sent twice in one millisecond by
+  two instances still shares an id; that is the same bytes to the same store, which the store
+  keeps as one message (spike S5), and the audit store's history keeps both versions.
+- **Not the result, the destination, `recorded` or a message name**: they are what is recorded
+  about the attempt.
 
 **Last write wins.** Because the result is left out on purpose, recording the same attempt again
 overwrites the AuditEvent, whatever the second write says. T13 records each attempt **once,
@@ -566,7 +649,10 @@ after its final outcome** (the ACK, the timeout or the error), so in practice a 
 a retry with the same content. The audit store keeps every version of a resource, so an
 overwrite is still visible in its history. A test states this behaviour.
 
-The four example ids are pinned by a test.
+The five example ids are pinned by a test. T33 changed the two sample examples' ids
+(`auditevent-send-rejected.json`, `auditevent-send-no-ack.json`), because the sample name joined
+their key; the ids of attempts without a sample did not change. Nothing had been written to a
+real audit store yet (the first deployment is T25), so no stored record became unreachable.
 
 `audit_event_write` derives method and URL from the resource with `request_for`, like every other
 request in this library. It refuses anything but an AuditEvent, so it cannot write a Patient or
@@ -590,7 +676,8 @@ else:                 # timeout, connection closed, or an HTTPS error with no hl
 attempt = SendAttempt(
     sent_at=sent_at, transport=transport, control_id=control_id, result=result,
     patient_id=configured_patient_id, agent="cuff-sim", destination=configured_hl7v2_store,
-    message_name=ingest_response_name,          # HTTPS 200 only; None otherwise
+    message_name=ingest_response_name,          # HTTPS 200 only: the store returned it
+    derived_message_name=derived_name,          # MLLP AA only: we computed it (T33)
     sample_name=malformed_sample_name,          # None unless "send malformed"
 )
 write = audit_event_write(build_send_attempt_audit_event(attempt, recorded=now_ms()))
@@ -622,7 +709,8 @@ for entry in bundle.get("entry", []):
         rows.append(error_row(resource.get("id"), str(exc)))  # shown, never hidden
         continue
     rows.append(row)  # row.sent_at, .transport, .control_id, .result, .ack_code, .reason,
-                      # .raw_ack, .no_ack_reason, .http_status, .reply_prefix, .message_name
+                      # .raw_ack, .no_ack_reason, .http_status, .reply_prefix, .message_name,
+                      # .derived_message_name (confirm with a get first), .message_name_source
 # report `unreadable` with the page, so a format problem is visible at once
 ```
 
@@ -673,12 +761,13 @@ the order is the same. `outcome` (token) is also a standard parameter if a filte
 `examples/` holds one file per resource type plus three transaction Bundles, all synthetic:
 `bundle-patient-setup.json` (the Patient upsert), `bundle-heart-rate-ingest.json` and
 `bundle-blood-pressure-ingest.json` (conditional creates; the latter built from PID-3 and PID-5
-only, and the former with one `preliminary` window). Four AuditEvents (T31) cover each send
+only, and the former with one `preliminary` window). Five AuditEvents (T31, T33) cover each send
 result: `auditevent-send-accepted.json` (HTTPS, `AA`, stored message name),
+`auditevent-send-accepted-mllp.json` (MLLP, `AA`, a derived message name, T33),
 `auditevent-send-rejected.json` (MLLP, the `unparseable_no_msh` sample, `AE` with reason),
 `auditevent-send-no-ack.json` (MLLP, the `noack_missing_end_block` sample, timeout) and
 `auditevent-send-unreadable-reply.json` (MLLP, a reply starting with a byte order mark). That
-makes thirteen files. The store name in them uses the placeholder project `example-project`. Expected
+makes fourteen files. The store name in them uses the placeholder project `example-project`. Expected
 validator warnings, beyond those listed above: the local `urn:pulsebridge:*` identifier systems.
 They are generated, never edited by hand:
 

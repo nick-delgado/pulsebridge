@@ -186,17 +186,17 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | done |
-| T09 | Synthetic data seeder | T06 | `services/seed/` | in-progress |
+| T09 | Synthetic data seeder | T06 | `services/seed/` | done |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | done |
-| T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | in-progress |
+| T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | done |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
-| T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | todo |
+| T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | in-progress |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
-| T33 | Library follow-ups from wave 3 reviews | T08, T10, T13 | `libs/pulsebridge_fhir/`, `libs/pulsebridge_hl7v2/`, `libs/pulsebridge_gcp/`, one marked line each in `services/cuff-sim/` and `services/health-sync/`, `scripts/fhir-validate-expected-warnings.json` | in-progress |
+| T33 | Library follow-ups from wave 3 reviews | T08, T10, T13 | `libs/pulsebridge_fhir/`, `libs/pulsebridge_hl7v2/`, `libs/pulsebridge_gcp/`, one marked line each in `services/cuff-sim/` and `services/health-sync/`, `scripts/fhir-validate-expected-warnings.json` | done |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
@@ -239,7 +239,10 @@ Bundle.
 **T11 Google Health connect flow.** CLI script that lets the deployer authorise their own account
 (see D2).
 - AC: reads the OAuth client ID and client secret from Secret Manager; if they are absent it
-  prompts for them without echo and stores them. None is committed or printed.
+  prompts for them without echo and stores them. The client secret is never committed,
+  printed or logged. The client ID is not committed or logged, and is printed only inside
+  Google's authorization address in `--paste` mode, where the user must open it by hand (a
+  client ID is public under RFC 6749 section 2.2).
 - AC: runs the OAuth authorization-code flow with PKCE and a `state` check, requesting offline
   access and a consent prompt (without them Google returns no refresh token), and stores the
   refresh token as a new Secret Manager version; prints only a success message.
@@ -251,7 +254,10 @@ Bundle.
   Google Health user ID from the identity call and demographics from configuration, and uses the
   device name exactly as Google reports it or writes no Device.
 - AC: `health-sync` needs exactly these three secrets and nothing else from the deployer.
-- AC: documented in `docs/setup.md` terms a new user can follow.
+- AC: its README is written in terms a new user can follow; carrying it into
+  `docs/setup.md` is T28's.
+- Nothing in T11 was run against Google or GCP. The assumptions to confirm on the first real
+  run are listed in its README.
 
 **T12 `v2-to-fhir` service.** Also creates `libs/pulsebridge_gcp/`, a thin shared client for the
 Cloud Healthcare API (FHIR `executeBundle` and resource reads and writes; HL7v2 message get,
@@ -372,6 +378,10 @@ Bundle endpoint and ignores conditional create.
 - AC: uses a registered client with the client credentials grant, authenticated by a signed
   assertion (`private_key_jwt`) with `system/*` scopes; no admin API key and no user login.
 - AC: sharing the same reading twice does not create a duplicate patient (search, then create).
+- AC: the Observation sent carries no reference to our own store: `subject` and `encounter`
+  are OpenEMR's, and `performer`, `device`, `meta` and `identifier` are dropped (OpenEMR does not
+  keep `performer`; see spike S1 and the T06 README). Only `final` Observations are shared; an
+  `amended` one is not.
 - AC: the Patient sent has a `PT`-typed identifier, a name with `use: official`, gender and birth date.
 - AC: the Patient sent is built with T06's `patient_for_sharing`, so the Google Health user ID,
   `id` and `meta` never go to the clinic; a Patient that is not complete is refused with what is
@@ -456,14 +466,15 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
-| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | todo |
+| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | in-progress |
 | T19 | Dashboard: share action and messages log | T16, T34 | `web/src/share/`, `web/src/messages/` | todo |
-| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | todo |
-| T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | todo |
+| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | in-progress |
+| T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | in-progress |
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
-| T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | in-progress |
-| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | in-progress |
+| T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
+| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
+| T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | in-progress |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
 task fills its own directory through the mount function and slots defined by the shell (T16) and
@@ -486,7 +497,8 @@ contract or the shell reports it to the orchestrator instead of editing those fi
 
 **T20 Module `ingestion`.** Cloud Run services `health-sync` and `v2-to-fhir`, Scheduler job,
 OIDC invoker bindings.
-- AC: services scale to zero and are not publicly invocable; images are referenced by digest.
+- AC: services scale to zero and are not publicly invocable; images are referenced by digest
+  in the variables `v2_to_fhir_image` and `health_sync_image` (the names the build prints).
 - AC: `v2-to-fhir` gets the environment variables listed in its README, and Pub/Sub pushes to
   its `/pubsub/hl7v2` route; a bad store ID stops the service starting, so it fails the deploy.
 - AC: `health-sync` is configured as its README's "For T20" section says: the three Google
@@ -494,6 +506,10 @@ OIDC invoker bindings.
   = 1`, Scheduler `retry_count = 0` and `attempt_deadline = 180s`, a request timeout of at
   least 180 s, `fhir-proxy` allowed to invoke it (for `/status`), and log-based alerts on a
   failed run and on "reconnect needed".
+- AC: when `use_synthetic_data` is true, the seeder (T09) runs instead of `health-sync`: a
+  Cloud Run job as the `seeder` account, image `seed_image` by digest, no retries, started
+  hourly by Scheduler with `--hours 4`; the README says how to run the first `--days 30`
+  seeding and how to size the job timeout. Nothing is created for it otherwise.
 - AC: there is a documented way to replay the dead-letter subscription. A message whose
   notification was dead-lettered (for example because a role was missing) stays "pending"
   until it is replayed; the README says how to find and replay such messages.
@@ -533,8 +549,15 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
 - AC: the cuff simulator is invocable only by the proxy's service account, and is configured
   as its README says: `MLLP_TIMEOUT_SECONDS`, `MLLP_HOST` as the VM's IP address, one gunicorn
   worker (the rate limit is per instance), a 90 s request timeout, and the same patient
-  identifier and authority as `v2-to-fhir`.
+  identifier and authority as `v2-to-fhir`. In a synthetic deployment its patient name is the
+  seeder's synthetic name (family `Synthetic`, given `Demo`), or the seeder refuses the
+  Patient the cuff path creates.
 - AC: the hosting layer sets a Content-Security-Policy header.
+- AC: images are given by digest in the variables `fhir_proxy_image` and `cuff_sim_image`
+  (the names the build prints). The README states the hosting layer's request timeout for
+  forwarded requests and whether it is shorter than the cuff simulator's documented worst
+  case (80 to 90 s); if it is, the proxy's own timeout is set below it so the page gets a
+  clear answer.
 
 **T23 Module `openemr`.** OpenEMR container on the edge VM, database connection, OAuth2 client
 registration script.
@@ -562,6 +585,14 @@ reports image digests.
 - AC: each image installs the local libraries it needs from `libs/` before the service; they
   are declared by name only and are not on PyPI. `v2-to-fhir` starts with the gunicorn command
   in its README and honours `PORT`.
+
+**T35 Seeder image and shared stored-window logic.** Two follow-ups from T09 and T24.
+- AC: `services/seed/Dockerfile` follows "Adding an image" in `services/README.md`; its command
+  is the `pulsebridge-seed` console script (a Cloud Run job, not gunicorn); `seed` leaves the
+  no-image allow-list and gains a smoke case (`--dry-run`); the build prints `seed_image`.
+- AC: the "read what is stored once, write only what changed" logic exists once, in a library,
+  used by both `health-sync` and the seeder with no change in either service's behaviour
+  (their existing tests pass unchanged apart from imports).
 
 **T34 Dashboard shell follow-ups.** Changes to shell-owned files that T13 and T17 showed are
 needed before T18 and T19 start.
@@ -596,14 +627,32 @@ needed before T18 and T19 start.
 - AC: `terraform destroy` leaves nothing billable.
 - AC: setup (writing the Patient, D11) runs before the ingest services are enabled: the Scheduler
   job and the push subscription are switched on only after it, so two services cannot both
-  create the Patient at first contact.
+  create the Patient at first contact. The connect script (T11) and the first seeding (T09)
+  are steps run outside `terraform apply`, so this needs an "ingest enabled" variable that
+  defaults to off, or a documented second apply.
+- AC: `use_synthetic_data` and a real Google Health connection are exclusive: a `SYN-` patient
+  ID is required with synthetic data and refused without it, and the setup guide says never
+  to run the connect script against a synthetic patient ID.
+- AC: outputs give everything the connect script and the seeder need (FHIR location, dataset
+  and store IDs, the secret name prefix), and one `patient_id` variable feeds every service
+  and both scripts.
 
 **T26 Terraform CI/CD.** `fmt -check`, `validate`, `tflint`, `trivy config`, plan posted on pull
 requests, apply to dev on merge, manual gate for prod, nightly destroy test for dev (see D1).
 - AC: authenticates with Workload Identity Federation only; no key in GitHub secrets.
+- AC: owns what T24 left open for image builds: a dedicated build service account (in the
+  `identity` module: writer on the services repository only, reader on the Docker Hub mirror
+  only, log writer; no access to secrets, health data, Cloud Run or IAM), a Cloud Build
+  trigger on release tags that runs `cloudbuild.yaml` as that account, and an Artifact
+  Registry cleanup policy in `project-base` (tags are immutable, so images otherwise
+  accumulate). The first real build confirms the assumptions listed as unverified in
+  `services/README.md`.
 
 **T27 Secret version scripts.** Add secret versions after apply.
 - AC: values are read from a prompt or stdin and never echoed or written to disk.
+- AC: the three Google Health secrets are written by the connect script (T11), not here. If a
+  script uses the Python Secret Manager client it switches off Google SDK payload logging
+  first (reuse `quiet_sdk_logging` from T11), and no script uses `gcloud --log-http`.
 - AC: includes `set-reviewer-password`, which enforces a 16-character minimum and can generate
   a random password.
 
@@ -611,6 +660,10 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
 bootstrap, register a Google Health OAuth app, connect an account, deploy, destroy. README: pitch,
 GIF, architecture, standards map, deploy, what this is not.
 - AC: no step relies on the author's accounts; every command uses a placeholder or a variable.
+- AC: carries over the connect script's README: a Desktop-app OAuth client, adding yourself
+  as a test user, the roles the deployer needs, keeping demographics out of shell history,
+  what to do when the refresh token expires, and that secrets must be named as the identity
+  module names them.
 - AC: the README shows a screenshot or GIF of a shared reading in the real OpenEMR chart,
   taken with synthetic data, since reviewers cannot open OpenEMR themselves (D13).
 - AC: the guide explains the OAuth app's Testing status (test users only, refresh token expires

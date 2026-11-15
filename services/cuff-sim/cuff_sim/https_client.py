@@ -14,11 +14,11 @@ differently: base64 in JSON, with no MLLP frame and no trailing carriage return.
 | 200 whose ``hl7Ack`` cannot be read                    | ``NoAck("unreadable-reply")``       |
 
 **A failure with no HTTP status** has no dedicated reason in T31's closed set (``api-error``
-needs a status). ``pulsebridge_gcp`` raises ``RetryableError(status=None)`` and chains the
-original exception as ``__cause__``:
+needs a status). ``pulsebridge_gcp`` raises ``RetryableError(status=None)``, and for a timeout
+its subclass ``TimedOutError`` (T33), so the class alone says which:
 
-- a ``requests.Timeout`` (connect or read): ``timeout``. After a read timeout the request was
-  sent, so the message **may have been stored**; that is what "no acknowledgment" means.
+- ``TimedOutError`` (a connect or read timeout): ``timeout``. After a read timeout the request
+  was sent, so the message **may have been stored**; that is what "no acknowledgment" means.
 - anything else (connection refused or reset, DNS, a token refresh failure): ``connection-closed``,
   the exchange ended with no reply of any kind, as for a refused MLLP connection. A token
   refresh failure means nothing was sent at all; T31's set has no exact reason for that, and
@@ -32,15 +32,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# requests is pulsebridge_gcp's HTTP library (RequestsTransport); only its exception types are
-# used here, to read what the transport chained.
-import requests
 from pulsebridge_gcp import (
     ClientError,
     HealthcareApiError,
     HealthcareClient,
     MalformedResponseError,
     RetryableError,
+    TimedOutError,
 )
 
 from cuff_sim.outcome import AckReceived, NoAck, TransportOutcome, read_ack
@@ -57,8 +55,8 @@ class HttpsDelivery:
 
 
 def _no_response(exc: RetryableError) -> NoAck:
-    """A failure with no HTTP response, classified by the exception the transport chained."""
-    if isinstance(exc.__cause__, requests.Timeout):
+    """A failure with no HTTP response: a timeout, or anything else."""
+    if isinstance(exc, TimedOutError):
         return NoAck("timeout", "the ingest API did not answer in time")
     return NoAck("connection-closed", "no HTTP response from the ingest API")
 

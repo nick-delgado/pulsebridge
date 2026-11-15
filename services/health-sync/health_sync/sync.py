@@ -268,6 +268,7 @@ class RunReport:
     windows_finalised: int = 0
     windows_amended: int = 0
     windows_withdrawn_kept: int = 0
+    windows_held_final: int = 0
     windows_written: int = 0
     windows_final: int = 0
     windows_preliminary: int = 0
@@ -307,6 +308,7 @@ class RunReport:
             "windows_finalised": self.windows_finalised,
             "windows_amended": self.windows_amended,
             "windows_withdrawn_kept": self.windows_withdrawn_kept,
+            "windows_held_final": self.windows_held_final,
             "windows_written": self.windows_written,
             "windows_final": self.windows_final,
             "windows_preliminary": self.windows_preliminary,
@@ -633,6 +635,7 @@ def _apply(report: RunReport, plan: Plan) -> None:
     report.windows_finalised += plan.finalised
     report.windows_amended += plan.amended
     report.windows_withdrawn_kept += plan.withdrawn_kept
+    report.windows_held_final += plan.held_final
 
 
 def _sync_one(run: _Run, piece: TimeRange) -> None:
@@ -664,6 +667,12 @@ def _sync_one(run: _Run, piece: TimeRange) -> None:
         run.deadline.require(MIN_STEP_SECONDS, "bundle")
         first, last = window_from_rollup(batch[0]), window_from_rollup(batch[-1])
         source = _data_source(run, first.start, last.end)
+        # Stored final, values changed since: written "amended", not "final" (T33).
+        amended = [
+            window_from_rollup(item).start
+            for item in batch
+            if run.key_of(item)[0] in plan.amend_keys
+        ]
         try:
             bundle = heart_rate_transaction(
                 batch,
@@ -675,6 +684,7 @@ def _sync_one(run: _Run, piece: TimeRange) -> None:
                 tz=config.time_zone,
                 recorded=truncate_to_ms(run.deps.now()),
                 complete_before=report.complete_before,
+                amended=amended,
                 assembler=ASSEMBLER,
             )
         except FhirInputError:
@@ -710,10 +720,11 @@ def _sync_one(run: _Run, piece: TimeRange) -> None:
         for entry in bundle["entry"]:
             resource = entry["resource"]
             if resource["resourceType"] == "Observation":
-                if resource["status"] == "final":
-                    report.windows_final += 1
-                else:
+                # final or amended: complete windows (amended ones are also in windows_amended).
+                if resource["status"] == "preliminary":
                     report.windows_preliminary += 1
+                else:
+                    report.windows_final += 1
 
 
 __all__ = [

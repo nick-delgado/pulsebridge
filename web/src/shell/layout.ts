@@ -40,8 +40,9 @@ function side(opts: {
   /** Prefix for the trace region's accessible name, for example "Blood-pressure". */
   traceName: string;
 }): HTMLElement {
-  const headingId = `${opts.key}-heading`;
-  const traceHeadingId = `${opts.key}-trace-heading`;
+  // Shell ids start with `shell-`, so they never collide with a feature's (README, element ids).
+  const headingId = `shell-${opts.key}-heading`;
+  const traceHeadingId = `shell-${opts.key}-trace-heading`;
   return el(
     'section',
     { class: `side side--${opts.key}`, attrs: { 'aria-labelledby': headingId } },
@@ -124,20 +125,24 @@ export function dashboardLayout(options: {
 
   const share = el(
     'section',
-    { class: 'share', attrs: { 'aria-labelledby': 'share-heading' } },
+    { class: 'share', attrs: { 'aria-labelledby': 'shell-share-heading' } },
     // The button carries the visible label; the heading names the region for screen readers.
-    el('h2', { id: 'share-heading', class: 'visually-hidden', text: 'Share with clinic' }),
+    el('h2', { id: 'shell-share-heading', class: 'visually-hidden', text: 'Share with clinic' }),
     slots.share.action,
     el(
       'section',
-      { class: 'card trace', attrs: { 'aria-labelledby': 'share-trace-heading' } },
-      el('h3', { id: 'share-trace-heading', class: 'trace__title', text: 'Share trace' }),
+      { class: 'card trace', attrs: { 'aria-labelledby': 'shell-share-trace-heading' } },
+      el('h3', { id: 'shell-share-trace-heading', class: 'trace__title', text: 'Share trace' }),
       slots.share.trace,
     ),
     el(
       'section',
-      { class: 'card trace', attrs: { 'aria-labelledby': 'readback-heading' } },
-      el('h3', { id: 'readback-heading', class: 'trace__title', text: 'As stored in OpenEMR' }),
+      { class: 'card trace', attrs: { 'aria-labelledby': 'shell-readback-heading' } },
+      el('h3', {
+        id: 'shell-readback-heading',
+        class: 'trace__title',
+        text: 'As stored in OpenEMR',
+      }),
       slots.share.readback,
     ),
   );

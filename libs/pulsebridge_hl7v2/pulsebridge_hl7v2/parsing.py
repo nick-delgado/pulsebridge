@@ -3,10 +3,14 @@
 ER7 is HL7v2's pipe-delimited text encoding ("MSH|^~\\&|..."). All the real parsing is done by
 hl7apy (decision D3). This module adds only:
 
-- byte decoding and two pre-checks (the message starts with ``MSH``; segments are separated by
-  carriage returns), because hl7apy's own error for those cases is misleading: a message with
-  line-feed separators fails with ``UnsupportedVersion``, since the whole message becomes one
-  segment and MSH-12 then runs on into the next line;
+- byte decoding and three pre-checks (the message starts with ``MSH``; segments are separated by
+  carriage returns; MSH-1 and MSH-2 are five distinct delimiter characters), because hl7apy's
+  own error for those cases is misleading or missing: a message with line-feed separators fails
+  with ``UnsupportedVersion``, since the whole message becomes one segment and MSH-12 then runs
+  on into the next line, and two header shapes make it raise a plain ``IndexError`` (below);
+- :func:`message_info`, hl7apy's header reader with its one known crash turned into
+  :class:`HL7ParseError`, so :func:`parse_er7` (and the ACK parser and the validator, which use
+  these too) raise only this package's errors for any bytes;
 - :func:`decode_escapes`, because hl7apy 1.3.5 escapes values when it writes ER7 but has no
   function to turn escape sequences back into text when it reads them.
 """
@@ -18,10 +22,16 @@ import re
 from hl7apy import exceptions as hl7apy_exceptions
 from hl7apy.consts import VALIDATION_LEVEL
 from hl7apy.core import Message
-from hl7apy.parser import parse_message
+from hl7apy.parser import get_message_info, parse_message
 
 # HL7v2 2.5.1 chapter 2.5.4 / 2.7: segments are terminated by a carriage return (hex 0D).
 SEGMENT_TERMINATOR = "\r"
+
+# MSH-1 (field separator) is the character right after "MSH", and MSH-2 (encoding characters)
+# starts right after it: component, repetition, escape, subcomponent (2.5.1 sections 2.15.9.1 and
+# 2.15.9.2). So the first five delimiters sit at fixed positions 3 to 7 of every header; reading
+# them by position is how hl7apy itself finds MSH-1, not ER7 splitting (D3).
+_DELIMITERS = slice(3, 8)
 
 
 class HL7ParseError(ValueError):
@@ -57,6 +67,49 @@ def check_framing_text(text: str) -> None:
             "message contains line feeds (\\n); HL7v2 requires each segment to end with a "
             "carriage return (\\r) only, and the HL7v2 store rejects \\n and \\r\\n"
         )
+    check_delimiters(text)
+
+
+def check_delimiters(text: str) -> None:
+    """Refuse a header whose delimiters HL7 does not allow, before hl7apy reads it.
+
+    HL7 2.5.1 section 2.5.4: the field separator and the four encoding characters are single,
+    distinct characters, and none may be a letter, a digit or whitespace (the segment terminator
+    is a carriage return, and ER7 data is text). hl7apy 1.3.5 checks that they are distinct, but
+    it accepts whitespace (and non-ASCII) as an encoding character, and when MSH-2 ends the header
+    its segment parser strips trailing whitespace, so reading the separators raises
+    ``IndexError`` (for example ``MSH|^~\\<space>``).
+    """
+    delimiters = text[_DELIMITERS]
+    if (
+        len(delimiters) < 5
+        or len(set(delimiters)) < 5
+        or any(not ("\x21" <= c <= "\x7e") or c.isalnum() for c in delimiters)
+    ):
+        raise HL7ParseError(
+            "MSH-1 and MSH-2 must be five distinct delimiter characters (printable, not a letter, "
+            "digit or space), such as |^~\\&"
+        )
+
+
+def message_info(text: str) -> tuple[dict, str | None, str | None]:
+    """hl7apy's header reader: ``(encoding characters, message structure, version)``.
+
+    hl7apy 1.3.5 ``parser._split_msh`` raises ``IndexError`` for a five-character MSH-2 (2.7
+    added a fifth, the truncation character) in a header of fewer than twelve fields: it reads
+    MSH-12 to decide whether that fifth character is allowed without checking MSH-12 exists
+    (``MSH|^~\\&#|...|ACK|A|``, or ``MSH|^~\\&`` followed by a non-ASCII character that the
+    delimiter check above has not already refused). That ``IndexError`` becomes
+    :class:`HL7ParseError`; hl7apy's own exceptions are left to the caller.
+    """
+    try:
+        return get_message_info(text)
+    except IndexError as exc:
+        # Nothing else in _split_msh or get_message_info indexes past MSH-2.
+        raise HL7ParseError(
+            "MSH-2 has five encoding characters, which only HL7 2.7 and later allow, and the "
+            "header has no MSH-12 (version) to say so"
+        ) from exc
 
 
 def parse_er7(payload: bytes | str, *, strict: bool = False) -> Message:
@@ -70,7 +123,10 @@ def parse_er7(payload: bytes | str, *, strict: bool = False) -> Message:
     check_framing_text(text)
     level = VALIDATION_LEVEL.STRICT if strict else VALIDATION_LEVEL.TOLERANT
     try:
+        message_info(text)  # parse_message reads the header the same way: fail here, clearly
         return parse_message(text, validation_level=level, find_groups=True)
+    except HL7ParseError:
+        raise  # from message_info, already one of ours (it is a ValueError: keep it as it is)
     except hl7apy_exceptions.UnsupportedVersion as exc:
         # MSH-12 (version ID) names a version hl7apy has no definitions for, e.g. "9.9".
         raise HL7ParseError(f"MSH-12 version is not supported by hl7apy: {exc}") from exc
