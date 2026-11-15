@@ -711,6 +711,68 @@ describe('polling the application-level outcome', () => {
     expect(m.rows()[0]?.textContent).toContain('the send-attempt record could not be found');
   });
 
+  it('messageLookup not-found: no outcome, polling stops, and the row says the stored message was not found', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(m.traces).toHaveLength(2);
+    m.traces[1]?.answer.resolve(attemptTrace(sendResult(), null, { lookup: 'not-found' }));
+    await flush();
+    // Stopped: no further trace calls however long we wait.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.traces).toHaveLength(2);
+    const row = m.rows()[0];
+    expect(row?.querySelectorAll('.cuff-reading__label')[1]?.textContent).toBe('Not found');
+    expect(row?.textContent).toContain(
+      'the HL7v2 store has no message under the name the simulator derived for this send',
+    );
+    expect(row?.textContent).not.toContain('Pending');
+    expect(row?.querySelector<HTMLButtonElement>('.cuff-reading__again')?.hidden).toBe(true);
+    expect(m.selection.get()?.unshareableReason).toContain('the HL7v2 store has no message');
+    expect(shareableObservation(m.selection.get())).toBeNull();
+    expect(m.slots.trace.textContent).toContain(
+      'Not found: the HL7v2 store has no message under this derived name.',
+    );
+  });
+
+  it('messageLookup failed: polling stops, "could not be checked", and "Check again" asks once more', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    m.traces[1]?.answer.resolve(attemptTrace(sendResult(), null, { lookup: 'failed' }));
+    await flush();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.traces).toHaveLength(2);
+    const row = m.rows()[0];
+    expect(row?.querySelectorAll('.cuff-reading__label')[1]?.textContent).toBe(
+      'Could not be checked',
+    );
+    const again = row?.querySelector<HTMLButtonElement>('.cuff-reading__again');
+    expect(again?.hidden).toBe(false);
+    again?.click();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(m.traces).toHaveLength(3);
+    m.traces[2]?.answer.resolve(
+      attemptTrace(
+        sendResult(),
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-9') },
+      ),
+    );
+    await flush();
+    expect(row?.querySelectorAll('.cuff-reading__label')[1]?.textContent).toBe('Accepted');
+    expect(shareableObservation(m.selection.get())).toBe('Observation/bp-9');
+  });
+
+  it('a 422 (unreadable AuditEvent) is final like a 404: polling stops and the trace says why', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    m.traces[1]?.answer.reject(new ApiError(422, 'unreadable'));
+    await flush();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.traces).toHaveLength(2);
+    expect(m.selection.get()).toBeNull();
+    expect(m.slots.trace.textContent).toContain('could not be read');
+  });
+
   it('a tick that changes nothing touches no DOM; settling replaces only what changed', async () => {
     const m = await sentPending();
     const message = m.slots.trace.querySelector('pre');

@@ -99,10 +99,11 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
     },
     signal,
   });
+  // Labelled by its heading only while open: a closed confirm has no heading to point at.
   const confirmBox = el('div', {
     class: 'share-confirm',
     id: 'share-confirm',
-    attrs: { role: 'group', 'aria-labelledby': 'share-confirm-heading' },
+    attrs: { role: 'group' },
   });
   confirmBox.hidden = true;
   // Two fixed live regions: progress and results are polite, failures assertive. Each is written
@@ -172,6 +173,7 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
 
   const closeConfirm = () => {
     confirmBox.hidden = true;
+    confirmBox.removeAttribute('aria-labelledby');
     replaceChildren(confirmBox);
   };
 
@@ -283,6 +285,7 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
       ),
       el('div', { class: 'share-confirm__actions' }, send, cancel),
     );
+    confirmBox.setAttribute('aria-labelledby', 'share-confirm-heading');
     confirmBox.hidden = false;
     renderAction();
     heading.focus();
