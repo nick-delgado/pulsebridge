@@ -274,7 +274,7 @@ export function applicationPhrase(r: Reading): Phrase {
     'gave-up':
       'Pending: still not mapped after 2 minutes, so the page stopped checking. The mapper may have failed, or the message is waiting to be replayed.',
     missing:
-      'Pending when last known: the send-attempt record could not be found, so the outcome cannot be looked up.',
+      'Pending when last known: the send-attempt record could not be found (or, answered 422, could not be read), so the outcome cannot be looked up.',
     'not-recorded':
       'Not known: this attempt was not recorded, so its outcome cannot be looked up here.',
     'not-stored': 'Pending.',
