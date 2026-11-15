@@ -8,6 +8,7 @@ error: every window is written, the run still succeeds). Synthetic data only.
 The clock starts at 2026-01-15T15:07:30Z (health_sync.testing), so W1300 is final.
 """
 
+import pytest
 from health_sync.sync import Outcome, run_sync, split_range, sync_range
 from health_sync.testing import (
     FHIR_PATH,
@@ -139,3 +140,25 @@ def test_a_component_that_is_not_an_object_is_skipped_and_the_window_rewritten(w
     assert report.outcome == Outcome.SYNCED
     assert report.stored_read == "ok"
     assert (report.windows_amended, report.windows_written) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        {"component": [{"code": "8867-4"}]},  # code as a string
+        {"component": 5},
+        {"identifier": 5},
+    ],
+)
+def test_an_observation_with_a_wrong_shape_fails_the_read_and_every_window_is_written(world, shape):
+    ready(world)
+    resource = {
+        "resourceType": "Observation",
+        "identifier": [{"system": "urn:pulsebridge:observation", "value": "k-other"}],
+        "status": "final",
+    }
+    world.fhir_transport.stored = [resource | shape]
+    report = run(world)
+    assert report.outcome == Outcome.SYNCED
+    assert report.stored_read == "failed:StoredReadError"
+    assert (report.windows_new, report.windows_written) == (1, 1)

@@ -96,13 +96,35 @@ def _number(quantity: object) -> float | int | None:
     return None
 
 
+def _array(element: dict, name: str) -> list:
+    """An R4 element that is an array in JSON (``identifier``, ``component``, ``coding``):
+    absent is empty; any other shape makes the page unusable (FHIR JSON never sends a single
+    value, ``null`` or a number in place of an array)."""
+    value = element.get(name)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise StoredReadError(f"{name} is not an array")
+    return value
+
+
+def _object(element: dict, name: str) -> dict:
+    """An R4 element that is an object in JSON (``component.code``, a CodeableConcept)."""
+    value = element.get(name)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise StoredReadError(f"{name} is not an object")
+    return value
+
+
 def _component(resource: dict, code: str) -> float | int | None:
     """``Observation.component[code=<LOINC code>].valueQuantity.value`` (T06 puts the minimum
     and maximum there: LOINC 96935-2 and 55426-1, ``codes.HEART_RATE_MIN`` and ``_MAX``)."""
-    for component in resource.get("component") or []:
+    for component in _array(resource, "component"):
         if not isinstance(component, dict):
             continue
-        codings = (component.get("code") or {}).get("coding") or []
+        codings = _array(_object(component, "code"), "coding")
         if any(
             isinstance(c, dict) and c.get("system") == codes.LOINC and c.get("code") == code
             for c in codings
@@ -116,11 +138,13 @@ def parse_stored_window(resource: dict) -> tuple[str, StoredWindow] | None:
     when it has no key in ``urn:pulsebridge:observation`` or no status (not one of ours).
 
     An end or value that cannot be read becomes ``None``, which never equals a window's real
-    end or values, so that window is written again."""
+    end or values, so that window is written again. ``identifier``, ``component`` or
+    ``component.coding`` that is not an array, or a ``component.code`` that is not an object,
+    raises :class:`StoredReadError` (the read fails and every window is written)."""
     key = next(
         (
             i.get("value")
-            for i in resource.get("identifier") or []
+            for i in _array(resource, "identifier")
             if isinstance(i, dict) and i.get("system") == codes.PB_OBSERVATION_ID
         ),
         None,
@@ -146,8 +170,9 @@ def parse_stored_window(resource: dict) -> tuple[str, StoredWindow] | None:
 def page_windows(page: object) -> list[tuple[str, StoredWindow]]:
     """The windows on one search page, in page order (a key may appear twice; the caller
     decides what that means). Raises :class:`StoredReadError` unless the page is a ``Bundle``
-    whose ``entry`` is absent or a list (R4 JSON: ``Bundle.entry`` is an array). Entries that
-    are not one of our heart-rate Observations are skipped."""
+    whose ``entry`` is absent or a list (R4 JSON: ``Bundle.entry`` is an array), and when an
+    Observation's arrays or ``component.code`` have another shape (:func:`parse_stored_window`).
+    Entries that are not one of our heart-rate Observations are skipped."""
     if not isinstance(page, dict) or page.get("resourceType") != "Bundle":
         raise StoredReadError("search did not return a Bundle")
     entries = page.get("entry", [])

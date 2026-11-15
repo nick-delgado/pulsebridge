@@ -276,6 +276,22 @@ def test_an_unusable_page_is_a_read_error(page):
         page_windows(page)
 
 
+@pytest.mark.parametrize(
+    ("change", "shape"),
+    [
+        ({"component": [{"code": "8867-4"}]}, "a component code that is a string"),
+        ({"component": 5}, "component as a number"),
+        ({"identifier": 5}, "identifier as a number"),
+        ({"component": [{"code": {"coding": 5}}]}, "coding as a number"),
+        ({"component": {"code": {}}}, "component as an object"),
+    ],
+)
+def test_an_observation_with_a_wrong_shape_is_a_read_error_not_a_crash(change, shape):
+    page = {"resourceType": "Bundle", "entry": [{"resource": observation(**change)}]}
+    with pytest.raises(StoredReadError):
+        page_windows(page)
+
+
 def test_search_parameters_are_the_r4_query():
     berlin = ZoneInfo("Europe/Berlin")
     params = stored_window_search_params(

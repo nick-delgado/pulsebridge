@@ -193,8 +193,8 @@ uses the functions below. This module makes no request of its own.
 | Name | What it is |
 | --- | --- |
 | `stored_window_search_params(patient_ref, start, end)` | The R4 search: `subject`, `code=http://loinc.org\|8867-4`, `date=ge…`, `date=lt…` (UTC, `Z`), `_elements=identifier,status,effectivePeriod,valueQuantity,component`, `_count=1000`. `date` on an `effectivePeriod` matches when the period overlaps the range. |
-| `page_windows(page)` | The `(key, StoredWindow)` pairs on one search page, in order. `StoredReadError` unless it is a `Bundle` whose `entry` is absent or a list. |
-| `parse_stored_window(resource)` | One stored Observation: its key (`urn:pulsebridge:observation`), status, end and min/avg/max; `None` if it is not ours. Unreadable parts become `None`, so that window is written again. |
+| `page_windows(page)` | The `(key, StoredWindow)` pairs on one search page, in order. `StoredReadError` unless it is a `Bundle` whose `entry` is absent or a list, and when an Observation has a wrong shape (below). |
+| `parse_stored_window(resource)` | One stored Observation: its key (`urn:pulsebridge:observation`), status, end and min/avg/max; `None` if it is not ours. Unreadable values (an end that is not a time, a value that is not a number, a component that is not an object) become `None`, so that window is written again. An `identifier`, `component` or `coding` that is not an array, or a `component.code` that is not an object, raises `StoredReadError`: the caller's read fails and every window is written, never a crash. |
 | `StoredWindow(status, end, values)`, `.is_final` | What is compared. `is_final`: `final`, `amended` or `corrected`. |
 | `plan_writes(items, stored, *, key_of, status_of)` | A `Plan`: the items to write (in order), the counts, and `amend_keys`. `stored=None` writes everything. |
 | `search_instant(dt)`, `search_token(system, value)` | A UTC `date` value; an escaped `system\|code` token. |

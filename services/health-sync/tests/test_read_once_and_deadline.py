@@ -498,6 +498,9 @@ def test_a_key_stored_twice_counts_as_not_stored(world, caplog, first_is_newer):
     assert (report.windows_new, report.windows_written) == (1, 1)
     events = [r.fields for r in caplog.records if r.fields.get("event") == "stored-duplicate-key"]
     assert events == [{"event": "stored-duplicate-key", "duplicate_keys": 1}]
+    # On the service's own logger (sync.py passes it to the shared read).
+    names = [r.name for r in caplog.records if r.fields.get("event") == "stored-duplicate-key"]
+    assert names == ["health_sync"]
 
 
 def test_duplicate_patients_are_a_read_state_of_their_own(world, caplog):
