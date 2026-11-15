@@ -185,7 +185,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | in-progress |
+| T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | done |
 | T09 | Synthetic data seeder | T06 | `services/seed/` | todo |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | in-progress |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
