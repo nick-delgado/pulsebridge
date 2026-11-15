@@ -81,6 +81,8 @@ describe('HttpClient', () => {
 
       expect(f.calls).toHaveLength(5);
       for (const call of f.calls) {
+        // One backend (D10): every request goes to fhir-proxy's base URL and nowhere else.
+        expect(call.url.startsWith(`${ORIGIN}/api/`)).toBe(true);
         expect(header(call, 'Authorization')).toBe(`Bearer ${TOKEN}`);
         // No cookies either way, and no HTTP caching of health data.
         expect(call.init.credentials).toBe('omit');
