@@ -196,8 +196,9 @@ terraform apply -target=module.stack.module.project_base
 ```
 
 The images (step 6) are pushed to project-base's Artifact Registry repository, so it must exist
-first; this apply also creates the edge VM's service account (project-base's mirror grant and
-firewall rule name it). The image variables may stay unset: nothing targeted depends on them.
+first. It also creates module identity's service accounts (not its secrets): project-base's
+mirror grant and firewall rule name the edge VM's account, and Terraform pulls in what a
+targeted module depends on. The image variables may stay unset: nothing targeted depends on them.
 Terraform warns that targeting is in effect; that is expected here.
 
 Worked when: the apply ends without error and `gcloud artifacts repositories list --project
@@ -461,7 +462,7 @@ task.
 
 | # | Check | Source | Verified on / result |
 | --- | --- | --- | --- |
-| A1 | Step 3's targeted apply creates project-base (and the edge VM's account) with no image variables set | T25 | |
+| A1 | Step 3's targeted apply creates project-base (and identity's service accounts) with no image variables set | T25 | |
 | A2 | Step 4's targeted apply creates the eight empty secrets once Secret Manager is enabled | T25 | |
 | A3 | The full plan on a clean project has no "Invalid count argument" for project-base's mirror grant (the stack passes the edge VM's email as a string template so the count is known; see "Findings") | T25 | |
 | A4 | `health.googleapis.com` is the Google Health API's service name (it enables) | PB | |

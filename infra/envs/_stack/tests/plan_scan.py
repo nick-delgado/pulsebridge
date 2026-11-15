@@ -48,7 +48,12 @@ URIS = {
 SCENARIOS = {
     "real_ingest_off": {"synthetic": False, "ingest": False, "env": "dev", "patient": "PAT-0001"},
     "real_ingest_on": {"synthetic": False, "ingest": True, "env": "dev", "patient": "PAT-0001"},
-    "synthetic_ingest_off": {"synthetic": True, "ingest": False, "env": "dev", "patient": "SYN-0001"},
+    "synthetic_ingest_off": {
+        "synthetic": True,
+        "ingest": False,
+        "env": "dev",
+        "patient": "SYN-0001",
+    },
     "synthetic_ingest_on": {"synthetic": True, "ingest": True, "env": "dev", "patient": "SYN-0001"},
     "prod_settings": {"synthetic": False, "ingest": False, "env": "prod", "patient": "PAT-0001"},
 }
@@ -114,8 +119,15 @@ def run_terraform() -> dict[str, dict]:
     )
     try:
         result = subprocess.run(
-            ["terraform", f"-chdir={STACK_DIR}", "test", "-no-color", "-json", "-verbose",
-             "-filter=tests/stack.tftest.hcl"],
+            [
+                "terraform",
+                f"-chdir={STACK_DIR}",
+                "test",
+                "-no-color",
+                "-json",
+                "-verbose",
+                "-filter=tests/stack.tftest.hcl",
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -150,7 +162,9 @@ class Scan:
             self.fail(message)
 
     def of_type(self, rtype: str) -> list[dict]:
-        return [r for r in self.by_address.values() if r["type"] == rtype and r["mode"] == "managed"]
+        return [
+            r for r in self.by_address.values() if r["type"] == rtype and r["mode"] == "managed"
+        ]
 
     def get(self, address: str) -> dict | None:
         r = self.by_address.get(address)
@@ -188,9 +202,17 @@ def check_security(s: Scan) -> None:
 
     services = {r["values"]["name"]: r["values"] for r in s.of_type("google_cloud_run_v2_service")}
     public = sorted(n for n, v in services.items() if v.get("invoker_iam_disabled"))
-    s.check(public == [f"{PREFIX}-fhir-proxy"], f"exactly one public service (fhir-proxy), found {public}")
-    ingress_all = sorted(n for n, v in services.items() if v.get("ingress") == "INGRESS_TRAFFIC_ALL")
-    s.check(ingress_all == [f"{PREFIX}-fhir-proxy"], f"only fhir-proxy may take internet traffic, found {ingress_all}")
+    s.check(
+        public == [f"{PREFIX}-fhir-proxy"],
+        f"exactly one public service (fhir-proxy), found {public}",
+    )
+    ingress_all = sorted(
+        n for n, v in services.items() if v.get("ingress") == "INGRESS_TRAFFIC_ALL"
+    )
+    s.check(
+        ingress_all == [f"{PREFIX}-fhir-proxy"],
+        f"only fhir-proxy may take internet traffic, found {ingress_all}",
+    )
 
 
 def check_mode_and_ingest(s: Scan) -> None:
@@ -199,21 +221,43 @@ def check_mode_and_ingest(s: Scan) -> None:
     jobs = {r["values"]["name"] for r in s.of_type("google_cloud_run_v2_job")}
     accounts = {r["values"]["account_id"] for r in s.of_type("google_service_account")}
 
-    s.check((f"{PREFIX}-health-sync" in names) == (not synthetic), "health-sync exists exactly with real data")
-    s.check((f"{PREFIX}-seed" in jobs) == synthetic, "the seeder job exists exactly with synthetic data")
-    s.check((f"{IDENTITY_PREFIX}-seeder" in accounts) == synthetic, "the seeder account exists exactly with synthetic data")
+    s.check(
+        (f"{PREFIX}-health-sync" in names) == (not synthetic),
+        "health-sync exists exactly with real data",
+    )
+    s.check(
+        (f"{PREFIX}-seed" in jobs) == synthetic, "the seeder job exists exactly with synthetic data"
+    )
+    s.check(
+        (f"{IDENTITY_PREFIX}-seeder" in accounts) == synthetic,
+        "the seeder account exists exactly with synthetic data",
+    )
 
     schedulers = s.of_type("google_cloud_scheduler_job")
-    s.check(len(schedulers) == (1 if ingest else 0), f"{len(schedulers)} Scheduler job(s); expected {1 if ingest else 0}")
+    s.check(
+        len(schedulers) == (1 if ingest else 0),
+        f"{len(schedulers)} Scheduler job(s); expected {1 if ingest else 0}",
+    )
     for job in schedulers:
         target = job["values"]["http_target"][0]
         if synthetic:
-            s.check(target["uri"].endswith(f"/jobs/{PREFIX}-seed:run"), "the seeder trigger must run the seeder job")
-            s.check(target["oauth_token"][0]["service_account_email"] == email("scheduler-invoker"), "seeder trigger identity")
+            s.check(
+                target["uri"].endswith(f"/jobs/{PREFIX}-seed:run"),
+                "the seeder trigger must run the seeder job",
+            )
+            s.check(
+                target["oauth_token"][0]["service_account_email"] == email("scheduler-invoker"),
+                "seeder trigger identity",
+            )
         else:
-            s.check(target["uri"] == URIS["health-sync"] + "/sync", "the sync trigger must POST health-sync's /sync")
+            s.check(
+                target["uri"] == URIS["health-sync"] + "/sync",
+                "the sync trigger must POST health-sync's /sync",
+            )
             oidc = target["oidc_token"][0]
-            s.check(oidc["service_account_email"] == email("scheduler-invoker"), "sync trigger identity")
+            s.check(
+                oidc["service_account_email"] == email("scheduler-invoker"), "sync trigger identity"
+            )
             s.check(oidc["audience"] == URIS["health-sync"], "sync trigger audience")
 
     sub = s.get("module.healthcare.google_pubsub_subscription.ingest") or {}
@@ -223,12 +267,22 @@ def check_mode_and_ingest(s: Scan) -> None:
     else:
         s.check(len(push) == 1, "with ingest_enabled = true the ingest subscription must push")
         if push:
-            s.check(push[0]["push_endpoint"] == URIS["v2-to-fhir"] + "/pubsub/hl7v2", "push endpoint = v2-to-fhir URL + /pubsub/hl7v2")
-            s.check(push[0]["oidc_token"][0]["service_account_email"] == email("pubsub-push"), "push identity = pubsub-push")
+            s.check(
+                push[0]["push_endpoint"] == URIS["v2-to-fhir"] + "/pubsub/hl7v2",
+                "push endpoint = v2-to-fhir URL + /pubsub/hl7v2",
+            )
+            s.check(
+                push[0]["oidc_token"][0]["service_account_email"] == email("pubsub-push"),
+                "push identity = pubsub-push",
+            )
     invokers = {
-        (r["values"]["name"], r["values"]["member"]) for r in s.of_type("google_cloud_run_v2_service_iam_member")
+        (r["values"]["name"], r["values"]["member"])
+        for r in s.of_type("google_cloud_run_v2_service_iam_member")
     }
-    s.check((f"{PREFIX}-v2-to-fhir", f"serviceAccount:{email('pubsub-push')}") in invokers, "pubsub-push may invoke v2-to-fhir")
+    s.check(
+        (f"{PREFIX}-v2-to-fhir", f"serviceAccount:{email('pubsub-push')}") in invokers,
+        "pubsub-push may invoke v2-to-fhir",
+    )
 
 
 def check_patient(s: Scan) -> None:
@@ -237,9 +291,13 @@ def check_patient(s: Scan) -> None:
     _, v2 = s.service("module.ingestion.google_cloud_run_v2_service.v2_to_fhir")
     _, cuff = s.service("module.phr.google_cloud_run_v2_service.cuff_sim")
     _, proxy = s.service("module.phr.google_cloud_run_v2_service.fhir_proxy")
-    ids = {"v2-to-fhir": v2["_env"].get("PATIENT_ID"), "cuff-sim": cuff["_env"].get("PATIENT_ID"), "fhir-proxy": proxy["_env"].get("PATIENT_ID")}
+    ids = {
+        "v2-to-fhir": v2["_env"].get("PATIENT_ID"),
+        "cuff-sim": cuff["_env"].get("PATIENT_ID"),
+        "fhir-proxy": proxy["_env"].get("PATIENT_ID"),
+    }
     if synthetic:
-        job = s.get(f"module.ingestion.google_cloud_run_v2_job.seed[0]") or {}
+        job = s.get("module.ingestion.google_cloud_run_v2_job.seed[0]") or {}
         container = job["template"][0]["template"][0]["containers"][0] if job else {}
         ids["seeder"] = env_of(container).get("PATIENT_ID")
     else:
@@ -252,7 +310,10 @@ def check_patient(s: Scan) -> None:
         "cuff-sim": cuff["_env"].get("PATIENT_ASSIGNING_AUTHORITY"),
         "fhir-proxy": proxy["_env"].get("PATIENT_ASSIGNING_AUTHORITY"),
     }
-    s.check(set(authorities.values()) == {"EXAMPLE"}, f"one assigning authority for v2-to-fhir and the cuff path: {authorities}")
+    s.check(
+        set(authorities.values()) == {"EXAMPLE"},
+        f"one assigning authority for v2-to-fhir and the cuff path: {authorities}",
+    )
 
     family, given = ("Synthetic", "Demo") if synthetic else ("Example", "Pat")
     for name, svc in (("cuff-sim", cuff), ("fhir-proxy", proxy)):
@@ -261,54 +322,103 @@ def check_patient(s: Scan) -> None:
 
 
 def check_edge_vm(s: Scan) -> None:
-    """project-base, edge-vm and openemr agree on the account, the ports, the mirror and the address."""
+    """project-base, edge-vm and openemr agree on the account, ports, mirror and address."""
     edge = email("edge-vm")
-    fw = s.get('module.project_base.google_compute_firewall.allow["allow-serverless-to-edge"]') or {}
-    s.check(fw.get("target_service_accounts") == [edge], "the MLLP/HTTPS firewall rule must target the edge VM's account")
+    fw = (
+        s.get('module.project_base.google_compute_firewall.allow["allow-serverless-to-edge"]') or {}
+    )
+    s.check(
+        fw.get("target_service_accounts") == [edge],
+        "the MLLP/HTTPS firewall rule must target the edge VM's account",
+    )
     ports = sorted(p for a in fw.get("allow", []) for p in a.get("ports", []))
     s.check(ports == sorted([MLLP_PORT, "443"]), f"firewall ports {ports}")
 
-    mirror = s.get("module.project_base.google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader[0]") or {}
-    s.check(mirror.get("member") == f"serviceAccount:{edge}" and mirror.get("role") == "roles/artifactregistry.reader",
-            "the edge VM's account must read the Docker Hub mirror")
-    s.check(mirror.get("repository") == f"{PREFIX}-dockerhub", "the grant must be on the mirror repository")
+    mirror = (
+        s.get(
+            "module.project_base.google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader[0]"
+        )
+        or {}
+    )
+    s.check(
+        mirror.get("member") == f"serviceAccount:{edge}"
+        and mirror.get("role") == "roles/artifactregistry.reader",
+        "the edge VM's account must read the Docker Hub mirror",
+    )
+    s.check(
+        mirror.get("repository") == f"{PREFIX}-dockerhub",
+        "the grant must be on the mirror repository",
+    )
 
     vm = s.get("module.edge_vm.google_compute_instance.this") or {}
-    s.check(vm.get("service_account", [{}])[0].get("email") == edge, "the VM runs as the edge VM account")
+    s.check(
+        vm.get("service_account", [{}])[0].get("email") == edge,
+        "the VM runs as the edge VM account",
+    )
     nic = (vm.get("network_interface") or [{}])[0]
     s.check(nic.get("network_ip") == ADDRESS, "the VM uses its reserved internal address")
-    s.check(nic.get("subnetwork") == f"projects/{PROJECT}/regions/us-central1/subnetworks/{PREFIX}-edge", "the VM is on project-base's edge subnet")
+    s.check(
+        nic.get("subnetwork")
+        == f"projects/{PROJECT}/regions/us-central1/subnetworks/{PREFIX}-edge",
+        "the VM is on project-base's edge subnet",
+    )
     s.check(not nic.get("access_config"), "the VM has no external IP")
 
     meta = vm.get("metadata") or {}
     for key in ("pulsebridge-hook-openemr", "pulsebridge-hook-openemr-oauth-client"):
         s.check(key in meta, f"VM metadata lacks {key}")
     hook = meta.get("pulsebridge-hook-openemr", "")
-    s.check(f"https://{ADDRESS}" in hook, "the openemr hook must use the VM's reserved address as OpenEMR's site address")
-    s.check(f"us-central1-docker.pkg.dev/{PROJECT}/{PREFIX}-dockerhub" in hook, "the openemr hook must pull through the mirror")
+    s.check(
+        f"https://{ADDRESS}" in hook,
+        "the openemr hook must use the VM's reserved address as OpenEMR's site address",
+    )
+    s.check(
+        f"us-central1-docker.pkg.dev/{PROJECT}/{PREFIX}-dockerhub" in hook,
+        "the openemr hook must pull through the mirror",
+    )
 
     script = meta.get("startup-script", "")
-    s.check("EDGE_HOOK_TIMEOUT_SECONDS='2400'" in script, "the hooks need module openemr's 40-minute limit")
-    for file_name, secret in (("mariadb-root-password", "db-root-password"),
-                              ("openemr-db-password", "openemr-db-password"),
-                              ("openemr-admin-password", "openemr-admin-password")):
-        s.check(f"'{file_name}={secret_resource_id(secret)}'" in script, f"the VM must copy {secret} to {file_name}")
-    for flag in (f"--port={MLLP_PORT}", f"--hl7_v2_project_id={PROJECT}", "--hl7_v2_location_id=us-central1",
-                 f"--hl7_v2_dataset_id={PREFIX}", f"--hl7_v2_store_id={PREFIX}-hl7v2"):
+    s.check(
+        "EDGE_HOOK_TIMEOUT_SECONDS='2400'" in script,
+        "the hooks need module openemr's 40-minute limit",
+    )
+    for file_name, secret in (
+        ("mariadb-root-password", "db-root-password"),
+        ("openemr-db-password", "openemr-db-password"),
+        ("openemr-admin-password", "openemr-admin-password"),
+    ):
+        s.check(
+            f"'{file_name}={secret_resource_id(secret)}'" in script,
+            f"the VM must copy {secret} to {file_name}",
+        )
+    for flag in (
+        f"--port={MLLP_PORT}",
+        f"--hl7_v2_project_id={PROJECT}",
+        "--hl7_v2_location_id=us-central1",
+        f"--hl7_v2_dataset_id={PREFIX}",
+        f"--hl7_v2_store_id={PREFIX}-hl7v2",
+    ):
         s.check(flag in script, f"the MLLP adapter command lacks {flag}")
 
     _, cuff = s.service("module.phr.google_cloud_run_v2_service.cuff_sim")
-    s.check(cuff["_env"].get("MLLP_HOST") == ADDRESS and cuff["_env"].get("MLLP_PORT") == MLLP_PORT,
-            "cuff-sim must send MLLP to the VM's address and the firewall's port")
-    s.check(cuff["vpc_access"][0]["network_interfaces"][0]["subnetwork"] == f"{PREFIX}-serverless",
-            "cuff-sim must egress through the serverless subnet (the firewall rule's source)")
+    s.check(
+        cuff["_env"].get("MLLP_HOST") == ADDRESS and cuff["_env"].get("MLLP_PORT") == MLLP_PORT,
+        "cuff-sim must send MLLP to the VM's address and the firewall's port",
+    )
+    s.check(
+        cuff["vpc_access"][0]["network_interfaces"][0]["subnetwork"] == f"{PREFIX}-serverless",
+        "cuff-sim must egress through the serverless subnet (the firewall rule's source)",
+    )
 
     writers = {
-        (r["values"]["role"], r["values"]["member"]) for r in s.of_type("google_secret_manager_secret_iam_member")
+        (r["values"]["role"], r["values"]["member"])
+        for r in s.of_type("google_secret_manager_secret_iam_member")
         if r["values"]["secret_id"] == secret_resource_id("openemr-client-private-key")
     }
-    s.check(("roles/secretmanager.secretVersionAdder", f"serviceAccount:{edge}") in writers,
-            "the VM must be able to add the OpenEMR client key version (edge_vm_writes_openemr_key)")
+    s.check(
+        ("roles/secretmanager.secretVersionAdder", f"serviceAccount:{edge}") in writers,
+        "the VM must be able to add the OpenEMR client key version (edge_vm_writes_openemr_key)",
+    )
 
 
 def check_front_door(s: Scan) -> None:
@@ -318,44 +428,87 @@ def check_front_door(s: Scan) -> None:
     if synthetic:
         s.check("HEALTH_SYNC_URL" not in env, "no HEALTH_SYNC_URL with synthetic data")
     else:
-        s.check(env.get("HEALTH_SYNC_URL") == URIS["health-sync"], "fhir-proxy must call health-sync's URL")
-    s.check(env.get("OPENEMR_SITE_ADDRESS") == f"https://{ADDRESS}", "fhir-proxy must call OpenEMR at the VM's address")
-    s.check(env.get("CUFF_SIM_URL") == URIS["cuff-sim"], "fhir-proxy must forward to cuff-sim's URL")
+        s.check(
+            env.get("HEALTH_SYNC_URL") == URIS["health-sync"],
+            "fhir-proxy must call health-sync's URL",
+        )
+    s.check(
+        env.get("OPENEMR_SITE_ADDRESS") == f"https://{ADDRESS}",
+        "fhir-proxy must call OpenEMR at the VM's address",
+    )
+    s.check(
+        env.get("CUFF_SIM_URL") == URIS["cuff-sim"], "fhir-proxy must forward to cuff-sim's URL"
+    )
     s.check(env.get("TRUSTED_PROXY_HOPS") == "1", "trusted_proxy_hops must reach fhir-proxy")
-    volumes = {v["name"]: v["secret"][0]["secret"] for v in proxy.get("volumes", []) if v.get("secret")}
-    s.check(volumes.get("openemr-client") == f"{IDENTITY_PREFIX}-openemr-client-private-key",
-            f"fhir-proxy must mount the OpenEMR client secret by its short ID: {volumes}")
-    s.check(volumes.get("reviewer-password") == f"{IDENTITY_PREFIX}-reviewer-password", "fhir-proxy must mount the reviewer password")
-    s.check(proxy["vpc_access"][0]["egress"] == "ALL_TRAFFIC", "fhir-proxy egress ALL_TRAFFIC (internal-only callees)")
+    volumes = {
+        v["name"]: v["secret"][0]["secret"] for v in proxy.get("volumes", []) if v.get("secret")
+    }
+    s.check(
+        volumes.get("openemr-client") == f"{IDENTITY_PREFIX}-openemr-client-private-key",
+        f"fhir-proxy must mount the OpenEMR client secret by its short ID: {volumes}",
+    )
+    s.check(
+        volumes.get("reviewer-password") == f"{IDENTITY_PREFIX}-reviewer-password",
+        "fhir-proxy must mount the reviewer password",
+    )
+    s.check(
+        proxy["vpc_access"][0]["egress"] == "ALL_TRAFFIC",
+        "fhir-proxy egress ALL_TRAFFIC (internal-only callees)",
+    )
 
     _, v2 = s.service("module.ingestion.google_cloud_run_v2_service.v2_to_fhir")
     dataset = s.get("module.healthcare.google_healthcare_dataset.this") or {}
-    s.check(dataset.get("project") == PROJECT and v2["_env"].get("GCP_PROJECT_ID") == PROJECT,
-            "the Healthcare dataset and ingestion must be in the same project (push is internal only then)")
+    s.check(
+        dataset.get("project") == PROJECT and v2["_env"].get("GCP_PROJECT_ID") == PROJECT,
+        "the Healthcare dataset and ingestion must share a project (push is internal only then)",
+    )
 
 
 def check_alerts(s: Scan) -> None:
     channels = s.of_type("google_monitoring_notification_channel")
-    s.check(len(channels) == 1 and channels[0]["values"]["labels"] == {"email_address": ALERT_EMAIL},
-            "alert_email must create one email channel")
+    s.check(
+        len(channels) == 1 and channels[0]["values"]["labels"] == {"email_address": ALERT_EMAIL},
+        "alert_email must create one email channel",
+    )
     policies = s.of_type("google_monitoring_alert_policy")
     s.check(len(policies) > 0, "the alerts must exist (an address is set)")
     if channels:
         name = channels[0]["values"]["name"]
         for p in policies:
-            s.check(name in (p["values"].get("notification_channels") or []), f"{p['address']} must notify the email channel")
+            s.check(
+                name in (p["values"].get("notification_channels") or []),
+                f"{p['address']} must notify the email channel",
+            )
 
 
 def check_environment(s: Scan) -> None:
     protect = s.expect["env"] == "prod"
-    policies = {r["values"].get("deletion_policy") for r in s.by_address.values()
-                if r["type"] in ("google_healthcare_dataset", "google_healthcare_fhir_store", "google_healthcare_hl7_v2_store")}
-    s.check(policies == {"PREVENT" if protect else "DELETE"}, f"Healthcare deletion policies {policies}")
-    secrets = {r["values"].get("deletion_protection") for r in s.of_type("google_secret_manager_secret")}
+    policies = {
+        r["values"].get("deletion_policy")
+        for r in s.by_address.values()
+        if r["type"]
+        in (
+            "google_healthcare_dataset",
+            "google_healthcare_fhir_store",
+            "google_healthcare_hl7_v2_store",
+        )
+    }
+    s.check(
+        policies == {"PREVENT" if protect else "DELETE"}, f"Healthcare deletion policies {policies}"
+    )
+    secrets = {
+        r["values"].get("deletion_protection") for r in s.of_type("google_secret_manager_secret")
+    }
     s.check(secrets == {protect}, f"secret deletion_protection {secrets}")
-    runs = {r["values"].get("deletion_protection") for r in s.of_type("google_cloud_run_v2_service") + s.of_type("google_cloud_run_v2_job")}
+    runs = {
+        r["values"].get("deletion_protection")
+        for r in s.of_type("google_cloud_run_v2_service") + s.of_type("google_cloud_run_v2_job")
+    }
     s.check(runs == {protect}, f"Cloud Run deletion_protection {runs}")
-    labels = {r["values"].get("labels", {}).get("environment") for r in s.of_type("google_cloud_run_v2_service")}
+    labels = {
+        r["values"].get("labels", {}).get("environment")
+        for r in s.of_type("google_cloud_run_v2_service")
+    }
     s.check(labels == {s.expect["env"]}, f"environment label {labels}")
 
 
@@ -367,8 +520,15 @@ def main() -> int:
     failures: list[str] = []
     for name, expect in SCENARIOS.items():
         scan = Scan(name, states[name], expect)
-        for check in (check_security, check_mode_and_ingest, check_patient, check_edge_vm,
-                      check_front_door, check_alerts, check_environment):
+        for check in (
+            check_security,
+            check_mode_and_ingest,
+            check_patient,
+            check_edge_vm,
+            check_front_door,
+            check_alerts,
+            check_environment,
+        ):
             check(scan)
         print(f"{name}: {len(scan.by_address)} resources checked, {len(scan.failures)} failure(s)")
         failures += scan.failures
