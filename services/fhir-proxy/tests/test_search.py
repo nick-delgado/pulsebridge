@@ -209,7 +209,10 @@ def test_store_failures_are_bounded_reasons(harness, patient) -> None:
     assert "example-project" not in response.get_data(as_text=True)
     harness.fake.failures.clear()
     harness.fake.fail(
-        "GET", "/Observation$", HttpResponse(400, b'{"resourceType": "OperationOutcome"}')
+        "GET",
+        "/Observation$",
+        HttpResponse(400, b'{"error": {"message": "projects/example-project/datasets/x refused"}}'),
     )
     response = harness.get(f"/fhir/Observation?{HR}")
     assert response.status_code == 502 and _reason(response) == "upstream-refused"
+    assert "example-project" not in response.get_data(as_text=True)

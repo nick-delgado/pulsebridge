@@ -194,6 +194,8 @@ def create_app(
     app.json.sort_keys = False  # type: ignore[attr-defined]
     routes: list[Route] = list(CORE_ROUTES) + [route for route, _ in context.routes]
     app.extensions["pulsebridge_routes"] = routes
+    app.extensions["pulsebridge_stores"] = stores
+    app.extensions["pulsebridge_messages_log"] = messages_log
     public_endpoints = {r.endpoint for r in routes if r.public}
     methods_by_rule = {f"{prefix}{r.path}": r.method for r in routes}
 

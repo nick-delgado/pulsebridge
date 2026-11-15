@@ -7,7 +7,7 @@ import copy
 from datetime import UTC, datetime
 
 import pytest
-from fhir_proxy.messages import Cursor, Item, Stream, decode_cursor, merge
+from fhir_proxy.messages import Cursor, Item, Lookup, Stream, decode_cursor, merge
 from fhir_proxy.testing import AUDIT_STORE, STORE_NAME, example, sample_bytes
 from pulsebridge_gcp import HttpResponse, TimedOutError
 
@@ -452,3 +452,13 @@ def test_store_failure_on_the_log_is_a_bounded_error(harness) -> None:
     assert response.get_json()["issue"][0]["details"]["coding"][0]["code"] == (
         "upstream-permission-denied"
     )
+
+
+def test_a_message_name_outside_our_store_is_never_fetched_directly(harness) -> None:
+    other = STORE_NAME.replace("example-store", "other-store") + "/messages/abc="
+    stores = harness.app.extensions["pulsebridge_stores"]
+    with pytest.raises(ValueError):
+        stores.get_message(other)
+    log = harness.app.extensions["pulsebridge_messages_log"]
+    assert log.lookups([other]) == {other: Lookup("failed")}
+    assert harness.fake.calls("GET", "/messages/") == []
