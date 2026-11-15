@@ -19,11 +19,14 @@ Observation HR  ``PUT Observation?identifier=…|<uuid>``                     UU
 Observation BP  ``PUT Observation?identifier=…|<uuid>``                     UUIDv5(patient,
                                                                             85354-9, source key)
 Provenance      ``PUT Provenance/<uuid>`` (update-as-create)                UUIDv5(Observation)
+AuditEvent      ``PUT AuditEvent/<uuid>`` alone, never in a Bundle (T31)    UUIDv5(sender,
+                                                                            transport, MSH-10,
+                                                                            sent time)
 ==============  ==========================================================  ======================
 
-R4 Provenance has no ``identifier`` element and the Cloud Healthcare API's conditional update
-matches on identifier only, so Provenance alone is written by id; that needs the FHIR store's
-``enableUpdateCreate`` setting (task T05).
+R4 Provenance and AuditEvent have no ``identifier`` element and the Cloud Healthcare API's
+conditional update matches on identifier only, so these two are written by id; that needs the
+FHIR store's ``enableUpdateCreate`` setting (task T05).
 """
 
 import copy
@@ -67,6 +70,9 @@ _IDENTITY_SYSTEMS = {
 }
 # Only these may be written with a conditional create (ingest); the rest are only ever updated.
 CREATE_IF_ABSENT_TYPES = ("Patient", "Device")
+# Resource types with no identifier element in R4, written by a deterministic id instead
+# ("update as create", PUT <Type>/<id>; needs the store's enableUpdateCreate, task T05).
+UPDATE_BY_ID_TYPES = ("Provenance", "AuditEvent")
 # R4 id datatype: [A-Za-z0-9\-\.]{1,64}
 _FHIR_ID = re.compile(r"^[A-Za-z0-9\-.]{1,64}$")
 
@@ -99,20 +105,21 @@ def request_for(resource: dict, write: Write) -> dict:
       ``ifNoneExist: identifier=<system>|<value>`` (R4 Bundle.entry.request.ifNoneExist: "just
       the query portion of the URL - what follows the '?' (not including the '?')"). Same query
       as the update, so both always match the same resource.
-    - Provenance, update only: ``PUT Provenance/<its id>``.
+    - Provenance and AuditEvent, update only: ``PUT <Type>/<its id>``. Neither has an
+      ``identifier`` element in R4, so there is nothing to match a conditional write on.
     """
     if not isinstance(resource, dict):
         raise FhirInputError(f"expected a resource dict, got {type(resource).__name__}")
     if not isinstance(write, Write):
         raise FhirInputError(f"expected a Write mode, got {write!r}")
     rt = resource.get("resourceType")
-    if rt == "Provenance":
+    if rt in UPDATE_BY_ID_TYPES:
         if write is not Write.UPDATE:
-            raise FhirInputError("Provenance has no conditional-create request")
+            raise FhirInputError(f"{rt} has no conditional-create request")
         rid = resource.get("id")
         if not isinstance(rid, str) or not _FHIR_ID.match(rid):
-            raise FhirInputError(f"Provenance: id {rid!r} is not a valid FHIR id")
-        return {"method": "PUT", "url": f"Provenance/{rid}"}
+            raise FhirInputError(f"{rt}: id {rid!r} is not a valid FHIR id")
+        return {"method": "PUT", "url": f"{rt}/{rid}"}
     system = _IDENTITY_SYSTEMS.get(rt)
     if system is None:
         raise FhirInputError(f"no write rule for resourceType {rt!r}")

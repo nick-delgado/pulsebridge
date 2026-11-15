@@ -104,3 +104,44 @@ ACTIVITY_CREATE: Final = coding(V3_DATA_OPERATION, "CREATE", "create")
 
 # Device.deviceName.type
 DEVICE_NAME_USER_FRIENDLY: Final = "user-friendly-name"
+
+
+# --- AuditEvent (task T31: one cuff send attempt) ------------------------------------------------
+# R4 AuditEvent's value sets are built mostly from the DICOM audit vocabulary (DICOM PS3.15 annex A
+# and PS3.16 "DCM"), because FHIR AuditEvent was designed to carry the same content as a DICOM /
+# IHE ATNA audit message. See README.md, "AuditEvent for a cuff send attempt".
+
+DICOM_DCM: Final = "http://dicom.nema.org/resources/ontology/DCM"
+V2_EVENT_TYPE: Final = "http://terminology.hl7.org/CodeSystem/v2-0003"  # HL7v2 table 0003
+AUDIT_SOURCE_TYPE: Final = "http://terminology.hl7.org/CodeSystem/security-source-type"
+AUDIT_ENTITY_TYPE: Final = "http://terminology.hl7.org/CodeSystem/audit-entity-type"
+AUDIT_OBJECT_ROLE: Final = "http://terminology.hl7.org/CodeSystem/object-role"
+
+# AuditEvent.type (AuditEventID, extensible). DICOM "Export": "Data has been exported out of a
+# system". DICOM PS3.15 A.5.3.4 (Data Export) and IHE (e.g. the ITI-41 source audit) fix the action
+# of an Export event to R (read): the sender reads the data it sends; the receiver records its own
+# Import (110107) with action C.
+AUDIT_TYPE_EXPORT: Final = coding(DICOM_DCM, "110106", "Export")
+AUDIT_ACTION_READ: Final = "R"  # AuditEvent.action, http://hl7.org/fhir/audit-event-action
+# AuditEvent.subtype: the HL7v2 trigger event the sender attempted, table 0003 R01.
+AUDIT_SUBTYPE_ORU_R01: Final = coding(
+    V2_EVENT_TYPE, "R01", "ORU/ACK - Unsolicited transmission of an observation message"
+)
+# AuditEvent.agent.type (ParticipationRoleType, extensible; it includes DICOM 110150-110155).
+AGENT_SOURCE_ROLE: Final = coding(DICOM_DCM, "110153", "Source Role ID")
+AGENT_DESTINATION_ROLE: Final = coding(DICOM_DCM, "110152", "Destination Role ID")
+# AuditEvent.source.type: the reporting system is an application server (a Cloud Run service).
+SOURCE_APPLICATION_SERVER: Final = coding(AUDIT_SOURCE_TYPE, "4", "Application Server")
+# AuditEvent.entity.type and .role.
+ENTITY_TYPE_PERSON: Final = coding(AUDIT_ENTITY_TYPE, "1", "Person")
+ENTITY_TYPE_SYSTEM_OBJECT: Final = coding(AUDIT_ENTITY_TYPE, "2", "System Object")
+ENTITY_ROLE_PATIENT: Final = coding(AUDIT_OBJECT_ROLE, "1", "Patient")
+ENTITY_ROLE_REPORT: Final = coding(AUDIT_OBJECT_ROLE, "3", "Report")
+
+# Identifier systems for the two systems taking part (logical references; neither is a FHIR
+# resource in our store). Owned by this software, the same in every clone.
+PB_SERVICE: Final = "urn:pulsebridge:service"  # a PulseBridge service, e.g. cuff-sim
+PB_HL7V2_STORE: Final = "urn:pulsebridge:hl7v2-store"  # a Cloud Healthcare HL7v2 store name
+# The stored message is identified exactly as T06's Provenance identifies it as a source record,
+# so the trace panel can join an AuditEvent and a Provenance on the same identifier.
+PB_HL7V2_MESSAGE: Final = PB_SOURCE_RECORD_PREFIX + "hl7v2-message"

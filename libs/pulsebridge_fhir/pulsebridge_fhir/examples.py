@@ -9,9 +9,10 @@ files equal what this module produces, so they cannot drift from the code.
 
 import json
 import sys
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
+from pulsebridge_fhir.audit_event import build_send_attempt_audit_event
 from pulsebridge_fhir.bundle import blood_pressure_transaction, patient_setup_transaction
 from pulsebridge_fhir.google_health import (
     GoogleDataSource,
@@ -20,7 +21,15 @@ from pulsebridge_fhir.google_health import (
     rollup_source,
     window_from_rollup,
 )
-from pulsebridge_fhir.inputs import BloodPressureReading, DeviceInput, PatientInput, SourceInfo
+from pulsebridge_fhir.inputs import (
+    Acknowledged,
+    BloodPressureReading,
+    DeviceInput,
+    NotAcknowledged,
+    PatientInput,
+    SendAttempt,
+    SourceInfo,
+)
 from pulsebridge_fhir.resources import (
     build_blood_pressure_observation,
     build_device,
@@ -83,6 +92,54 @@ SYNTHETIC_BP_SOURCE = SourceInfo(
     recording_method=None,
 )
 
+# Cuff send attempts (T31). A made-up store name; the project ID is a placeholder.
+SYNTHETIC_HL7V2_STORE = (
+    "projects/example-project/locations/us-central1/datasets/example-dataset/"
+    "hl7V2Stores/example-store"
+)
+SYNTHETIC_SEND_ACCEPTED = SendAttempt(
+    sent_at=datetime(2026, 1, 1, 14, 30, 0, 125000, tzinfo=UTC),
+    transport="https",
+    control_id="MSG-SYN-0002",
+    result=Acknowledged(
+        code="AA",
+        # The shape of the store's ACK (spike S5): message type ACK, MSA-2 echoes MSH-10.
+        raw_ack=b"MSH|^~\\&|PHR|PULSEBRIDGE|CUFFSIM|PULSEBRIDGE|20260101143000||ACK|ACK-SYN-0002"
+        b"|P|2.5.1\rMSA|AA|MSG-SYN-0002",
+    ),
+    patient_id="PB-SYN-0001",
+    agent="cuff-sim",
+    destination=SYNTHETIC_HL7V2_STORE,
+    message_name=SYNTHETIC_HL7V2_STORE + "/messages/synthetic-message-0002",
+)
+SYNTHETIC_SEND_REJECTED = SendAttempt(
+    sent_at=datetime(2026, 1, 1, 14, 31, 0, tzinfo=UTC),
+    transport="mllp",
+    # The "no MSH segment" sample has no MSH-10 to report.
+    control_id=None,
+    result=Acknowledged(
+        code="AE",
+        # The store's NACK for a message with no MSH (spike S4): empty MSA-2, reason in MSA-3.
+        raw_ack=b"MSH|^~\\&|||||20260101143100||ACK|ACK-SYN-0003\rMSA|AE||Invalid MSH header",
+        reason="Invalid MSH header",
+    ),
+    patient_id="PB-SYN-0001",
+    agent="cuff-sim",
+    destination=SYNTHETIC_HL7V2_STORE,
+    sample_name="unparseable_no_msh",
+)
+SYNTHETIC_SEND_NO_ACK = SendAttempt(
+    sent_at=datetime(2026, 1, 1, 14, 32, 0, tzinfo=UTC),
+    transport="mllp",
+    control_id="MSG-SYN-0004",
+    # A frame with no end block: the adapter waits for more bytes and never answers (spike S4).
+    result=NotAcknowledged(why="timeout"),
+    patient_id="PB-SYN-0001",
+    agent="cuff-sim",
+    destination=SYNTHETIC_HL7V2_STORE,
+    sample_name="noack_missing_end_block",
+)
+
 
 def build_examples() -> dict[str, dict]:
     """File name to resource, for every example."""
@@ -108,7 +165,18 @@ def build_examples() -> dict[str, dict]:
         recorded=SYNTHETIC_RECORDED,
         assembler="PulseBridge v2-to-fhir",
     )
-    return {
+    sends = {
+        name: build_send_attempt_audit_event(
+            attempt, recorded=attempt.sent_at + timedelta(seconds=seconds)
+        ).resource
+        for name, attempt, seconds in (
+            ("auditevent-send-accepted.json", SYNTHETIC_SEND_ACCEPTED, 1),
+            ("auditevent-send-rejected.json", SYNTHETIC_SEND_REJECTED, 1),
+            # recorded after the simulator's read timeout
+            ("auditevent-send-no-ack.json", SYNTHETIC_SEND_NO_ACK, 5),
+        )
+    }
+    return sends | {
         "patient.json": patient.resource,
         "device-watch.json": watch.resource,
         "observation-heart-rate.json": heart_rate.resource,

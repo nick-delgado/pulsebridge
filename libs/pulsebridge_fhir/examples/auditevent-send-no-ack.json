@@ -1,0 +1,128 @@
+{
+  "resourceType": "AuditEvent",
+  "id": "ba24b13a-bed7-55ea-879e-60bd9cab12ca",
+  "type": {
+    "system": "http://dicom.nema.org/resources/ontology/DCM",
+    "code": "110106",
+    "display": "Export"
+  },
+  "subtype": [
+    {
+      "system": "http://terminology.hl7.org/CodeSystem/v2-0003",
+      "code": "R01",
+      "display": "ORU/ACK - Unsolicited transmission of an observation message"
+    }
+  ],
+  "action": "R",
+  "period": {
+    "start": "2026-01-01T14:32:00+00:00",
+    "end": "2026-01-01T14:32:05+00:00"
+  },
+  "recorded": "2026-01-01T14:32:05+00:00",
+  "outcome": "8",
+  "outcomeDesc": "No acknowledgment received: the read timed out",
+  "agent": [
+    {
+      "type": {
+        "coding": [
+          {
+            "system": "http://dicom.nema.org/resources/ontology/DCM",
+            "code": "110153",
+            "display": "Source Role ID"
+          }
+        ]
+      },
+      "who": {
+        "identifier": {
+          "system": "urn:pulsebridge:service",
+          "value": "cuff-sim"
+        }
+      },
+      "requestor": true
+    },
+    {
+      "type": {
+        "coding": [
+          {
+            "system": "http://dicom.nema.org/resources/ontology/DCM",
+            "code": "110152",
+            "display": "Destination Role ID"
+          }
+        ]
+      },
+      "who": {
+        "identifier": {
+          "system": "urn:pulsebridge:hl7v2-store",
+          "value": "projects/example-project/locations/us-central1/datasets/example-dataset/hl7V2Stores/example-store"
+        }
+      },
+      "requestor": false
+    }
+  ],
+  "source": {
+    "observer": {
+      "identifier": {
+        "system": "urn:pulsebridge:service",
+        "value": "cuff-sim"
+      }
+    },
+    "type": [
+      {
+        "system": "http://terminology.hl7.org/CodeSystem/security-source-type",
+        "code": "4",
+        "display": "Application Server"
+      }
+    ]
+  },
+  "entity": [
+    {
+      "what": {
+        "type": "Patient",
+        "identifier": {
+          "system": "urn:pulsebridge:patient",
+          "value": "PB-SYN-0001"
+        }
+      },
+      "type": {
+        "system": "http://terminology.hl7.org/CodeSystem/audit-entity-type",
+        "code": "1",
+        "display": "Person"
+      },
+      "role": {
+        "system": "http://terminology.hl7.org/CodeSystem/object-role",
+        "code": "1",
+        "display": "Patient"
+      }
+    },
+    {
+      "type": {
+        "system": "http://terminology.hl7.org/CodeSystem/audit-entity-type",
+        "code": "2",
+        "display": "System Object"
+      },
+      "role": {
+        "system": "http://terminology.hl7.org/CodeSystem/object-role",
+        "code": "3",
+        "display": "Report"
+      },
+      "detail": [
+        {
+          "type": "transport",
+          "valueString": "mllp"
+        },
+        {
+          "type": "MSH-10",
+          "valueString": "MSG-SYN-0004"
+        },
+        {
+          "type": "no-ack-reason",
+          "valueString": "timeout"
+        },
+        {
+          "type": "malformed-sample",
+          "valueString": "noack_missing_end_block"
+        }
+      ]
+    }
+  ]
+}
