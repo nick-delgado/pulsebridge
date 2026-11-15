@@ -86,6 +86,21 @@ def test_invalid_values_are_refused_without_echoing_them(name, value, message):
     assert value not in str(caught.value)
 
 
+def test_a_synthetic_patient_id_is_refused():
+    # The Terraform roots refuse SYN- without synthetic data; this is the script's own guard.
+    for argv in ([], ["--skip-patient"]):
+        with pytest.raises(cli.UsageError) as caught:
+            cli.load_config(argv, {**ENV, "PATIENT_ID": "SYN-0001"})
+        assert "synthetic" in str(caught.value) and "SYN-0001" not in str(caught.value)
+
+
+def test_an_identifier_merely_containing_syn_is_accepted():
+    assert (
+        cli.load_config([], {**ENV, "PATIENT_ID": "PB-SYN-0001"}).demographics.patient_id
+        == "PB-SYN-0001"
+    )
+
+
 @pytest.mark.parametrize("args", [["--port", "70000"], ["--timeout", "5"]])
 def test_numeric_limits(args):
     with pytest.raises(cli.UsageError):
