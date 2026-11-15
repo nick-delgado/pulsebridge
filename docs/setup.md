@@ -547,7 +547,8 @@ replace it, or create it if there is none"), so running it again is safe. The in
 later only *link* to it (a conditional create that never overwrites).
 
 **Synthetic data: the first seeding.** It writes the synthetic Patient and 30 days of invented
-heart-rate windows, and takes about 15 minutes:
+heart-rate windows; it should take about 15 minutes (an estimate, not measured on Cloud
+Healthcare):
 
 ```bash
 gcloud run jobs execute "$(terraform output -raw seed_job_name)" \
