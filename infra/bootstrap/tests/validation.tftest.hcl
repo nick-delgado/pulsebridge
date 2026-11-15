@@ -279,13 +279,36 @@ run "rejects_secret_access_for_the_planner" {
   expect_failures = [var.planner_extra_permissions]
 }
 
+# A list permission is refused by its shape alone (compute.instances.list reads no data, but
+# list permissions are not what a refresh needs).
 run "rejects_a_list_permission_for_the_planner" {
+  command = plan
+  variables {
+    create_planner            = true
+    planner_extra_permissions = ["compute.instances.list"]
+  }
+  expect_failures = [var.planner_extra_permissions]
+}
+
+run "rejects_private_log_entries_for_the_planner" {
   command = plan
   variables {
     create_planner            = true
     planner_extra_permissions = ["logging.privateLogEntries.list"]
   }
   expect_failures = [var.planner_extra_permissions]
+}
+
+run "accepts_a_harmless_extra_get_for_the_planner" {
+  command = plan
+  variables {
+    create_planner            = true
+    planner_extra_permissions = ["compute.zones.get"]
+  }
+  assert {
+    condition     = contains(google_project_iam_custom_role.planner[0].permissions, "compute.zones.get")
+    error_message = "A get permission that reads no data must be added to the planner's role."
+  }
 }
 
 # --- the three accounts' contexts never meet (T26 review B1) -------------------------------------
