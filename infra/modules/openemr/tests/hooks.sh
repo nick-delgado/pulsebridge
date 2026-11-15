@@ -714,6 +714,12 @@ if [ -s "$SB/mnt/disks/edge/openemr/default/sqlconf.php" ] && [ -d "$SB/mnt/disk
 echo 31 > "$SB/state/db/gacl_acl"
 run_hook openemr
 expect_rc nonzero "$RC" "ACL present but no setup marker: still refused"
+echo 0 > "$SB/state/db/gacl_acl"
+echo 16 > "$SB/mnt/disks/edge/openemr/default/docker-version"
+: > "$SB/out.log"
+run_hook openemr
+expect_rc nonzero "$RC" "setup marker present but the ACL table empty: refused"
+expect_log 'gacl_acl is empty' "names the empty access-control table"
 
 # -- Case: registration without OpenEMR running --------------------------------------------------------
 echo "== registration hook with OpenEMR not running"
