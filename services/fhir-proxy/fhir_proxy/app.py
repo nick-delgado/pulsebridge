@@ -207,6 +207,7 @@ def create_app(
     app.extensions["pulsebridge_routes"] = routes
     app.extensions["pulsebridge_stores"] = stores
     app.extensions["pulsebridge_messages_log"] = messages_log
+    app.extensions["pulsebridge_status"] = status_service
     # Fixed by the core table: an extension can never make a route public (or replace login).
     public_endpoints = {r.endpoint for r in CORE_ROUTES if r.public}
     methods_by_rule = {f"{prefix}{r.path}": r.method for r in routes}

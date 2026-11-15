@@ -301,3 +301,39 @@ def test_upstream_calls_get_at_most_the_time_left(tmp_path) -> None:
     (call,) = h.sender.calls
     # health-sync's own timeout is 25 s; the call may only use what is left of the 2 s budget.
     assert call["timeout"] <= 2
+
+
+def test_an_inner_status_search_still_running_at_the_deadline_is_never_in_the_answer(
+    tmp_path,
+) -> None:
+    h = build_harness(tmp_path, request_budget=1)
+    _patient(h)
+    h.sender.answer("/status", 200, {"googleHealth": "connected"})
+    h.fake.stubborn_delays.append(("GET", r"/Observation$", 2.5))  # outlives the budget
+    token = h.login()
+    response = h.client.get("/status", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["observationCounts"] == {"watch": None, "cuff": None}
+    assert body["fhirStore"]["reachable"] is False
+
+
+def test_the_store_part_itself_never_returns_an_unfinished_search(tmp_path) -> None:
+    """The inner guard on its own (the outer wait usually covers it, but the two deadlines can
+    race): the store part, run directly under a short budget, gives unknown counts."""
+    from fhir_proxy import deadline
+
+    h = build_harness(tmp_path)
+    _patient(h)
+    status_service = h.app.extensions["pulsebridge_status"]
+    status_service._cached = None
+    h.fake.stubborn_delays.append(("GET", r"/Observation$", 1.5))
+    import contextvars
+
+    def run() -> dict:
+        deadline.start(0.5)
+        return status_service._from_store(datetime(2026, 1, 2, 12, tzinfo=UTC))
+
+    result = contextvars.copy_context().run(run)
+    assert result["observationCounts"] == {"watch": None, "cuff": None}
+    assert result["fhirStore"]["reachable"] is False

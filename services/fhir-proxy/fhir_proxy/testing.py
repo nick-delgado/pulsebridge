@@ -135,6 +135,9 @@ class FakeHealthcare:
     delays: list[tuple[str, str, float]] = field(default_factory=list)
     # A store that ignores the subject pin, to test the proxy's own post-filter.
     ignore_subject: bool = False
+    # (method, path regex, seconds): answer slowly and IGNORE the caller's timeout, like a
+    # stuck connection, so a parallel wait really reaches its deadline first.
+    stubborn_delays: list[tuple[str, str, float]] = field(default_factory=list)
     # (path, start, end) of every delayed call, monotonic seconds: for ordering assertions.
     timeline: list[tuple[str, float, float]] = field(default_factory=list)
 
@@ -194,6 +197,9 @@ class FakeHealthcare:
                 self.timeline.append((path, began, time.monotonic()))
                 if seconds > timeout:
                     raise TimedOutError(f"{method} {path}", None)
+        for delay_method, pattern, seconds in self.stubborn_delays:
+            if delay_method == method and re.search(pattern, path):
+                time.sleep(seconds)
         for fail_method, pattern, response in self.failures:
             if fail_method == method and re.search(pattern, path):
                 if isinstance(response, BaseException):
