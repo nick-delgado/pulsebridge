@@ -46,6 +46,7 @@ import {
   type FieldErrors,
 } from './form';
 import {
+  ACK_MODE_SHORT,
   applicationPhrase,
   clockTime,
   commitAckPhrase,
@@ -56,6 +57,7 @@ import {
   sendFailureText,
   unshareableReason,
   whatWasSent,
+  isStaleTrace,
   withTrace,
   type Reading,
 } from './readings';
@@ -65,6 +67,7 @@ import { APPLICATION_LEVEL_LABEL, COMMIT_LEVEL_LABEL, tracePanel } from './trace
 export const MAX_READINGS = 20;
 
 export const RECHECK_REASON = 'being checked again after a data change.';
+export const CHECKING_REASON = 'being checked against its stored trace.';
 
 export interface CuffDeps {
   /** Clock for the rate-limit countdown. */
@@ -93,6 +96,12 @@ function childController(parent: AbortSignal): AbortController {
       { once: true, signal: c.signal },
     );
   return c;
+}
+
+/** What a selection points at, for comparing two selections whatever their other values. */
+function selectionTarget(s: Selection | null): string {
+  if (s === null) return 'none';
+  return s.source === 'cuff' ? `cuff:${s.attemptId}` : `watch:${s.observationId}`;
 }
 
 function errorMessage(error: unknown): string {
@@ -275,12 +284,22 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     class: 'button button--primary cuff-send',
     id: 'cuff-send',
     text: 'Take reading',
-    attrs: { type: 'submit', 'aria-describedby': 'cuff-form-message cuff-countdown' },
+    attrs: {
+      type: 'submit',
+      'aria-describedby': 'cuff-form-status cuff-form-alert cuff-countdown',
+    },
   });
-  const formMessage = el('p', {
+  // Two fixed live regions, one polite and one assertive, rather than one element whose role
+  // changes (a screen reader may not notice a region whose role changed).
+  const formStatus = el('p', {
     class: 'cuff-form-message',
-    id: 'cuff-form-message',
+    id: 'cuff-form-status',
     attrs: { role: 'status' },
+  });
+  const formAlert = el('p', {
+    class: 'cuff-form-message',
+    id: 'cuff-form-alert',
+    attrs: { role: 'alert' },
   });
   const countdown = el('p', { class: 'cuff-countdown', id: 'cuff-countdown' });
   const form = el(
@@ -293,7 +312,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     pressures,
     transport,
     malformedBox,
-    el('div', { class: 'cuff-actions' }, sendButton, formMessage, countdown),
+    el('div', { class: 'cuff-actions' }, sendButton, formStatus, formAlert, countdown),
   );
 
   // -- readings list ---------------------------------------------------------------------------
@@ -312,6 +331,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
       id: 'cuff-readings-heading',
       text: 'Readings this session',
     }),
+    el('p', { class: 'cuff-hint', id: 'cuff-readings-help', text: ACK_MODE_SHORT }),
     listEmpty,
     list,
   );
@@ -361,7 +381,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     diastolic: { message: diastolic.error, control: diastolic.input },
     transport: { message: transportError, control: mllp.input },
     sendMalformed: { message: sampleError, control: null },
-    body: { message: formMessage, control: null },
+    body: { message: formAlert, control: null },
   };
 
   const clearFieldErrors = () => {
@@ -402,11 +422,13 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     else form.removeAttribute('aria-busy');
   };
 
+  /** An error or warning goes to the assertive region, anything else to the polite one. */
   const setMessage = (text: string, tone: 'info' | 'ok' | 'warn' | 'error') => {
-    formMessage.textContent = text;
-    formMessage.className = `cuff-form-message cuff-form-message--${tone}`;
-    // An error interrupts; anything else is announced politely.
-    formMessage.setAttribute('role', tone === 'error' || tone === 'warn' ? 'alert' : 'status');
+    const urgent = tone === 'error' || tone === 'warn';
+    const [target, other] = urgent ? [formAlert, formStatus] : [formStatus, formAlert];
+    other.textContent = '';
+    target.textContent = text;
+    target.className = `cuff-form-message cuff-form-message--${tone}`;
   };
 
   const stopCountdown = () => {
@@ -457,7 +479,8 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
         info ? el('p', { class: 'cuff-hint', text: info.layer }) : null,
       );
       for (const s of group.samples) {
-        const id = `cuff-sample-${s.name}`;
+        // A generated id: a server-supplied name never becomes an element id (README, ids).
+        const id = uniqueId('cuff-sample');
         const available = sampleAvailable(s, t);
         const input = el('input', {
           id,
@@ -699,34 +722,43 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     renderAllRows();
   };
 
+  /** Shows the selected row's latest trace; the panel leaves unchanged parts alone. */
+  const showSelectedTrace = () => {
+    if (selectedKey === null) return;
+    const shown = find(selectedKey);
+    const latest = traces.get(selectedKey);
+    if (!shown || !latest) return;
+    selection.set(selectionFor(shown)); // no notification when nothing changed
+    trace.render({
+      kind: 'ready',
+      reading: shown,
+      trace: latest,
+      summary: readingSummary(shown, deps.timeZone),
+    });
+  };
+
   /**
-   * Applies a trace answer to its row. Returns false when the answer was older than what the row
-   * already knows (it said "pending" after the row settled), and so was not used.
+   * Applies a trace answer to its row. An answer that still says "pending" about a row that has
+   * settled is older than what the row knows, and is dropped. The row is re-rendered only when
+   * something it shows changed (`withTrace` returns the same object otherwise), and the trace
+   * panel patches only the parts that changed, so a poll tick that changes nothing touches no DOM.
    */
-  const applyTrace = (key: string, t: CuffAttemptTrace): boolean => {
+  const applyTrace = (key: string, t: CuffAttemptTrace): void => {
     const before = find(key);
-    if (!before) return false;
-    const after = withTrace(before, t);
-    const used = after !== before;
-    if (used) {
-      traces.set(key, t);
-      replace(after);
-    }
-    if (selectedKey === key) {
-      const latest = traces.get(key);
-      const shown = find(key);
-      if (latest && shown) {
+    if (!before || isStaleTrace(before, t)) {
+      if (selectedKey === key && traces.has(key)) {
         traceController?.abort();
-        selection.set(selectionFor(shown));
-        trace.render({
-          kind: 'ready',
-          reading: shown,
-          trace: latest,
-          summary: readingSummary(shown, deps.timeZone),
-        });
+        showSelectedTrace();
       }
+      return;
     }
-    return used;
+    traces.set(key, t);
+    const after = withTrace(before, t);
+    if (after !== before) replace(after);
+    if (selectedKey === key) {
+      traceController?.abort();
+      showSelectedTrace();
+    }
   };
 
   const loadTrace = (r: Reading) => {
@@ -787,7 +819,16 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
       current?.source === 'cuff'
         ? readings.find((r) => r.recorded && r.result.attemptId === current.attemptId)
         : undefined;
-    if (ours) {
+    if (ours && ours.key !== selectedKey) {
+      // Another feature (for example the messages log) selected one of our rows: show its trace,
+      // and until it answers, mark the selection as being checked (the outside summary and
+      // reason are not ours to trust). Setting it here re-enters this listener, which then
+      // finds the key already selected; the store hands every listener the latest value.
+      selectedKey = ours.key;
+      const sel = selectionFor(ours);
+      if (sel) selection.set({ ...sel, unshareableReason: CHECKING_REASON });
+      loadTrace(ours);
+    } else if (ours) {
       selectedKey = ours.key;
     } else if (selectedKey !== null) {
       // The selection moved to the watch side or was cleared: drop our highlight and trace.
@@ -819,6 +860,8 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
           if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
             const now = find(r.key);
             if (now) replace({ ...now, lookup: 'missing' });
+            // The same as a 404 from a trace load: the selected attempt is gone.
+            if (now && selectedKey === r.key) dropSelection(now);
             return true;
           }
           return false; // a passing failure: try again at the next tick
@@ -855,19 +898,22 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     setMessage('Sending…', 'info');
     const c = childController(signal);
     sendController = c;
-    const selectionAtStart = selection.get();
+    const selectionAtStart = selectionTarget(selection.get());
     client.submitCuffReading(request, { signal: c.signal }).then(
       (result) => {
         // Logged out (or torn down) meanwhile: the answer belongs to a dashboard that is gone.
         if (c.signal.aborted) return;
         sending = false;
+        if (waitUntil === 0) countdown.textContent = '';
         updateButton();
         const r = newReading(uniqueId('cuff-row'), request, result);
         addReading(r);
         setMessage(sentMessage(r), r.result.result === 'accepted' ? 'ok' : 'warn');
         context.notifyDataChanged('cuff-send');
         // Select the new reading, unless the user picked something else while it was sending.
-        if (r.recorded && selection.get() === selectionAtStart) pick(r);
+        // Compared by what is selected, not by object: a row that settles meanwhile re-sets the
+        // selection with new values but the same target.
+        if (r.recorded && selectionTarget(selection.get()) === selectionAtStart) pick(r);
         if (isPending(r)) startPolling(r);
       },
       (error: unknown) => {
@@ -883,10 +929,12 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
           }
           showFieldErrors(errors);
           if (error.reason === 'rate-limited') startCountdown(error.retryAfterSeconds);
-          // It may have been sent: whatever happened is now on the server, so others re-fetch.
-          if (error.reason === 'no-answer') context.notifyDataChanged('cuff-send');
         }
-        setMessage(sendFailureText(error).message, 'error');
+        const text = sendFailureText(error);
+        // It may have been sent (504, a lost connection, an unreadable 200): whatever happened
+        // is now on the server, so the others re-fetch.
+        if (text.maybeSent) context.notifyDataChanged('cuff-send');
+        setMessage(text.message, 'error');
       },
     );
   };

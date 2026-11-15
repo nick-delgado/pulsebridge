@@ -371,3 +371,17 @@
     margin-bottom: var(--space-1);
   }
 }
+
+/*
+ * Text from other systems (sample descriptions, MSA-3 reasons, diagnostics) can hold one long
+ * unbroken token; let it break anywhere rather than widen the page.
+ */
+.cuff-choice__help,
+.cuff-reading__detail,
+.cuff-form-message,
+.cuff-field__error,
+.cuff-note,
+.cuff-trace__note,
+.cuff-countdown {
+  overflow-wrap: anywhere;
+}

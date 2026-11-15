@@ -3,6 +3,7 @@ import type { CuffAttemptTrace, CuffSendResult } from '../api/contract';
 import { newReading, withTrace, type Reading } from './readings';
 import {
   APPLICATION_LEVEL_LABEL,
+  messageNote,
   COMMIT_LEVEL_LABEL,
   framingNote,
   messageNameFacts,
@@ -87,7 +88,7 @@ describe('trace panel: three tabs', () => {
     expect(COMMIT_LEVEL_LABEL).toBe('Commit-level acknowledgment (from the store)');
     expect(APPLICATION_LEVEL_LABEL).toBe('Application-level outcome (from the mapper)');
     expect(ack.textContent).toContain(
-      'MSA-1 AA: Application Accept: the HL7v2 store parsed the message and stored it.',
+      'MSA-1 AA (original acknowledgment mode): the HL7v2 store parsed the message and stored it.',
     );
     expect(ack.querySelector('pre code')?.textContent).toBe(
       'MSH|^~\\&|||||20260301091531+0000||ACK|A1|P|2.5.1\nMSA|AA|C0FFEE0000000000000A',
@@ -108,7 +109,9 @@ describe('trace panel: three tabs', () => {
       trace,
     );
     const ack = tab('ACK as received');
-    expect(ack.textContent).toContain('MSA-1 AE: Application Error');
+    expect(ack.textContent).toContain(
+      'MSA-1 AE (original acknowledgment mode): the HL7v2 store could not process the message',
+    );
     expect(ack.textContent).toContain('MSA-3 (reason)Invalid MSH header');
     expect(ack.textContent).toContain('Not stored, so the mapper never saw it');
     expect(tab('FHIR as stored').textContent).toContain(
@@ -148,7 +151,7 @@ describe('trace panel: three tabs', () => {
       const ack = tab('ACK as received');
       expect(ack.textContent).toContain('No acknowledgment received');
       expect(ack.textContent).toContain(`Detailsynthetic ${why} detail`);
-      expect(ack.textContent).not.toContain('MSA-1');
+      expect(ack.textContent).not.toMatch(/MSA-1 [A-Z]{2}/);
       expect(ack.textContent.includes('HTTP status503')).toBe(why === 'api-error');
       expect(ack.textContent.includes('77u/TVNIfA==')).toBe(why === 'unreadable-reply');
     },
@@ -210,6 +213,56 @@ describe('message name, framing and terminators', () => {
     expect(tab('HL7v2 as sent').querySelector('pre code')?.textContent).toContain(
       'MSH|^~\\&|CUFFSIM',
     );
+  });
+});
+
+describe('the HL7v2 tab names what the message is', () => {
+  it('a built reading is an ORU^R01; a malformed sample is not called one', () => {
+    expect(messageNote(newReading('k', built, sendResult()))).toMatch(
+      /^A built reading, an ORU\^R01/,
+    );
+    const malformed = newReading(
+      'k',
+      { transport: 'mllp', sendMalformed: 'unparseable_no_msh' },
+      sendResult({ ack: AE, sample: 'unparseable_no_msh' }),
+    );
+    expect(messageNote(malformed)).toMatch(
+      /^A deliberately malformed sample \(unparseable_no_msh\), sent as its own fixed bytes; it may not be an ORU\^R01 at all\. A well-formed reading is an ORU\^R01/,
+    );
+  });
+});
+
+describe('rendering again changes only what changed', () => {
+  it('the same trace twice keeps every node; a new outcome replaces only its parts', () => {
+    const { slot, panel } = mountPanel();
+    const result = sendResult();
+    const pending = attemptTrace(result, { outcome: 'pending', reason: null });
+    const r = newReading('k', built, result);
+    panel.render({ kind: 'ready', reading: r, trace: pending, summary: 'BP' });
+    const before = [...slot.querySelectorAll('[data-part]')];
+    panel.render({
+      kind: 'ready',
+      reading: r,
+      trace: attemptTrace(result, { outcome: 'pending', reason: null }),
+      summary: 'BP',
+    });
+    expect([...slot.querySelectorAll('[data-part]')]).toEqual(before);
+    expect([...slot.querySelectorAll('[data-part]')].every((n, i) => n === before[i])).toBe(true);
+
+    const accepted = attemptTrace(
+      result,
+      { outcome: 'accepted', reason: null },
+      { observation: bpObservation('bp-1') },
+    );
+    panel.render({
+      kind: 'ready',
+      reading: withTrace(r, accepted),
+      trace: accepted,
+      summary: 'BP',
+    });
+    const after = [...slot.querySelectorAll<HTMLElement>('[data-part]')];
+    const replaced = after.filter((n) => !before.includes(n)).map((n) => n.dataset.part);
+    expect(replaced.sort()).toEqual(['application', 'observation', 'provenance']);
   });
 });
 

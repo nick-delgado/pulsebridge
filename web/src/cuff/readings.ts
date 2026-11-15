@@ -93,39 +93,68 @@ export function isPending(r: Reading): boolean {
  * moves a settled row back (an older request can answer after a newer one).
  */
 export function withTrace(r: Reading, trace: CuffAttemptTrace): Reading {
-  const application = trace.attempt.application;
-  if (r.application && r.application.outcome !== 'pending' && application?.outcome === 'pending') {
-    return r;
-  }
+  if (isStaleTrace(r, trace)) return r;
+  const application = trace.attempt.application ?? r.application;
   const fromRef = trace.attempt.observation?.replace(/^Observation\//, '') ?? null;
-  const observationId = trace.observation?.id ?? fromRef;
-  return {
+  const next: Reading = {
     ...r,
-    application: application ?? r.application,
+    application,
     lookup: application && application.outcome !== 'pending' ? 'settled' : r.lookup,
-    observationId,
+    observationId: trace.observation?.id ?? fromRef,
     observationStatus: trace.observation?.status ?? null,
   };
+  // Nothing the page shows changed (a poll tick while pending): keep the same object, so the
+  // caller can tell and leave the page alone.
+  const same =
+    next.application?.outcome === r.application?.outcome &&
+    next.application?.reason === r.application?.reason &&
+    next.lookup === r.lookup &&
+    next.observationId === r.observationId &&
+    next.observationStatus === r.observationStatus;
+  return same ? r : next;
+}
+
+/** True for an answer that still says `pending` about a row that has already settled. */
+export function isStaleTrace(r: Reading, trace: CuffAttemptTrace): boolean {
+  return (
+    r.application !== null &&
+    r.application.outcome !== 'pending' &&
+    trace.attempt.application?.outcome === 'pending'
+  );
 }
 
 // -- words -------------------------------------------------------------------------------------
 
 /**
- * MSA-1, the acknowledgment code (HL7 table 0008). The store sends AA or AE only (spike S4); the
- * others are listed so an unexpected code still reads as something.
+ * How the two labels relate to HL7's acknowledgment modes (D7). Shown in full in the trace's ACK
+ * tab, and in short above the readings list, so nobody reads AA under a "commit-level" heading
+ * as a confusion of the two levels.
+ */
+export const ACK_MODE_NOTE =
+  "The store answers in HL7's original acknowledgment mode (AA or AE in MSA-1). PulseBridge calls that answer the commit-level acknowledgment and the mapper's result the application-level outcome, after HL7's enhanced mode (MSH-15/16), where those would be CA/CE/CR and AA/AE/AR.";
+
+export const ACK_MODE_SHORT =
+  "Each reading gets two answers. The commit-level acknowledgment is the HL7v2 store's ACK, in HL7's original mode (AA stored, AE not stored). The application-level outcome is what the mapper later made of a stored message.";
+
+/**
+ * MSA-1, the acknowledgment code (HL7 table 0008), as the store uses it here. The store answers
+ * in the ORIGINAL acknowledgment mode and sends AA or AE only (spike S4); in that mode the codes
+ * are the receiver's only answer, so they are described by what happened to the message, not by
+ * HL7's names ("application accept", ...), which would read as the other level. The enhanced-mode
+ * commit codes are listed so an unexpected one still reads as something.
  */
 export const ACK_CODE_MEANING: Readonly<Record<AckCode, string>> = {
-  AA: 'Application Accept: the HL7v2 store parsed the message and stored it.',
-  AE: 'Application Error: the HL7v2 store could not process the message and did not store it.',
-  AR: 'Application Reject: the message was refused outright (the store does not normally send this).',
-  CA: 'Commit Accept (enhanced mode): the receiver has safely stored the message.',
-  CE: 'Commit Error (enhanced mode): the receiver could not store the message.',
-  CR: 'Commit Reject (enhanced mode): the receiver refused the message.',
+  AA: 'the HL7v2 store parsed the message and stored it.',
+  AE: 'the HL7v2 store could not process the message and did not store it.',
+  AR: 'the message was refused outright (the store does not normally send this).',
+  CA: 'commit accept (enhanced mode): the receiver has safely stored the message.',
+  CE: 'commit error (enhanced mode): the receiver could not store the message.',
+  CR: 'commit reject (enhanced mode): the receiver refused the message.',
 };
 
 export const NO_ACK_REASON: Readonly<Record<NoAckReason, string>> = {
   timeout: 'timed out: nothing came back before the simulator stopped waiting',
-  'connection-closed': 'connection closed without a reply',
+  'connection-closed': 'the connection was closed, or could not be opened, without a reply',
   'api-error': 'the ingest API answered with an error and no HL7v2 acknowledgment',
   'unreadable-reply': 'a reply came back, but it is not a readable HL7v2 ACK',
 };
@@ -151,7 +180,7 @@ export function commitAckPhrase(ack: CommitAck): Phrase {
       tone: 'warn',
     };
   }
-  const meaning = ACK_CODE_MEANING[ack.code];
+  const meaning = `MSA-1 ${ack.code}: ${ACK_CODE_MEANING[ack.code]}`;
   const accepted = ack.code === 'AA' || ack.code === 'CA';
   return {
     label: accepted ? `${ack.code}, stored` : `${ack.code}, rejected`,
@@ -273,6 +302,16 @@ export interface SendFailureText {
   maybeSent: boolean;
 }
 
+/** A server text as a clause: trimmed, without the full stop it may end with. */
+function clause(text: string): string {
+  return text.trim().replace(/[.\s]+$/, '');
+}
+
+/** "<text>. Nothing was sent.", unless the server's text already says so. */
+function nothingSent(text: string): string {
+  return /nothing was sent/i.test(text) ? `${clause(text)}.` : `${clause(text)}. Nothing was sent.`;
+}
+
 /**
  * Words for a failed `submitCuffReading`. Field errors (`fields`) are shown next to their fields
  * by the panel; this is the message for the form as a whole. 401 and aborts are not passed here.
@@ -282,18 +321,19 @@ export function sendFailureText(error: unknown): SendFailureText {
     switch (error.reason) {
       case 'invalid-input':
         return {
-          message: `The simulator refused the reading (HTTP 422): ${error.message}. Nothing was sent.`,
+          message: nothingSent(`The simulator refused the reading (HTTP 422): ${error.message}`),
           maybeSent: false,
         };
       case 'rate-limited':
+        // The limit is the simulator's configuration (per instance), so no rate is assumed here.
         return {
           message:
-            'Too many readings in a short time: the simulator allows a few in a row, then about one every 10 seconds. Nothing was sent.',
+            'Too many readings in a short time: the simulator limits how often it sends. Nothing was sent.',
           maybeSent: false,
         };
       case 'invalid-body':
         return {
-          message: `The simulator could not read the request (HTTP 400): ${error.message}. Nothing was sent. This is a fault in the page.`,
+          message: `${nothingSent(`The simulator could not read the request (HTTP 400): ${error.message}`)} This is a fault in the page.`,
           maybeSent: false,
         };
       case 'too-large':
@@ -303,7 +343,7 @@ export function sendFailureText(error: unknown): SendFailureText {
         };
       case 'server-error':
         return {
-          message: `The simulator failed before sending (HTTP 500): ${error.message}. Nothing was sent.`,
+          message: nothingSent(`The simulator failed before sending (HTTP 500): ${error.message}`),
           maybeSent: false,
         };
       case 'no-answer':
@@ -317,17 +357,17 @@ export function sendFailureText(error: unknown): SendFailureText {
   if (error instanceof ApiError) {
     if (error.status === 0) {
       return {
-        message: `The connection failed (${error.message}), so it is not known whether the reading was sent. Check the messages log before sending again.`,
+        message: `The connection failed (${clause(error.message)}), so it is not known whether the reading was sent. Check the messages log before sending again.`,
         maybeSent: true,
       };
     }
     return {
-      message: `The server answered HTTP ${error.status}: ${error.message}. It is not known whether the reading was sent.`,
+      message: `The server answered HTTP ${error.status}: ${clause(error.message)}. It is not known whether the reading was sent.`,
       maybeSent: true,
     };
   }
   return {
-    message: `Could not send: ${error instanceof Error ? error.message : 'unknown error'}. It is not known whether the reading was sent.`,
+    message: `Could not send: ${error instanceof Error ? clause(error.message) : 'unknown error'}. It is not known whether the reading was sent.`,
     maybeSent: true,
   };
 }

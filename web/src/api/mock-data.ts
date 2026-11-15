@@ -98,11 +98,14 @@ export const MOCK_DATA_SETS = {
  * The markup the `hostile` data set puts into text from other systems: an MSA-3 reason (and so
  * the raw ACK), each sample's description, a malformed sample's segment text (an extra NTE
  * segment) and the diagnostics of a refusal. Rendered as markup it would run script or load an
- * image, which the CSP would report; rendered as text it is just characters.
+ * image, which the CSP would report; rendered as text it is just characters. It ends with one
+ * long unbroken token, which must wrap rather than widen the page.
  */
 export const HOSTILE_MARKUP =
   `<img src="x" onerror="alert('pulsebridge-hostile-mock')">` +
-  `<script>alert('pulsebridge-hostile-mock')</script>`;
+  `<script>alert('pulsebridge-hostile-mock')</script> ` +
+  // One 612-character token with no break opportunity, to prove long text wraps on a phone.
+  'PULSEBRIDGEHOSTILE'.repeat(34);
 
 /**
  * In the `hostile` data set a built reading with this systolic value is refused with a 422 whose

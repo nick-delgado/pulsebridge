@@ -18,6 +18,12 @@
  *
  * The panel keeps one fixed-height frame for every state (empty, loading, error, ready), so
  * selecting a reading or switching tabs does not move the page (no layout shift).
+ *
+ * Rendering a ready trace again is cheap and quiet: each tab is a list of parts, and a part whose
+ * content is unchanged keeps its DOM node. So a poll tick that changes nothing touches nothing
+ * (focus and scroll position inside a code block survive), and an outcome that settles replaces
+ * only the parts it changes. The summary line, a live region, is written only when its text
+ * changes.
  */
 import type { CommitAck, CuffAttemptTrace } from '../api/contract';
 import { isDerivedMessageName } from '../api/contract';
@@ -25,6 +31,7 @@ import { codeBlock, el, placeholder, replaceChildren } from '../ui/dom';
 import { createTabs, type Tabs } from '../ui/tabs';
 import {
   ACK_CODE_MEANING,
+  ACK_MODE_NOTE,
   applicationPhrase,
   commitAckPhrase,
   NO_ACK_REASON,
@@ -55,6 +62,10 @@ export interface TracePanel {
 export function tracePanel(slot: HTMLElement, signal: AbortSignal): TracePanel {
   // One frame for every state, so its height never changes (see the CSS: fixed block size).
   const heading = el('p', { class: 'cuff-trace__summary', attrs: { 'aria-live': 'polite' } });
+  /** Writes the live summary only when its text changes, so it is announced once per change. */
+  const setSummary = (text: string) => {
+    if (heading.textContent !== text) heading.textContent = text;
+  };
   const body = el('div', { class: 'cuff-trace__body' });
   const frame = el('div', { class: 'cuff-trace__frame' }, heading, body);
   replaceChildren(slot, frame);
@@ -72,7 +83,7 @@ export function tracePanel(slot: HTMLElement, signal: AbortSignal): TracePanel {
   return {
     render(state) {
       if (state.kind === 'empty') {
-        heading.textContent = '';
+        setSummary('');
         replaceChildren(
           body,
           placeholder(
@@ -81,7 +92,7 @@ export function tracePanel(slot: HTMLElement, signal: AbortSignal): TracePanel {
         );
         return;
       }
-      heading.textContent = state.summary;
+      setSummary(state.summary);
       if (state.kind === 'loading') {
         replaceChildren(
           body,
@@ -123,12 +134,49 @@ export function tracePanel(slot: HTMLElement, signal: AbortSignal): TracePanel {
         return;
       }
       const t = ensureTabs();
-      fillHl7v2(t.panel(TRACE_TABS.hl7v2.id), state.reading, state.trace);
-      fillAck(t.panel(TRACE_TABS.ack.id), state.reading);
-      fillFhir(t.panel(TRACE_TABS.fhir.id), state.reading, state.trace);
+      patch(t.panel(TRACE_TABS.hl7v2.id), hl7v2Parts(state.reading, state.trace));
+      patch(t.panel(TRACE_TABS.ack.id), ackParts(state.reading));
+      patch(t.panel(TRACE_TABS.fhir.id), fhirParts(state.reading, state.trace));
       if (t.root.parentNode !== body) replaceChildren(body, t.root);
     },
   };
+}
+
+/**
+ * One block of a tab: `key` names it, `content` is everything it is built from (compared as
+ * JSON), and `build` makes its element. A part is rebuilt only when its content changed.
+ */
+interface Part {
+  key: string;
+  content: unknown;
+  build: () => HTMLElement;
+}
+
+const contentOf = new WeakMap<Element, string>();
+
+/** Makes `panel` hold exactly `parts`, in order, keeping the node of every unchanged part. */
+function patch(panel: HTMLElement, parts: (Part | null)[]): void {
+  const old = new Map<string, HTMLElement>();
+  for (const child of [...panel.children]) {
+    if (child instanceof HTMLElement) old.set(child.dataset.part ?? '', child);
+  }
+  const nodes = parts
+    .filter((p): p is Part => p !== null)
+    .map((p) => {
+      // Every part's content is defined (null where there is nothing), so this is a string.
+      const fingerprint = JSON.stringify(p.content);
+      const existing = old.get(p.key);
+      if (existing && contentOf.get(existing) === fingerprint) return existing;
+      const node = p.build();
+      node.dataset.part = p.key;
+      contentOf.set(node, fingerprint);
+      return node;
+    });
+  const keep = new Set<Node>(nodes);
+  for (const child of [...panel.children]) if (!keep.has(child)) child.remove();
+  nodes.forEach((node, i) => {
+    if (panel.children[i] !== node) panel.insertBefore(node, panel.children[i] ?? null);
+  });
 }
 
 function section(title: string, ...children: (Node | null)[]): HTMLElement {
@@ -200,39 +248,68 @@ export function messageNameFacts(reading: Reading): [string, string][] {
   return [['Stored message name (returned by the store)', r.messageName]];
 }
 
-function fillHl7v2(panel: HTMLElement, reading: Reading, trace: CuffAttemptTrace): void {
+/** What the HL7v2 tab says the message is: an ORU^R01, or a deliberately malformed sample. */
+export function messageNote(reading: Reading): string {
+  const sample = reading.result.sample;
+  const oru =
+    'an ORU^R01 (observation result) message: MSH is the header, PID the patient, OBR the order (LOINC 85354-9, the blood-pressure panel) and one OBX per value (8480-6 systolic, 8462-4 diastolic).';
+  return sample === null
+    ? `A built reading, ${oru}`
+    : `A deliberately malformed sample (${sample}), sent as its own fixed bytes; it may not be an ORU^R01 at all. A well-formed reading is ${oru}`;
+}
+
+function hl7v2Parts(reading: Reading, trace: CuffAttemptTrace): (Part | null)[] {
   const message = trace.messageSent ?? reading.result.messageSent;
   const fromResult = trace.messageSent === null;
-  replaceChildren(
-    panel,
-    el('p', {
-      class: 'cuff-trace__note',
-      text: 'An ORU^R01 (observation result) message: MSH is the header, PID the patient, OBR the order (LOINC 85354-9, the blood-pressure panel) and one OBX per value (8480-6 systolic, 8462-4 diastolic).',
-    }),
-    el('p', {
-      class:
-        reading.result.framing && reading.result.framing !== 'standard'
-          ? 'cuff-note cuff-note--warn'
-          : 'cuff-trace__note',
-      text: framingNote(reading.result.framing, reading.result.transport),
-    }),
-    el('p', { class: 'cuff-trace__note', text: terminatorNote(message) }),
+  const r = reading.result;
+  const nonStandard = r.framing !== null && r.framing !== 'standard';
+  return [
+    {
+      key: 'what',
+      content: r.sample,
+      build: () => el('p', { class: 'cuff-trace__note', text: messageNote(reading) }),
+    },
+    {
+      key: 'framing',
+      content: [r.framing, r.transport],
+      build: () =>
+        el('p', {
+          class: nonStandard ? 'cuff-note cuff-note--warn' : 'cuff-trace__note',
+          text: framingNote(r.framing, r.transport),
+        }),
+    },
+    {
+      key: 'terminator',
+      content: terminatorNote(message),
+      build: () => el('p', { class: 'cuff-trace__note', text: terminatorNote(message) }),
+    },
     fromResult
-      ? el('p', {
-          class: 'cuff-trace__note',
-          text: 'The server did not return the message for this attempt; this is the copy the send returned.',
-        })
+      ? {
+          key: 'copy',
+          content: true,
+          build: () =>
+            el('p', {
+              class: 'cuff-trace__note',
+              text: 'The server did not return the message for this attempt; this is the copy the send returned.',
+            }),
+        }
       : null,
-    codeBlock(message, 'HL7v2 message as sent (ER7)'),
-    facts([
-      [
-        'Control ID (MSH-10)',
-        reading.result.controlId ?? 'None: the message has no readable MSH-10.',
-      ],
-      ['Sent at', reading.result.sentAt],
-      ...messageNameFacts(reading),
-    ]),
-  );
+    {
+      key: 'message',
+      content: message,
+      build: () => codeBlock(message, 'HL7v2 message as sent (ER7)'),
+    },
+    {
+      key: 'facts',
+      content: [r.controlId, r.sentAt, messageNameFacts(reading)],
+      build: () =>
+        facts([
+          ['Control ID (MSH-10)', r.controlId ?? 'None: the message has no readable MSH-10.'],
+          ['Sent at', r.sentAt],
+          ...messageNameFacts(reading),
+        ]),
+    },
+  ];
 }
 
 function commitSection(ack: CommitAck): HTMLElement {
@@ -264,7 +341,7 @@ function commitSection(ack: CommitAck): HTMLElement {
     COMMIT_LEVEL_LABEL,
     el('p', {
       class: `cuff-note cuff-note--${commitAckPhrase(ack).tone}`,
-      text: `MSA-1 ${ack.code}: ${ACK_CODE_MEANING[ack.code]}`,
+      text: `MSA-1 ${ack.code} (original acknowledgment mode): ${ACK_CODE_MEANING[ack.code]}`,
     }),
     facts([
       ['MSA-2 (control ID acknowledged)', ack.controlId ?? 'Empty'],
@@ -276,58 +353,91 @@ function commitSection(ack: CommitAck): HTMLElement {
   );
 }
 
-function fillAck(panel: HTMLElement, reading: Reading): void {
+function ackParts(reading: Reading): Part[] {
   const app = applicationPhrase(reading);
   const reason = reading.application?.reason ?? null;
-  replaceChildren(
-    panel,
-    el('p', {
-      class: 'cuff-trace__note',
-      text: 'Two separate answers. The store’s ACK only says whether it stored the message; whether the reading became FHIR is decided later by the mapper.',
-    }),
-    // The ACK as the send received it: it carries MSA-2, which the attempt record does not keep.
-    commitSection(reading.result.ack),
-    section(
-      APPLICATION_LEVEL_LABEL,
-      el('p', { class: `cuff-note cuff-note--${app.tone}`, text: app.detail }),
-      reading.application?.outcome === 'error'
-        ? facts([
-            ['Reason code', reason ?? 'none'],
-            ['In words', reasonText(reason)],
-          ])
-        : null,
-    ),
-  );
+  // The ACK as the send received it: it carries MSA-2, which the attempt record does not keep.
+  const ack = reading.result.ack;
+  return [
+    {
+      key: 'intro',
+      content: 1,
+      build: () =>
+        el(
+          'div',
+          { class: 'cuff-trace__intro' },
+          el('p', {
+            class: 'cuff-trace__note',
+            text: 'Two separate answers. The store’s ACK only says whether it stored the message; whether the reading became FHIR is decided later by the mapper.',
+          }),
+          el('p', { class: 'cuff-trace__note cuff-ack-mode', text: ACK_MODE_NOTE }),
+        ),
+    },
+    { key: 'commit', content: ack, build: () => commitSection(ack) },
+    {
+      key: 'application',
+      content: [app, reading.application],
+      build: () =>
+        section(
+          APPLICATION_LEVEL_LABEL,
+          el('p', { class: `cuff-note cuff-note--${app.tone}`, text: app.detail }),
+          reading.application?.outcome === 'error'
+            ? facts([
+                ['Reason code', reason ?? 'none'],
+                ['In words', reasonText(reason)],
+              ])
+            : null,
+        ),
+    },
+  ];
 }
 
-function fillFhir(panel: HTMLElement, reading: Reading, trace: CuffAttemptTrace): void {
-  let observation: Node;
-  if (trace.observation) {
-    observation = codeBlock(trace.observation, 'Observation JSON');
-  } else {
-    const why =
-      reading.application?.outcome === 'pending'
-        ? 'No Observation yet: the mapper has not run for this message.'
-        : reading.application?.outcome === 'error'
-          ? 'No Observation: the mapper could not map this message (see "ACK as received").'
-          : reading.application === null
-            ? 'No Observation: the message was not stored, so nothing was mapped.'
-            : 'No Observation was returned for this reading.';
-    observation = placeholder(why);
-  }
-  replaceChildren(
-    panel,
-    el('p', {
-      class: 'cuff-trace__note',
-      text: 'The blood-pressure panel Observation (LOINC 85354-9, systolic and diastolic as components) and the Provenance pointing at the HL7v2 message it came from, as the FHIR store holds them; and the AuditEvent recording this send attempt in the separate audit store.',
-    }),
-    section('Observation', observation),
-    trace.provenance ? section('Provenance', codeBlock(trace.provenance, 'Provenance JSON')) : null,
-    section(
-      'Send-attempt record (AuditEvent, audit store)',
-      trace.auditEvent
-        ? codeBlock(trace.auditEvent, 'AuditEvent JSON')
-        : placeholder('The AuditEvent was not returned.'),
-    ),
-  );
+function fhirParts(reading: Reading, trace: CuffAttemptTrace): (Part | null)[] {
+  const why =
+    reading.application?.outcome === 'pending'
+      ? 'No Observation yet: the mapper has not run for this message.'
+      : reading.application?.outcome === 'error'
+        ? 'No Observation: the mapper could not map this message (see "ACK as received").'
+        : reading.application === null
+          ? 'No Observation: the message was not stored, so nothing was mapped.'
+          : 'No Observation was returned for this reading.';
+  const { observation, provenance, auditEvent } = trace;
+  return [
+    {
+      key: 'intro',
+      content: 1,
+      build: () =>
+        el('p', {
+          class: 'cuff-trace__note',
+          text: 'The blood-pressure panel Observation (LOINC 85354-9, systolic and diastolic as components) and the Provenance pointing at the HL7v2 message it came from, as the FHIR store holds them; and the AuditEvent recording this send attempt in the separate audit store.',
+        }),
+    },
+    {
+      key: 'observation',
+      content: observation ?? why,
+      build: () =>
+        section(
+          'Observation',
+          observation ? codeBlock(observation, 'Observation JSON') : placeholder(why),
+        ),
+    },
+    provenance
+      ? {
+          key: 'provenance',
+          content: provenance,
+          build: () => section('Provenance', codeBlock(provenance, 'Provenance JSON')),
+        }
+      : null,
+    {
+      key: 'audit',
+      content: auditEvent,
+      build: () =>
+        section(
+          'Send-attempt record (AuditEvent, audit store)',
+          auditEvent
+            ? codeBlock(auditEvent, 'AuditEvent JSON')
+            : placeholder('The AuditEvent was not returned.'),
+        ),
+    },
+  ];
 }

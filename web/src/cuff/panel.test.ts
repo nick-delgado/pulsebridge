@@ -11,7 +11,8 @@ import { ApiError, CuffSendError, UnauthorizedError } from '../api/errors';
 import type { OperationOutcome } from '../api/fhir';
 import { createDataChangeBus, type DataChangeKind } from '../state/data-changed';
 import { createSelectionStore, shareableObservation } from '../state/selection';
-import { createCuff, RECHECK_REASON } from './panel';
+import { CHECKING_REASON, createCuff, RECHECK_REASON } from './panel';
+import { ACK_MODE_NOTE, ACK_MODE_SHORT } from './readings';
 import {
   AE,
   attemptTrace,
@@ -126,7 +127,16 @@ async function mount(options: { maxReadings?: number; samples?: boolean } = {}) 
     );
   };
   const rows = () => [...slots.panel.querySelectorAll<HTMLLIElement>('.cuff-reading')];
-  const message = () => q('#cuff-form-message').textContent;
+  /** The form's message: whichever of the two live regions holds it. */
+  const message = () => `${q('#cuff-form-status').textContent}${q('#cuff-form-alert').textContent}`;
+  /** A sample radio, found by its value (its id is generated). */
+  const sample = (name: string) =>
+    q(`input[name="cuff-sample"][value="${name}"]`) as HTMLInputElement;
+  const pickSample = (name: string) => {
+    const i = sample(name);
+    i.checked = true;
+    i.dispatchEvent(new Event('change', { bubbles: true }));
+  };
   /** Sends a built reading and answers it with `result`. */
   const sendAndAnswer = async (result: CuffSendResult) => {
     submit();
@@ -149,6 +159,8 @@ async function mount(options: { maxReadings?: number; samples?: boolean } = {}) 
     message,
     sendAndAnswer,
     q,
+    sample,
+    pickSample,
   };
 }
 
@@ -199,7 +211,7 @@ describe('the request sent for each form state', () => {
     expect((m.q('.cuff-pressures') as HTMLFieldSetElement).disabled).toBe(true);
     expect((m.q('#cuff-samples') as HTMLFieldSetElement).hidden).toBe(false);
     expect(m.sendButton().textContent).toBe('Send malformed sample');
-    m.check('cuff-sample-unmappable_missing_obx14');
+    m.pickSample('unmappable_missing_obx14');
     m.submit();
     expect(m.sends[0]?.request).toStrictEqual({
       transport: 'mllp',
@@ -217,9 +229,10 @@ describe('the request sent for each form state', () => {
       'No acknowledgment (MLLP only)',
       'Parses but cannot be mapped',
     ]);
-    expect(m.q('#cuff-sample-unparseable_no_msh-help').textContent).toBe(
-      'The MSH segment is missing.',
-    );
+    const help = m.sample('unparseable_no_msh').getAttribute('aria-describedby') ?? '';
+    expect(m.q(`#${help}`).textContent).toBe('The MSH segment is missing.');
+    // Ids are generated, never made from a server's sample name.
+    expect(m.sample('unparseable_no_msh').id).toMatch(/^cuff-sample-\d+$/);
   });
 });
 
@@ -277,16 +290,16 @@ describe('samples and transports', () => {
   it('an MLLP-only sample is disabled over HTTPS, and unchosen with a reason when switching', async () => {
     const m = await mount();
     m.check('cuff-malformed');
-    m.check('cuff-sample-noack_missing_end_block');
+    m.pickSample('noack_missing_end_block');
     m.check('cuff-transport-https');
-    expect(m.input('cuff-sample-noack_missing_end_block').disabled).toBe(true);
-    expect(m.input('cuff-sample-noack_missing_end_block').checked).toBe(false);
-    expect(m.input('cuff-sample-unparseable_no_msh').disabled).toBe(false);
+    expect(m.sample('noack_missing_end_block').disabled).toBe(true);
+    expect(m.sample('noack_missing_end_block').checked).toBe(false);
+    expect(m.sample('unparseable_no_msh').disabled).toBe(false);
     expect(m.q('#cuff-sample-error').textContent).toBe(
       'noack_missing_end_block can only be sent over MLLP; choose another sample or switch back.',
     );
     m.check('cuff-transport-mllp');
-    expect(m.input('cuff-sample-noack_missing_end_block').disabled).toBe(false);
+    expect(m.sample('noack_missing_end_block').disabled).toBe(false);
   });
 
   it('a failed sample load offers a retry', async () => {
@@ -339,7 +352,8 @@ describe('refusals', () => {
     expect(m.message()).toBe(
       'The simulator refused the reading (HTTP 422): systolic: must be greater than diastolic; diastolic: is required. Nothing was sent.',
     );
-    expect(m.q('#cuff-form-message').getAttribute('role')).toBe('alert');
+    expect(m.q('#cuff-form-alert').textContent).toContain('The simulator refused the reading');
+    expect(m.q('#cuff-form-status').textContent).toBe('');
     expect(m.rows()).toHaveLength(0);
     expect(m.notified).toEqual([]);
   });
@@ -358,7 +372,7 @@ describe('refusals', () => {
   it('422 on sendMalformed is shown by the sample picker', async () => {
     const m = await mount();
     m.check('cuff-malformed');
-    m.check('cuff-sample-unparseable_no_msh');
+    m.pickSample('unparseable_no_msh');
     m.submit();
     m.sends[0]?.answer.reject(
       refusal(422, [['sendMalformed', 'this sample cannot be sent over https']]),
@@ -435,6 +449,34 @@ describe('refusals', () => {
     );
   });
 
+  it('an unreadable 200 (502 from the client) re-enables the button and tells the others', async () => {
+    const m = await mount();
+    m.submit();
+    m.sends[0]?.answer.reject(
+      new ApiError(
+        502,
+        'The send answered, but its result could not be read (no ack). It is not known what the store said.',
+      ),
+    );
+    await flush();
+    expect(m.sendButton().disabled).toBe(false);
+    expect(m.message()).toBe(
+      'The server answered HTTP 502: The send answered, but its result could not be read (no ack). It is not known what the store said. It is not known whether the reading was sent.',
+    );
+    expect(m.message()).not.toContain('..');
+    expect(m.notified).toEqual(['cuff-send']);
+  });
+
+  it('the countdown text is cleared by the next successful send', async () => {
+    const m = await mount();
+    m.submit();
+    m.sends[0]?.answer.reject(refusal(429, [['body', 'x']], null));
+    await flush();
+    expect(m.q('#cuff-countdown').textContent).toBe('Wait a little before sending again.');
+    await m.sendAndAnswer(sendResult());
+    expect(m.q('#cuff-countdown').textContent).toBe('');
+  });
+
   it('401 is left to the shell: no message is written over the form', async () => {
     const m = await mount();
     m.submit();
@@ -487,7 +529,7 @@ describe('the readings list', () => {
 
   it.each([
     ['timeout', 'timed out'],
-    ['connection-closed', 'connection closed without a reply'],
+    ['connection-closed', 'closed, or could not be opened, without a reply'],
     ['api-error', '(HTTP 503)'],
     ['unreadable-reply', 'not a readable HL7v2 ACK'],
   ] as const)('no acknowledgment, %s', async (why, words) => {
@@ -523,7 +565,7 @@ describe('the readings list', () => {
     const m = await mount();
     await m.sendAndAnswer(sendResult({ ack: AE }));
     m.check('cuff-malformed');
-    m.check('cuff-sample-unparseable_no_msh');
+    m.pickSample('unparseable_no_msh');
     await m.sendAndAnswer(
       sendResult({ ack: AE, attemptId: 'att-2', sample: 'unparseable_no_msh' }),
     );
@@ -667,6 +709,75 @@ describe('polling the application-level outcome', () => {
     await vi.advanceTimersByTimeAsync(9000);
     expect(m.traces).toHaveLength(3);
     expect(m.rows()[0]?.textContent).toContain('the send-attempt record could not be found');
+  });
+
+  it('a tick that changes nothing touches no DOM; settling replaces only what changed', async () => {
+    const m = await sentPending();
+    const message = m.slots.trace.querySelector('pre');
+    const summary = m.slots.trace.querySelector('.cuff-trace__summary');
+    expect(message).not.toBeNull();
+    const records: MutationRecord[] = [];
+    const observer = new MutationObserver((list) => records.push(...list));
+    const take = () => [...records.splice(0), ...observer.takeRecords()];
+    const watch = { subtree: true, childList: true, characterData: true, attributes: true };
+    observer.observe(m.slots.trace, watch);
+    observer.observe(m.slots.panel, watch);
+    for (let i = 1; i <= 3; i++) {
+      await vi.advanceTimersByTimeAsync(3000);
+      m.traces
+        .at(-1)
+        ?.answer.resolve(attemptTrace(sendResult(), { outcome: 'pending', reason: null }));
+      await flush();
+    }
+    expect(m.traces).toHaveLength(4);
+    expect(take()).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(3000);
+    m.traces
+      .at(-1)
+      ?.answer.resolve(
+        attemptTrace(
+          sendResult(),
+          { outcome: 'accepted', reason: null },
+          { observation: bpObservation('bp-1') },
+        ),
+      );
+    await flush();
+    const changed = take();
+    expect(changed.length).toBeGreaterThan(0);
+    // The message block and the live summary were left alone; the outcome was updated.
+    expect(m.slots.trace.querySelector('pre')).toBe(message);
+    expect(changed.some((c) => summary?.contains(c.target))).toBe(false);
+    expect(m.slots.trace.textContent).toContain('Accepted: the mapper wrote');
+    observer.disconnect();
+  });
+
+  it('a 404 while polling the selected row drops the selection and clears the trace', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    m.traces[1]?.answer.reject(new ApiError(404, 'not found'));
+    await flush();
+    expect(m.selection.get()).toBeNull();
+    expect(m.slots.trace.textContent).toContain('no longer in the audit store');
+    expect(m.rows()[0]?.classList.contains('cuff-reading--selected')).toBe(false);
+  });
+
+  it('a row that settles during a second send does not stop the new row being selected', async () => {
+    const m = await sentPending();
+    m.submit(); // second send in flight
+    await vi.advanceTimersByTimeAsync(3000);
+    m.traces[1]?.answer.resolve(
+      attemptTrace(
+        sendResult(),
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-1') },
+      ),
+    );
+    await flush();
+    expect(m.selection.get()).toMatchObject({ attemptId: 'att-1', observationId: 'bp-1' });
+    m.sends[1]?.answer.resolve(sendResult({ attemptId: 'att-2' }));
+    await flush();
+    expect(m.selection.get()).toMatchObject({ attemptId: 'att-2' });
   });
 
   it('stops on logout, and a poll answer arriving after logout changes nothing', async () => {
@@ -864,6 +975,73 @@ describe('selection and later data changes', () => {
     expect(m.slots.trace.textContent).toContain('"status": "entered-in-error"');
   });
 
+  it('a re-check that finds the Observation gone makes the selection unshareable', async () => {
+    const m = await selectedAccepted();
+    m.bus.notify('sync');
+    m.traces[1]?.answer.resolve(attemptTrace(sendResult(), { outcome: 'accepted', reason: null }));
+    await flush();
+    expect(m.selection.get()).toMatchObject({
+      observationId: null,
+      unshareableReason:
+        'the mapper accepted it, but its Observation could not be found in the FHIR store.',
+    });
+    expect(shareableObservation(m.selection.get())).toBeNull();
+  });
+
+  it('another feature selecting one of our rows loads its trace and re-sets the selection from the row', async () => {
+    const m = await mount();
+    await m.sendAndAnswer(sendResult({ attemptId: 'a1' }));
+    m.traces[0]?.answer.resolve(
+      attemptTrace(
+        sendResult({ attemptId: 'a1' }),
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-1') },
+      ),
+    );
+    await flush();
+    const https = sendResult({ attemptId: 'a2', transport: 'https', framing: null });
+    await m.sendAndAnswer(https);
+    expect(m.selection.get()).toMatchObject({ attemptId: 'a2' });
+    const calls = m.traces.length;
+
+    // As the messages log might: our attempt, with its own summary and no reason.
+    m.selection.set({
+      source: 'cuff',
+      attemptId: 'a1',
+      observationId: 'bp-1',
+      summary: 'from the log',
+      unshareableReason: null,
+    });
+    expect(m.selection.get()).toMatchObject({
+      attemptId: 'a1',
+      unshareableReason: CHECKING_REASON,
+    });
+    expect(shareableObservation(m.selection.get())).toBeNull();
+    expect(m.traces.length).toBe(calls + 1);
+    expect(m.traces.at(-1)?.id).toBe('a1');
+    expect(m.rows()[1]?.classList.contains('cuff-reading--selected')).toBe(true);
+    m.traces
+      .at(-1)
+      ?.answer.resolve(
+        attemptTrace(
+          sendResult({ attemptId: 'a1' }),
+          { outcome: 'accepted', reason: null },
+          { observation: bpObservation('bp-1') },
+        ),
+      );
+    await flush();
+    expect(m.selection.get()).toEqual({
+      source: 'cuff',
+      attemptId: 'a1',
+      observationId: 'bp-1',
+      summary: 'BP 120/80 mm[Hg] at 09:15:30, MLLP',
+      unshareableReason: null,
+    });
+    expect(m.slots.trace.querySelector('.cuff-trace__summary')?.textContent).toBe(
+      'BP 120/80 mm[Hg] at 09:15:30, MLLP',
+    );
+  });
+
   it('a re-check that finds the attempt gone clears the selection and says so', async () => {
     const m = await selectedAccepted();
     m.bus.notify('sync');
@@ -901,6 +1079,25 @@ describe('selection and later data changes', () => {
       unshareableReason:
         'the HL7v2 store rejected this message, so it was never stored and there is no Observation.',
     });
+  });
+});
+
+describe('the two acknowledgment levels are explained, never confused', () => {
+  it('the list carries the short form, the ACK tab the full explanation', async () => {
+    const m = await mount();
+    await m.sendAndAnswer(sendResult());
+    m.traces[0]?.answer.resolve(attemptTrace(sendResult(), { outcome: 'pending', reason: null }));
+    await flush();
+    expect(m.q('#cuff-readings-help').textContent).toBe(ACK_MODE_SHORT);
+    expect(ACK_MODE_SHORT).toBe(
+      "Each reading gets two answers. The commit-level acknowledgment is the HL7v2 store's ACK, in HL7's original mode (AA stored, AE not stored). The application-level outcome is what the mapper later made of a stored message.",
+    );
+    expect(m.slots.trace.textContent).toContain(ACK_MODE_NOTE);
+    expect(ACK_MODE_NOTE).toBe(
+      "The store answers in HL7's original acknowledgment mode (AA or AE in MSA-1). PulseBridge calls that answer the commit-level acknowledgment and the mapper's result the application-level outcome, after HL7's enhanced mode (MSH-15/16), where those would be CA/CE/CR and AA/AE/AR.",
+    );
+    // HL7's names for AA/AE are not used under the commit-level heading.
+    expect(document.body.textContent).not.toMatch(/Application (Accept|Error|Reject)/);
   });
 });
 

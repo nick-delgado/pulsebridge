@@ -92,13 +92,13 @@ describe('words for the two acknowledgment levels', () => {
   it('AA and AE, with MSA-3 as the reason', () => {
     expect(commitAckPhrase(AA)).toEqual({
       label: 'AA, stored',
-      detail: 'Application Accept: the HL7v2 store parsed the message and stored it.',
+      detail: 'MSA-1 AA: the HL7v2 store parsed the message and stored it.',
       tone: 'ok',
     });
     expect(commitAckPhrase(AE)).toEqual({
       label: 'AE, rejected',
       detail:
-        'Application Error: the HL7v2 store could not process the message and did not store it. Reason (MSA-3): Invalid MSH header',
+        'MSA-1 AE: the HL7v2 store could not process the message and did not store it. Reason (MSA-3): Invalid MSH header',
       tone: 'error',
     });
     expect(
@@ -109,7 +109,7 @@ describe('words for the two acknowledgment levels', () => {
 
   it.each([
     ['timeout', 'timed out: nothing came back before the simulator stopped waiting'],
-    ['connection-closed', 'connection closed without a reply'],
+    ['connection-closed', 'the connection was closed, or could not be opened, without a reply'],
     ['api-error', 'the ingest API answered with an error and no HL7v2 acknowledgment (HTTP 503)'],
     ['unreadable-reply', 'a reply came back, but it is not a readable HL7v2 ACK'],
   ] as const)('no acknowledgment: %s', (why, words) => {
@@ -229,6 +229,26 @@ describe('sendFailureText for every refusal', () => {
     expect(text.message).toContain(words);
     expect(text.maybeSent).toBe(maybeSent);
     if (!maybeSent) expect(text.message).toContain('Nothing was sent');
+  });
+
+  it("does not say 'Nothing was sent' twice when cuff-sim's 500 text already says it", () => {
+    const text = sendFailureText(
+      cuff(500, [['body', 'the built message failed HL7v2 validation; nothing was sent']]),
+    ).message;
+    expect(text).toBe(
+      'The simulator failed before sending (HTTP 500): body: the built message failed HL7v2 validation; nothing was sent.',
+    );
+    expect(text.match(/nothing was sent/gi)).toHaveLength(1);
+  });
+
+  it('the 429 text assumes no rate; a message ending in a full stop gets no second one', () => {
+    const limited = sendFailureText(cuff(429)).message;
+    expect(limited).toBe(
+      'Too many readings in a short time: the simulator limits how often it sends. Nothing was sent.',
+    );
+    expect(sendFailureText(new ApiError(502, 'Bad gateway.')).message).toBe(
+      'The server answered HTTP 502: Bad gateway. It is not known whether the reading was sent.',
+    );
   });
 
   it('a plain network failure and another status say it is not known', () => {
