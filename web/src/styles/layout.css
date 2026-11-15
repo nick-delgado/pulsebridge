@@ -1,3 +1,11 @@
+/* The app root is a full-height column, so the log strip sits at the bottom of the viewport even
+   when the page is shorter than the window, and sticks there when it is longer. */
+#app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
 /* ---- Header and status strip --------------------------------------------------------------- */
 .app-header {
   display: flex;
@@ -81,8 +89,10 @@
   grid-template-areas: 'figure' 'cuff' 'watch' 'share';
   gap: var(--space-4);
   padding: var(--space-4) var(--gutter) var(--space-6);
+  width: 100%;
   max-width: 1600px;
   margin: 0 auto;
+  flex: 1 0 auto;
 }
 
 .dashboard:focus {
