@@ -285,10 +285,15 @@ which can double that. Neither is a hard bound: a server trickling bytes could s
 | MLLP | `MLLP_TIMEOUT_SECONDS` + audit write (2 × `HTTPS_TIMEOUT_SECONDS`, doubled on a token refresh and 401 retry) | 5 + 20 = 25 s; 45 s with a refresh and retry |
 | HTTPS | ingest (2 × `HTTPS_TIMEOUT_SECONDS`, doubled likewise) + audit write (the same) | 20 + 20 = 40 s; 80 s with a refresh and retry on both |
 
-**Numbers to set:** the `cuff-sim` Cloud Run request timeout (T22) at **90 s**, the hard stop
-for anything above, and `fhir-proxy`'s forward timeout to this service (T14) at **at least
-90 s**, with the proxy's own Cloud Run timeout above it. If Cloud Run does cut a request off,
-the caller gets 504 and the attempt may have been sent but is not recorded.
+**Numbers to set:** the dashboard reaches the proxy through Firebase Hosting, which ends a
+request at 60 s, so set `HTTPS_TIMEOUT_SECONDS` to **6**: the worst cases become 5 + 24 = 29 s
+(MLLP) and 48 s (HTTPS). `fhir-proxy`'s forward timeout to this service (T14,
+`CUFF_FORWARD_TIMEOUT_SECONDS`) is **55 s** by default, above that. Set the `cuff-sim` Cloud Run
+request timeout (T22) **above the proxy's forward timeout** (for example 60 s), so an attempt the
+proxy has already answered 504 for can still finish and record its AuditEvent. Without Hosting in
+front, the defaults in the table need a forward timeout of at least 90 s and a request timeout
+here above it. If Cloud Run does cut a request off, the caller gets 504 and the attempt may have
+been sent but is not recorded.
 
 ## Who may call it
 
