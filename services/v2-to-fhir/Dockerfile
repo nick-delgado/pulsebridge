@@ -76,5 +76,7 @@ USER 10001:10001
 EXPOSE 8080
 
 # Exec form: gunicorn is PID 1 and receives Cloud Run's SIGTERM directly. The arguments are the
-# README's ("Running"): one worker, four threads, request deadlines left to Cloud Run.
-CMD ["gunicorn", "--workers", "1", "--threads", "4", "--timeout", "0", "v2_to_fhir.app:create_app()"]
+# README's ("Running"): one worker, four threads, request deadlines left to Cloud Run, and
+# --preload: the app (and its configuration check) loads in the master before the port opens,
+# so a bad configuration exits before anything listens and Cloud Run's startup probe fails.
+CMD ["gunicorn", "--workers", "1", "--threads", "4", "--timeout", "0", "--preload", "v2_to_fhir.app:create_app()"]
