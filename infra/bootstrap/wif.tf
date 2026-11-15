@@ -32,6 +32,38 @@ locals {
     # claim makes the expression fail, and a condition that is not true rejects the token.
     length(var.github_environments) == 0 ? "" : "assertion.environment in [${join(", ", [for e in var.github_environments : "\"${e}\""])}]",
   ]))
+
+  # T26: the CI CONTEXT of a token, one short word that says where the job runs. Each service
+  # account below is bound to a list of contexts, so the planner, the deployer and the page
+  # deployer can each be reached from different places (a principalSet matches one attribute
+  # only, so the context folds the repository ID, the environment, the ref and the event into
+  # that one attribute). The values:
+  #
+  #   other-repository      any token whose repository_id is not var.github_repository_id
+  #   env-<name>-main       a job in GitHub Environment <name>, on the main branch, triggered by
+  #                         push, schedule or workflow_dispatch
+  #   env-<name>-other      a job in that environment anywhere else (bound to nothing)
+  #   pull-request          a pull_request event without an environment
+  #   main                  a job on the main branch triggered by push, schedule or
+  #                         workflow_dispatch, without an environment
+  #   other                 everything else: branch pushes, tags, pull_request_target, ...
+  #
+  # pull_request_target runs on the BASE branch (refs/heads/main) for events from forks, so the
+  # event check matters: without it, such a workflow would read as "main".
+  github_main_push = "(assertion.ref == \"refs/heads/${var.github_main_branch}\" && assertion.event_name in [\"push\", \"schedule\", \"workflow_dispatch\"])"
+  github_ci_context = join("", [
+    "assertion.repository_id != \"${var.github_repository_id}\" ? \"other-repository\" : ",
+    "(\"environment\" in assertion) ? (\"env-\" + assertion.environment + (${local.github_main_push} ? \"-main\" : \"-other\")) : ",
+    "assertion.event_name == \"pull_request\" ? \"pull-request\" : ",
+    "${local.github_main_push} ? \"main\" : \"other\"",
+  ])
+
+  # Which contexts may impersonate which account.
+  wif_bindings = merge(
+    { for c in var.deployer_wif_contexts : "deployer/${c}" => { account = google_service_account.deployer.name, context = c } },
+    var.create_planner ? { for c in var.planner_wif_contexts : "planner/${c}" => { account = google_service_account.planner[0].name, context = c } } : {},
+    var.create_page_deployer ? { for c in var.page_deployer_wif_contexts : "page-deployer/${c}" => { account = google_service_account.page_deployer[0].name, context = c } } : {},
+  )
 }
 
 resource "google_iam_workload_identity_pool" "github" {
@@ -54,7 +86,7 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   # google.subject is required and identifies the caller in audit logs, for example
   # "repo:owner/name:ref:refs/heads/main". Google limits google.subject to 127 bytes; a long
   # owner, repository or branch name can exceed that and the exchange then fails (README.md).
-  # attribute.repository_id is what the IAM binding in this file matches on.
+  # attribute.ci_context (T26, see the locals) is what the IAM bindings in this file match on.
   attribute_mapping = merge({
     "google.subject"                = "assertion.sub"
     "attribute.repository"          = "assertion.repository"
@@ -62,6 +94,7 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.repository_owner"    = "assertion.repository_owner"
     "attribute.repository_owner_id" = "assertion.repository_owner_id"
     "attribute.ref"                 = "assertion.ref"
+    "attribute.ci_context"          = local.github_ci_context
     }, length(var.github_environments) == 0 ? {} : {
     # Google: "You must have an attribute mapping for all attribute condition fields." Mapped only
     # when the condition uses it, so tokens of jobs without an environment are unaffected.
@@ -75,17 +108,19 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   }
 }
 
-# Who may impersonate the deployer: every identity in the pool whose repository_id attribute is
-# exactly var.github_repository_id. roles/iam.workloadIdentityUser lets a federated identity act
-# as this service account.
+# Who may impersonate which account: the identities in the pool whose ci_context is one of that
+# account's contexts. roles/iam.workloadIdentityUser lets a federated identity act as the account.
 #
-# The binding keys on the numeric ID, not the name, so it is never weaker than the condition
-# above: a principalSet can match one attribute only, and the ID is the one that cannot be
-# reused by a different repository. This is a second, independent check: the condition stops
-# other repositories at the pool; this binding would stop them at the service account even if
-# the condition were loosened later.
-resource "google_service_account_iam_member" "deployer_github_wif" {
-  service_account_id = google_service_account.deployer.name
+# The context includes the repository's numeric ID (a foreign repository is "other-repository",
+# which nothing is bound to), so a binding is never weaker than the pool's condition: the
+# condition stops other repositories at the pool, the binding would stop them at the account even
+# if the condition were loosened later. On top of that it says WHERE in this repository: the dev
+# deployer only from main (default ["main"]), the prod deployer only from the prod Environment on
+# main (["env-prod-main"]), the planner from pull requests (dev) or the prod-plan Environment.
+resource "google_service_account_iam_member" "github_wif" {
+  for_each = local.wif_bindings
+
+  service_account_id = each.value.account
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository_id/${var.github_repository_id}"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.ci_context/${each.value.context}"
 }

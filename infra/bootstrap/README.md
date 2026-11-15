@@ -12,7 +12,7 @@ It creates:
 | The six APIs bootstrap itself calls (Resource Manager, Service Usage, IAM, IAM Credentials, STS, Storage) | The rest of the stack's APIs are enabled later by module `project-base`. |
 | A versioned, private GCS bucket for remote Terraform state | Every env root keeps its state here, one prefix per environment. |
 | A `terraform-deployer` service account with a reasoned set of roles | The identity env roots and CI deploy as. |
-| A Workload Identity pool and GitHub OIDC provider, restricted to **one** repository, plus the binding that lets that repository impersonate the deployer | CI authenticates with short-lived tokens. **No service account key is created anywhere.** |
+| A Workload Identity pool and GitHub OIDC provider, restricted to **one** repository, plus bindings that let that repository impersonate the deployer (and, opt-in, a read-only planner and a page deployer), each from its own CI contexts | CI authenticates with short-lived tokens. **No service account key is created anywhere.** |
 
 ## Prerequisites
 
@@ -42,21 +42,13 @@ apply fails with "API has not been used in project ... or it is disabled", wait 
 
 Then:
 
-- Env roots: put `state_bucket_name` in each root's `backend "gcs"` block as `bucket`, with a
-  per-environment `prefix` (`dev`, `prod`).
-- GitHub Actions: give `google-github-actions/auth` the two outputs below (they are identifiers,
-  not secrets, so repository variables are fine):
-
-  ```yaml
-  permissions:
-    id-token: write   # lets the job request GitHub's OIDC token
-    contents: read
-  steps:
-    - uses: google-github-actions/auth@<pinned sha>
-      with:
-        workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }} # output workload_identity_provider
-        service_account: ${{ vars.GCP_DEPLOYER_SA }}                           # output deployer_service_account_email
-  ```
+- Env roots: copy the root's `backend.hcl.example` to `backend.hcl` (git-ignored), set `bucket =
+  "<state_bucket_name>"` in it, and run `terraform init -backend-config=backend.hcl`. The prefix
+  (`dev`, `prod`) is fixed in each root's committed `backend.tf` (infra/envs/README.md, step 2).
+- GitHub Actions: the outputs `workload_identity_provider`, `state_bucket_name` and the account
+  emails become repository variables (they are identifiers, not secrets). The exact names and the
+  rest of the setup are in infra/envs/README.md, "CI/CD"; the identities CI uses are below, "CI
+  identities".
 
 ## State: the chicken-and-egg
 
@@ -157,7 +149,7 @@ predefined admin role per product the stack uses, rather than `roles/owner` or `
 | `roles/monitoring.alertPolicyEditor` | alert policies on those metrics (only with an alert address or channel) |
 | `roles/monitoring.notificationChannelEditor` | the optional email notification channel (module ingestion's `alert_email`) |
 | `roles/firebasehosting.admin` | module phr's Firebase Hosting site, and deploying the page to it (T26) |
-| `roles/cloudbuild.builds.editor` | project-base's opt-in Cloud Build trigger on release tags (T26): creating, changing and deleting a trigger needs `cloudbuild.builds.create`. Not used while no env root sets `build_trigger_repository` |
+| `roles/cloudbuild.builds.editor` (only with `allow_build_trigger = true`) | project-base's opt-in Cloud Build trigger on release tags (T26): creating, changing and deleting a trigger needs `cloudbuild.builds.create`, which also lets the holder start builds, so it is not in the default list |
 
 The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only Cloud
 Storage access (the stack creates no bucket), so it can always read and write state.
@@ -196,10 +188,11 @@ GitHub Actions gets a short-lived token for the deployer instead of a stored key
    signature against GitHub's issuer `https://token.actions.githubusercontent.com`, maps the
    claims (`attribute_mapping`) and evaluates `attribute_condition`. If the condition is false,
    the exchange is refused.
-3. STS returns a federated token for the principal
-   `principalSet://.../attribute.repository_id/<numeric id>`.
-4. That principal holds `roles/iam.workloadIdentityUser` on the deployer, so the IAM Credentials
-   API issues a deployer access token valid for about an hour.
+3. STS returns a federated token whose attributes include `ci_context` (T26: where the job runs,
+   below), for example `principalSet://.../attribute.ci_context/main`.
+4. If that principal holds `roles/iam.workloadIdentityUser` on the account the job asks for (the
+   deployer, the planner or the page deployer), the IAM Credentials API issues an access token for
+   it, valid for about an hour.
 
 ### Why the repository's numeric ID is required
 
@@ -218,38 +211,55 @@ assertion.repository == "<owner>/<name>" && assertion.repository_id == "<id>"
 the owning account. Find the IDs with `gh api repos/<owner>/<name> --jq '.id, .owner.id'`, or in
 the `id` and `owner.id` fields of `https://api.github.com/repos/<owner>/<name>`.
 
-The impersonation binding is keyed on `attribute.repository_id`, not the name. A `principalSet`
-can match only one attribute, and keying it on the ID keeps the binding at least as strict as the
-condition: it would still keep a re-created repository out even if the condition were loosened.
+The impersonation bindings are keyed on `attribute.ci_context`, whose expression starts with the
+numeric ID: a token from any other repository maps to `other-repository`, which nothing is bound
+to. A `principalSet` can match only one attribute; folding the ID into the context keeps every
+binding at least as strict as the condition, so a re-created repository stays out even if the
+condition were loosened.
 
 ### What the condition does not restrict
 
-By default the condition says nothing about the branch (`ref`), the GitHub environment
-(`environment`) or the triggering event (`event_name`). **Any** workflow on any branch or tag in
-the repository can therefore get deployer tokens, including a `pull_request_target` workflow,
-which runs with the repository's permissions on events from forks. A "manual approval before
-prod" that exists only in workflow YAML can be bypassed by a workflow that skips it.
+By default the pool's condition says nothing about the branch (`ref`), the GitHub environment
+(`environment`) or the triggering event (`event_name`): any workflow of the repository can get a
+federated token. What it may then impersonate is decided per account by the bindings below (T26).
+Before T26 the deployer was bound to the whole repository, so any workflow on any branch or tag,
+including a `pull_request_target` workflow (which runs with the repository's permissions on
+events from forks), could get deployer tokens, and a "manual approval before prod" that existed
+only in workflow YAML could be bypassed by a workflow that skipped it.
 
 What this root offers, and what T26's workflows use:
 
-- `github_environments` (optional, T26) adds `assertion.environment in [...]` to the condition.
+- **Per-account contexts** (T26). The provider maps one more attribute, `attribute.ci_context`, a
+  single word for where a job runs (wif.tf has the expression):
+
+  | Context | A job that is |
+  | --- | --- |
+  | `main` | on `refs/heads/<github_main_branch>`, run by `push`, `schedule` or `workflow_dispatch`, without an environment |
+  | `pull-request` | a `pull_request` run without an environment |
+  | `env-<name>-main` | in GitHub Environment `<name>`, on main, run by `push`, `schedule` or `workflow_dispatch` |
+  | `env-<name>-other`, `other` | anything else: branch pushes, tags, `pull_request_target` (which runs on the base branch for fork events, hence the event check) |
+  | `other-repository` | from another repository (the numeric ID differs) |
+
+  Each account's `roles/iam.workloadIdentityUser` binding names its contexts
+  (`principalSet://.../attribute.ci_context/<context>`), so the three CI identities are reachable
+  from different places: `deployer_wif_contexts` (default `["main"]`), `planner_wif_contexts`
+  (default `["pull-request"]`) and `page_deployer_wif_contexts` (default `["main"]`). "pull-request"
+  is refused for the deployer and the page deployer. Because the context starts with the repository
+  check, a binding is never weaker than the pool's condition.
+- `github_environments` (optional) adds `assertion.environment in [...]` to the pool's condition.
   GitHub puts the `environment` claim into a job's OIDC token only when the job references a
   **GitHub Environment**, and only after that environment's protection rules (required reviewers,
-  allowed branches) have passed. A token without the claim fails the condition. So with
-  `github_environments = ["prod-plan", "prod"]` the prod deployer is reachable only from jobs that
-  GitHub itself has gated, whatever a workflow file says. T26 uses this for **prod**
-  (infra/envs/README.md, "CI/CD"). The condition field is also mapped (`attribute.environment`),
-  because Google requires a mapping for every condition field; the mapping exists only when the
-  option is set.
-- `github_allowed_refs` (optional) adds `assertion.ref in [...]` to the condition. Pull-request
-  workflows run on `refs/pull/<n>/merge`, so setting it also blocks plan-on-PR.
-- Values of both are validated to contain no quotes or backslashes, so they cannot inject CEL.
-- **dev** keeps the default (no environment, no ref): pull-request plans, applies on merge and the
-  nightly destroy all use the dev deployer, so anyone who can push a branch to the repository can
-  run a workflow with dev deployer rights. That is accepted for dev, which holds synthetic data
-  only. A separate read-only planner identity for pull requests (bound by a second
-  `principalSet` on the same pool) would narrow it; it is not built (infra/envs/README.md,
-  "Decisions you could change").
+  allowed branches) have passed. A token without the claim fails the condition. The field is also
+  mapped (`attribute.environment`), because Google requires a mapping for every condition field.
+- `github_allowed_refs` (optional) adds `assertion.ref in [...]`. Both options together are ANDed:
+  for **prod**, set `github_allowed_refs = ["refs/heads/main"]` and `github_environments =
+  ["prod-plan", "prod"]` (a test checks the combined condition). Pull-request workflows run on
+  `refs/pull/<n>/merge`, so restricting refs blocks plan-on-PR, which prod does not do.
+- Values of these options are validated to contain no quotes or backslashes, so they cannot inject
+  CEL.
+- **dev** keeps no pool-level ref or environment restriction (its plans run on pull requests); the
+  bindings do the narrowing: pull requests reach only the read-only planner, and only jobs on main
+  reach the deployer.
 
 ### Limits and lifecycle
 
@@ -258,6 +268,45 @@ What this root offers, and what T26's workflows use:
   that with long owner, repository or branch names; the token exchange then fails. If that
   happens, map `google.subject` to a shorter claim combination.
 - A deleted pool or provider is soft-deleted for 30 days and its ID cannot be reused in that time.
+
+## CI identities (T26)
+
+Three accounts, each reachable only from its own CI contexts (above). The planner and the page
+deployer are opt-in (`create_planner`, `create_page_deployer`); with neither, CI's plan and page
+deploy jobs skip (they never fall back to the deployer).
+
+| Account | dev contexts | prod contexts | Roles |
+| --- | --- | --- | --- |
+| deployer (`terraform-deployer`) | `main` (apply on merge, nightly destroy) | `env-prod-main` (the `prod` Environment) | `deployer_roles` (above), object admin on the state bucket |
+| planner (`terraform-planner`) | `pull-request` | `env-prod-plan-main` (the `prod-plan` Environment) | read-only, below; object **viewer** on the state bucket |
+| page deployer (`page-deployer`) | `main` | `env-prod-main` | `roles/firebasehosting.admin` only |
+
+The planner's default `planner_roles`, each for what `terraform plan` must read (refresh), and
+none of which writes or reads health data or secret values:
+
+| Role | Reads |
+| --- | --- |
+| `roles/iam.securityReviewer` | every IAM policy: the project's, the service accounts', the secrets', the Healthcare stores', the repositories', the topics' and subscriptions', Cloud Run's. Policies only, no data |
+| `roles/serviceusage.serviceUsageViewer` | which APIs are enabled (project-base) |
+| `roles/compute.viewer` | VPC, subnets, firewall rules, router and NAT, the VM, its disks and address, the snapshot schedule |
+| `roles/iam.serviceAccountViewer` | the service accounts (identity) |
+| `roles/secretmanager.viewer` | secret metadata and version state; it has no `secretmanager.versions.access` |
+| `roles/artifactregistry.reader` | the repositories and their cleanup policy (it can also pull images, which hold no secrets; there is no narrower predefined role) |
+| `roles/healthcare.datasetViewer`, `fhirStoreViewer`, `hl7V2StoreViewer` | the dataset and the stores' configuration; they hold no `fhirResources.*` or `hl7V2Messages.*` permission |
+| `roles/pubsub.viewer` | the topic and subscriptions (it cannot pull messages) |
+| `roles/run.viewer` | Cloud Run services and the job (including their environment variables, which the state holds anyway) |
+| `roles/cloudscheduler.viewer` | Scheduler jobs |
+| `roles/logging.viewer` | log-based metrics; no narrower role has `logging.logMetrics.get`. It also reads log entries |
+| `roles/monitoring.viewer` | alert policies and the notification channel |
+| `roles/firebasehosting.viewer` | the Hosting site |
+| `roles/cloudbuild.builds.viewer` | the build trigger, when there is one |
+
+The planner plans with `-lock=false`: taking the GCS backend's lock means writing and deleting a
+lock object, and read-only is the point. A plan made while an apply runs may be stale; nothing is
+applied from it (prod's apply plans again). The validation accepts only role names ending in
+`Viewer`, `viewer`, `reader` or `securityReviewer`. **Whether this set suffices for a full plan of
+the stack is not verified** (infra/envs/README.md, checklist CI16): if a plan is refused, the error
+names the permission; add the matching viewer role.
 
 ## Teardown
 

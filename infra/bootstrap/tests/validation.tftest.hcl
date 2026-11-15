@@ -234,3 +234,56 @@ run "rejects_bad_label_key" {
   }
   expect_failures = [var.labels]
 }
+
+# --- T26: the CI identities ------------------------------------------------------------------------
+
+run "rejects_a_pull_request_context_for_the_deployer" {
+  command = plan
+  variables {
+    deployer_wif_contexts = ["pull-request"]
+  }
+  expect_failures = [var.deployer_wif_contexts]
+}
+
+run "rejects_an_empty_deployer_context_list" {
+  command = plan
+  variables {
+    deployer_wif_contexts = []
+  }
+  expect_failures = [var.deployer_wif_contexts]
+}
+
+run "rejects_a_non_main_environment_context" {
+  command = plan
+  variables {
+    page_deployer_wif_contexts = ["env-prod-other"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_writing_role_for_the_planner" {
+  command = plan
+  variables {
+    create_planner = true
+    planner_roles  = ["roles/compute.viewer", "roles/run.admin"]
+  }
+  expect_failures = [var.planner_roles]
+}
+
+run "rejects_secret_access_for_the_planner" {
+  command = plan
+  variables {
+    create_planner = true
+    planner_roles  = ["roles/secretmanager.secretAccessor"]
+  }
+  expect_failures = [var.planner_roles]
+}
+
+run "rejects_a_basic_viewer_role_for_the_planner" {
+  command = plan
+  variables {
+    create_planner = true
+    planner_roles  = ["roles/viewer"]
+  }
+  expect_failures = [var.planner_roles]
+}

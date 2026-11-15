@@ -42,17 +42,130 @@ run "wif_provider_is_pinned_to_one_repository" {
   }
 
   assert {
-    condition = (
-      google_service_account_iam_member.deployer_github_wif.role == "roles/iam.workloadIdentityUser" &&
-      google_service_account_iam_member.deployer_github_wif.service_account_id == google_service_account.deployer.name
+    # T26: by default only the deployer is bound, and only to the "main" context.
+    condition = keys(google_service_account_iam_member.github_wif) == ["deployer/main"] && (
+      google_service_account_iam_member.github_wif["deployer/main"].role == "roles/iam.workloadIdentityUser" &&
+      google_service_account_iam_member.github_wif["deployer/main"].service_account_id == google_service_account.deployer.name
     )
-    error_message = "The pool's identities must be bound to the deployer with roles/iam.workloadIdentityUser."
+    error_message = "By default the pool's identities must be bound to the deployer only, from the main context, with roles/iam.workloadIdentityUser."
   }
 
   assert {
-    # Keyed on the immutable repository ID, so the binding is never weaker than the condition.
-    condition     = google_service_account_iam_member.deployer_github_wif.member == "principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.repository_id/123456789"
-    error_message = "Only identities from the repository with ID var.github_repository_id may impersonate the deployer."
+    condition     = google_service_account_iam_member.github_wif["deployer/main"].member == "principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/main"
+    error_message = "The deployer binding must match attribute.ci_context = main."
+  }
+
+  # The context folds in the repository ID (a foreign repository is "other-repository"), the
+  # environment, the main ref and the event (pull_request_target must not read as main).
+  assert {
+    condition = google_iam_workload_identity_pool_provider.github.attribute_mapping["attribute.ci_context"] == join("", [
+      "assertion.repository_id != \"123456789\" ? \"other-repository\" : ",
+      "(\"environment\" in assertion) ? (\"env-\" + assertion.environment + ((assertion.ref == \"refs/heads/main\" && assertion.event_name in [\"push\", \"schedule\", \"workflow_dispatch\"]) ? \"-main\" : \"-other\")) : ",
+      "assertion.event_name == \"pull_request\" ? \"pull-request\" : ",
+      "(assertion.ref == \"refs/heads/main\" && assertion.event_name in [\"push\", \"schedule\", \"workflow_dispatch\"]) ? \"main\" : \"other\"",
+    ])
+    error_message = "attribute.ci_context must be mapped from the repository ID, environment, main ref and event exactly as documented."
+  }
+
+  assert {
+    condition     = length(google_service_account.planner) == 0 && length(google_service_account.page_deployer) == 0 && output.planner_service_account_email == null && output.page_deployer_service_account_email == null
+    error_message = "The planner and the page deployer are opt-in: none by default."
+  }
+}
+
+# T26: the three CI identities as configured for prod, each bound only to its own contexts.
+run "prod_identities_are_bound_to_their_environments" {
+  command = plan
+
+  variables {
+    github_environments        = ["prod-plan", "prod"]
+    github_allowed_refs        = ["refs/heads/main"]
+    deployer_wif_contexts      = ["env-prod-main"]
+    create_planner             = true
+    planner_wif_contexts       = ["env-prod-plan-main"]
+    create_page_deployer       = true
+    page_deployer_wif_contexts = ["env-prod-main"]
+  }
+
+  override_resource {
+    target          = google_service_account.planner[0]
+    override_during = plan
+    values = {
+      email  = "terraform-planner@example-project.iam.gserviceaccount.com"
+      member = "serviceAccount:terraform-planner@example-project.iam.gserviceaccount.com"
+      name   = "projects/example-project/serviceAccounts/terraform-planner@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  override_resource {
+    target          = google_service_account.page_deployer[0]
+    override_during = plan
+    values = {
+      email  = "page-deployer@example-project.iam.gserviceaccount.com"
+      member = "serviceAccount:page-deployer@example-project.iam.gserviceaccount.com"
+      name   = "projects/example-project/serviceAccounts/page-deployer@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  assert {
+    condition = {
+      for k, b in google_service_account_iam_member.github_wif : k => "${b.service_account_id}|${b.member}"
+      } == {
+      "deployer/env-prod-main"      = "projects/example-project/serviceAccounts/terraform-deployer@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-main"
+      "planner/env-prod-plan-main"  = "projects/example-project/serviceAccounts/terraform-planner@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-plan-main"
+      "page-deployer/env-prod-main" = "projects/example-project/serviceAccounts/page-deployer@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-main"
+    }
+    error_message = "prod: the deployer and page deployer only from env-prod-main, the planner only from env-prod-plan-main."
+  }
+
+  # Ref AND environment together in the pool's condition (B2).
+  assert {
+    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\" && assertion.ref in [\"refs/heads/main\"] && assertion.environment in [\"prod-plan\", \"prod\"]"
+    error_message = "github_allowed_refs and github_environments must both be in the condition."
+  }
+
+  # The planner reads, never writes: viewer-type project roles and objectViewer on the state bucket.
+  assert {
+    condition = alltrue([
+      for k, m in google_project_iam_member.planner :
+      can(regex("([Vv]iewer|reader|securityReviewer)$", m.role)) && m.member == "serviceAccount:terraform-planner@example-project.iam.gserviceaccount.com"
+    ]) && length(google_project_iam_member.planner) == 16
+    error_message = "The planner must get exactly its 16 read-only roles."
+  }
+
+  assert {
+    condition     = !contains(keys(google_project_iam_member.planner), "roles/secretmanager.secretAccessor") && !contains(keys(google_project_iam_member.planner), "roles/healthcare.fhirResourceReader")
+    error_message = "The planner must not read secret values or FHIR resources."
+  }
+
+  assert {
+    condition     = google_storage_bucket_iam_member.planner_state[0].role == "roles/storage.objectViewer" && google_storage_bucket_iam_member.planner_state[0].member == "serviceAccount:terraform-planner@example-project.iam.gserviceaccount.com"
+    error_message = "The planner may only read the state bucket (it plans with -lock=false)."
+  }
+
+  # The page deployer: Hosting and nothing else.
+  assert {
+    condition     = google_project_iam_member.page_deployer[0].role == "roles/firebasehosting.admin" && google_project_iam_member.page_deployer[0].member == "serviceAccount:page-deployer@example-project.iam.gserviceaccount.com" && length(google_project_iam_member.page_deployer) == 1
+    error_message = "The page deployer must hold roles/firebasehosting.admin only."
+  }
+
+  assert {
+    condition     = output.planner_service_account_email == "terraform-planner@example-project.iam.gserviceaccount.com" && output.page_deployer_service_account_email == "page-deployer@example-project.iam.gserviceaccount.com"
+    error_message = "The two new accounts' emails must be outputs (repository variables)."
+  }
+}
+
+run "dev_planner_from_pull_requests_deployer_from_main" {
+  command = plan
+
+  variables {
+    create_planner       = true
+    create_page_deployer = true
+  }
+
+  assert {
+    condition     = toset(keys(google_service_account_iam_member.github_wif)) == toset(["deployer/main", "planner/pull-request", "page-deployer/main"])
+    error_message = "dev defaults: deployer and page deployer from main, the planner from pull requests."
   }
 }
 
@@ -137,12 +250,9 @@ run "default_deployer_roles_are_not_basic_roles" {
     error_message = "The default deployer roles must include roles/firebasehosting.admin and not roles/storage.admin."
   }
   assert {
-    # T26: project-base's build trigger (triggers.create needs cloudbuild.builds.create). Only the
-    # editor role: no Cloud Build connection admin, no builder role.
-    condition = contains(keys(google_project_iam_member.deployer), "roles/cloudbuild.builds.editor") && length(setintersection(toset(keys(google_project_iam_member.deployer)), toset([
-      "roles/cloudbuild.connectionAdmin", "roles/cloudbuild.builds.builder", "roles/cloudbuild.integrationsOwner",
-    ]))) == 0
-    error_message = "The default deployer roles must include roles/cloudbuild.builds.editor and no broader Cloud Build role."
+    # T26: no Cloud Build role by default; allow_build_trigger adds it (run below).
+    condition     = length([for r in keys(google_project_iam_member.deployer) : r if startswith(r, "roles/cloudbuild.")]) == 0
+    error_message = "The default deployer roles must not include a Cloud Build role."
   }
   assert {
     # Adding Firebase is bootstrap's job (add_firebase), so the deployer gets no broad Firebase role.
@@ -185,5 +295,18 @@ run "outputs_carry_what_consumers_need" {
   assert {
     condition     = google_service_account.deployer.account_id == "terraform-deployer"
     error_message = "The deployer account_id must default to terraform-deployer."
+  }
+}
+
+run "build_trigger_role_only_when_opted_in" {
+  command = plan
+
+  variables {
+    allow_build_trigger = true
+  }
+
+  assert {
+    condition     = [for r in keys(google_project_iam_member.deployer) : r if startswith(r, "roles/cloudbuild.")] == ["roles/cloudbuild.builds.editor"]
+    error_message = "allow_build_trigger must add roles/cloudbuild.builds.editor and no other Cloud Build role."
   }
 }

@@ -227,9 +227,6 @@ variable "deployer_roles" {
     # Firebase to the project needs more (firebase.projects.update): bootstrap does that once
     # with the owner's credentials (add_firebase), so the deployer never needs roles/firebase.admin.
     "roles/firebasehosting.admin",
-    # T26: create, update and delete project-base's Cloud Build trigger (triggers.create needs
-    # cloudbuild.builds.create). Used only when build_trigger_repository is set in an env root.
-    "roles/cloudbuild.builds.editor",
   ]
 
   validation {
@@ -320,6 +317,130 @@ variable "github_environments" {
     condition     = alltrue([for e in var.github_environments : can(regex("^[A-Za-z0-9._-]{1,255}$", e))])
     error_message = "Each entry of github_environments must be an environment name of letters, digits, '.', '_' and '-'."
   }
+}
+
+variable "github_main_branch" {
+  description = "The branch whose push, schedule and workflow_dispatch runs count as the \"main\" CI context (wif.tf). Default \"main\"."
+  type        = string
+  default     = "main"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9._/-]{1,200}$", var.github_main_branch))
+    error_message = "github_main_branch must be a branch name of letters, digits, '.', '_', '/' and '-'."
+  }
+}
+
+variable "deployer_wif_contexts" {
+  description = "The CI contexts (wif.tf) whose jobs may impersonate the deployer. Default [\"main\"]: jobs on the main branch run by push, schedule or workflow_dispatch (dev's apply and nightly destroy). For prod use [\"env-prod-main\"]: only jobs in the prod GitHub Environment on main. Never \"pull-request\": a pull request's code would hold the deployer."
+  type        = list(string)
+  default     = ["main"]
+  nullable    = false
+
+  validation {
+    condition     = length(var.deployer_wif_contexts) > 0 && alltrue([for c in var.deployer_wif_contexts : can(regex("^(main|env-[A-Za-z0-9._-]{1,255}-main)$", c))])
+    error_message = "deployer_wif_contexts must be a non-empty list of \"main\" or \"env-<environment>-main\" (never \"pull-request\")."
+  }
+}
+
+variable "create_planner" {
+  description = "Create the read-only planner service account (ci_identities.tf, T26) that CI's terraform plan runs as. Default false. Opt in for CI."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "planner_account_id" {
+  description = "account_id of the planner service account."
+  type        = string
+  default     = "terraform-planner"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.planner_account_id))
+    error_message = "planner_account_id must be 6-30 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
+}
+
+variable "planner_roles" {
+  description = "Project roles of the planner: enough to READ every resource the stack manages for `terraform plan`, and nothing that writes or reads data. infra/bootstrap/README.md (\"CI identities\") gives each one's reason. Only viewer- and reader-type roles are accepted. Whether this set suffices for a full plan is not verified."
+  type        = list(string)
+  nullable    = false
+  default = [
+    "roles/iam.securityReviewer",            # every IAM policy (project, accounts, secrets, stores, repositories, topics, Cloud Run)
+    "roles/serviceusage.serviceUsageViewer", # enabled APIs (project-base)
+    "roles/compute.viewer",                  # VPC, subnets, firewall rules, router/NAT, the VM, disks, address, snapshot schedule
+    "roles/iam.serviceAccountViewer",        # the service accounts (identity)
+    "roles/secretmanager.viewer",            # secret METADATA and versions' state; not secretmanager.versions.access
+    "roles/artifactregistry.reader",         # the repositories and their cleanup policy (images hold no secrets)
+    "roles/healthcare.datasetViewer",        # the dataset; no FHIR resources
+    "roles/healthcare.fhirStoreViewer",      # the FHIR stores' configuration; not fhirResources.*
+    "roles/healthcare.hl7V2StoreViewer",     # the HL7v2 store's configuration; not hl7V2Messages.*
+    "roles/pubsub.viewer",                   # topic and subscriptions; cannot pull messages
+    "roles/run.viewer",                      # Cloud Run services and the job
+    "roles/cloudscheduler.viewer",           # Scheduler jobs
+    "roles/logging.viewer",                  # log-based metrics (no narrower role has logMetrics.get; also reads log entries)
+    "roles/monitoring.viewer",               # alert policies and the notification channel
+    "roles/firebasehosting.viewer",          # the Hosting site
+    "roles/cloudbuild.builds.viewer",        # the build trigger (when there is one)
+  ]
+
+  validation {
+    # Read-only by construction: the role name must end in Viewer, viewer, reader or be the
+    # security reviewer. A writer, editor or admin role cannot be added by mistake.
+    condition     = alltrue([for r in var.planner_roles : can(regex("^roles/[a-zA-Z0-9]+\\.([a-zA-Z0-9.]*[Vv]iewer|reader|securityReviewer)$", r))])
+    error_message = "planner_roles may contain only predefined viewer, reader or securityReviewer roles (roles/<service>.<...>Viewer, roles/<service>.reader, roles/iam.securityReviewer)."
+  }
+}
+
+variable "planner_wif_contexts" {
+  description = "The CI contexts whose jobs may impersonate the planner. dev: [\"pull-request\"] (the default). prod: [\"env-prod-plan-main\"] (the prod-plan Environment on main)."
+  type        = list(string)
+  default     = ["pull-request"]
+  nullable    = false
+
+  validation {
+    condition     = length(var.planner_wif_contexts) > 0 && alltrue([for c in var.planner_wif_contexts : can(regex("^(pull-request|main|env-[A-Za-z0-9._-]{1,255}-main)$", c))])
+    error_message = "planner_wif_contexts must be a non-empty list of \"pull-request\", \"main\" or \"env-<environment>-main\"."
+  }
+}
+
+variable "create_page_deployer" {
+  description = "Create the page deployer service account (ci_identities.tf, T26): roles/firebasehosting.admin only, used by CI's page deploy job. Default false."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "page_deployer_account_id" {
+  description = "account_id of the page deployer service account."
+  type        = string
+  default     = "page-deployer"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.page_deployer_account_id))
+    error_message = "page_deployer_account_id must be 6-30 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
+}
+
+variable "page_deployer_wif_contexts" {
+  description = "The CI contexts whose jobs may impersonate the page deployer. dev: [\"main\"] (the default). prod: [\"env-prod-main\"]."
+  type        = list(string)
+  default     = ["main"]
+  nullable    = false
+
+  validation {
+    condition     = length(var.page_deployer_wif_contexts) > 0 && alltrue([for c in var.page_deployer_wif_contexts : can(regex("^(main|env-[A-Za-z0-9._-]{1,255}-main)$", c))])
+    error_message = "page_deployer_wif_contexts must be a non-empty list of \"main\" or \"env-<environment>-main\"."
+  }
+}
+
+variable "allow_build_trigger" {
+  description = "Grant the deployer roles/cloudbuild.builds.editor, which creating project-base's Cloud Build trigger needs (T26). Default false: set it only together with build_trigger_repository in an env root. The role also lets the holder start builds."
+  type        = bool
+  default     = false
+  nullable    = false
 }
 
 variable "wif_pool_id" {
