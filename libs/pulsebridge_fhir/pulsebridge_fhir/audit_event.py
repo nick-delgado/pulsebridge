@@ -363,10 +363,10 @@ class SendAttemptRecord:
     format_version: int = FORMAT_VERSION
 
 
-# [0-9], not \d (no non-ASCII digits). Fractions of up to 9 digits are read; past microseconds
-# they are dropped (Python's datetime holds 6).
+# [0-9], not \d (no non-ASCII digits). Up to 9 fraction digits; Python 3.13's fromisoformat
+# reads them and keeps microseconds.
 _INSTANT = re.compile(
-    r"([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})"
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]{1,9})?(Z|[+-][0-9]{2}:[0-9]{2})"
 )
 _HTTP_STATUS = re.compile(r"[0-9]{3}")
 _VERSION = re.compile(r"[1-9][0-9]{0,5}")
@@ -449,13 +449,10 @@ def _check_ours(resource: object) -> dict:
 
 
 def _instant(value: object, name: str) -> datetime:
-    match = _INSTANT.fullmatch(value) if isinstance(value, str) else None
-    if match is None:
+    if not isinstance(value, str) or not _INSTANT.fullmatch(value):
         raise _unreadable(f"{name} is missing or not a FHIR instant")
-    whole, fraction, zone = match.groups()
-    text = whole + (fraction[:7] if fraction else "") + zone
     try:
-        return datetime.fromisoformat(text)
+        return datetime.fromisoformat(value)
     except ValueError as exc:
         raise _unreadable(f"{name} ({value!r}) is not a real date and time") from exc
 
