@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# Stand-in for the system commands the edge VM startup script calls, for tests/startup_script.sh.
+# The test links this one file under each command's name (docker, curl, mount, blkid, mkfs.ext4,
+# ...) in a sandbox bin directory and runs the script with PATH set to that directory only, so no
+# real disk, mount, swap, container or network call can happen.
+#
+# Every call is appended to "$FAKE_STATE/calls.log" as "<command> <args>". State that a real
+# machine would keep (the disk's filesystem, mounts, swap, containers, images) lives in files
+# under $FAKE_STATE, so a second run of the script sees what the first one did.
+#
+# Behaviour switches (environment variables set by a test case):
+#   FAKE_PULL_FAIL=1        docker pull fails
+#   FAKE_ADAPTER_CRASH=1    the mllp-adapter container keeps restarting
+#   FAKE_MARIADB_HEALTH=x   health status MariaDB reports (default healthy)
+#   FAKE_SECRET_MISSING=1   Secret Manager answers 404 (no version yet)
+#   FAKE_FSCK_RC=n          exit code of fsck.ext4
+#   FAKE_SECRET, FAKE_TOKEN the secret value and access token the fakes hand out
+
+set -uo pipefail
+
+: "${FAKE_STATE:?FAKE_STATE must point at the sandbox state directory}"
+cmd=$(basename "$0")
+{
+  printf '%s' "$cmd"
+  printf ' %s' "$@"
+  printf '\n'
+} >> "$FAKE_STATE/calls.log"
+
+containers="$FAKE_STATE/containers"
+mkdir -p "$containers" "$FAKE_STATE/images" "$FAKE_STATE/networks"
+
+fake_docker() {
+  local sub=${1:-}
+  shift || true
+  case "$sub" in
+    info) return 0 ;;
+    network)
+      case "$1" in
+        inspect) [ -e "$FAKE_STATE/networks/$2" ] ;;
+        create) touch "$FAKE_STATE/networks/${*: -1}" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    image)
+      [ "$1" = inspect ] || return 1
+      [ -e "$FAKE_STATE/images/$(printf '%s' "$2" | sha256sum | cut -c1-32)" ]
+      ;;
+    pull)
+      [ "${FAKE_PULL_FAIL:-0}" = 1 ] && {
+        echo "Error response from daemon: fake pull failure" >&2
+        return 1
+      }
+      touch "$FAKE_STATE/images/$(printf '%s' "${*: -1}" | sha256sum | cut -c1-32)"
+      ;;
+    container)
+      [ "$1" = inspect ] || return 1
+      shift
+      local format="" name
+      if [ "$1" = --format ]; then
+        format=$2
+        shift 2
+      fi
+      name=$1
+      [ -d "$containers/$name" ] || {
+        echo "Error: No such container: $name" >&2
+        return 1
+      }
+      case "$format" in
+        "") echo "[{}]" ;;
+        *Labels*) cat "$containers/$name/label" ;;
+        *RestartCount*)
+          if [ "$name" = mllp-adapter ] && [ "${FAKE_ADAPTER_CRASH:-0}" = 1 ]; then
+            echo $(($(cat "$containers/$name/restarts") + 1)) > "$containers/$name/restarts"
+            echo restarting > "$containers/$name/status"
+          fi
+          echo "$(cat "$containers/$name/status") $(cat "$containers/$name/restarts")"
+          ;;
+        *Health*) echo "${FAKE_MARIADB_HEALTH:-healthy}" ;;
+        *) return 1 ;;
+      esac
+      ;;
+    run)
+      local name="" label="" args=("$@")
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --name) name=$2; shift 2 ;;
+          --label) label=${2#*=}; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      [ -n "$name" ] || return 1
+      if [ -d "$containers/$name" ]; then
+        echo "docker: Error response from daemon: Conflict. The container name \"/$name\" is already in use." >&2
+        return 125
+      fi
+      mkdir -p "$containers/$name"
+      echo "$label" > "$containers/$name/label"
+      echo running > "$containers/$name/status"
+      echo 0 > "$containers/$name/restarts"
+      printf '%s\n' "${args[@]}" > "$containers/$name/args"
+      echo "fakecontainerid-$name"
+      ;;
+    start)
+      [ -d "$containers/$1" ] || return 1
+      echo running > "$containers/$1/status"
+      echo "$1"
+      ;;
+    rm)
+      rm -rf "${containers:?}/${*: -1}"
+      ;;
+    logs)
+      echo "flag provided but not defined: -fake_bad_flag"
+      echo "Usage of /usr/mllp_adapter/mllp_adapter:"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+fake_curl() {
+  local output="" writeout="" url="" header_stdin=0 auth=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --output) output=$2; shift 2 ;;
+      --write-out) writeout=$2; shift 2 ;;
+      --header)
+        [ "$2" = "@-" ] && header_stdin=1
+        shift 2
+        ;;
+      --silent | --fail | --show-error) shift ;;
+      *) url=$1; shift ;;
+    esac
+  done
+  if [ "$header_stdin" = 1 ]; then
+    IFS= read -r auth || true
+  fi
+
+  case "$url" in
+    */instance/service-accounts/default/token)
+      printf '{"access_token":"%s","expires_in":3599,"token_type":"Bearer"}' "$FAKE_TOKEN"
+      ;;
+    */instance/attributes/pulsebridge-hook-*)
+      local hook=${url##*/pulsebridge-hook-}
+      [ -f "$FAKE_STATE/hooks/$hook" ] || return 22
+      cp "$FAKE_STATE/hooks/$hook" "$output"
+      ;;
+    */versions/latest:access)
+      local code
+      if [ "$auth" != "Authorization: Bearer $FAKE_TOKEN" ]; then
+        code=401
+        printf '{"error":{"code":401}}' > "$output"
+      elif [ "${FAKE_SECRET_MISSING:-0}" = 1 ]; then
+        code=404
+        printf '{"error":{"code":404,"status":"NOT_FOUND"}}' > "$output"
+      else
+        code=200
+        printf '{\n  "name": "%s/versions/1",\n  "payload": {\n    "data": "%s",\n    "dataCrc32c": "1234"\n  }\n}\n' \
+          "${url%/versions/latest:access}" "$(printf '%s' "$FAKE_SECRET" | base64 -w0)" > "$output"
+      fi
+      [ -n "$writeout" ] && printf '%s' "$code"
+      ;;
+    *) return 6 ;;
+  esac
+}
+
+case "$cmd" in
+  docker) fake_docker "$@" ;;
+  docker-credential-gcr)
+    # The real helper writes $HOME/.docker/config.json; record where it would write.
+    mkdir -p "$DOCKER_CONFIG"
+    printf '{"credHelpers":{"%s":"gcr"}}\n' "${2#--registries=}" > "$DOCKER_CONFIG/config.json"
+    ;;
+  curl) fake_curl "$@" ;;
+  blkid)
+    # blkid -p -o value -s TYPE <dev>: exit 2 when no filesystem is found.
+    fs=$(cat "$FAKE_STATE/fstype" 2> /dev/null || true)
+    case "$fs" in
+      "") exit 2 ;;
+      ERR) exit 4 ;;
+      *) echo "$fs" ;;
+    esac
+    ;;
+  mkfs.ext4) echo ext4 > "$FAKE_STATE/fstype" ;;
+  fsck.ext4) exit "${FAKE_FSCK_RC:-0}" ;;
+  resize2fs) exit 0 ;;
+  mount)
+    # mount -t ext4 -o <opts> <dev> <dir>
+    dev=${*: -2:1}
+    dir=${*: -1}
+    [ -d "$dir" ] || exit 32
+    echo "$dev $dir ext4 rw,discard 0 0" >> "$FAKE_STATE/proc_mounts"
+    ;;
+  mkswap) exit 0 ;;
+  swapon) echo "${*: -1} file 2097148 0 -2" >> "$FAKE_STATE/proc_swaps" ;;
+  fallocate)
+    # fallocate -l <n>M <file>; a sparse file of the right size is enough for the size check.
+    size=$2
+    truncate -s "$((${size%M} * 1024 * 1024))" "$3"
+    ;;
+  sleep) exit 0 ;;
+  *)
+    echo "fake-command: no fake for $cmd" >&2
+    exit 127
+    ;;
+esac
