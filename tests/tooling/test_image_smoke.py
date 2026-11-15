@@ -266,14 +266,23 @@ def test_starts_listens_on_port_and_answers(case: Case, running: tuple[str, str]
 
 
 def test_bad_configuration_stops_start_up(case: Case, adc_dir: Path) -> None:
-    result = docker(
-        "run",
-        "--rm",
-        *run_args(adc_dir, {**case.env, **case.bad_env}),
-        image(case.service),
-        check=False,
-        timeout=60,
-    )
+    # A service that wrongly starts would run until removed, so the container is named and
+    # always removed, and "still running after the timeout" is reported as the failure.
+    name = f"pulsebridge-smoke-bad-{case.service}-{os.getpid()}"
+    try:
+        result = docker(
+            "run",
+            "--name",
+            name,
+            *run_args(adc_dir, {**case.env, **case.bad_env}),
+            image(case.service),
+            check=False,
+            timeout=START_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"{case.service} kept running with bad configuration {case.bad_env}")
+    finally:
+        docker("rm", "--force", name, check=False)
     assert result.returncode != 0, "the service started with bad configuration"
     assert case.bad_message in result.stdout + result.stderr
 

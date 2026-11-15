@@ -494,8 +494,9 @@ def test_dockerignore_keeps_what_the_images_install(path: str) -> None:
     assert not is_excluded(path, dockerignore_patterns()), f"{path} is needed by an image build"
 
 
-def test_dockerignore_keeps_every_file_a_dockerfile_copies() -> None:
-    # Every real file under each COPY source that is not a test, cache or secret is sent.
+def test_dockerignore_sends_every_directory_a_dockerfile_copies() -> None:
+    # Each COPY source (a library or service directory) is sent: its pyproject.toml is not
+    # excluded. (Which files inside are left out is checked by the tests above.)
     patterns = dockerignore_patterns()
     for d in dockerfile_dirs():
         for source in copy_sources(read_dockerfile(d / "Dockerfile")):
