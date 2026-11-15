@@ -48,6 +48,18 @@ zone. The zone belongs to the data, never to the browser. A range crosses a cloc
 falls inside it: the browser test `e2e/mock-dst.e2e.ts` pins the page's clock to 2026-11-01 12:00
 EST, eleven hours after the autumn change.
 
+Two more switches exist for browser tests, in mock builds only (both are parsed in
+`src/api/mock-data.ts`, and `scripts/check-bundle.mjs` fails an HTTP build that contains them):
+
+- `?mock-data=hostile`: UTC data plus markup (`HOSTILE_MARKUP`: an `<img onerror>`, a
+  `<script>` and a 612-character unbroken token) in every text that comes from another system:
+  each sample's description, an AE's MSA-3 reason and so the raw ACK, an extra NTE segment in a
+  malformed sample's message text, and the diagnostics of a refusal (a built reading with
+  systolic 333 is refused with 422). `src/cuff/cuff.e2e.ts` shows it is rendered as text, with no
+  CSP violation and no page scroll.
+- `?mock-audit=build|write`: every cuff send fails to record its AuditEvent
+  (`MockClientOptions.auditFailure`), so "not recorded" rows can be seen in the browser.
+
 Put a local value in `web/.env.local` (git-ignored); `.env.example` shows the format. Vite copies
 every `VITE_` variable into the public bundle, so **never put a secret in one**. The mode (mock or
 HTTP) is not a variable: it is `vite --mode mock`, fixed at build time, and an HTTP build does not
@@ -590,6 +602,32 @@ commit-level ACK and, once mapped, the application-level outcome; label a derive
 derived; handle `attemptId: null`; on `CuffSendError` mark `error.fields` and, for
 `rate-limited`, say when to retry from `retryAfterSeconds`; and expect 429 after three quick sends
 in mock mode too.
+
+**Changes made in the T18 review round** (orchestrator-approved edits to shell files):
+
+| What                                                                                                                                                                                                                                                                                                                                                 | Where                 | For                                     |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | --------------------------------------- |
+| The mapper's reason sentences are one shared module, `reasonText(code)` and `REASON_SENTENCES` (moved from `src/cuff/`). Its test checks every code and sentence against `services/v2-to-fhir/v2_to_fhir/reasons.py`, and `MAPPER_PLAUSIBLE_RANGE` against `SYSTOLIC_RANGE`/`DIASTOLIC_RANGE` in `libs/pulsebridge_fhir/pulsebridge_fhir/inputs.py`. | `src/api/reasons.ts`  | T19 (show reason codes as text with it) |
+| A 200 from `POST /cuff/readings` whose `ack`, `audit`, `transport`, `sentAt` or `messageSent` cannot be read throws `ApiError(502)` instead of returning a half-read result.                                                                                                                                                                         | `src/api/parse.ts`    | T14                                     |
+| The share hint shows a selection's `unshareableReason` before the generic "no Observation was stored".                                                                                                                                                                                                                                               | `src/share/index.ts`  | T19                                     |
+| The tab list wraps instead of scrolling, so no tab is cut off on a phone.                                                                                                                                                                                                                                                                            | `src/styles/base.css` | all                                     |
+| `?mock-data=hostile` and `?mock-audit=build\|write` (above).                                                                                                                                                                                                                                                                                         | `src/api/`            | T19 browser tests                       |
+
+For T19, from the cuff side:
+
+- **Selecting a cuff row from the messages log works.** If T19 sets the shared selection to an
+  attempt that is in T18's readings list (this session's sends), the cuff panel highlights it,
+  loads its trace, marks the selection "being checked against its stored trace." while that
+  loads, and then re-sets the selection from its own data (summary, Observation, reason). An
+  attempt not sent in this session has no row there, so the cuff trace stays empty.
+- **The two acknowledgment levels need the same explanation in the log.** The store answers in
+  HL7's original acknowledgment mode (AA or AE in MSA-1); "commit-level acknowledgment" and
+  "application-level outcome" are PulseBridge's names, after HL7's enhanced mode (MSH-15/16),
+  where those would be CA/CE/CR and AA/AE/AR. Without that sentence a reader who knows HL7 sees AA
+  under a "commit-level" heading and thinks the levels are confused. The cuff side shows it in
+  the ACK tab and in short above its readings list (`ACK_MODE_NOTE`, `ACK_MODE_SHORT` in
+  `src/cuff/readings.ts`); T19 should do the same in the log, and must not call AA "application
+  accept" under the commit-level label.
 
 For T19 in short: an attempt whose AuditEvent was not recorded is not in the log; the log row's
 `messageName` is only ever a name the store returned (null over MLLP), and an accepted MLLP row

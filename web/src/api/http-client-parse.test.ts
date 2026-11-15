@@ -239,7 +239,6 @@ describe('cuff send: result fields', () => {
       ['stored', RESULT.ack, 'accepted'],
       [undefined, { ...RESULT.ack, code: 'AE' }, 'rejected'],
       [42, { received: false, why: 'timeout' }, 'no-acknowledgment'],
-      ['accepted?', undefined, 'no-acknowledgment'],
     ];
     for (const [result, ack, expected] of cases) {
       const r = await client(json(200, { ...RESULT, result, ack })).submitCuffReading(READING);
@@ -248,6 +247,54 @@ describe('cuff send: result fields', () => {
     // A known value is kept as sent.
     const r = await client(json(200, { ...RESULT, result: 'rejected' })).submitCuffReading(READING);
     expect(r.result).toBe('rejected');
+  });
+
+  it('a 200 whose body has no readable ack or audit is a 502, never a half-read result', async () => {
+    const bodies: [string, unknown][] = [
+      ['empty object', {}],
+      ['null', null],
+      ['an array', [RESULT]],
+      ['no ack', { ...RESULT, ack: undefined }],
+      ['ack without received', { ...RESULT, ack: { code: 'AA' } }],
+      ['unknown MSA-1 code', { ...RESULT, ack: { ...RESULT.ack, code: 'ZZ' } }],
+      ['unknown no-ack reason', { ...RESULT, ack: { received: false, why: 'gremlins' } }],
+      ['no audit', { ...RESULT, audit: undefined }],
+      ['audit without recorded', { ...RESULT, audit: { ok: true } }],
+      ['no transport', { ...RESULT, transport: 'carrier-pigeon' }],
+      ['no sentAt', { ...RESULT, sentAt: undefined }],
+      ['no messageSent', { ...RESULT, messageSent: 7 }],
+    ];
+    for (const [what, body] of bodies) {
+      const error = await client(json(200, body))
+        .submitCuffReading(READING)
+        .then(
+          () => null,
+          (e: unknown) => e,
+        );
+      expect(error, what).toBeInstanceOf(ApiError);
+      expect(error, what).not.toBeInstanceOf(CuffSendError);
+      expect((error as ApiError).status, what).toBe(502);
+      expect((error as ApiError).message, what).toContain('its result could not be read');
+    }
+  });
+
+  it('normalises a no-acknowledgment ack and a failed audit to the documented shapes', async () => {
+    const r = await client(
+      json(200, {
+        ...RESULT,
+        result: 'no-acknowledgment',
+        ack: { received: false, why: 'api-error', httpStatus: 503 },
+        audit: { recorded: false },
+      }),
+    ).submitCuffReading(READING);
+    expect(r.ack).toEqual({
+      received: false,
+      why: 'api-error',
+      httpStatus: 503,
+      detail: '',
+      replyPrefixBase64: null,
+    });
+    expect(r.audit).toEqual({ recorded: false, detail: 'no detail given' });
   });
 
   it('reads an unknown framing as null rather than inventing one', async () => {

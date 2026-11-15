@@ -43,6 +43,8 @@ import {
   bloodPressureObservation,
   derivedMessageName,
   hash32,
+  HOSTILE_MARKUP,
+  HOSTILE_REFUSED_SYSTOLIC,
   heartRateObservation,
   heartRateObservations,
   lastSyncRun,
@@ -127,6 +129,8 @@ export class MockClient implements PulseBridgeApi {
   readonly #unreadable: UnreadableSendAttemptEntry[] = [];
   readonly #shared = new Set<string>();
   readonly #zone: string | null;
+  /** The `hostile` data set: markup in text from other systems (mock-data.ts, HOSTILE_MARKUP). */
+  readonly #hostile: boolean;
   readonly #rateLimit: { burst: number; perMinute: number } | null;
   #tokens: number;
   #tokensAt: number;
@@ -137,6 +141,7 @@ export class MockClient implements PulseBridgeApi {
     this.#latency = options.latencyMs ?? 150;
     this.#mappingDelay = options.mappingDelayMs ?? 3000;
     this.#zone = (options.dataSet ?? MOCK_DATA_SETS.utc).timeZone;
+    this.#hostile = (options.dataSet ?? MOCK_DATA_SETS.utc).hostile;
     this.#rateLimit = options.rateLimit === undefined ? MOCK_RATE_LIMIT : options.rateLimit;
     this.#tokens = this.#rateLimit?.burst ?? 0;
     this.#tokensAt = this.#now();
@@ -243,7 +248,7 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     return MOCK_SAMPLES.map(({ name, label, class: cls, transports }) => ({
       name,
-      label,
+      label: this.#hostile ? `${label} ${HOSTILE_MARKUP}` : label,
       class: cls,
       transports: [...transports],
     }));
@@ -257,6 +262,13 @@ export class MockClient implements PulseBridgeApi {
     // The same checks as cuff-sim's parse_request, in the same order: the body, then the rate
     // limit (a typo does not use up a send), then the send.
     const checked = this.#checkReading(request);
+    if (this.#hostile && checked.sample === null && checked.systolic === HOSTILE_REFUSED_SYSTOLIC) {
+      throw cuffRefusal(
+        422,
+        [['systolic', `is refused by the hostile data set ${HOSTILE_MARKUP}`]],
+        'invalid',
+      );
+    }
     this.#takeToken();
     const { transport, sendMalformed, sample } = checked;
 
@@ -275,7 +287,10 @@ export class MockClient implements PulseBridgeApi {
       diastolic,
       sample: sendMalformed,
       commit: sample ? sample.commitAck : 'AA',
-      commitReason: sample?.commitReason ?? null,
+      commitReason:
+        this.#hostile && sample?.commitReason
+          ? `${sample.commitReason} ${HOSTILE_MARKUP}`
+          : (sample?.commitReason ?? null),
       final: sample
         ? sample.application && { outcome: sample.application, reason: sample.mappingReason }
         : plausible
@@ -745,8 +760,9 @@ export class MockClient implements PulseBridgeApi {
         source: 'audit-event',
       },
       // A malformed send shows the sample's own bytes (T07), not a message built from the inputs.
-      messageSent:
-        sample?.er7 ?? mockOruR01(controlId ?? '', input.at, input.systolic, input.diastolic),
+      messageSent: sample
+        ? this.#hostileSegment(sample.er7)
+        : mockOruR01(controlId ?? '', input.at, input.systolic, input.diastolic),
       systolic: input.systolic,
       diastolic: input.diastolic,
       finalOutcome: stored ? input.final : null,
@@ -762,6 +778,16 @@ export class MockClient implements PulseBridgeApi {
     }
     this.#attempts.push(attempt);
     return attempt;
+  }
+
+  /**
+   * A sample's bytes, plus (in the `hostile` data set) an NTE (notes and comments) segment holding
+   * HOSTILE_MARKUP, ended with the sample's own segment terminator.
+   */
+  #hostileSegment(er7: string): string {
+    if (!this.#hostile) return er7;
+    const end = er7.includes('\r\n') ? '\r\n' : er7.includes('\r') ? '\r' : '\n';
+    return `${er7}NTE|1||${HOSTILE_MARKUP}${end}`;
   }
 
   /** Write every finished derived-name hash into its entry (see `MockAttempt.derivedName`). */

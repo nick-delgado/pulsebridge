@@ -50,10 +50,11 @@ export function mountShare({ slots, selection, signal }: FeatureContext<ShareSlo
     // The hint is the button's description (aria-describedby), so a disabled button says why.
     let text: string;
     if (current === null) text = 'Select a heart-rate point or a cuff reading first.';
-    else if (current.observationId === null)
-      text = `${current.summary}: no Observation was stored for this reading, so there is nothing to share.`;
+    // The feature's own reason first: it is more precise (for example the mapper's error).
     else if (current.unshareableReason !== null)
       text = `${current.summary}: ${current.unshareableReason}`;
+    else if (current.observationId === null)
+      text = `${current.summary}: no Observation was stored for this reading, so there is nothing to share.`;
     else text = `Selected: ${current.summary}`;
     hint.textContent = text;
   }, signal);

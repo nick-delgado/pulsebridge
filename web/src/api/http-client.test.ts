@@ -51,6 +51,12 @@ const ANSWERS_EVERYTHING = {
   readBack: { resourceType: 'Bundle', type: 'collection', entry: [] },
   entries: [],
   nextCursor: null,
+  // A readable cuff send result (parseCuffSendResult refuses one without these).
+  transport: 'mllp',
+  sentAt: '2026-01-01T00:00:00Z',
+  messageSent: 'MSH|^~\\&|CUFFSIM\r',
+  ack: { received: true, code: 'AA', controlId: null, reason: null, raw: null },
+  audit: { recorded: true },
 };
 
 type Method = {

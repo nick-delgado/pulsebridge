@@ -76,6 +76,14 @@ describe('Share with clinic button', () => {
     expect(button.getAttribute('aria-describedby')).toBe(hint?.id);
   });
 
+  it("a cuff reading with no Observation shows the feature's own reason, not the generic text", () => {
+    const { button, selection, hint } = mount();
+    const reason = 'the mapper could not turn it into an Observation: An OBX-14 is empty.';
+    selection.set(cuff({ observationId: null, summary: 'BP 1', unshareableReason: reason }));
+    expect(button.disabled).toBe(true);
+    expect(hint?.textContent).toBe(`BP 1: ${reason}`);
+  });
+
   it('stops following the selection once the dashboard is torn down', () => {
     const { button, selection, controller } = mount();
     controller.abort();
