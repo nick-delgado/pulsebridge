@@ -1,15 +1,15 @@
 """Behaviour of infra/envs/ci/tf_ci.py, the Terraform steps of the CI/CD workflows (T26).
 
-The script runs in-process with its repository root pointed at a temporary directory, and with
-fake `terraform`, `make` and `npm` programs first on PATH. Each fake records its arguments (and
-the npm settings) and answers from files the test writes. Nothing reaches Google, and no test
-writes into the real infra/envs roots. All values are synthetic.
+The script runs in-process with its repository root pointed at a temporary directory and fake
+`terraform`, `npm` and `npx` programs first on PATH; each fake records its arguments and answers
+from files the test writes. HTTP calls (Cloud Storage, the GitHub API) are replaced in-process.
+Nothing reaches Google or GitHub, and no test writes into the real infra/envs roots. All values
+are synthetic.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
+import copy
 import importlib.util
 import io
 import json
@@ -22,6 +22,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "infra" / "envs" / "ci" / "tf_ci.py"
+SHA = "0123456789abcdef0123456789abcdef01234567"
 
 TFVARS = """\
 project_id                  = "example-project"
@@ -37,14 +38,14 @@ from pathlib import Path
 fake = Path(os.environ["FAKE_DIR"])
 args = sys.argv[1:]
 with open(fake / "calls.log", "a") as f:
-    f.write(json.dumps({"cwd": os.getcwd(), "args": args}) + "\n")
+    f.write(json.dumps({"tool": "terraform", "cwd": os.getcwd(), "args": args}) + "\n")
 def read(name, default=""):
     p = fake / name
     return p.read_text() if p.exists() else default
 cmd = args[0]
 if cmd == "state":
-    after = fake / "destroyed"
-    sys.stdout.write(read("state_after" if after.exists() else "state"))
+    sys.stdout.write(read("state_after" if (fake / "destroyed").exists() else "state"))
+    sys.exit(int(read("state_rc", "0")))
 elif cmd == "plan":
     out = [a for a in args if a.startswith("-out=")][0][5:]
     Path(out).write_text("binary plan")
@@ -63,28 +64,35 @@ FAKE_RECORDER = r"""#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
 fake = Path(os.environ["FAKE_DIR"])
-name = Path(sys.argv[0]).name
 with open(fake / "calls.log", "a") as f:
-    f.write(json.dumps({"tool": name, "cwd": os.getcwd(), "args": sys.argv[1:],
+    f.write(json.dumps({"tool": Path(sys.argv[0]).name, "cwd": os.getcwd(), "args": sys.argv[1:],
                         "ignore_scripts": os.environ.get("NPM_CONFIG_IGNORE_SCRIPTS")}) + "\n")
 """
 
-
-def plan_json(*changes: tuple[list[str], str]) -> str:
-    return json.dumps(
-        {"resource_changes": [{"address": a, "change": {"actions": acts}} for acts, a in changes]}
-    )
-
-
-CHANGES = (
-    (["create"], "module.stack.module.phr.google_cloud_run_v2_service.cuff_sim"),
-    (["no-op"], 'module.stack.module.identity.google_service_account.this["edge-vm"]'),
-    (["delete", "create"], "module.stack.module.edge_vm.google_compute_instance.this"),
-)
-EXPECTED_DIGEST = hashlib.sha256(
-    b"create module.stack.module.phr.google_cloud_run_v2_service.cuff_sim\n"
-    b"delete,create module.stack.module.edge_vm.google_compute_instance.this"
-).hexdigest()
+PLAN = {
+    "resource_changes": [
+        {
+            "address": "module.stack.module.phr.google_cloud_run_v2_service.cuff_sim",
+            "change": {
+                "actions": ["update"],
+                "before": {"max_instance_count": 1, "env": {"PATIENT_ID": "SYN-0042"}},
+                "after": {"max_instance_count": 2, "env": {"PATIENT_ID": "SYN-0042"}},
+                "before_sensitive": {"env": True},
+                "after_sensitive": {"env": True},
+                "after_unknown": {},
+            },
+        },
+        {
+            "address": 'module.stack.module.identity.google_service_account.this["edge-vm"]',
+            "change": {"actions": ["no-op"], "before": {"a": 1}, "after": {"a": 1}},
+        },
+        {
+            "address": "module.stack.module.edge_vm.google_compute_instance.this",
+            "change": {"actions": ["delete", "create"], "before": {"x": 1}, "after": {"x": 2}},
+        },
+    ],
+    "output_changes": {"region": {"actions": ["no-op"], "before": "a", "after": "a"}},
+}
 
 
 @pytest.fixture
@@ -99,51 +107,70 @@ def ci(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     for env in ("dev", "prod"):
         (repo / "infra" / "envs" / env).mkdir(parents=True)
         (repo / "infra" / "envs" / env / "terraform.tfvars").write_text(TFVARS)
-    (repo / "web").mkdir()
+    (repo / "web" / "dist").mkdir(parents=True)
+    (repo / "web" / "dist" / "index.html").write_text("<!doctype html>")
+    tools = repo / "deploy-tools"
+    tools.mkdir()
+    (tools / "package.json").write_text('{"dependencies": {"firebase-tools": "15.34.2"}}')
     monkeypatch.setattr(module, "REPO", repo)
     monkeypatch.setattr(module, "ENVS", repo / "infra" / "envs")
+    monkeypatch.setattr(module, "DEPLOY_TOOLS", tools)
 
     fake = tmp_path / "fake"
     bin_dir = fake / "bin"
     bin_dir.mkdir(parents=True)
     for name, body in (
         ("terraform", FAKE_TERRAFORM),
-        ("make", FAKE_RECORDER),
         ("npm", FAKE_RECORDER),
+        ("npx", FAKE_RECORDER),
     ):
         path = bin_dir / name
         path.write_text(body.replace("/usr/bin/env python3", sys.executable, 1))
         path.chmod(path.stat().st_mode | stat.S_IEXEC)
-    (fake / "plan.json").write_text(plan_json(*CHANGES))
-    (fake / "plan.txt").write_text('  + env { value = (sensitive value) }\n  + name = "cuff-sim"\n')
+    (fake / "plan.json").write_text(json.dumps(PLAN))
+    (fake / "plan.txt").write_text("  ~ env = (sensitive value)\n  ~ max_instance_count = 1 -> 2\n")
 
     runner_temp = tmp_path / "runner-temp"
     runner_temp.mkdir()
-    outputs = tmp_path / "github_output"
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_DIR", str(fake))
     monkeypatch.setenv("RUNNER_TEMP", str(runner_temp))
-    monkeypatch.setenv("GITHUB_OUTPUT", str(outputs))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "github_output"))
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
     monkeypatch.setenv("TF_STATE_BUCKET", "example-project-tfstate")
+    monkeypatch.setenv("GITHUB_SHA", SHA)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example-owner/example-repo")
     monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    # A recorded generation, as fetch-tfvars leaves it.
+    for env in ("dev", "prod"):
+        module.generation_path(env).write_text("1700000000000001")
     return module, fake, repo
 
 
-def calls(fake: Path) -> list[dict]:
+def calls(fake: Path, tool: str | None = None) -> list[dict]:
     log = fake / "calls.log"
-    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    entries = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+    return [e for e in entries if tool is None or e["tool"] == tool]
 
 
 def tf_calls(fake: Path, command: str) -> list[list[str]]:
-    return [c["args"] for c in calls(fake) if "tool" not in c and c["args"][0] == command]
+    return [c["args"] for c in calls(fake, "terraform") if c["args"][0] == command]
 
 
-def outputs(path: Path) -> dict[str, str]:
-    return dict(line.split("=", 1) for line in path.read_text().splitlines())
+def outputs() -> dict[str, str]:
+    path = Path(os.environ["GITHUB_OUTPUT"])
+    return (
+        dict(line.split("=", 1) for line in path.read_text().splitlines()) if path.exists() else {}
+    )
 
 
-# --- the redaction check -------------------------------------------------------------------------
+def record_plan(module, tmp: Path, env: str = "prod") -> Path:
+    record = tmp / f"plan-{env}"
+    assert module.main(["plan", "--env", env, "--no-lock", "--record", str(record)]) == 0
+    return record
+
+
+# --- the tfvars: parsing, redaction ------------------------------------------------------------
 
 
 def test_sensitive_values_are_read_from_the_tfvars(ci) -> None:
@@ -157,13 +184,22 @@ def test_sensitive_values_are_read_from_the_tfvars(ci) -> None:
     }
 
 
+@pytest.mark.parametrize(
+    "line",
+    ["patient_family_name = <<EOT\nExample\nEOT\n", "alert_email = local.address\n"],
+)
+def test_a_heredoc_or_expression_for_a_sensitive_value_is_refused(ci, line: str) -> None:
+    module, _, _ = ci
+    with pytest.raises(module.CiError, match="plain quoted string"):
+        module.sensitive_values(line)
+
+
 def test_redaction_passes_a_redacted_plan_and_refuses_a_leak(ci) -> None:
     module, _, _ = ci
     module.check_redaction("patient = (sensitive value)\nauthority = PULSEBRIDGE", TFVARS)
     for leaked in ('PATIENT_ID = "SYN-0042"', "to: alerts@example.com"):
         with pytest.raises(module.CiError) as e:
             module.check_redaction(leaked, TFVARS)
-        # The message names the variable, never its value.
         assert "SYN-0042" not in str(e.value) and "alerts@example.com" not in str(e.value)
 
 
@@ -175,47 +211,99 @@ def test_redaction_matches_whole_words_only(ci) -> None:
         module.check_redaction('given = "Ann"', tfvars)
 
 
-def test_plan_fails_and_reports_nothing_when_the_text_leaks(ci) -> None:
-    module, fake, _ = ci
-    (fake / "plan.txt").write_text('  + value = "alerts@example.com"\n')
-    assert module.main(["plan", "--env", "dev"]) == 1
-    out = Path(os.environ["GITHUB_OUTPUT"])
-    assert not out.exists() or "text_b64" not in out.read_text()
+# --- plan ---------------------------------------------------------------------------------------
 
 
-# --- plan and apply ------------------------------------------------------------------------------
-
-
-def test_plan_reports_digest_count_and_text_and_keeps_the_plan_out_of_the_repo(ci) -> None:
+def test_plan_records_the_redacted_text_and_metadata_outside_the_repo(ci, tmp_path: Path) -> None:
     module, fake, repo = ci
-    assert module.main(["plan", "--env", "dev"]) == 0
-    got = outputs(Path(os.environ["GITHUB_OUTPUT"]))
-    assert got["digest"] == EXPECTED_DIGEST
-    assert got["changes"] == "2"  # the no-op does not count
-    assert base64.b64decode(got["text_b64"]).decode() == (fake / "plan.txt").read_text()
+    record = record_plan(module, tmp_path)
+    assert (record / "plan.txt").read_text() == (fake / "plan.txt").read_text()
+    meta = json.loads((record / "meta.json").read_text())
+    assert meta == {
+        "env": "prod",
+        "digest": module.plan_digest(PLAN)[0],
+        "changes": 2,  # the no-op does not count
+        "tfvars_generation": "1700000000000001",
+        "commit": SHA,
+    }
     [plan_args] = tf_calls(fake, "plan")
     out = Path(next(a for a in plan_args if a.startswith("-out="))[5:])
     assert repo not in out.parents, "the binary plan must not be written into the checkout"
     assert Path(os.environ["RUNNER_TEMP"]) in out.parents
     assert not out.exists(), "the binary plan must be deleted when the step ends"
-    assert "-lock-timeout=10m" in plan_args
+    assert not list(record.glob("tfplan*")), "the record must not hold the binary plan"
+    # The planner: no lock (it cannot write the lock object).
+    assert "-lock=false" in plan_args and not any(a.startswith("-lock-timeout") for a in plan_args)
+    # Nothing important travels in step outputs (a masked value would blank them).
+    assert outputs() == {}
 
 
-def test_plan_text_is_truncated_for_the_comment(ci) -> None:
+def test_plan_with_the_lock_by_default(ci, tmp_path: Path) -> None:
     module, fake, _ = ci
-    (fake / "plan.txt").write_text("x" * (module.MAX_PLAN_CHARS + 500))
-    assert module.main(["plan", "--env", "dev"]) == 0
-    text = base64.b64decode(outputs(Path(os.environ["GITHUB_OUTPUT"]))["text_b64"]).decode()
-    assert len(text) < module.MAX_PLAN_CHARS + 200 and "truncated" in text
+    assert module.main(["plan", "--env", "dev", "--record", str(tmp_path / "r")]) == 0
+    [plan_args] = tf_calls(fake, "plan")
+    assert "-lock-timeout=10m" in plan_args and "-lock=false" not in plan_args
 
 
-def test_digest_ignores_values_and_no_ops(ci) -> None:
+def test_plan_fails_and_records_nothing_when_the_text_leaks(ci, tmp_path: Path) -> None:
+    module, fake, _ = ci
+    (fake / "plan.txt").write_text('  + value = "alerts@example.com"\n')
+    assert module.main(["plan", "--env", "dev", "--record", str(tmp_path / "r")]) == 1
+    assert not (tmp_path / "r").exists()
+
+
+def test_plan_fails_when_changes_have_no_text(ci, tmp_path: Path) -> None:
+    module, fake, _ = ci
+    (fake / "plan.txt").write_text("   \n")
+    assert module.main(["plan", "--env", "dev", "--record", str(tmp_path / "r")]) == 1
+
+
+def test_plan_needs_a_recorded_generation(ci, tmp_path: Path) -> None:
+    module, fake, _ = ci
+    module.generation_path("dev").unlink()
+    assert module.main(["plan", "--env", "dev", "--record", str(tmp_path / "r")]) == 1
+    assert tf_calls(fake, "plan") == []
+
+
+# --- the digest ---------------------------------------------------------------------------------
+
+
+def test_digest_ignores_order_and_no_ops(ci) -> None:
     module, _, _ = ci
-    a = module.plan_digest(json.loads(plan_json(*CHANGES)))
-    b = module.plan_digest(json.loads(plan_json(*reversed(CHANGES))))
-    assert a == b == (EXPECTED_DIGEST, 2)
-    c = module.plan_digest(json.loads(plan_json((["update"], CHANGES[0][1]))))
-    assert c[0] != EXPECTED_DIGEST
+    reordered = copy.deepcopy(PLAN)
+    reordered["resource_changes"].reverse()
+    assert module.plan_digest(PLAN) == module.plan_digest(reordered)
+    assert module.plan_digest(PLAN)[1] == 2
+
+
+def test_digest_changes_with_a_non_sensitive_value(ci) -> None:
+    module, _, _ = ci
+    changed = copy.deepcopy(PLAN)
+    changed["resource_changes"][0]["change"]["after"]["max_instance_count"] = 5
+    assert module.plan_digest(changed)[0] != module.plan_digest(PLAN)[0]
+    changed_output = copy.deepcopy(PLAN)
+    changed_output["output_changes"]["region"] = {
+        "actions": ["update"],
+        "before": "a",
+        "after": "b",
+    }
+    assert module.plan_digest(changed_output)[0] != module.plan_digest(PLAN)[0]
+
+
+def test_digest_does_not_carry_sensitive_values(ci) -> None:
+    module, _, _ = ci
+    # Two plans that differ only in a sensitive value have the same digest: the hash input has a
+    # placeholder there, so the digest cannot be used to test guesses of the patient ID.
+    other = copy.deepcopy(PLAN)
+    other["resource_changes"][0]["change"]["after"]["env"]["PATIENT_ID"] = "SYN-9999"
+    assert module.plan_digest(other)[0] == module.plan_digest(PLAN)[0]
+    assert module._redact({"a": "x", "b": ["y", "z"]}, {"b": [False, True]}) == {
+        "a": "x",
+        "b": ["y", "(sensitive)"],
+    }
+
+
+# --- apply ---------------------------------------------------------------------------------------
 
 
 def test_apply_applies_the_plan_it_made(ci) -> None:
@@ -224,25 +312,58 @@ def test_apply_applies_the_plan_it_made(ci) -> None:
     [apply_args] = tf_calls(fake, "apply")
     [plan_args] = tf_calls(fake, "plan")
     assert apply_args[-1] == next(a for a in plan_args if a.startswith("-out="))[5:]
+    assert "-lock-timeout=10m" in plan_args
 
 
-def test_apply_with_the_reviewed_digest_applies(ci) -> None:
+def test_apply_with_the_reviewed_plan_applies(ci, tmp_path: Path) -> None:
     module, fake, _ = ci
-    assert module.main(["apply", "--env", "prod", "--expect-digest", EXPECTED_DIGEST]) == 0
+    record = record_plan(module, tmp_path)
+    assert module.main(["apply", "--env", "prod", "--reviewed", str(record)]) == 0
     assert len(tf_calls(fake, "apply")) == 1
 
 
-def test_apply_refuses_a_plan_that_differs_from_the_reviewed_one(ci) -> None:
+def test_apply_refuses_a_changed_value(ci, tmp_path: Path) -> None:
     module, fake, _ = ci
-    assert module.main(["apply", "--env", "prod", "--expect-digest", "0" * 64]) == 1
+    record = record_plan(module, tmp_path)
+    changed = copy.deepcopy(PLAN)
+    changed["resource_changes"][2]["change"]["after"]["x"] = 3
+    (fake / "plan.json").write_text(json.dumps(changed))
+    assert module.main(["apply", "--env", "prod", "--reviewed", str(record)]) == 1
     assert tf_calls(fake, "apply") == []
 
 
-@pytest.mark.parametrize("digest", ["", "abc", EXPECTED_DIGEST.upper()])
-def test_apply_refuses_an_empty_or_malformed_digest(ci, digest: str) -> None:
+def test_apply_refuses_another_tfvars_generation(ci, tmp_path: Path) -> None:
     module, fake, _ = ci
-    assert module.main(["apply", "--env", "prod", "--expect-digest", digest]) == 1
-    assert tf_calls(fake, "plan") == [] and tf_calls(fake, "apply") == []
+    record = record_plan(module, tmp_path)
+    module.generation_path("prod").write_text("1700000000000002")
+    assert module.main(["apply", "--env", "prod", "--reviewed", str(record)]) == 1
+    assert tf_calls(fake, "apply") == []
+
+
+def test_apply_refuses_another_commit(ci, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, fake, _ = ci
+    record = record_plan(module, tmp_path)
+    monkeypatch.setenv("GITHUB_SHA", "f" * 40)
+    assert module.main(["apply", "--env", "prod", "--reviewed", str(record)]) == 1
+    assert tf_calls(fake, "apply") == []
+
+
+@pytest.mark.parametrize("broken", ["missing", "not-json", "other-env", "bad-digest"])
+def test_apply_refuses_a_broken_reviewed_record(ci, tmp_path: Path, broken: str) -> None:
+    module, fake, _ = ci
+    record = record_plan(module, tmp_path)
+    meta = json.loads((record / "meta.json").read_text())
+    if broken == "missing":
+        (record / "meta.json").unlink()
+    elif broken == "not-json":
+        (record / "meta.json").write_text("{")
+    elif broken == "other-env":
+        (record / "meta.json").write_text(json.dumps({**meta, "env": "dev"}))
+    else:
+        (record / "meta.json").write_text(json.dumps({**meta, "digest": ""}))
+    count = len(tf_calls(fake, "plan"))
+    assert module.main(["apply", "--env", "prod", "--reviewed", str(record)]) == 1
+    assert tf_calls(fake, "apply") == [] and len(tf_calls(fake, "plan")) == count
 
 
 def test_a_failed_plan_applies_nothing(ci) -> None:
@@ -252,29 +373,21 @@ def test_a_failed_plan_applies_nothing(ci) -> None:
     assert tf_calls(fake, "apply") == []
 
 
-# --- init, stack-is-up ---------------------------------------------------------------------------
+# --- init, stack-is-up -------------------------------------------------------------------------
 
 
 def test_init_gives_only_the_bucket(ci) -> None:
     module, fake, repo = ci
     assert module.main(["init", "--env", "prod"]) == 0
-    [call] = [c for c in calls(fake) if c["args"][0] == "init"]
+    [call] = [c for c in calls(fake, "terraform") if c["args"][0] == "init"]
     assert "-backend-config=bucket=example-project-tfstate" in call["args"]
     assert Path(call["cwd"]) == repo / "infra" / "envs" / "prod"
-
-
-def test_init_needs_the_bucket(ci, monkeypatch: pytest.MonkeyPatch) -> None:
-    module, fake, _ = ci
-    monkeypatch.delenv("TF_STATE_BUCKET")
-    assert module.main(["init", "--env", "dev"]) == 1
-    assert calls(fake) == []
 
 
 @pytest.mark.parametrize(
     "state,up",
     [
         ("module.stack.module.phr.google_cloud_run_v2_service.fhir_proxy\n", "true"),
-        # Targeted steps 3 to 6 done, step 8 not yet: CI must not take over.
         ("module.stack.module.project_base.google_compute_network.this\n", "false"),
         ("", "false"),
     ],
@@ -283,39 +396,95 @@ def test_stack_is_up_only_after_the_first_full_apply(ci, state: str, up: str) ->
     module, fake, _ = ci
     (fake / "state").write_text(state)
     assert module.main(["stack-is-up", "--env", "dev"]) == 0
-    assert outputs(Path(os.environ["GITHUB_OUTPUT"]))["up"] == up
+    assert outputs()["up"] == up
+    if up == "false":
+        assert (
+            "dev is not deployed: nothing was planned or applied"
+            in Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+        )
+
+
+def test_an_unreadable_state_is_an_error_not_down(ci) -> None:
+    module, fake, _ = ci
+    (fake / "state_rc").write_text("1")
+    assert module.main(["stack-is-up", "--env", "dev"]) == 1
+    assert "up" not in outputs()
 
 
 # --- destroy -------------------------------------------------------------------------------------
 
+UP = (
+    "module.stack.module.phr.google_cloud_run_v2_service.fhir_proxy\n"
+    "module.stack.module.edge_vm.google_compute_instance.this\n"
+)
 LEFTOVERS = (
     "module.stack.module.project_base.google_compute_subnetwork.serverless\n"
     "module.stack.module.project_base.google_compute_network.this\n"
 )
 
 
-def test_destroy_with_nothing_left_passes(ci) -> None:
+def test_destroy_of_an_empty_state_destroys_nothing_and_says_so(ci) -> None:
     module, fake, _ = ci
+    (fake / "state").write_text("")
+    assert module.main(["destroy", "--env", "dev"]) == 0
+    assert tf_calls(fake, "destroy") == []
+    text = Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+    assert "nothing to destroy" in text and "nothing is left" not in text
+
+
+def test_destroy_leaves_a_bring_up_in_progress_alone(ci) -> None:
+    module, fake, _ = ci
+    (fake / "state").write_text(
+        LEFTOVERS + 'module.stack.module.identity.google_service_account.this["edge-vm"]\n'
+    )
+    assert module.main(["destroy", "--env", "dev"]) == 0
+    assert tf_calls(fake, "destroy") == []
+    assert "not destroyed" in Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
+
+
+def test_destroy_of_a_deployed_dev_with_nothing_left_passes(ci) -> None:
+    module, fake, _ = ci
+    (fake / "state").write_text(UP)
     (fake / "state_after").write_text("")
     assert module.main(["destroy", "--env", "dev", "--final"]) == 0
     [args] = tf_calls(fake, "destroy")
     assert "-auto-approve" in args
+    assert "destroyed 2 resource(s)" in Path(os.environ["GITHUB_STEP_SUMMARY"]).read_text()
 
 
 def test_destroy_allows_the_subnet_and_vpc_until_the_retry(ci) -> None:
     module, fake, _ = ci
-    (fake / "destroy_rc").write_text("1")  # terraform reports the subnet it could not delete
+    (fake / "state").write_text(UP + LEFTOVERS)
+    (fake / "destroy_rc").write_text("1")
     (fake / "state_after").write_text(LEFTOVERS)
     assert module.main(["destroy", "--env", "dev"]) == 0
+    (fake / "destroyed").unlink()
     assert module.main(["destroy", "--env", "dev", "--final"]) == 1
+
+
+def test_the_retry_run_destroys_the_leftovers(ci) -> None:
+    module, fake, _ = ci
+    (fake / "state").write_text(LEFTOVERS)  # fhir-proxy is gone: only the network waited
+    (fake / "state_after").write_text("")
+    assert module.main(["destroy", "--env", "dev", "--final"]) == 0
+    assert len(tf_calls(fake, "destroy")) == 1
 
 
 def test_destroy_fails_on_any_other_leftover(ci) -> None:
     module, fake, _ = ci
+    (fake / "state").write_text(UP)
     (fake / "destroy_rc").write_text("1")
     (fake / "state_after").write_text(
         LEFTOVERS + "module.stack.module.edge_vm.google_compute_instance.this\n"
     )
+    assert module.main(["destroy", "--env", "dev"]) == 1
+
+
+def test_a_failed_destroy_with_nothing_left_is_still_a_failure(ci) -> None:
+    module, fake, _ = ci
+    (fake / "state").write_text(UP)
+    (fake / "destroy_rc").write_text("1")
+    (fake / "state_after").write_text("")
     assert module.main(["destroy", "--env", "dev"]) == 1
 
 
@@ -325,41 +494,78 @@ def test_prod_is_never_destroyed(ci) -> None:
     assert calls(fake) == []
 
 
-# --- the page deploy -----------------------------------------------------------------------------
+# --- the page ------------------------------------------------------------------------------------
 
 
-def test_deploy_page_writes_firebase_json_builds_and_deploys_with_the_pinned_cli(ci) -> None:
+def test_export_page_config_hands_over_firebase_json_and_the_project(ci, tmp_path: Path) -> None:
+    module, fake, _ = ci
+    (fake / "output_firebase_json").write_text(
+        json.dumps('{"hosting": {"site": "example-project"}}')
+    )
+    (fake / "output_project_id").write_text('"example-project"')
+    out = tmp_path / "page" / "page.json"
+    assert module.main(["export-page-config", "--env", "dev", "--out", str(out)]) == 0
+    assert json.loads(out.read_text()) == {
+        "project_id": "example-project",
+        "firebase_json": '{"hosting": {"site": "example-project"}}',
+    }
+
+
+def test_export_page_config_needs_the_outputs(ci, tmp_path: Path) -> None:
+    module, _, _ = ci
+    out = tmp_path / "page.json"
+    assert module.main(["export-page-config", "--env", "dev", "--out", str(out)]) == 1
+    assert not out.exists()
+
+
+def write_page_config(tmp_path: Path) -> Path:
+    config = tmp_path / "page.json"
+    config.write_text(
+        json.dumps(
+            {"project_id": "example-project", "firebase_json": '{"hosting": {"public": "dist"}}'}
+        )
+    )
+    return config
+
+
+def test_deploy_page_installs_the_locked_cli_and_deploys(ci, tmp_path: Path) -> None:
     module, fake, repo = ci
-    (fake / "output_firebase_json").write_text('{"hosting": {"site": "example-project"}}')
-    (fake / "output_project_id").write_text("example-project")
-    assert module.main(["deploy-page", "--env", "dev"]) == 0
-    assert (
-        repo / "web" / "firebase.json"
-    ).read_text() == '{"hosting": {"site": "example-project"}}'
-    tools = [c for c in calls(fake) if "tool" in c]
-    assert [t["tool"] for t in tools] == ["make", "npm"]
-    assert tools[0]["args"] == ["web-build"]
-    npm = tools[1]
-    assert Path(npm["cwd"]) == repo / "web"
-    assert npm["args"] == [
-        "exec", "--yes", f"--package=firebase-tools@{module.FIREBASE_TOOLS_VERSION}", "--",
-        "firebase", "deploy", "--only", "hosting", "--project", "example-project",
-        "--non-interactive",
+    assert module.main(["deploy-page", "--config", str(write_page_config(tmp_path))]) == 0
+    assert (repo / "web" / "firebase.json").read_text() == '{"hosting": {"public": "dist"}}'
+    npm, npx = calls(fake, "npm"), calls(fake, "npx")
+    assert npm[0]["args"] == ["ci", "--ignore-scripts", "--no-audit", "--no-fund"]
+    assert Path(npm[0]["cwd"]) == repo / "deploy-tools"
+    assert npx[0]["args"] == [
+        "--no-install", "firebase", "deploy", "--only", "hosting", "--project", "example-project",
+        "--config", str(repo / "web" / "firebase.json"), "--non-interactive",
     ]  # fmt: skip
-    assert npm["ignore_scripts"] == "true"
+    assert npm[0]["ignore_scripts"] == npx[0]["ignore_scripts"] == "true"
+    assert calls(fake, "terraform") == [], "the page deploy runs no Terraform"
 
 
-def test_deploy_page_needs_the_outputs(ci) -> None:
+def test_deploy_page_needs_the_built_page(ci, tmp_path: Path) -> None:
     module, fake, repo = ci
-    assert module.main(["deploy-page", "--env", "dev"]) == 1
-    assert not (repo / "web" / "firebase.json").exists()
-    assert not [c for c in calls(fake) if c.get("tool") == "npm"]
+    (repo / "web" / "dist" / "index.html").unlink()
+    assert module.main(["deploy-page", "--config", str(write_page_config(tmp_path))]) == 1
+    assert calls(fake) == []
 
 
-# --- fetch-tfvars --------------------------------------------------------------------------------
+def test_deploy_page_refuses_a_bad_configuration(ci, tmp_path: Path) -> None:
+    module, fake, _ = ci
+    config = tmp_path / "page.json"
+    config.write_text(json.dumps({"project_id": "Not A Project", "firebase_json": "{}"}))
+    assert module.main(["deploy-page", "--config", str(config)]) == 1
+    assert calls(fake) == []
+
+
+# --- fetch-tfvars, cleanup -----------------------------------------------------------------------
 
 
 class FakeResponse(io.BytesIO):
+    def __init__(self, body: bytes, headers: dict[str, str]):
+        super().__init__(body)
+        self.headers = headers
+
     def __enter__(self):
         return self
 
@@ -367,22 +573,28 @@ class FakeResponse(io.BytesIO):
         return False
 
 
-def test_fetch_tfvars_writes_a_private_file_and_masks_sensitive_values(
+def fake_storage(monkeypatch, module, generation="1700000000000005", body=TFVARS):
+    seen = {}
+
+    def urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["auth"] = request.get_header("Authorization")
+        headers = {"x-goog-generation": generation} if generation else {}
+        return FakeResponse(body.encode(), headers)
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("GCP_ACCESS_TOKEN", "fake-token-for-test")
+    return seen
+
+
+def test_fetch_tfvars_writes_a_private_file_records_the_generation_and_masks(
     ci, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     module, _, repo = ci
-    seen = {}
-
-    def fake_urlopen(request, timeout):
-        seen["url"] = request.full_url
-        seen["auth"] = request.get_header("Authorization")
-        return FakeResponse(TFVARS.encode())
-
-    monkeypatch.setattr(module.urllib.request, "urlopen", fake_urlopen)
-    monkeypatch.setenv("GCP_ACCESS_TOKEN", "fake-token-for-test")
+    seen = fake_storage(monkeypatch, module)
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
     target = repo / "infra" / "envs" / "dev" / "terraform.tfvars"
-    target.unlink()
+    target.chmod(0o644)  # an existing, too-open file is tightened
     assert module.main(["fetch-tfvars", "--env", "dev"]) == 0
     assert seen["url"] == (
         "https://storage.googleapis.com/storage/v1/b/example-project-tfstate/o/ci%2Fdev.tfvars?alt=media"
@@ -390,24 +602,224 @@ def test_fetch_tfvars_writes_a_private_file_and_masks_sensitive_values(
     assert seen["auth"] == "Bearer fake-token-for-test"
     assert target.read_text() == TFVARS
     assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert module.generation_path("dev").read_text() == "1700000000000005"
     printed = capsys.readouterr().out
     assert "::add-mask::SYN-0042" in printed and "::add-mask::alerts@example.com" in printed
-    # Nothing else from the file is printed, and never the token.
     assert "fake-token-for-test" not in printed
     assert printed.count("SYN-0042") == 1
 
 
-def test_fetch_tfvars_reports_a_missing_object_without_the_token(
-    ci, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+def test_fetch_tfvars_asks_for_and_checks_the_reviewed_generation(
+    ci, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _, _ = ci
+    seen = fake_storage(monkeypatch, module, generation="1700000000000007")
+    assert module.main(["fetch-tfvars", "--env", "prod", "--generation", "1700000000000007"]) == 0
+    assert seen["url"].endswith("?alt=media&generation=1700000000000007")
+    fake_storage(monkeypatch, module, generation="1700000000000008")
+    assert module.main(["fetch-tfvars", "--env", "prod", "--generation", "1700000000000007"]) == 1
+
+
+@pytest.mark.parametrize("generation", ["", "abc", "1 2"])
+def test_fetch_tfvars_refuses_a_bad_generation(
+    ci, monkeypatch: pytest.MonkeyPatch, generation: str
+) -> None:
+    module, _, _ = ci
+    fake_storage(monkeypatch, module)
+    assert module.main(["fetch-tfvars", "--env", "prod", "--generation", generation]) == 1
+
+
+def test_fetch_tfvars_needs_the_generation_header(ci, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = ci
+    fake_storage(monkeypatch, module, generation=None)
+    assert module.main(["fetch-tfvars", "--env", "dev"]) == 1
+
+
+def test_fetch_tfvars_refuses_a_heredoc_sensitive_value(
+    ci, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _, repo = ci
+    fake_storage(monkeypatch, module, body="alert_email = <<EOT\nalerts@example.com\nEOT\n")
+    target = repo / "infra" / "envs" / "dev" / "terraform.tfvars"
+    target.unlink()
+    assert module.main(["fetch-tfvars", "--env", "dev"]) == 1
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("error", ["http", "network", "timeout"])
+def test_fetch_tfvars_reports_errors_without_a_traceback_or_the_token(
+    ci, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, error: str
 ) -> None:
     module, _, _ = ci
 
-    def not_found(request, timeout):
-        raise module.urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+    def fail(request, timeout):
+        if error == "http":
+            raise module.urllib.error.HTTPError(request.full_url, 404, "Not Found", {}, None)
+        if error == "network":
+            raise module.urllib.error.URLError("no route")
+        raise TimeoutError
 
-    monkeypatch.setattr(module.urllib.request, "urlopen", not_found)
+    monkeypatch.setattr(module.urllib.request, "urlopen", fail)
     monkeypatch.setenv("GCP_ACCESS_TOKEN", "fake-token-for-test")
     assert module.main(["fetch-tfvars", "--env", "prod"]) == 1
-    printed = capsys.readouterr().out
-    assert "HTTP 404" in printed and "ci/prod.tfvars" in printed
-    assert "fake-token-for-test" not in printed
+    printed = capsys.readouterr()
+    assert "Traceback" not in printed.out + printed.err
+    assert "fake-token-for-test" not in printed.out + printed.err
+    assert "ci/prod.tfvars" in printed.out
+
+
+def test_cleanup_deletes_the_tfvars_and_the_generation(ci) -> None:
+    module, _, repo = ci
+    assert module.main(["cleanup", "--env", "dev"]) == 0
+    assert not (repo / "infra" / "envs" / "dev" / "terraform.tfvars").exists()
+    assert not module.generation_path("dev").exists()
+    assert module.main(["cleanup", "--env", "dev"]) == 0  # nothing left: still fine
+
+
+# --- the GitHub checks ---------------------------------------------------------------------------
+
+
+def fake_github(monkeypatch, module, answers: dict[str, object]):
+    def api(path):
+        if path not in answers:
+            raise module.CiError(f"GitHub API {path}: HTTP 404")
+        return copy.deepcopy(answers[path])
+
+    monkeypatch.setattr(module, "github_api", api)
+
+
+REPO = "/repos/example-owner/example-repo"
+
+
+def good_environments() -> dict[str, object]:
+    answers: dict[str, object] = {}
+    for name in ("prod-plan", "prod"):
+        answers[f"{REPO}/environments/{name}"] = {
+            "name": name,
+            "can_admins_bypass": False,
+            "deployment_branch_policy": {
+                "protected_branches": False,
+                "custom_branch_policies": True,
+            },
+            "protection_rules": [{"type": "branch_policy"}]
+            + (
+                [
+                    {
+                        "type": "required_reviewers",
+                        "reviewers": [{"type": "User", "reviewer": {"id": 1}}],
+                    }
+                ]
+                if name == "prod"
+                else []
+            ),
+        }
+        answers[f"{REPO}/environments/{name}/deployment-branch-policies"] = {
+            "total_count": 1,
+            "branch_policies": [{"id": 1, "name": "main", "type": "branch"}],
+        }
+    return answers
+
+
+def test_check_environments_passes_the_required_settings(
+    ci, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _, _ = ci
+    fake_github(monkeypatch, module, good_environments())
+    assert module.main(["check-environments"]) == 0
+
+
+@pytest.mark.parametrize(
+    "breakage",
+    [
+        "missing-environment",
+        "protected-branches-only",
+        "no-branch-policy",
+        "admin-bypass",
+        "admin-bypass-absent",
+        "second-branch",
+        "tag-policy",
+        "type-absent",
+        "no-reviewers",
+        "empty-reviewers",
+        "unexpected-shape",
+    ],
+)
+def test_check_environments_fails_closed(
+    ci, monkeypatch: pytest.MonkeyPatch, breakage: str
+) -> None:
+    module, _, _ = ci
+    answers = good_environments()
+    prod = answers[f"{REPO}/environments/prod"]
+    plan_policies = answers[f"{REPO}/environments/prod-plan/deployment-branch-policies"]
+    if breakage == "missing-environment":
+        del answers[f"{REPO}/environments/prod-plan"]
+    elif breakage == "protected-branches-only":
+        prod["deployment_branch_policy"] = {
+            "protected_branches": True,
+            "custom_branch_policies": False,
+        }
+    elif breakage == "no-branch-policy":
+        prod["deployment_branch_policy"] = None
+    elif breakage == "admin-bypass":
+        prod["can_admins_bypass"] = True
+    elif breakage == "admin-bypass-absent":
+        del prod["can_admins_bypass"]
+    elif breakage == "second-branch":
+        plan_policies["branch_policies"].append({"id": 2, "name": "release/*", "type": "branch"})
+        plan_policies["total_count"] = 2
+    elif breakage == "tag-policy":
+        plan_policies["branch_policies"][0]["type"] = "tag"
+    elif breakage == "type-absent":
+        del plan_policies["branch_policies"][0]["type"]
+    elif breakage == "no-reviewers":
+        prod["protection_rules"] = [{"type": "branch_policy"}]
+    elif breakage == "empty-reviewers":
+        prod["protection_rules"][1]["reviewers"] = []
+    else:
+        prod["protection_rules"] = "not a list"
+    fake_github(monkeypatch, module, answers)
+    assert module.main(["check-environments"]) == 1
+
+
+def test_github_api_needs_a_token(ci, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = ci
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    assert module.main(["check-environments"]) == 1
+
+
+def test_require_tip_passes_on_the_tip(ci, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = ci
+    fake_github(monkeypatch, module, {f"{REPO}/git/ref/heads/main": {"object": {"sha": SHA}}})
+    assert module.main(["require-tip"]) == 0
+
+
+@pytest.mark.parametrize("answer", [{"object": {"sha": "f" * 40}}, {"object": {}}, {}])
+def test_require_tip_refuses_a_stale_commit(ci, monkeypatch: pytest.MonkeyPatch, answer) -> None:
+    module, _, _ = ci
+    fake_github(monkeypatch, module, {f"{REPO}/git/ref/heads/main": answer})
+    assert module.main(["require-tip"]) == 1
+
+
+def test_require_tip_needs_a_full_sha(ci, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = ci
+    fake_github(monkeypatch, module, {f"{REPO}/git/ref/heads/main": {"object": {"sha": SHA}}})
+    monkeypatch.setenv("GITHUB_SHA", "abc")
+    assert module.main(["require-tip"]) == 1
+
+
+def test_github_api_reads_over_https_with_the_token(ci, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = ci
+    seen = {}
+
+    def urlopen(request, timeout):
+        seen["url"] = request.full_url
+        seen["auth"] = request.get_header("Authorization")
+        return FakeResponse(b'{"object": {"sha": "x"}}', {})
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    monkeypatch.setenv("GH_TOKEN", "fake-github-token")
+    assert module.github_api("/repos/a/b/git/ref/heads/main") == {"object": {"sha": "x"}}
+    assert seen == {
+        "url": "https://api.github.com/repos/a/b/git/ref/heads/main",
+        "auth": "Bearer fake-github-token",
+    }

@@ -580,6 +580,11 @@ run "trigger_runs_cloudbuild_yaml_as_the_build_account_on_release_tags" {
   }
 
   assert {
+    condition     = google_cloudbuild_trigger.images_on_tag[0].approval_config[0].approval_required == true
+    error_message = "Triggered builds must wait for an approval by default."
+  }
+
+  assert {
     condition = google_cloudbuild_trigger.images_on_tag[0].substitutions == tomap({
       _REGION           = "us-central1"
       _REPOSITORY       = "pulsebridge-services"
@@ -643,4 +648,20 @@ run "malformed_trigger_repository_is_refused" {
   }
 
   expect_failures = [var.build_trigger_repository]
+}
+
+run "trigger_approval_can_be_turned_off" {
+  command = plan
+
+  variables {
+    build_service_account_email         = "pb-build@example-project-123.iam.gserviceaccount.com"
+    grant_build_account_registry_access = true
+    build_trigger_repository            = "projects/example-project-123/locations/us-central1/connections/github/repositories/pulsebridge"
+    build_trigger_approval_required     = false
+  }
+
+  assert {
+    condition     = google_cloudbuild_trigger.images_on_tag[0].approval_config[0].approval_required == false
+    error_message = "build_trigger_approval_required = false must turn the approval off."
+  }
 }

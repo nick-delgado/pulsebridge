@@ -460,3 +460,10 @@ variable "build_trigger_repository" {
     error_message = "build_trigger_repository needs create_build_service_account = true: the trigger runs the build as that account."
   }
 }
+
+variable "build_trigger_approval_required" {
+  description = "Each build the trigger starts waits for an approval in the Cloud Build console (roles/cloudbuild.builds.approver). Default true: otherwise anyone who can push a v* tag publishes images. Set false once a GitHub tag ruleset limits who may create v* tags (infra/envs/README.md, step 7)."
+  type        = bool
+  default     = true
+  nullable    = false
+}

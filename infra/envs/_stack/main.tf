@@ -95,6 +95,7 @@ module "project_base" {
   build_service_account_email         = lookup(module.identity.service_account_emails, "build", null)
   grant_build_account_registry_access = var.create_build_service_account
   build_trigger_repository            = var.build_trigger_repository
+  build_trigger_approval_required     = var.build_trigger_approval_required
 }
 
 # ---------------------------------------------------------------------------------------------

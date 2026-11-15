@@ -1,22 +1,23 @@
 # Terraform plan of dev on pull requests (T26), posted as a comment on the pull request.
 #
 # A PLAN is Terraform's preview: what an apply would create, change or destroy, computed from the
-# code in the pull request against the real dev project and its state. It changes nothing (it
-# does take the state lock briefly). Reviewing it before merging is the point of plan-on-PR.
+# code in the pull request against the real dev project and its state. It changes nothing.
+#
+# The job runs the pull request's code, so it runs as dev's READ-ONLY PLANNER (bootstrap
+# create_planner; reachable only from the "pull-request" context), never as the deployer. It
+# plans with -lock=false, because the planner cannot write the lock object.
 #
 # Skips cleanly (no failure) until the user has set it up (infra/envs/README.md, "CI/CD"):
-#   - the three DEV_* repository variables must be set (dev's bootstrap outputs);
-#   - pull requests from forks never run it: their code would get deployer credentials. GitHub
-#     also withholds OIDC tokens from fork pull requests, but the job does not rely on that;
-#   - Dependabot's pull requests are skipped for the same reason;
-#   - while dev is not deployed (no first full apply, or after the nightly destroy) it reports
-#     that in the job summary and posts nothing.
+#   - DEV_GCP_WORKLOAD_IDENTITY_PROVIDER, DEV_GCP_PLANNER_SA and DEV_TF_STATE_BUCKET must be set.
+#     Without a planner there is no plan: it never falls back to the deployer;
+#   - pull requests from forks never run it, nor Dependabot's;
+#   - while dev is not deployed, the comment says so and nothing is planned.
 #
-# Two jobs, so that each token has only what it needs: `plan` may get a dev deployer token
-# (id-token: write) but cannot write to the pull request; `comment` can write the comment but
-# gets no cloud credential. The plan crosses between them as a job output of the human-readable,
-# redacted plan text (base64). The binary plan file, which holds sensitive values in clear, stays
-# in the runner's temp directory and is never uploaded.
+# Two jobs, so that each token has only what it needs: `plan` may get a planner token (id-token:
+# write) but cannot write to the pull request; `comment` writes the comment and has no cloud
+# credential. The REDACTED plan text crosses between them as an artifact, written only after the
+# check for the sensitive tfvars values passed. The binary plan, which holds sensitive values in
+# clear, stays in the runner's temp directory and is never uploaded.
 #
 # Every action is pinned to a full commit SHA; tests/tooling/test_terraform_workflows.py checks
 # that and the gates above.
@@ -26,7 +27,6 @@ name: Terraform plan (dev)
 on:
   pull_request:
 
-# Nothing by default; each job lists what it needs.
 permissions: {}
 
 # A newer push to the same pull request replaces a plan that is still running.
@@ -39,13 +39,12 @@ env:
 
 jobs:
   plan:
-    name: Plan dev
-    # Same-repository pull requests only, and only once the dev variables exist.
+    name: Plan dev (read-only planner)
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository
       && github.actor != 'dependabot[bot]'
       && vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
-      && vars.DEV_GCP_DEPLOYER_SA != ''
+      && vars.DEV_GCP_PLANNER_SA != ''
       && vars.DEV_TF_STATE_BUCKET != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -54,8 +53,6 @@ jobs:
       id-token: write # request GitHub's OIDC token for Workload Identity Federation
     outputs:
       up: ${{ steps.up.outputs.up }}
-      changes: ${{ steps.plan.outputs.changes }}
-      text_b64: ${{ steps.plan.outputs.text_b64 }}
     env:
       TF_STATE_BUCKET: ${{ vars.DEV_TF_STATE_BUCKET }}
     steps:
@@ -66,15 +63,14 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
-      # Workload Identity Federation: GitHub's OIDC token for this job is exchanged for a
-      # short-lived token of the dev deployer. No key is stored anywhere. The credential file it
-      # writes (GOOGLE_APPLICATION_CREDENTIALS) lets Terraform refresh that token itself; the
-      # access token output is used once, to read the tfvars.
+      # Workload Identity Federation: this job's OIDC token is exchanged for a short-lived token
+      # of the planner. No key is stored anywhere. The credential file it writes lets Terraform
+      # refresh the token; the access token output is used once, to read the tfvars.
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.DEV_GCP_DEPLOYER_SA }}
+          service_account: ${{ vars.DEV_GCP_PLANNER_SA }}
           token_format: access_token
           access_token_lifetime: 300s
       - name: Fetch dev's tfvars from the state bucket
@@ -84,44 +80,80 @@ jobs:
       - run: python3 infra/envs/ci/tf_ci.py init --env dev
       - id: up
         run: python3 infra/envs/ci/tf_ci.py stack-is-up --env dev
-      - id: plan
+      - name: Plan
         if: steps.up.outputs.up == 'true'
-        run: python3 infra/envs/ci/tf_ci.py plan --env dev
+        run: python3 infra/envs/ci/tf_ci.py plan --env dev --no-lock --record "${RUNNER_TEMP}/plan-dev"
+      # Redacted text and metadata only (plan.txt, meta.json), kept one day.
+      - if: steps.up.outputs.up == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-dev
+          path: ${{ runner.temp }}/plan-dev/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Delete the tfvars
+        if: always()
+        run: python3 infra/envs/ci/tf_ci.py cleanup --env dev
 
   comment:
     name: Post the plan on the pull request
     needs: plan
-    if: needs.plan.outputs.up == 'true'
+    if: needs.plan.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       pull-requests: write # write the comment; nothing else
     steps:
+      - if: needs.plan.outputs.up == 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: plan-dev
+          path: ${{ runner.temp }}/plan-dev
       # Every value reaches the script through env, never as ${{ }} inside it, so plan text or a
-      # branch name cannot become shell code. --edit-last updates this workflow's earlier comment.
+      # branch name cannot become shell code. --edit-last updates the newest comment this
+      # workflow's token wrote on the pull request (or creates one).
       - name: Comment
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          CHANGES: ${{ needs.plan.outputs.changes }}
-          PLAN_B64: ${{ needs.plan.outputs.text_b64 }}
+          UP: ${{ needs.plan.outputs.up }}
         run: |
-          {
-            echo "### Terraform plan: dev"
-            echo
-            echo "Commit \`${HEAD_SHA}\`: ${CHANGES} resource change(s). Sensitive values show as"
-            echo "\`(sensitive value)\`; the plan was checked for the sensitive tfvars values before"
-            echo "posting. Nothing is applied until the pull request is merged."
-            echo
-            echo "<details><summary>Plan</summary>"
-            echo
-            echo '````text'
-            printf '%s' "${PLAN_B64}" | base64 --decode
-            echo '````'
-            echo
-            echo "</details>"
-          } > "${RUNNER_TEMP}/comment.md"
+          set -euo pipefail
+          body="${RUNNER_TEMP}/comment.md"
+          if [ "${UP}" != "true" ]; then
+            {
+              echo "### Terraform plan: dev"
+              echo
+              echo "**dev is not deployed: nothing was planned.** CI plans dev only after a person"
+              echo "has done its first full apply (infra/envs/README.md, runbook steps 3 to 8)."
+            } > "${body}"
+          else
+            plan="${RUNNER_TEMP}/plan-dev/plan.txt"
+            changes="$(jq -r '.changes' "${RUNNER_TEMP}/plan-dev/meta.json")"
+            case "${changes}" in ''|*[!0-9]*) echo "::error::meta.json has no change count"; exit 1;; esac
+            # A masked value can blank text; never post an empty plan that has changes.
+            if [ "${changes}" != "0" ] && [ ! -s "${plan}" ]; then
+              echo "::error::the plan has ${changes} change(s) but its text is empty"
+              exit 1
+            fi
+            {
+              echo "### Terraform plan: dev"
+              echo
+              echo "Commit \`${HEAD_SHA}\`: ${changes} resource change(s). Planned by the read-only"
+              echo "planner. Sensitive values show as \`(sensitive value)\`. Nothing is applied until"
+              echo "the pull request is merged."
+              echo
+              echo "<details><summary>Plan</summary>"
+              echo
+              echo '````text'
+              head -c 60000 "${plan}"
+              echo
+              echo '````'
+              echo
+              echo "</details>"
+            } > "${body}"
+          fi
           gh pr comment "${PR_NUMBER}" --repo "${REPO}" --edit-last --create-if-none \
-            --body-file "${RUNNER_TEMP}/comment.md"
+            --body-file "${body}"

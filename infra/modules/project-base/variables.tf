@@ -274,6 +274,13 @@ variable "build_trigger_tag_pattern" {
   nullable    = false
 }
 
+variable "build_trigger_approval_required" {
+  description = "Triggered builds wait for a manual approval in the Cloud Build console (roles/cloudbuild.builds.approver) before they run. Default true: anyone who can push a v* tag can otherwise publish images. Set false once a GitHub tag ruleset limits who may create v* tags."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "services_keep_recent_versions" {
   description = "Cleanup policy of the services repository: the newest N versions of each image are always kept (a KEEP policy, which wins over DELETE). Keep it above the number of releases you might roll back to: Cloud Run pulls an image again when it starts a new instance, so an image a revision still uses must not be deleted."
   type        = number

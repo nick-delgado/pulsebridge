@@ -52,6 +52,7 @@ module "stack" {
   v2_to_fhir_ingress  = var.v2_to_fhir_ingress
   health_sync_ingress = var.health_sync_ingress
 
-  create_build_service_account = var.create_build_service_account
-  build_trigger_repository     = var.build_trigger_repository
+  create_build_service_account    = var.create_build_service_account
+  build_trigger_repository        = var.build_trigger_repository
+  build_trigger_approval_required = var.build_trigger_approval_required
 }

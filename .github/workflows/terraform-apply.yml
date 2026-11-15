@@ -1,34 +1,46 @@
 # Terraform apply on merge to main (T26): dev first, then prod behind a manual approval, and the
 # dashboard deployed after every apply.
 #
-#   dev             apply infra/envs/dev, then deploy its page
-#   prod-preflight  refuse to go on unless the GitHub Environments "prod-plan" and "prod" exist
-#                   with their protection rules (GitHub creates a missing environment, with NO
-#                   rules, the first time a job names it)
-#   prod-plan       plan prod and show it in the job summary   (environment prod-plan: main only)
-#   prod-apply      after a required reviewer approves: plan again, refuse if anything differs
-#                   from the reviewed plan, apply, deploy prod's page   (environment prod)
+#   build-page      build web/dist (npm ci, Vite) with NO cloud credential; upload it
+#   dev             apply infra/envs/dev as dev's deployer (no npm code runs in this job)
+#   dev-page        deploy web/dist to dev's Hosting as dev's PAGE DEPLOYER (Hosting only)
+#   prod-preflight  refuse to go on unless "prod-plan" and "prod" allow exactly main, with no
+#                   admin bypass, and "prod" has required reviewers
+#   prod-plan       (environment prod-plan) plan prod as prod's READ-ONLY PLANNER; record the
+#                   redacted plan, its digest, the tfvars generation and the commit
+#   prod-apply      (environment prod: waits for a reviewer) as prod's deployer: refuse unless the
+#                   commit is still the tip of main; fetch exactly the reviewed tfvars generation;
+#                   plan again and apply only if the digest matches the reviewed plan
+#   prod-page       (environment prod, a second approval) deploy web/dist as prod's page deployer
 #
 # Skips cleanly (no failure) until the user has set it up (infra/envs/README.md, "CI/CD"): each
-# environment's jobs need its three repository variables, and CI applies an environment only
-# after a person has done its first full apply (runbook step 8; `stack-is-up`). dev's project
-# does not exist yet (D1), so until DEV_* is set the dev job is skipped and prod goes alone.
+# job needs its repository variables, and CI applies an environment only after a person has done
+# its first full apply (runbook step 8; `stack-is-up`). prod is planned only when dev was applied
+# in the same run, or dev is not configured at all (D1: dev's project does not exist yet), or
+# PROD_WITHOUT_DEV is true.
 #
-# Authentication is Workload Identity Federation only: no key is stored in GitHub. prod's
-# deployer is additionally reachable only from jobs in those two environments (bootstrap's
-# github_environments condition), so the approval is enforced by GitHub and Google, not just by
-# this file.
+# Authentication is Workload Identity Federation only: no key is stored in GitHub. Which account a
+# job can become is decided by bootstrap's per-account bindings (the "CI contexts"), so the
+# gates hold even against a workflow that skipped them.
 #
 # Two applies of one environment never overlap: every job that writes an environment's state is
 # in the concurrency group terraform-state-<env>, shared with the nightly destroy (and the GCS
-# backend's state lock is the second guard). Plan files are never uploaded as artifacts: a
-# binary plan holds every sensitive value in clear, so each apply job plans for itself.
+# backend's state lock is the second guard). Binary plans are never uploaded: they hold every
+# sensitive value in clear. The artifacts are the built page (public once deployed), the page
+# deploy's configuration (firebase.json and the project ID) and prod's redacted plan.
 
 name: Terraform apply
 
 on:
   push:
     branches: [main]
+  # A manual run from main: dev only, unless "prod" is ticked.
+  workflow_dispatch:
+    inputs:
+      prod:
+        description: "Also plan and apply prod (after approval)"
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -38,8 +50,36 @@ env:
   NODE_VERSION: "22.23.4"
 
 jobs:
+  build-page:
+    name: Build the page (no credentials)
+    if: >-
+      github.ref == 'refs/heads/main'
+      && (vars.DEV_GCP_PAGE_DEPLOYER_SA != '' || vars.PROD_GCP_PAGE_DEPLOYER_SA != '')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # npm ci from web/package-lock.json, then the Vite build and its bundle check. This job has
+      # no id-token permission, so its npm packages can reach no cloud credential.
+      - run: make web-build
+      # The built page holds no secret (VITE_FHIR_PROXY_URL stays unset: the page calls /api)
+      # and is public once deployed, unlike a plan.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-dist
+          path: web/dist/
+          retention-days: 1
+          if-no-files-found: error
+
   dev:
-    name: Apply dev, deploy its page
+    name: Apply dev
     if: >-
       github.ref == 'refs/heads/main'
       && vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
@@ -53,6 +93,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      up: ${{ steps.up.outputs.up }}
     env:
       TF_STATE_BUCKET: ${{ vars.DEV_TF_STATE_BUCKET }}
     steps:
@@ -63,9 +105,6 @@ jobs:
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
@@ -83,66 +122,108 @@ jobs:
       - name: Apply dev
         if: steps.up.outputs.up == 'true'
         run: python3 infra/envs/ci/tf_ci.py apply --env dev
-      # After every apply: a Terraform change to the rewrite or the headers reaches the site only
-      # with a deploy (phr README, "Deploying the page").
-      - name: Deploy dev's page
+      # The deploy job's identity cannot read the state, so this job hands over the page's
+      # firebase.json (site, rewrite, headers; no secret) and the project ID.
+      - name: Export the page configuration
         if: steps.up.outputs.up == 'true'
-        run: python3 infra/envs/ci/tf_ci.py deploy-page --env dev
+        run: python3 infra/envs/ci/tf_ci.py export-page-config --env dev --out "${RUNNER_TEMP}/page-dev/page.json"
+      - if: steps.up.outputs.up == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: page-config-dev
+          path: ${{ runner.temp }}/page-dev/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Say what happens to prod
+        if: steps.up.outputs.up != 'true'
+        run: |
+          echo "**prod is not planned in this run either** (it follows dev), unless the repository variable PROD_WITHOUT_DEV is true." >> "${GITHUB_STEP_SUMMARY}"
+      - name: Delete the tfvars
+        if: always()
+        run: python3 infra/envs/ci/tf_ci.py cleanup --env dev
+
+  dev-page:
+    name: Deploy dev's page (page deployer)
+    needs: [dev, build-page]
+    if: >-
+      github.ref == 'refs/heads/main'
+      && vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+      && vars.DEV_GCP_PAGE_DEPLOYER_SA != ''
+      && needs.dev.result == 'success'
+      && needs.dev.outputs.up == 'true'
+      && needs.build-page.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      # The page deployer holds roles/firebasehosting.admin only: the Firebase CLI and its npm
+      # packages run with nothing else.
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEV_GCP_PAGE_DEPLOYER_SA }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: page-config-dev
+          path: ${{ runner.temp }}/page-dev
+      # npm ci --ignore-scripts from infra/envs/ci/deploy-tools/package-lock.json, then the
+      # locked firebase-tools with npx --no-install.
+      - name: Deploy dev's page
+        run: python3 infra/envs/ci/tf_ci.py deploy-page --config "${RUNNER_TEMP}/page-dev/page.json"
 
   prod-preflight:
     name: Check prod's GitHub Environments
     if: >-
       github.ref == 'refs/heads/main'
+      && (github.event_name != 'workflow_dispatch' || inputs.prod)
       && vars.PROD_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
-      && vars.PROD_GCP_DEPLOYER_SA != ''
+      && vars.PROD_GCP_PLANNER_SA != ''
       && vars.PROD_TF_STATE_BUCKET != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
+      contents: read
       actions: read # GET /repos/{owner}/{repo}/environments/{name} needs Actions: read
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Require the protection rules
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          fail=0
-          for name in prod-plan prod; do
-            if ! gh api "repos/${REPO}/environments/${name}" > "${RUNNER_TEMP}/${name}.json"; then
-              echo "::error::GitHub Environment '${name}' does not exist. Create it first (infra/envs/README.md, \"CI/CD\")."
-              fail=1
-              continue
-            fi
-            if [ "$(jq '.deployment_branch_policy != null' "${RUNNER_TEMP}/${name}.json")" != "true" ]; then
-              echo "::error::Environment '${name}' must allow deployments from selected branches (main) only."
-              fail=1
-            fi
-          done
-          if [ -f "${RUNNER_TEMP}/prod.json" ] && \
-             [ "$(jq '[.protection_rules[]?.type] | index("required_reviewers") != null' "${RUNNER_TEMP}/prod.json")" != "true" ]; then
-            echo "::error::Environment 'prod' must have required reviewers: they are the manual gate before a prod apply."
-            fail=1
-          fi
-          exit "${fail}"
+        run: python3 infra/envs/ci/tf_ci.py check-environments
 
   prod-plan:
-    name: Plan prod
+    name: Plan prod (read-only planner)
     needs: [dev, prod-preflight]
-    # prod goes ahead when dev succeeded or was skipped (dev not configured yet, D1), never after
-    # a dev failure.
+    # dev applied in this run, or dev not configured at all (D1), or PROD_WITHOUT_DEV; never
+    # after a failed dev.
     if: >-
       !cancelled()
       && github.ref == 'refs/heads/main'
       && vars.PROD_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
-      && vars.PROD_GCP_DEPLOYER_SA != ''
+      && vars.PROD_GCP_PLANNER_SA != ''
       && vars.PROD_TF_STATE_BUCKET != ''
       && needs.prod-preflight.result == 'success'
-      && (needs.dev.result == 'success' || needs.dev.result == 'skipped')
+      && needs.dev.result != 'failure'
+      && (needs.dev.outputs.up == 'true' || vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER == '' || vars.PROD_WITHOUT_DEV == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     # GitHub applies the environment's rules (main only) before the job starts, and only then puts
-    # `environment: prod-plan` into the OIDC token that prod's Workload Identity condition requires.
+    # `environment: prod-plan` into the OIDC token that prod's planner binding requires.
     environment: prod-plan
     concurrency:
       group: terraform-state-prod
@@ -152,8 +233,6 @@ jobs:
       id-token: write
     outputs:
       up: ${{ steps.up.outputs.up }}
-      digest: ${{ steps.plan.outputs.digest }}
-      changes: ${{ steps.plan.outputs.changes }}
     env:
       TF_STATE_BUCKET: ${{ vars.PROD_TF_STATE_BUCKET }}
     steps:
@@ -168,7 +247,7 @@ jobs:
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
           workload_identity_provider: ${{ vars.PROD_GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.PROD_GCP_DEPLOYER_SA }}
+          service_account: ${{ vars.PROD_GCP_PLANNER_SA }}
           token_format: access_token
           access_token_lifetime: 300s
       - name: Fetch prod's tfvars from the state bucket
@@ -179,12 +258,22 @@ jobs:
       - id: up
         run: python3 infra/envs/ci/tf_ci.py stack-is-up --env prod
       # The redacted plan goes to this job's summary, where the reviewer reads it before approving.
-      - id: plan
+      - name: Plan
         if: steps.up.outputs.up == 'true'
-        run: python3 infra/envs/ci/tf_ci.py plan --env prod
+        run: python3 infra/envs/ci/tf_ci.py plan --env prod --no-lock --record "${RUNNER_TEMP}/plan-prod"
+      - if: steps.up.outputs.up == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: plan-prod
+          path: ${{ runner.temp }}/plan-prod/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Delete the tfvars
+        if: always()
+        run: python3 infra/envs/ci/tf_ci.py cleanup --env prod
 
   prod-apply:
-    name: Apply prod (after approval), deploy its page
+    name: Apply prod (after approval)
     needs: prod-plan
     if: >-
       !cancelled()
@@ -206,18 +295,23 @@ jobs:
       id-token: write
     env:
       TF_STATE_BUCKET: ${{ vars.PROD_TF_STATE_BUCKET }}
-      REVIEWED_DIGEST: ${{ needs.prod-plan.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The approval may come hours later: a newer merge then applies the newer commit instead.
+      - name: Require this commit to be the tip of main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 infra/envs/ci/tf_ci.py require-tip
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          name: plan-prod
+          path: ${{ runner.temp }}/reviewed
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:
@@ -225,13 +319,66 @@ jobs:
           service_account: ${{ vars.PROD_GCP_DEPLOYER_SA }}
           token_format: access_token
           access_token_lifetime: 300s
-      - name: Fetch prod's tfvars from the state bucket
+      # Exactly the tfvars generation the reviewed plan used: an edit since then is refused.
+      - name: Fetch the reviewed tfvars generation
         env:
           GCP_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
-        run: python3 infra/envs/ci/tf_ci.py fetch-tfvars --env prod
+        run: |
+          generation="$(jq -r '.tfvars_generation' "${RUNNER_TEMP}/reviewed/meta.json")"
+          python3 infra/envs/ci/tf_ci.py fetch-tfvars --env prod --generation "${generation}"
       - run: python3 infra/envs/ci/tf_ci.py init --env prod
-      # Re-plans and applies only if exactly the reviewed resources would change.
+      # Re-plans and applies only if the commit, the tfvars and the plan's digest are the reviewed ones.
       - name: Apply prod
-        run: python3 infra/envs/ci/tf_ci.py apply --env prod --expect-digest "${REVIEWED_DIGEST}"
+        run: python3 infra/envs/ci/tf_ci.py apply --env prod --reviewed "${RUNNER_TEMP}/reviewed"
+      - name: Export the page configuration
+        run: python3 infra/envs/ci/tf_ci.py export-page-config --env prod --out "${RUNNER_TEMP}/page-prod/page.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: page-config-prod
+          path: ${{ runner.temp }}/page-prod/
+          retention-days: 1
+          if-no-files-found: error
+      - name: Delete the tfvars
+        if: always()
+        run: python3 infra/envs/ci/tf_ci.py cleanup --env prod
+
+  prod-page:
+    name: Deploy prod's page (page deployer, after approval)
+    needs: [prod-apply, build-page]
+    if: >-
+      !cancelled()
+      && github.ref == 'refs/heads/main'
+      && vars.PROD_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+      && vars.PROD_GCP_PAGE_DEPLOYER_SA != ''
+      && needs.prod-apply.result == 'success'
+      && needs.build-page.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # prod's page deployer is bound to the prod Environment on main, so this waits for a reviewer
+    # too (a second approval in the same run).
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.PROD_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.PROD_GCP_PAGE_DEPLOYER_SA }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: web/dist
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: page-config-prod
+          path: ${{ runner.temp }}/page-prod
       - name: Deploy prod's page
-        run: python3 infra/envs/ci/tf_ci.py deploy-page --env prod
+        run: python3 infra/envs/ci/tf_ci.py deploy-page --config "${RUNNER_TEMP}/page-prod/page.json"

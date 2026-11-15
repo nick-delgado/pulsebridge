@@ -10,13 +10,17 @@
 #   06:17 UTC  retry: destroy what is left; now nothing may remain
 # rather than one run that sleeps for hours (which would bill GitHub Actions minutes for waiting).
 #
-# After it, dev is gone, including its images and secret values: CI does not plan or apply it
-# again until a person brings it back up with the runbook (infra/envs/README.md, steps 3 to 8).
+# Guards (tf_ci.py destroy): an empty state is reported as "nothing to destroy", not as a
+# successful destroy; a partly built dev (a person in the middle of the bring-up, runbook steps 3
+# to 7) is left alone with a warning. Turn DEV_NIGHTLY_DESTROY off during a bring-up anyway.
 #
-# Off unless the user opts in: repository variable DEV_NIGHTLY_DESTROY = true, plus the three
-# DEV_* variables. Runs only on main (scheduled runs use the default branch; a manual run from
-# another branch is skipped). Shares the concurrency group terraform-state-dev with the dev apply,
-# so a destroy and an apply never overlap.
+# After it, dev is gone, including its images and secret values: CI does not plan or apply dev,
+# and prod waits for dev (unless PROD_WITHOUT_DEV), until a person brings dev back with the
+# runbook (infra/envs/README.md, steps 3 to 8).
+#
+# Off unless the user opts in: repository variable DEV_NIGHTLY_DESTROY = true, plus dev's
+# deployer variables. Runs only on main (scheduled runs use the default branch; a manual run from
+# another branch is skipped). Shares the concurrency group terraform-state-dev with the dev apply.
 #
 # Note: GitHub disables scheduled workflows in a public repository after 60 days without
 # repository activity; re-enable it from the Actions tab.
@@ -86,3 +90,6 @@ jobs:
           else
             python3 infra/envs/ci/tf_ci.py destroy --env dev
           fi
+      - name: Delete the tfvars
+        if: always()
+        run: python3 infra/envs/ci/tf_ci.py cleanup --env dev

@@ -5,10 +5,13 @@
 #   make tf-validate   terraform fmt -check and terraform validate (init -backend=false)
 #   make tf-lint       tflint with the Terraform and Google rulesets (.tflint.hcl)
 #   make tf-scan       Trivy's misconfiguration checks; HIGH and CRITICAL findings fail
+#   make tf-test       terraform test against mocked providers, the static checks and the scans
 #
-# The Terraform tests (`make tf-test`, mocked providers) run in ci.yml. The plan of the real dev
-# environment is terraform-plan.yml; applies are terraform-apply.yml (infra/envs/README.md,
-# "CI/CD").
+# This job took over ci.yml's former terraform job (T26). The plan of the real dev environment is
+# terraform-plan.yml; applies are terraform-apply.yml (infra/envs/README.md, "CI/CD").
+#
+# No path filter: a path-filtered workflow reports no status on pull requests it skips, so it
+# could never be a required check.
 #
 # Every action is pinned to a full commit SHA (the tag is in the trailing comment): a tag can be
 # moved to different code, a commit SHA cannot. tests/tooling/test_terraform_workflows.py checks
@@ -34,9 +37,9 @@ env:
 
 jobs:
   checks:
-    name: Terraform fmt, validate, tflint and trivy
+    name: Terraform fmt, validate, test, tflint and trivy
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -48,6 +51,8 @@ jobs:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
           terraform_wrapper: false
       - run: make tf-validate
+      # Mocked providers, no credentials (the Makefile removes every Google credential variable).
+      - run: make tf-test
       # tflint and Trivy are downloaded at pinned versions and checked against pinned SHA-256
       # sums (Makefile, "Terraform lint and security scan").
       - run: make tf-lint

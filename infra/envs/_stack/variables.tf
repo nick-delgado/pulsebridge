@@ -321,3 +321,9 @@ variable "build_trigger_repository" {
     error_message = "build_trigger_repository needs create_build_service_account = true: the trigger runs the build as that account."
   }
 }
+
+variable "build_trigger_approval_required" {
+  description = "Triggered builds wait for a manual approval in the Cloud Build console (module project-base)."
+  type        = bool
+  nullable    = false
+}

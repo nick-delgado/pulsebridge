@@ -287,7 +287,8 @@ variables {
 
   alert_email = "alerts@example.com"
 
-  create_build_service_account = false
+  create_build_service_account    = false
+  build_trigger_approval_required = true
 
   mllp_port          = 2575
   openemr_https_port = 443

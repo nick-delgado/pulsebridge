@@ -1,0 +1,9 @@
+{
+  "name": "pulsebridge-deploy-tools",
+  "private": true,
+  "description": "The Firebase CLI the CI page deploy runs (T26). Installed with `npm ci --ignore-scripts` from the committed package-lock.json, so every package in its tree is pinned by version and integrity hash.",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "firebase-tools": "15.34.2"
+  }
+}

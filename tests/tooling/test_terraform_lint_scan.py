@@ -123,3 +123,21 @@ def test_tf_scan_fails_on_ssh_open_to_the_internet(tmp_path: Path) -> None:
     result = run_make("tf-scan", tmp_path)
     assert result.returncode != 0
     assert "GCP-0027" in result.stdout  # "Firewall rule allows unrestricted ingress"
+
+
+def test_a_download_with_the_wrong_checksum_is_refused(tmp_path: Path) -> None:
+    # An empty tool cache (a fresh VENV) and a pinned SHA-256 that does not match the release
+    # asset: the download must be refused and no tflint installed, so a replaced asset never runs.
+    venv = tmp_path / "venv"
+    env = {k: v for k, v in os.environ.items() if k not in {"MAKEFLAGS", "MFLAGS", "MAKELEVEL"}}
+    result = subprocess.run(
+        [
+            "make", "--no-print-directory", "-C", str(REPO_ROOT), "tf-lint",
+            f"VENV={venv}", f"TFLINT_SHA256={'0' * 64}", f"TF_ROOT={tmp_path / 'none'}",
+        ],
+        env=env, capture_output=True, text=True, timeout=600,
+    )  # fmt: skip
+    assert result.returncode != 0
+    assert "checksum mismatch" in result.stderr
+    assert not (venv / "tools" / "tflint-v0.65.0" / "tflint").exists()
+    assert not (venv / "tools" / "tflint_v0.65.0.zip").exists()

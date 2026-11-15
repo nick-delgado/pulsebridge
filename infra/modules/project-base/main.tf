@@ -374,6 +374,13 @@ resource "google_cloudbuild_trigger" "images_on_tag" {
 
   filename = "cloudbuild.yaml"
 
+  # Each triggered build waits until someone with roles/cloudbuild.builds.approver approves it in
+  # the console (T26 review, m6): a pushed tag alone does not publish images. Turn off with
+  # build_trigger_approval_required = false once a tag ruleset protects v* tags.
+  approval_config {
+    approval_required = var.build_trigger_approval_required
+  }
+
   # The build account, as projects/<project>/serviceAccounts/<email>. With a user-specified
   # account the build log must go to Cloud Logging only, which cloudbuild.yaml sets.
   service_account = "projects/${var.project_id}/serviceAccounts/${var.build_service_account_email}"
