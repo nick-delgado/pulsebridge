@@ -14,6 +14,7 @@ import type {
   MalformedSample,
   MessagesLogPage,
   MessagesLogQuery,
+  CallOptions,
   ObservationQuery,
   PulseBridgeApi,
   SendAttemptEntry,
@@ -63,6 +64,7 @@ interface RequestOptions {
   accept?: string;
   /** False only for the login route, which is the one route without a token. */
   auth?: boolean;
+  signal?: AbortSignal | undefined;
 }
 
 export class HttpClient implements PulseBridgeApi {
@@ -79,13 +81,14 @@ export class HttpClient implements PulseBridgeApi {
 
   // -- login ------------------------------------------------------------------------------------
 
-  async login(password: string): Promise<LoginResult> {
+  async login(password: string, options: CallOptions = {}): Promise<LoginResult> {
     let response: Response;
     try {
       response = await this.#send('auth/login', {
         method: 'POST',
         body: { password },
         auth: false,
+        signal: options.signal,
       });
     } catch (error) {
       if (error instanceof ApiError && error.status === 0) {
@@ -128,16 +131,19 @@ export class HttpClient implements PulseBridgeApi {
 
   // -- reads ------------------------------------------------------------------------------------
 
-  getStatus(): Promise<StatusSummary> {
-    return this.#json<StatusSummary>('status');
+  getStatus(options: CallOptions = {}): Promise<StatusSummary> {
+    return this.#json<StatusSummary>('status', JSON_TYPE, options.signal);
   }
 
-  async searchObservations(query: ObservationQuery): Promise<Observation[]> {
-    // FHIR search: token search on code as system|code, and two date prefixes (ge, lt) that
-    // together bound the range. _sort=date gives oldest first.
+  async searchObservations(
+    query: ObservationQuery,
+    options: CallOptions = {},
+  ): Promise<Observation[]> {
+    // FHIR search: token search on code as system|code, and two date prefixes (gt, lt) that
+    // together bound the range; see TimeRange for the Period rule. _sort=date gives oldest first.
     const params = new URLSearchParams();
     params.set('code', `${LOINC_SYSTEM}|${query.code}`);
-    params.append('date', `ge${query.range.start.toISOString()}`);
+    params.append('date', `gt${query.range.start.toISOString()}`);
     params.append('date', `lt${query.range.end.toISOString()}`);
     params.set('_sort', 'date');
     params.set('_count', String(SEARCH_PAGE_SIZE));
@@ -150,7 +156,7 @@ export class HttpClient implements PulseBridgeApi {
       }
       // Typed as a Bundle of any resource: a searchset may also carry an OperationOutcome entry
       // (search mode "outcome"), which is skipped here.
-      const bundle: Bundle = await this.#json<Bundle>(url, FHIR_JSON);
+      const bundle: Bundle = await this.#json<Bundle>(url, FHIR_JSON, options.signal);
       results.push(
         ...bundleResources(bundle).filter(
           (r): r is Observation => r.resourceType === 'Observation',
@@ -162,9 +168,14 @@ export class HttpClient implements PulseBridgeApi {
     return results;
   }
 
-  async getHeartRateTrace(observationId: string): Promise<HeartRateTrace> {
+  async getHeartRateTrace(
+    observationId: string,
+    options: CallOptions = {},
+  ): Promise<HeartRateTrace> {
     const body = await this.#json<{ resources: Bundle; source: GoogleHealthRollUpWindow | null }>(
       `trace/heart-rate/${encodeURIComponent(observationId)}`,
+      JSON_TYPE,
+      options.signal,
     );
     const resources = bundleResources(body.resources);
     const observation = first<Observation>(resources, 'Observation');
@@ -177,21 +188,31 @@ export class HttpClient implements PulseBridgeApi {
     };
   }
 
-  listMalformedSamples(): Promise<MalformedSample[]> {
-    return this.#json<MalformedSample[]>('cuff/samples');
+  listMalformedSamples(options: CallOptions = {}): Promise<MalformedSample[]> {
+    return this.#json<MalformedSample[]>('cuff/samples', JSON_TYPE, options.signal);
   }
 
-  async submitCuffReading(request: CuffReadingRequest): Promise<CuffSendResult> {
-    const response = await this.#send('cuff/readings', { method: 'POST', body: request });
+  async submitCuffReading(
+    request: CuffReadingRequest,
+    options: CallOptions = {},
+  ): Promise<CuffSendResult> {
+    const response = await this.#send('cuff/readings', {
+      method: 'POST',
+      body: request,
+      signal: options.signal,
+    });
     return (await response.json()) as CuffSendResult;
   }
 
-  async getCuffAttemptTrace(attemptId: string): Promise<CuffAttemptTrace> {
+  async getCuffAttemptTrace(
+    attemptId: string,
+    options: CallOptions = {},
+  ): Promise<CuffAttemptTrace> {
     const body = await this.#json<{
       attempt: SendAttemptEntry;
       messageSent: string | null;
       resources: Bundle;
-    }>(`trace/cuff-attempts/${encodeURIComponent(attemptId)}`);
+    }>(`trace/cuff-attempts/${encodeURIComponent(attemptId)}`, JSON_TYPE, options.signal);
     const resources = bundleResources(body.resources);
     return {
       attempt: body.attempt,
@@ -202,18 +223,26 @@ export class HttpClient implements PulseBridgeApi {
     };
   }
 
-  listMessages(query: MessagesLogQuery = {}): Promise<MessagesLogPage> {
+  listMessages(query: MessagesLogQuery = {}, options: CallOptions = {}): Promise<MessagesLogPage> {
     const params = new URLSearchParams();
     if (query.kind) params.set('kind', query.kind);
     if (query.outcome) params.set('outcome', query.outcome);
     if (query.count !== undefined) params.set('count', String(query.count));
     if (query.cursor) params.set('cursor', query.cursor);
     const qs = params.toString();
-    return this.#json<MessagesLogPage>(qs === '' ? 'messages' : `messages?${qs}`);
+    return this.#json<MessagesLogPage>(
+      qs === '' ? 'messages' : `messages?${qs}`,
+      JSON_TYPE,
+      options.signal,
+    );
   }
 
-  async share(request: ShareRequest): Promise<ShareResult> {
-    const response = await this.#send('share', { method: 'POST', body: request });
+  async share(request: ShareRequest, options: CallOptions = {}): Promise<ShareResult> {
+    const response = await this.#send('share', {
+      method: 'POST',
+      body: request,
+      signal: options.signal,
+    });
     const body = (await response.json()) as Omit<ShareResult, 'readBack'> & { readBack: Bundle };
     const resources = bundleResources(body.readBack);
     return {
@@ -245,17 +274,18 @@ export class HttpClient implements PulseBridgeApi {
     return url;
   }
 
-  async #json<T>(path: string | URL, accept = JSON_TYPE): Promise<T> {
-    const response = await this.#send(path, { accept });
+  async #json<T>(path: string | URL, accept = JSON_TYPE, signal?: AbortSignal): Promise<T> {
+    const response = await this.#send(path, { accept, signal });
     return (await response.json()) as T;
   }
 
   async #send(path: string | URL, options: RequestOptions = {}): Promise<Response> {
-    const { method = 'GET', body, accept = JSON_TYPE, auth = true } = options;
+    const { method = 'GET', body, accept = JSON_TYPE, auth = true, signal } = options;
     const headers = new Headers({ Accept: accept });
     if (body !== undefined) headers.set('Content-Type', JSON_TYPE);
+    let token: string | null = null;
     if (auth) {
-      const token = this.options.session.token();
+      token = this.options.session.token();
       if (token === null) {
         // No point asking the server: without a token the answer is 401.
         this.#unauthorized();
@@ -274,16 +304,24 @@ export class HttpClient implements PulseBridgeApi {
       redirect: 'error',
     };
     if (body !== undefined) init.body = JSON.stringify(body);
+    if (signal) init.signal = signal;
 
     let response: Response;
     try {
       response = await this.#fetch(typeof path === 'string' ? this.#url(path) : path, init);
-    } catch {
+    } catch (error) {
+      // An aborted request (logout, teardown) rejects with the AbortError itself, which callers
+      // ignore; anything else is a network failure.
+      if (signal?.aborted) throw error;
       throw new ApiError(0, 'The server could not be reached.');
     }
 
     if (auth && response.status === 401) {
-      this.#unauthorized();
+      // Only end the session this request belonged to. A slow request sent with an old token
+      // can answer 401 after the user has logged in again; that must not clear the new token.
+      // (No stored token at all, for example it just expired, still means "show the login".)
+      const current = this.options.session.token();
+      if (current === null || current === token) this.#unauthorized();
       throw new UnauthorizedError();
     }
     if (!auth || response.ok) return response;
@@ -310,5 +348,6 @@ async function toApiError(response: Response): Promise<ApiError> {
     // Not JSON.
   }
   const text = outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`;
-  return new ApiError(response.status, text, outcome);
+  const retry = Number.parseInt(response.headers.get('Retry-After') ?? '', 10);
+  return new ApiError(response.status, text, outcome, Number.isFinite(retry) ? retry : null);
 }

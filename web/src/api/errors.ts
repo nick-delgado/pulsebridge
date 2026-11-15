@@ -35,6 +35,8 @@ export class ApiError extends Error {
     message: string,
     /** The FHIR OperationOutcome from the body, when the proxy sent one. */
     readonly outcome: OperationOutcome | null = null,
+    /** Seconds from a 429 `Retry-After` header (the rate-limited cuff route), when given. */
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
   }

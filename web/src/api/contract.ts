@@ -58,10 +58,15 @@ export interface StatusSummary {
 // ---------------------------------------------------------------------------------------------
 // Observations
 
+/**
+ * A search range, sent as `date=gt<start>&date=lt<end>` (both bounds exclusive). With the R4
+ * rules for a prefix on a Period, a heart-rate window matches when its effectivePeriod overlaps
+ * (start, end): it ends after `start` and starts before `end`. So an aligned 24 h range returns
+ * 288 five-minute windows, not 289 (with `ge`, the window ending exactly at `start` would match).
+ * A blood-pressure reading (effectiveDateTime) matches when start < time < end.
+ */
 export interface TimeRange {
-  /** Inclusive. */
   start: Date;
-  /** Exclusive. */
   end: Date;
 }
 
@@ -97,9 +102,12 @@ export const CUFF_BOUNDS = {
   diastolic: { min: 30, max: 150 },
 } as const;
 
-/** The malformed classes from the work plan's "Malformed message handling" table (D7). */
+/**
+ * The malformed classes from the work plan's "Malformed message handling" table (D7), spelled
+ * exactly as `classes` in libs/pulsebridge_hl7v2/samples/samples.json (T07).
+ */
 export type MalformedClass =
-  'structurally-invalid' | 'unparseable' | 'no-acknowledgment' | 'parses-but-cannot-map';
+  'structurally_invalid' | 'unparseable' | 'no_acknowledgment' | 'parses_but_cannot_map';
 
 /** A synthetic sample from libs/pulsebridge_hl7v2/samples that "send malformed" can send. */
 export interface MalformedSample {
@@ -119,9 +127,19 @@ export interface CuffReadingRequest {
   sendMalformed: string | null;
 }
 
-export type AckCode = 'AA' | 'AE' | 'AR';
+/**
+ * MSA-1 acknowledgment code (HL7 table 0008). AA/AE/AR are the original-mode codes the store
+ * actually sends; CA/CE/CR are the enhanced-mode commit codes, included so a future ACK (or T31's
+ * AuditEvent model) can be represented.
+ */
+export type AckCode = 'AA' | 'AE' | 'AR' | 'CA' | 'CE' | 'CR';
 
-export type NoAckReason = 'timeout' | 'connection-closed' | 'http-error' | 'network-error';
+/**
+ * Why no readable ACK came back: T31's closed set (`no-ack-reason` in the AuditEvent).
+ * `api-error` is an HTTPS ingest error with an HTTP status 400-599 and no hl7Nack;
+ * `unreadable-reply` means bytes came back that are not a readable HL7v2 ACK.
+ */
+export type NoAckReason = 'timeout' | 'connection-closed' | 'api-error' | 'unreadable-reply';
 
 /**
  * The commit-level acknowledgment (D7): what the HL7v2 store (through the MLLP adapter, or the
@@ -132,19 +150,33 @@ export type CommitAck =
       received: true;
       /** MSA-1. The store answers AA or AE; it never sends AR (spike S4). */
       code: AckCode;
-      /** MSA-2, the control ID acknowledged. Empty (null) on a NACK the store could not read. */
+      /**
+       * MSA-2, the control ID acknowledged, when known: in a send result (T13). Null on a NACK
+       * the store could not read, and in a log row built from an AuditEvent (T31 keeps MSH-10 of
+       * the attempt, which is the row's `controlId`, not MSA-2).
+       */
       controlId: string | null;
-      /** MSA-3 text, for example "Invalid MSH header". */
+      /** MSA-3 text as T31 stores it (cleaned), for example "Invalid MSH header". */
       reason: string | null;
-      /** The ACK as received, segments separated by "\r". Null for a store-only log row. */
+      /**
+       * The ACK as received, DECODED for display: segments separated by "\r". Convenience only:
+       * the AuditEvent stores it as `ack-message` valueBase64Binary, and the proxy decodes it.
+       * It came from another system, so render it as text only. Null for a store-only row.
+       */
       raw: string | null;
     }
   | {
       received: false;
       why: NoAckReason;
-      /** HTTP status when `why` is `http-error`. */
+      /** HTTP status when `why` is `api-error` (400-599); otherwise null. */
       httpStatus: number | null;
+      /** Short human-readable explanation. */
       detail: string;
+      /**
+       * For `unreadable-reply`: the first bytes of what came back, base64 as in the AuditEvent
+       * (`unreadable-reply-bytes`), because they may not be text at all. Otherwise null.
+       */
+      replyPrefixBase64: string | null;
     };
 
 /**
@@ -188,22 +220,52 @@ export interface CuffAttemptTrace {
 // ---------------------------------------------------------------------------------------------
 // Messages log (D12)
 
-/** One cuff send attempt, from its AuditEvent, joined to the stored message where there is one. */
+/**
+ * One cuff send attempt: the fields of T31's `SendAttemptRecord` (parse_send_attempt), read from
+ * the send-attempt AuditEvent in the audit FHIR store (D15), plus the application-level outcome
+ * joined from the stored message's labels where the send was accepted.
+ */
 export interface SendAttemptEntry {
   kind: 'cuff-send';
+  /** The AuditEvent id (the stored message name for a store-only row). */
   id: string;
+  /** When the message was sent (`period.start`). */
+  sentAt: string;
+  /** When the attempt was recorded (`recorded`); the log sorts on this. */
   recordedAt: string;
+  /** Null only for a store-only row, whose transport is unknown. */
   transport: Transport | null;
+  /** MSH-10 of the message sent; null for a sample with no MSH. */
   controlId: string | null;
+  /** T31's result: AA/CA accepted; AE/AR/CE/CR rejected; anything else no-acknowledgment. */
+  result: 'accepted' | 'rejected' | 'no-acknowledgment';
+  /** The AuditEvent's R4 outcome code: 0 accepted, 4 rejected, 8 no acknowledgment. */
+  outcome: '0' | '4' | '8';
+  /** The malformed sample sent (`malformed-sample`), or null. */
   sample: string | null;
   commitAck: CommitAck;
-  /** Null when the message was never stored (an AE or no acknowledgment). */
+  /** Null when the message was never stored (rejected or no acknowledgment). */
   application: ApplicationOutcome | null;
+  /** HL7v2 store message name (HTTPS accept only, or found by the proxy). */
   messageName: string | null;
   /** The resulting Observation as a reference, `Observation/<id>`, once mapped. */
   observation: string | null;
   /** `store-only`: a stored message with no AuditEvent, for example sent straight to the adapter. */
   source: 'audit-event' | 'store-only';
+}
+
+/**
+ * An AuditEvent that is ours (a cuff send attempt) but could not be read: T31's
+ * `UnreadableSendAttempt`, for example a missing value or a newer format version. The proxy
+ * surfaces it as a visible error row and never hides it; T19 shows it as such.
+ */
+export interface UnreadableSendAttemptEntry {
+  kind: 'unreadable-send-attempt';
+  id: string;
+  /** `recorded` when it could be read, else null (sorted last). */
+  recordedAt: string | null;
+  /** What was wrong, from the parser's message. */
+  problem: string;
 }
 
 /** One FHIR transaction Bundle written by an ingest service. */
@@ -218,7 +280,7 @@ export interface FhirTransactionEntry {
   resources: string[];
 }
 
-export type MessagesLogEntry = SendAttemptEntry | FhirTransactionEntry;
+export type MessagesLogEntry = SendAttemptEntry | UnreadableSendAttemptEntry | FhirTransactionEntry;
 
 export interface MessagesLogQuery {
   kind?: MessagesLogEntry['kind'];
@@ -230,8 +292,10 @@ export interface MessagesLogQuery {
 }
 
 export interface MessagesLogPage {
-  /** Newest first. */
+  /** Newest first (unreadable rows without a time last). */
   entries: MessagesLogEntry[];
+  /** How many AuditEvents on this page were ours but unreadable (also present as rows). */
+  unreadable: number;
   nextCursor: string | null;
 }
 
@@ -259,6 +323,15 @@ export interface ShareStep {
   durationMs: number;
 }
 
+/**
+ * The body of a 200 answer from `POST /share`. How failures are reported (proposal):
+ * - Refused before anything is sent to OpenEMR (nothing selected, not `final`, or the Patient
+ *   is incomplete, for example "Patient incomplete: missing birthDate"): 422 with an
+ *   OperationOutcome; the client throws `ApiError` and no steps exist.
+ * - Failed during the OpenEMR sequence: 200 with `outcome: 'failed'` or `'partly-shared'` and
+ *   the steps so far, because the trace of what happened is the point of the panel.
+ * - OpenEMR unreachable before the first step: 502 with an OperationOutcome.
+ */
 export interface ShareResult {
   outcome: 'shared' | 'already-shared' | 'partly-shared' | 'failed';
   steps: ShareStep[];
@@ -269,27 +342,37 @@ export interface ShareResult {
 // ---------------------------------------------------------------------------------------------
 // The client interface
 
+/** Per-call options. Pass the feature's `signal` so a torn-down dashboard cancels its requests. */
+export interface CallOptions {
+  signal?: AbortSignal;
+}
+
 export interface PulseBridgeApi {
   readonly mode: 'mock' | 'http';
 
   /** Checks the password; on success stores the token in the session. Throws `LoginError`. */
-  login(password: string): Promise<LoginResult>;
+  login(password: string, options?: CallOptions): Promise<LoginResult>;
   /** Forgets the token. Stateless tokens need no server call. */
   logout(): void;
   isLoggedIn(): boolean;
 
-  getStatus(): Promise<StatusSummary>;
+  getStatus(options?: CallOptions): Promise<StatusSummary>;
 
   /** Observations for one LOINC code in a time range, oldest first, all pages followed. */
-  searchObservations(query: ObservationQuery): Promise<Observation[]>;
-  getHeartRateTrace(observationId: string): Promise<HeartRateTrace>;
+  searchObservations(query: ObservationQuery, options?: CallOptions): Promise<Observation[]>;
+  getHeartRateTrace(observationId: string, options?: CallOptions): Promise<HeartRateTrace>;
 
-  listMalformedSamples(): Promise<MalformedSample[]>;
-  /** Throws `ApiError` 422 (with an OperationOutcome) for inputs outside bounds; nothing is sent. */
-  submitCuffReading(request: CuffReadingRequest): Promise<CuffSendResult>;
-  getCuffAttemptTrace(attemptId: string): Promise<CuffAttemptTrace>;
+  listMalformedSamples(options?: CallOptions): Promise<MalformedSample[]>;
+  /**
+   * Throws `ApiError` 422 (with an OperationOutcome) for inputs outside bounds; nothing is sent.
+   * The route is rate-limited: 429 with `Retry-After` becomes `ApiError` with
+   * `retryAfterSeconds`.
+   */
+  submitCuffReading(request: CuffReadingRequest, options?: CallOptions): Promise<CuffSendResult>;
+  getCuffAttemptTrace(attemptId: string, options?: CallOptions): Promise<CuffAttemptTrace>;
 
-  listMessages(query?: MessagesLogQuery): Promise<MessagesLogPage>;
+  listMessages(query?: MessagesLogQuery, options?: CallOptions): Promise<MessagesLogPage>;
 
-  share(request: ShareRequest): Promise<ShareResult>;
+  /** See `ShareResult` for how a refused or failed share is reported. */
+  share(request: ShareRequest, options?: CallOptions): Promise<ShareResult>;
 }

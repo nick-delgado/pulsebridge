@@ -9,11 +9,19 @@
  * - roll-up windows: docs/spikes/s3.md section 6 (Google Health `dataPoints:rollUp`)
  * - HL7v2 sample names and their expected outcomes: libs/pulsebridge_hl7v2/samples/samples.json
  */
-import type { GoogleHealthRollUpWindow, MalformedSample } from './contract';
+import type {
+  CommitAck,
+  GoogleHealthRollUpWindow,
+  MalformedClass,
+  MalformedSample,
+  SendAttemptEntry,
+  Transport,
+} from './contract';
 import {
   LOINC,
   LOINC_SYSTEM,
   UCUM_SYSTEM,
+  type AuditEvent,
   type CodeableConcept,
   type Device,
   type Observation,
@@ -21,6 +29,11 @@ import {
   type Provenance,
   type Quantity,
 } from './fhir';
+import mockSamples from './mock-samples.json';
+import acceptedExample from './t31-examples/auditevent-send-accepted.json';
+import noAckExample from './t31-examples/auditevent-send-no-ack.json';
+import rejectedExample from './t31-examples/auditevent-send-rejected.json';
+import unreadableExample from './t31-examples/auditevent-send-unreadable-reply.json';
 
 export const MOCK_PATIENT_REF = 'Patient/mock-patient';
 export const MOCK_WATCH_REF = 'Device/mock-watch';
@@ -153,15 +166,22 @@ export function windowStartFromId(id: string): number | null {
   return Number.isInteger(ms) && ms % WINDOW_MS === 0 ? ms : null;
 }
 
-/** All complete windows that start in [startMs, endMs) and end by nowMs, oldest first. */
+/**
+ * All complete windows (ending by nowMs) whose effectivePeriod overlaps the open interval
+ * (startMs, endMs), oldest first. This is the R4 search rule for `date=gt<start>&date=lt<end>`
+ * on a Period: `gt` matches when the period ends after start, `lt` when it starts before end.
+ * A window that ends exactly at start is therefore excluded, so an aligned 24 h range gives 288.
+ */
 export function heartRateObservations(
   startMs: number,
   endMs: number,
   nowMs: number,
 ): Observation[] {
   const out: Observation[] = [];
-  const first = Math.ceil(startMs / WINDOW_MS) * WINDOW_MS;
+  // First window whose end (t + WINDOW_MS) is after startMs.
+  const first = Math.floor(startMs / WINDOW_MS) * WINDOW_MS;
   for (let t = first; t < endMs && t + WINDOW_MS <= nowMs; t += WINDOW_MS) {
+    if (t + WINDOW_MS <= startMs) continue;
     const window = syntheticRollUp(t);
     if (window) out.push(heartRateObservation(window, nowMs));
   }
@@ -257,89 +277,52 @@ export function openemrPatient(id: string): Patient {
 }
 
 /**
- * The malformed samples "send malformed" offers, named exactly as in
- * libs/pulsebridge_hl7v2/samples/samples.json, with the outcome that file expects at each layer.
+ * The malformed samples "send malformed" offers: a generated copy of T07's manifest
+ * (libs/pulsebridge_hl7v2/samples/samples.json, via scripts/sync-mock-samples.mjs), with each
+ * sample's exact payload and the outcome that file expects at each layer.
  */
 export interface MockSampleBehaviour extends MalformedSample {
-  /** null: no acknowledgment (timeout). */
+  /** The payload exactly as T07 defines it (its own segment terminator). */
+  er7: string;
+  /** The sample's own MSH-10, or null when it has none (for example no MSH segment). */
+  controlId: string | null;
+  /** MSA-1 the store replies with, or null for no acknowledgment. */
   commitAck: 'AA' | 'AE' | null;
   commitReason: string | null;
   application: 'accepted' | 'error' | null;
   mappingReason: string | null;
 }
 
-export const MOCK_SAMPLES: MockSampleBehaviour[] = [
-  {
-    name: 'invalid_missing_pid3',
-    label: 'Missing patient identifier (PID-3)',
-    class: 'structurally-invalid',
-    transports: ['mllp', 'https'],
-    commitAck: 'AA',
-    commitReason: null,
-    application: 'error',
-    mappingReason: 'missing-patient-identifier',
-  },
-  {
-    name: 'unparseable_no_msh',
-    label: 'No MSH segment',
-    class: 'unparseable',
-    transports: ['mllp', 'https'],
-    commitAck: 'AE',
-    commitReason: 'Invalid MSH header',
-    application: null,
-    mappingReason: null,
-  },
-  {
-    name: 'unparseable_lf_terminators',
-    label: 'Line-feed segment terminators',
-    class: 'unparseable',
-    transports: ['mllp', 'https'],
-    commitAck: 'AE',
-    commitReason: 'invalid segment terminator, store expects: "\\r"',
-    application: null,
-    mappingReason: null,
-  },
-  {
-    name: 'noack_missing_end_block',
-    label: 'MLLP frame without its end block',
-    class: 'no-acknowledgment',
-    transports: ['mllp'],
-    commitAck: null,
-    commitReason: null,
-    application: null,
-    mappingReason: null,
-  },
-  {
-    name: 'unmappable_unknown_obx3_code',
-    label: 'Unknown OBX-3 code',
-    class: 'parses-but-cannot-map',
-    transports: ['mllp', 'https'],
-    commitAck: 'AA',
-    commitReason: null,
-    application: 'error',
-    mappingReason: 'unknown-obx-3-code',
-  },
-  {
-    name: 'unmappable_missing_obx14',
-    label: 'Missing OBX-14 (observation time)',
-    class: 'parses-but-cannot-map',
-    transports: ['mllp', 'https'],
-    commitAck: 'AA',
-    commitReason: null,
-    application: 'error',
-    mappingReason: 'missing-obx-14',
-  },
-  {
-    name: 'unmappable_non_numeric_obx5',
-    label: 'Non-numeric OBX-5 (value)',
-    class: 'parses-but-cannot-map',
-    transports: ['mllp', 'https'],
-    commitAck: 'AA',
-    commitReason: null,
-    application: 'error',
-    mappingReason: 'non-numeric-obx-5',
-  },
-];
+interface ManifestSample {
+  name: string;
+  class: string;
+  description: string;
+  transports: string[];
+  controlId: string | null;
+  er7: string;
+  expected: {
+    commit_ack: string | null;
+    commit_ack_reason: string | null;
+    no_ack: string | null;
+    application_outcome: string | null;
+    mapping_reason: string | null;
+  };
+}
+
+export const MOCK_SAMPLES: MockSampleBehaviour[] = (
+  mockSamples as { samples: ManifestSample[] }
+).samples.map((s) => ({
+  name: s.name,
+  label: s.description,
+  class: s.class as MalformedClass,
+  transports: s.transports as Transport[],
+  er7: s.er7,
+  controlId: s.controlId,
+  commitAck: s.expected.commit_ack as 'AA' | 'AE' | null,
+  commitReason: s.expected.commit_ack_reason,
+  application: s.expected.application_outcome as 'accepted' | 'error' | null,
+  mappingReason: s.expected.mapping_reason,
+}));
 
 /** HL7v2 timestamp (DTM, YYYYMMDDHHMMSS+ZZZZ) in UTC. */
 export function hl7Time(ms: number): string {
@@ -348,9 +331,16 @@ export function hl7Time(ms: number): string {
   return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}+0000`;
 }
 
+/** A new MSH-10 control ID in T07's format: 20 upper-case hex characters (the 2.5.1 maximum). */
+export function mockControlId(seed: string): string {
+  return pseudoUuid(seed).replace(/-/g, '').slice(0, 20).toUpperCase();
+}
+
 /**
- * A display copy of the ORU^R01 the simulator would send (segments joined with "\r", as on the
- * wire). Mock mode only: the real message is built and validated with hl7apy by T07/T13.
+ * A display copy of the ORU^R01 T07's builder produces for a reading (build_bp_oru_r01 with its
+ * default endpoints): MSH-3 CUFFSIM, MSH-5 PHR, OBR-3 filler number = control ID, OBX-6 as a CE
+ * `mm[Hg]^mm[Hg]^UCUM`, every segment ending in "\r". Mock mode only: the real message is built
+ * and validated with hl7apy by T07/T13. A test compares it with T07's `valid_bp_reading` sample.
  */
 export function mockOruR01(
   controlId: string,
@@ -359,13 +349,16 @@ export function mockOruR01(
   diastolic: number,
 ): string {
   const ts = hl7Time(ms);
-  return [
-    `MSH|^~\\&|PULSEBRIDGE-CUFF|PULSEBRIDGE|PULSEBRIDGE|PULSEBRIDGE|${ts}||ORU^R01^ORU_R01|${controlId}|P|2.5.1`,
-    'PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA',
-    `OBR|1|||85354-9^Blood pressure panel^LN|||${ts}`,
-    `OBX|1|NM|8480-6^Systolic blood pressure^LN||${systolic}|mm[Hg]|||||F|||${ts}`,
-    `OBX|2|NM|8462-4^Diastolic blood pressure^LN||${diastolic}|mm[Hg]|||||F|||${ts}`,
-  ].join('\r');
+  const unit = 'mm[Hg]^mm[Hg]^UCUM';
+  return (
+    [
+      `MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|${ts}||ORU^R01^ORU_R01|${controlId}|P|2.5.1`,
+      'PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA',
+      `OBR|1||${controlId}^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||${ts}`,
+      `OBX|1|NM|8480-6^Systolic blood pressure^LN||${systolic}|${unit}|||||F|||${ts}`,
+      `OBX|2|NM|8462-4^Diastolic blood pressure^LN||${diastolic}|${unit}|||||F|||${ts}`,
+    ].join('\r') + '\r'
+  );
 }
 
 /** A display copy of the store's ACK. Per spike S4 its type is `ACK` and MSA-2 is empty on AE. */
@@ -378,4 +371,117 @@ export function mockAck(
   const ts = hl7Time(ms);
   const msa = code === 'AA' ? `MSA|AA|${controlId ?? ''}` : `MSA|AE||${reason ?? ''}`;
   return [`MSH|^~\\&|||||${ts}||ACK|${pseudoUuid(`ack${ms}`).slice(0, 8)}|P|2.5.1`, msa].join('\r');
+}
+
+// ---------------------------------------------------------------------------------------------
+// Send-attempt AuditEvents (D12), in T31's final model.
+//
+// Built from T31's four generated examples (copied into ./t31-examples/ from
+// libs/pulsebridge_fhir/examples/auditevent-send-*.json) as templates; only values change.
+// mock-audit.test.ts compares the result with those files element by element.
+
+/** Placeholder HL7v2 store name for mock mode (the real one is configuration). */
+export const MOCK_HL7V2_STORE =
+  'projects/mock-project/locations/mock-region/datasets/mock-dataset/hl7V2Stores/mock-store';
+/** The synthetic patient's identifier (urn:pulsebridge:patient), as in T07's samples. */
+export const MOCK_PATIENT_IDENTIFIER = 'SYN-000123';
+
+const TEMPLATES = {
+  accepted: acceptedExample,
+  rejected: rejectedExample,
+  noAck: noAckExample,
+  unreadable: unreadableExample,
+} as const;
+
+/** T31's result for a commit-level acknowledgment (its outcome mapping table). */
+export function sendResult(ack: CommitAck): SendAttemptEntry['result'] {
+  if (!ack.received) return 'no-acknowledgment';
+  return ack.code === 'AA' || ack.code === 'CA' ? 'accepted' : 'rejected';
+}
+
+/** R4 audit-event-outcome for that result: 0 success, 4 minor failure, 8 serious failure. */
+export function outcomeCode(result: SendAttemptEntry['result']): SendAttemptEntry['outcome'] {
+  return result === 'accepted' ? '0' : result === 'rejected' ? '4' : '8';
+}
+
+const NO_ACK_WORDS: Record<string, string> = {
+  timeout: 'the read timed out',
+  'connection-closed': 'the connection was closed without a reply',
+  'api-error': 'the ingest API answered with an error',
+  'unreadable-reply': 'the reply could not be read as an HL7v2 ACK',
+};
+
+/** base64 of a string of byte-sized characters (an HL7v2 ACK is ASCII). */
+function base64(text: string): string {
+  return btoa(text);
+}
+
+/** The AuditEvent T31's builder would write for this attempt, shaped exactly like its examples. */
+export function mockSendAuditEvent(entry: SendAttemptEntry): AuditEvent {
+  const ack = entry.commitAck;
+  const template = ack.received
+    ? sendResult(ack) === 'accepted'
+      ? TEMPLATES.accepted
+      : TEMPLATES.rejected
+    : ack.why === 'unreadable-reply'
+      ? TEMPLATES.unreadable
+      : TEMPLATES.noAck;
+  const event = structuredClone(template) as unknown as AuditEvent;
+  const result = sendResult(ack);
+
+  event.id = entry.id;
+  (event as AuditEvent & { period: { start: string; end: string } }).period = {
+    start: entry.sentAt,
+    end: entry.recordedAt,
+  };
+  event.recorded = entry.recordedAt;
+  event.outcome = outcomeCode(result);
+  // Assigned in place, so the element keeps the template's position; an accept has none.
+  if (result === 'accepted') delete event.outcomeDesc;
+  if (ack.received && result === 'rejected') {
+    event.outcomeDesc = `Rejected by the receiver (MSA-1 ${ack.code})${ack.reason ? `: ${ack.reason}` : ''}`;
+  } else if (!ack.received) {
+    event.outcomeDesc = `No acknowledgment received: ${NO_ACK_WORDS[ack.why] ?? ack.why}`;
+  }
+
+  const destination = event.agent[1]?.who?.identifier;
+  if (destination) destination.value = MOCK_HL7V2_STORE;
+  const patient = event.entity?.[0]?.what?.identifier;
+  if (patient) patient.value = MOCK_PATIENT_IDENTIFIER;
+
+  const message = event.entity?.[1];
+  if (message) {
+    if (entry.messageName) {
+      message.what = {
+        identifier: {
+          system: 'urn:pulsebridge:source-record:hl7v2-message',
+          value: entry.messageName,
+        },
+      };
+    } else {
+      delete message.what;
+    }
+    // detail entries in T31's order; each only when it applies (its README's detail table).
+    const detail: { type: string; valueString?: string; valueBase64Binary?: string }[] = [
+      { type: 'format-version', valueString: '1' },
+      { type: 'transport', valueString: entry.transport ?? 'mllp' },
+    ];
+    if (entry.controlId) detail.push({ type: 'MSH-10', valueString: entry.controlId });
+    if (ack.received) {
+      detail.push({ type: 'MSA-1', valueString: ack.code });
+      if (ack.reason) detail.push({ type: 'MSA-3', valueString: ack.reason });
+      if (ack.raw) detail.push({ type: 'ack-message', valueBase64Binary: base64(ack.raw) });
+    } else {
+      detail.push({ type: 'no-ack-reason', valueString: ack.why });
+      if (ack.why === 'api-error' && ack.httpStatus !== null) {
+        detail.push({ type: 'http-status', valueString: String(ack.httpStatus) });
+      }
+    }
+    if (entry.sample) detail.push({ type: 'malformed-sample', valueString: entry.sample });
+    if (!ack.received && ack.replyPrefixBase64) {
+      detail.push({ type: 'unreadable-reply-bytes', valueBase64Binary: ack.replyPrefixBase64 });
+    }
+    message.detail = detail;
+  }
+  return event;
 }

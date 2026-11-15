@@ -4,3 +4,5 @@ dist-mock/
 test-results/
 playwright-report/
 package-lock.json
+src/api/mock-samples.json
+src/api/t31-examples/*.json

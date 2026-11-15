@@ -20,33 +20,33 @@ import type {
   MessagesLogEntry,
   MessagesLogPage,
   MessagesLogQuery,
+  CallOptions,
   ObservationQuery,
   PulseBridgeApi,
   SendAttemptEntry,
   ShareRequest,
   ShareResult,
   ShareStep,
+  UnreadableSendAttemptEntry,
   StatusSummary,
   Transport,
 } from './contract';
 import { CUFF_BOUNDS } from './contract';
 import { ApiError, LoginError, UnauthorizedError } from './errors';
-import {
-  LOINC,
-  type AuditEvent,
-  type Observation,
-  type OperationOutcome,
-  type Resource,
-} from './fhir';
+import { LOINC, type Observation, type OperationOutcome, type Resource } from './fhir';
 import {
   bloodPressureObservation,
   hash32,
   heartRateObservation,
   heartRateObservations,
-  MOCK_PATIENT_REF,
   MOCK_SAMPLES,
   MOCK_WATCH,
   mockAck,
+  MOCK_HL7V2_STORE,
+  mockControlId,
+  mockSendAuditEvent,
+  outcomeCode,
+  sendResult,
   mockOruR01,
   openemrPatient,
   provenanceFor,
@@ -79,6 +79,8 @@ interface MockAttempt {
   /** Final application outcome once the mock mapper has "run"; null when never stored. */
   finalOutcome: { outcome: 'accepted' | 'error'; reason: string | null } | null;
   resolveAt: number;
+  /** Sequence number, used to name the Observation once mapped. */
+  seq: number;
 }
 
 export class MockClient implements PulseBridgeApi {
@@ -88,6 +90,7 @@ export class MockClient implements PulseBridgeApi {
   readonly #mappingDelay: number;
   readonly #attempts: MockAttempt[] = [];
   readonly #transactions: FhirTransactionEntry[] = [];
+  readonly #unreadable: UnreadableSendAttemptEntry[] = [];
   readonly #shared = new Set<string>();
   #sequence = 0;
 
@@ -100,8 +103,9 @@ export class MockClient implements PulseBridgeApi {
 
   // -- login ------------------------------------------------------------------------------------
 
-  async login(password: string): Promise<LoginResult> {
+  async login(password: string, options: CallOptions = {}): Promise<LoginResult> {
     await this.#delay();
+    options.signal?.throwIfAborted();
     if (password === '') throw new LoginError('wrong-password', 'Enter a password.');
     const result = {
       token: `${MOCK_TOKEN_PREFIX}${(this.#now() % 1e9).toString(36)}`,
@@ -121,8 +125,8 @@ export class MockClient implements PulseBridgeApi {
 
   // -- reads ------------------------------------------------------------------------------------
 
-  async getStatus(): Promise<StatusSummary> {
-    await this.#authorised();
+  async getStatus(options: CallOptions = {}): Promise<StatusSummary> {
+    await this.#authorised(options.signal);
     const now = this.#now();
     const checkedAt = new Date(now).toISOString();
     return {
@@ -140,22 +144,28 @@ export class MockClient implements PulseBridgeApi {
     };
   }
 
-  async searchObservations(query: ObservationQuery): Promise<Observation[]> {
-    await this.#authorised();
+  async searchObservations(
+    query: ObservationQuery,
+    options: CallOptions = {},
+  ): Promise<Observation[]> {
+    await this.#authorised(options.signal);
     const start = query.range.start.getTime();
     const end = query.range.end.getTime();
     if (query.code === LOINC.heartRate) return heartRateObservations(start, end, this.#now());
     if (query.code === LOINC.bloodPressurePanel) {
       return this.#bloodPressure().filter((o) => {
         const t = Date.parse(o.effectiveDateTime ?? '');
-        return t >= start && t < end;
+        return t > start && t < end; // date=gt<start>&date=lt<end>
       });
     }
     throw this.#unprocessable(`Searching for code ${query.code} is not supported.`);
   }
 
-  async getHeartRateTrace(observationId: string): Promise<HeartRateTrace> {
-    await this.#authorised();
+  async getHeartRateTrace(
+    observationId: string,
+    options: CallOptions = {},
+  ): Promise<HeartRateTrace> {
+    await this.#authorised(options.signal);
     const start = windowStartFromId(observationId);
     const window = start === null ? null : syntheticRollUp(start);
     if (start === null || window === null || start + 5 * 60 * 1000 > this.#now()) {
@@ -170,8 +180,8 @@ export class MockClient implements PulseBridgeApi {
     };
   }
 
-  async listMalformedSamples(): Promise<MalformedSample[]> {
-    await this.#authorised();
+  async listMalformedSamples(options: CallOptions = {}): Promise<MalformedSample[]> {
+    await this.#authorised(options.signal);
     return MOCK_SAMPLES.map(({ name, label, class: cls, transports }) => ({
       name,
       label,
@@ -180,8 +190,11 @@ export class MockClient implements PulseBridgeApi {
     }));
   }
 
-  async submitCuffReading(request: CuffReadingRequest): Promise<CuffSendResult> {
-    await this.#authorised();
+  async submitCuffReading(
+    request: CuffReadingRequest,
+    options: CallOptions = {},
+  ): Promise<CuffSendResult> {
+    await this.#authorised(options.signal);
     const { systolic, diastolic, transport, sendMalformed } = request;
     const sample =
       sendMalformed === null ? null : MOCK_SAMPLES.find((s) => s.name === sendMalformed);
@@ -210,19 +223,22 @@ export class MockClient implements PulseBridgeApi {
     this.#resolve();
     return {
       attemptId: attempt.entry.id,
-      sentAt: attempt.entry.recordedAt,
+      sentAt: attempt.entry.sentAt,
       transport,
       controlId: attempt.entry.controlId,
       sample: attempt.entry.sample,
       messageSent: attempt.messageSent,
-      messageName: transport === 'https' ? attempt.entry.messageName : null,
+      messageName: attempt.entry.messageName,
       ack: attempt.entry.commitAck,
       audit: { recorded: true },
     };
   }
 
-  async getCuffAttemptTrace(attemptId: string): Promise<CuffAttemptTrace> {
-    await this.#authorised();
+  async getCuffAttemptTrace(
+    attemptId: string,
+    options: CallOptions = {},
+  ): Promise<CuffAttemptTrace> {
+    await this.#authorised(options.signal);
     this.#resolve();
     const attempt = this.#attempts.find((a) => a.entry.id === attemptId);
     if (!attempt) throw notFound(`AuditEvent/${attemptId}`);
@@ -230,7 +246,8 @@ export class MockClient implements PulseBridgeApi {
     return {
       attempt: structuredClone(attempt.entry),
       messageSent: attempt.messageSent,
-      auditEvent: auditEventFor(attempt.entry),
+      // The resource as stored: the raw ACK stays base64 here (T31's model).
+      auditEvent: mockSendAuditEvent(attempt.entry),
       observation,
       provenance: observation
         ? provenanceFor(
@@ -243,11 +260,15 @@ export class MockClient implements PulseBridgeApi {
     };
   }
 
-  async listMessages(query: MessagesLogQuery = {}): Promise<MessagesLogPage> {
-    await this.#authorised();
+  async listMessages(
+    query: MessagesLogQuery = {},
+    options: CallOptions = {},
+  ): Promise<MessagesLogPage> {
+    await this.#authorised(options.signal);
     this.#resolve();
     const all: MessagesLogEntry[] = [
       ...this.#attempts.map((a) => structuredClone(a.entry)),
+      ...this.#unreadable.map((u) => structuredClone(u)),
       ...this.#transactions.map((t) => structuredClone(t)),
     ]
       .filter((e) => !query.kind || e.kind === query.kind)
@@ -255,20 +276,22 @@ export class MockClient implements PulseBridgeApi {
         (e) =>
           !query.outcome || (e.kind === 'cuff-send' && e.application?.outcome === query.outcome),
       )
-      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt));
+      // Newest first; an unreadable row without a time goes last.
+      .sort((a, b) => (b.recordedAt ?? '').localeCompare(a.recordedAt ?? ''));
     const offset = query.cursor ? Number.parseInt(query.cursor, 10) || 0 : 0;
     const count = Math.min(query.count ?? 50, 100);
     const entries = all.slice(offset, offset + count);
     return {
       entries,
       nextCursor: offset + count < all.length ? String(offset + count) : null,
+      unreadable: entries.filter((e) => e.kind === 'unreadable-send-attempt').length,
     };
   }
 
   // -- share ------------------------------------------------------------------------------------
 
-  async share(request: ShareRequest): Promise<ShareResult> {
-    await this.#authorised();
+  async share(request: ShareRequest, options: CallOptions = {}): Promise<ShareResult> {
+    await this.#authorised(options.signal);
     if (request.observations.length === 0) throw this.#unprocessable('Nothing selected to share.');
     const observations = await Promise.all(request.observations.map((ref) => this.#lookup(ref)));
     const notFinal = observations.filter((o) => o.status !== 'final');
@@ -340,7 +363,7 @@ export class MockClient implements PulseBridgeApi {
     for (const obs of observations) {
       const ref = `Observation/${obs.id ?? ''}`;
       const body: Observation = {
-        ...withoutServerFields(obs),
+        ...observationForSharing(obs),
         subject: { reference: `Patient/${patientId}` },
         encounter: { reference: `Encounter/${encounterId}` },
       };
@@ -415,8 +438,11 @@ export class MockClient implements PulseBridgeApi {
   // -- internals --------------------------------------------------------------------------------
 
   /** The same gate the proxy applies: no valid token, no data. */
-  async #authorised(): Promise<void> {
+  async #authorised(signal?: AbortSignal): Promise<void> {
     await this.#delay();
+    // Like fetch: a call whose signal was aborted (the dashboard was torn down) rejects with
+    // an AbortError, which callers ignore.
+    signal?.throwIfAborted();
     const token = this.options.session.token();
     if (token === null || !token.startsWith(MOCK_TOKEN_PREFIX)) {
       this.options.session.clear();
@@ -467,7 +493,7 @@ export class MockClient implements PulseBridgeApi {
       if (now < a.resolveAt) continue;
       a.entry.application = { ...a.finalOutcome };
       if (a.finalOutcome.outcome === 'accepted') {
-        a.entry.observation = `Observation/mock-bp-${a.entry.controlId ?? ''}`;
+        a.entry.observation = `Observation/mock-bp-${String(a.seq)}`;
       }
     }
   }
@@ -485,7 +511,9 @@ export class MockClient implements PulseBridgeApi {
     noAck?: CommitAck & { received: false };
   }): MockAttempt {
     const n = this.#sequence++;
-    const controlId = `PB${String(input.at).slice(-8)}${String(n).padStart(2, '0')}`;
+    const sample = MOCK_SAMPLES.find((x) => x.name === input.sample);
+    // A sample carries its own MSH-10 (or none); a built reading gets a new one in T07's format.
+    const controlId = sample ? sample.controlId : mockControlId(`${String(input.at)}-${String(n)}`);
     const stored = input.commit === 'AA';
     const commitAck: CommitAck =
       input.noAck ??
@@ -496,6 +524,7 @@ export class MockClient implements PulseBridgeApi {
             httpStatus: null,
             detail:
               'No ACK within 10 s: the adapter is still waiting for the end of the MLLP frame.',
+            replyPrefixBase64: null,
           }
         : {
             received: true,
@@ -504,27 +533,39 @@ export class MockClient implements PulseBridgeApi {
             reason: input.commitReason,
             raw: mockAck(input.commit, controlId, input.commitReason, input.at),
           });
+    const result = sendResult(commitAck);
+    // A timeout is recorded when the read gives up; anything else about a second after sending.
+    const recordedMs = input.at + (commitAck.received ? 1000 : 10_000);
     const attempt: MockAttempt = {
       entry: {
         kind: 'cuff-send',
-        id: `mock-attempt-${pseudoUuid(controlId).slice(0, 13)}`,
-        recordedAt: new Date(input.at).toISOString(),
+        id: `mock-attempt-${pseudoUuid(`${String(input.at)}-${String(n)}`).slice(0, 13)}`,
+        sentAt: new Date(input.at).toISOString(),
+        recordedAt: new Date(recordedMs).toISOString(),
         transport: input.transport,
         controlId,
+        result,
+        outcome: outcomeCode(result),
         sample: input.sample,
         commitAck,
         application: stored ? { outcome: 'pending', reason: null } : null,
-        messageName: stored
-          ? `projects/mock/locations/mock/datasets/mock/hl7V2Stores/mock/messages/${hash32(controlId).toString(16)}`
-          : null,
+        // The ingest response names the stored message over HTTPS only (T13); over MLLP the
+        // ACK does not carry it.
+        messageName:
+          stored && input.transport === 'https'
+            ? `${MOCK_HL7V2_STORE}/messages/${hash32(`${String(input.at)}-${String(n)}`).toString(16)}`
+            : null,
         observation: null,
         source: 'audit-event',
       },
-      messageSent: mockOruR01(controlId, input.at, input.systolic, input.diastolic),
+      // A malformed send shows the sample's own bytes (T07), not a message built from the inputs.
+      messageSent:
+        sample?.er7 ?? mockOruR01(controlId ?? '', input.at, input.systolic, input.diastolic),
       systolic: input.systolic,
       diastolic: input.diastolic,
       finalOutcome: stored ? input.final : null,
       resolveAt: input.resolveAt,
+      seq: n,
     };
     this.#attempts.push(attempt);
     return attempt;
@@ -588,9 +629,31 @@ export class MockClient implements PulseBridgeApi {
       resolveAt: done,
       noAck: {
         received: false,
-        why: 'http-error',
+        why: 'api-error',
         httpStatus: 503,
         detail: 'The ingest endpoint answered 503 Service Unavailable.',
+        replyPrefixBase64: null,
+      },
+    });
+    // A reply that is not a readable ACK: a byte order mark before MSH (as in T31's example).
+    this.#record({
+      at: now - 70 * min,
+      transport: 'mllp',
+      systolic: 122,
+      diastolic: 80,
+      sample: null,
+      commit: null,
+      commitReason: null,
+      final: null,
+      resolveAt: done,
+      noAck: {
+        received: false,
+        why: 'unreadable-reply',
+        httpStatus: null,
+        detail: 'The reply started with a byte order mark, so it could not be read as an ACK.',
+        replyPrefixBase64: btoa(
+          '\u00ef\u00bb\u00bfMSH|^~\\&|||||20260101143300||ACK|ACK-MOCK|P|2.5.1\rMSA|AA|',
+        ),
       },
     });
     fromSample(now - 60 * min, 'unmappable_missing_obx14', 'mllp');
@@ -618,6 +681,15 @@ export class MockClient implements PulseBridgeApi {
       resolveAt: Number.POSITIVE_INFINITY,
     });
     this.#resolve();
+
+    // An AuditEvent that is ours but unreadable (T31's UnreadableSendAttempt): shown as an error.
+    this.#unreadable.push({
+      kind: 'unreadable-send-attempt',
+      id: 'mock-unreadable-0001',
+      recordedAt: new Date(now - 50 * min).toISOString(),
+      problem:
+        "written in format version 2, newer than this library's 1: the MSA-1 detail is missing",
+    });
 
     // health-sync runs every 15 minutes (brief, "Ingestion, wearable").
     for (let i = 0; i < 8; i++) {
@@ -651,6 +723,18 @@ function boundsIssues(systolic: number, diastolic: number): string[] {
   if (issues.length === 0 && diastolic >= systolic)
     issues.push('Systolic must be above diastolic.');
   return issues;
+}
+
+/**
+ * An Observation as the share sends it to OpenEMR, following T06: no server `id` or `meta`, no
+ * `identifier` (our conditional-update key means nothing to the clinic) and no `device` reference
+ * (the Device lives in our store, not in OpenEMR). `subject` and `encounter` are set by the caller.
+ */
+function observationForSharing(obs: Observation): Observation {
+  const copy = withoutServerFields(obs);
+  delete copy.identifier;
+  delete copy.device;
+  return copy;
 }
 
 /** A resource as a client sends it for creation: no server-assigned `id` or `meta`. */
@@ -689,41 +773,5 @@ function step(
     response: { status, body: response },
     result: status < 300 ? 'ok' : 'failed',
     durationMs: 40 + (hash32(label) % 160),
-  };
-}
-
-/**
- * An approximation of T31's AuditEvent for one send attempt, for the mock trace only. T31 owns
- * the real codes; this uses DICOM 110106 "Export" (data leaving the sender) as a stand-in.
- */
-function auditEventFor(entry: SendAttemptEntry): AuditEvent {
-  const ack = entry.commitAck;
-  const outcome = !ack.received ? '8' : ack.code === 'AA' ? '0' : '4';
-  return {
-    resourceType: 'AuditEvent',
-    id: entry.id,
-    type: {
-      system: 'http://dicom.nema.org/resources/ontology/DCM',
-      code: '110106',
-      display: 'Export',
-    },
-    action: 'C',
-    recorded: entry.recordedAt,
-    outcome,
-    outcomeDesc: ack.received
-      ? `${ack.code}${ack.reason ? `: ${ack.reason}` : ''}`
-      : `No acknowledgment: ${ack.why}`,
-    agent: [{ requestor: true, who: { display: 'cuff-sim (mock)' } }],
-    source: { observer: { display: 'cuff-sim (mock)' } },
-    entity: [
-      {
-        what: { reference: MOCK_PATIENT_REF },
-        detail: [
-          { type: 'transport', valueString: entry.transport ?? 'unknown' },
-          { type: 'control-id', valueString: entry.controlId ?? '' },
-          ...(entry.sample ? [{ type: 'sample', valueString: entry.sample }] : []),
-        ],
-      },
-    ],
   };
 }

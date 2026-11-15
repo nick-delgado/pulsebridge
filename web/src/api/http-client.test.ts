@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, LoginError, UnauthorizedError } from './errors';
 import { LOINC } from './fhir';
+import type { PulseBridgeApi } from './contract';
 import { HttpClient } from './http-client';
 import { SESSION_KEY, Session } from './session';
 
@@ -34,6 +35,57 @@ function header(call: Call | undefined, name: string): string | null {
   return new Headers(call?.init.headers).get(name);
 }
 
+/** One body every method can read its fields from, so the loop below needs no per-method setup. */
+const ANSWERS_EVERYTHING = {
+  token: TOKEN,
+  expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+  resourceType: 'Bundle',
+  type: 'searchset',
+  entry: [],
+  resources: {
+    resourceType: 'Bundle',
+    type: 'collection',
+    entry: [{ resource: { resourceType: 'Observation', status: 'final', code: {} } }],
+  },
+  source: null,
+  readBack: { resourceType: 'Bundle', type: 'collection', entry: [] },
+  entries: [],
+  nextCursor: null,
+};
+
+type Method = {
+  [K in keyof PulseBridgeApi]: PulseBridgeApi[K] extends (...args: never[]) => unknown ? K : never;
+}[keyof PulseBridgeApi];
+
+/**
+ * Every method of the API, with how to call it. Typed as a Record over the interface's method
+ * names, so adding a method to PulseBridgeApi without adding it here fails the type check.
+ */
+const CALLS: Record<
+  Method,
+  ((c: HttpClient, signal: AbortSignal) => Promise<unknown>) | 'no-request'
+> = {
+  login: (c, signal) => c.login('pw', { signal }),
+  logout: 'no-request',
+  isLoggedIn: 'no-request',
+  getStatus: (c, signal) => c.getStatus({ signal }),
+  searchObservations: (c, signal) =>
+    c.searchObservations(
+      { code: LOINC.heartRate, range: { start: new Date(0), end: new Date(1) } },
+      { signal },
+    ),
+  getHeartRateTrace: (c, signal) => c.getHeartRateTrace('hr-1', { signal }),
+  listMalformedSamples: (c, signal) => c.listMalformedSamples({ signal }),
+  submitCuffReading: (c, signal) =>
+    c.submitCuffReading(
+      { systolic: 120, diastolic: 80, transport: 'mllp', sendMalformed: null },
+      { signal },
+    ),
+  getCuffAttemptTrace: (c, signal) => c.getCuffAttemptTrace('a-1', { signal }),
+  listMessages: (c, signal) => c.listMessages({}, { signal }),
+  share: (c, signal) => c.share({ observations: ['Observation/hr-1'] }, { signal }),
+};
+
 const futureLogin = () => ({
   token: TOKEN,
   expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
@@ -54,43 +106,41 @@ describe('HttpClient', () => {
   }
 
   describe('bearer token', () => {
-    it('adds Authorization: Bearer <token> to every protected call', async () => {
+    it('every method: one backend (D10), bearer token, no cookies, no cache, no redirects, signal', async () => {
       session.save(futureLogin());
-      const searchset = { resourceType: 'Bundle', type: 'searchset', entry: [] };
-      const f = fakeFetch(
-        json(200, { watchSync: {} }),
-        json(200, searchset),
-        json(200, { entries: [], nextCursor: null }),
-        json(200, []),
-        json(200, { attemptId: 'a' }),
-      );
+      const f = fakeFetch(...Object.keys(CALLS).map(() => json(200, ANSWERS_EVERYTHING)));
       const c = client(f.fetch);
-      await c.getStatus();
-      await c.searchObservations({
-        code: LOINC.heartRate,
-        range: { start: new Date(0), end: new Date(1) },
-      });
-      await c.listMessages();
-      await c.listMalformedSamples();
-      await c.submitCuffReading({
-        systolic: 120,
-        diastolic: 80,
-        transport: 'mllp',
-        sendMalformed: null,
-      });
-
-      expect(f.calls).toHaveLength(5);
-      for (const call of f.calls) {
-        // One backend (D10): every request goes to fhir-proxy's base URL and nowhere else.
-        expect(call.url.startsWith(`${ORIGIN}/api/`)).toBe(true);
-        expect(header(call, 'Authorization')).toBe(`Bearer ${TOKEN}`);
-        // No cookies either way, and no HTTP caching of health data.
-        expect(call.init.credentials).toBe('omit');
-        expect(call.init.cache).toBe('no-store');
+      const signal = new AbortController().signal;
+      for (const [name, call] of Object.entries(CALLS)) {
+        if (call === 'no-request') continue;
+        const before = f.calls.length;
+        await call(c, signal);
+        expect(f.calls.length, `${name} made no request`).toBeGreaterThan(before);
+        for (const req of f.calls.slice(before)) {
+          // One backend (D10): every request goes to fhir-proxy's base URL and nowhere else.
+          expect(req.url.startsWith(`${ORIGIN}/api/`), `${name} -> ${req.url}`).toBe(true);
+          expect(header(req, 'Authorization'), name).toBe(
+            name === 'login' ? null : `Bearer ${TOKEN}`,
+          );
+          // No cookies either way, no HTTP caching of health data, a redirect is an error.
+          expect(req.init.credentials, name).toBe('omit');
+          expect(req.init.cache, name).toBe('no-store');
+          expect(req.init.redirect, name).toBe('error');
+          // The caller's AbortSignal reaches fetch, so a torn-down dashboard cancels it.
+          expect(req.init.signal, name).toBe(signal);
+        }
       }
     });
 
-    it('sends no Authorization header on login, and stores the token it gets back', async () => {
+    it('the method list above covers every method of HttpClient', () => {
+      const methods = Object.getOwnPropertyNames(HttpClient.prototype).filter(
+        (n) => n !== 'constructor',
+      );
+      expect(methods.sort()).toEqual(Object.keys(CALLS).sort());
+    });
+
+    it('sends no Authorization header on login, even with a token already saved', async () => {
+      session.save({ token: 'older-token', expiresAt: futureLogin().expiresAt });
       const login = futureLogin();
       const f = fakeFetch(json(200, { token: login.token, expires_at: login.expiresAt }));
       await client(f.fetch).login('correct horse');
@@ -102,6 +152,17 @@ describe('HttpClient', () => {
       expect(JSON.parse(call?.init.body as string)).toEqual({ password: 'correct horse' });
       expect(session.token()).toBe(TOKEN);
       expect(sessionStorage.getItem(SESSION_KEY)).toContain(TOKEN);
+    });
+
+    it('logout() forgets the token without calling the server', () => {
+      session.save(futureLogin());
+      const f = fakeFetch();
+      const c = client(f.fetch);
+      expect(c.isLoggedIn()).toBe(true);
+      c.logout();
+      expect(c.isLoggedIn()).toBe(false);
+      expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
+      expect(f.calls).toHaveLength(0);
     });
 
     it('does not call the server at all when there is no token', async () => {
@@ -120,6 +181,39 @@ describe('HttpClient', () => {
       expect(onUnauthorized).toHaveBeenCalledOnce();
       expect(session.token()).toBeNull();
       expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
+    });
+
+    it('a late 401 from a request sent with an old token does not end a newer session', async () => {
+      session.save({ token: 'old-token', expiresAt: futureLogin().expiresAt });
+      let answer: (r: Response) => void = () => undefined;
+      const slow = vi.fn(() => new Promise<Response>((resolve) => (answer = resolve)));
+      const c = client(slow);
+      const pending = c.getStatus();
+      // Meanwhile the user logs out and in again.
+      session.save(futureLogin());
+      answer(json(401, {}));
+      await expect(pending).rejects.toBeInstanceOf(UnauthorizedError);
+      expect(onUnauthorized).not.toHaveBeenCalled();
+      expect(session.token()).toBe(TOKEN);
+    });
+
+    it('an aborted request rejects with the AbortError, not as a network failure', async () => {
+      session.save(futureLogin());
+      const controller = new AbortController();
+      const hanging = vi.fn(
+        (_url: unknown, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('aborted', 'AbortError'));
+            });
+          }),
+      );
+      const pending = client(hanging).getStatus({
+        signal: controller.signal,
+      });
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      expect(onUnauthorized).not.toHaveBeenCalled();
     });
 
     it('treats 401 on login as a wrong password, not as a session ending', async () => {
@@ -143,6 +237,16 @@ describe('HttpClient', () => {
   });
 
   describe('errors', () => {
+    it('a 429 from the rate-limited cuff route carries Retry-After', async () => {
+      session.save(futureLogin());
+      const f = fakeFetch(json(429, {}, { 'Retry-After': '30' }));
+      const error = (await client(f.fetch)
+        .submitCuffReading({ systolic: 120, diastolic: 80, transport: 'mllp', sendMalformed: null })
+        .catch((e: unknown) => e)) as ApiError;
+      expect(error).toBeInstanceOf(ApiError);
+      expect([error.status, error.retryAfterSeconds]).toEqual([429, 30]);
+    });
+
     it('keeps a FHIR OperationOutcome from an error body', async () => {
       session.save(futureLogin());
       const outcome = {
@@ -184,7 +288,7 @@ describe('HttpClient', () => {
       expect(first.pathname).toBe('/api/fhir/Observation');
       expect(first.searchParams.get('code')).toBe('http://loinc.org|8867-4');
       expect(first.searchParams.getAll('date')).toEqual([
-        'ge2026-01-01T00:00:00.000Z',
+        'gt2026-01-01T00:00:00.000Z',
         'lt2026-01-02T00:00:00.000Z',
       ]);
       expect(header(f.calls[0], 'Accept')).toBe('application/fhir+json');

@@ -25,6 +25,10 @@ export interface CodeableConcept {
 /** R4 datatype Reference, for example `{ "reference": "Patient/123" }`. */
 export interface Reference {
   reference?: string;
+  /** Logical reference by identifier, for a target with no resolvable URL (R4 Reference.identifier). */
+  identifier?: Identifier;
+  /** The target's resource type, for example "Device" (R4 Reference.type). */
+  type?: string;
   display?: string;
 }
 
@@ -70,7 +74,16 @@ export interface ObservationComponent {
 export interface Observation extends Resource {
   resourceType: 'Observation';
   identifier?: Identifier[];
-  status: 'registered' | 'preliminary' | 'final' | 'amended' | 'corrected' | 'cancelled';
+  /** R4 ObservationStatus (required binding): all eight codes. */
+  status:
+    | 'registered'
+    | 'preliminary'
+    | 'final'
+    | 'amended'
+    | 'corrected'
+    | 'cancelled'
+    | 'entered-in-error'
+    | 'unknown';
   category?: CodeableConcept[];
   code: CodeableConcept;
   subject?: Reference;
@@ -125,7 +138,13 @@ export interface AuditEvent extends Resource {
   outcomeDesc?: string;
   agent: { requestor: boolean; who?: Reference; type?: CodeableConcept }[];
   source: { observer: Reference; type?: Coding[] };
-  entity?: { what?: Reference; detail?: { type: string; valueString?: string }[] }[];
+  entity?: {
+    what?: Reference;
+    type?: Coding;
+    role?: Coding;
+    /** R4 AuditEvent.entity.detail: value[x] is a string or base64Binary (raw ACK bytes, D12). */
+    detail?: { type: string; valueString?: string; valueBase64Binary?: string }[];
+  }[];
 }
 
 /** R4 OperationOutcome: the standard FHIR error body. */
