@@ -37,7 +37,7 @@ locals {
       }
       "scheduler-invoker" = {
         display_name = "PulseBridge scheduler invoker"
-        description  = "Identity in the OIDC token Cloud Scheduler sends to health-sync (T20). Can only invoke health-sync."
+        description  = "Identity in the OIDC token Cloud Scheduler sends to health-sync, or the OAuth token it uses to run the seeder job. Can only invoke health-sync or run the seeder job."
       }
       "pubsub-push" = {
         display_name = "PulseBridge Pub/Sub push"
