@@ -180,3 +180,33 @@ FHIR_VALIDATE_ARGS ?=
 
 fhir-validate: ## FHIR Validator over the examples (needs Java 17+ and network; not in `check`)
 	scripts/fhir-validate.sh $(FHIR_VALIDATE_ARGS)
+
+# ---- Container images (T24) ---------------------------------------------------------------------
+# Builds the same images as cloudbuild.yaml on a developer machine with Docker, without Cloud Build
+# and without pushing anything. Every services/*/Dockerfile is built from the repository root (the
+# Dockerfiles copy from libs/). Deliberately NOT part of `check`: it needs a Docker daemon and the
+# network (Docker Hub for the base image, PyPI for the dependencies). See services/README.md.
+#   make images                     build pulsebridge/<service>:local for every service
+#   make images-smoke               start each built image with fake configuration and probe it
+#   make images IMAGE_PIP_CERT=...  behind a TLS-inspecting proxy: a CA bundle for pip, passed as
+#                                   a build secret (never stored in a layer)
+DOCKER ?= docker
+IMAGE_PREFIX ?= pulsebridge
+IMAGE_TAG ?= local
+IMAGE_PIP_CERT ?=
+IMAGE_SERVICES := $(patsubst services/%/Dockerfile,%,$(wildcard services/*/Dockerfile))
+# Defined on its own line: a comma inside $(if ...) would split its arguments.
+IMAGE_SECRET_FLAG := --secret "id=pip_cert,src=$(IMAGE_PIP_CERT)"
+
+.PHONY: images images-smoke
+
+images: ## Build every service image locally with Docker (not in `check`)
+	@for s in $(IMAGE_SERVICES); do \
+		echo "== $(DOCKER) build $(IMAGE_PREFIX)/$$s:$(IMAGE_TAG)"; \
+		$(DOCKER) build --file "services/$$s/Dockerfile" --tag "$(IMAGE_PREFIX)/$$s:$(IMAGE_TAG)" \
+			$(if $(IMAGE_PIP_CERT),$(IMAGE_SECRET_FLAG)) . || exit 1; \
+	done
+
+images-smoke: install ## Start each image built by `make images` and check it serves (not in `check`)
+	PULSEBRIDGE_IMAGE_SMOKE=1 IMAGE_PREFIX="$(IMAGE_PREFIX)" IMAGE_TAG="$(IMAGE_TAG)" DOCKER="$(DOCKER)" \
+		$(BIN)/pytest tests/tooling/test_image_smoke.py
