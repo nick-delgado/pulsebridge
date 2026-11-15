@@ -197,7 +197,12 @@ interface MockOpenEmr {
   /** Observation id per (code, Encounter, effective time): OpenEMR's duplicate rule. */
   observations: Map<string, string>;
   stored: Map<string, Resource>;
+  /** When the mock's access token was issued (ms); reused for 240 s, as the proxy does. */
+  tokenAt: number | null;
 }
+
+/** The proxy reuses a 300 s token until 60 s before it expires (T15, `share/oauth.py`). */
+const TOKEN_REUSE_MS = 240_000;
 
 export class MockClient implements PulseBridgeApi {
   readonly mode = 'mock' as const;
@@ -213,6 +218,7 @@ export class MockClient implements PulseBridgeApi {
     encounters: new Map(),
     observations: new Map(),
     stored: new Map(),
+    tokenAt: null,
   };
   readonly #zone: string | null;
   /** The `hostile` data set: markup in text from other systems (mock-data.ts, HOSTILE_MARKUP). */
@@ -808,22 +814,41 @@ export class MockClient implements PulseBridgeApi {
       );
       throw stop(502, 'openemr-unreachable', 'OpenEMR could not be reached; nothing was sent.');
     }
-    steps.push(
-      traceStep(
-        'token',
-        'Access token (client credentials, signed assertion)',
-        'POST',
-        '/oauth2/default/token',
-        tokenRequest,
-        200,
-        {
-          access_token: 'mock-access-token-never-shown',
-          token_type: 'Bearer',
-          expires_in: 300,
-          scope,
-        },
-      ),
-    );
+    const tokenAt = emr.tokenAt;
+    if (tokenAt !== null && this.#now() - tokenAt < TOKEN_REUSE_MS) {
+      // As the proxy: a token still valid in memory is reused, and no token request is sent.
+      steps.push(
+        traceStep(
+          'token',
+          `Access token reused from this proxy's memory (obtained ${String(Math.round((this.#now() - tokenAt) / 1000))} s ago, still valid): no token request was sent`,
+          'POST',
+          '/oauth2/default/token',
+          null,
+          0,
+          null,
+          'reused',
+        ),
+      );
+    } else {
+      steps.push(
+        traceStep(
+          'token',
+          'Access token (client credentials, signed assertion)',
+          'POST',
+          '/oauth2/default/token',
+          tokenRequest,
+          200,
+          {
+            access_token: 'mock-access-token-never-shown',
+            token_type: 'Bearer',
+            expires_in: 300,
+            scope,
+          },
+        ),
+      );
+
+      emr.tokenAt = this.#now();
+    }
 
     // Patient: search by the PT identifier; create only if absent (OpenEMR ignores conditional
     // create, so a second create would be a second patient).
@@ -1550,6 +1575,11 @@ function observationForSharing(obs: Observation): Observation {
   delete copy.identifier;
   delete copy.device;
   delete copy.performer;
+  // OpenEMR 8.5.0 reads only effectiveDateTime: a heart-rate window is sent at its start.
+  if (copy.effectivePeriod?.start !== undefined && copy.effectiveDateTime === undefined) {
+    copy.effectiveDateTime = copy.effectivePeriod.start;
+  }
+  delete copy.effectivePeriod;
   return copy;
 }
 

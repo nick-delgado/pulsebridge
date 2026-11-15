@@ -103,6 +103,12 @@ test('sharing the same reading again: no new Patient, Encounter reused, reported
   await expect(steps(page).nth(1)).toContainText('Patient already existed: not created again');
   await expect(steps(page).nth(2)).toContainText('Encounter found: reused');
   await expect(steps(page).nth(3)).toContainText('refused as a repeat, nothing new written');
+  // The first share's token is still valid: reused, and no "no answer" line for it (T15).
+  await expect(steps(page).nth(0)).toContainText(
+    'Token reused from the server’s memory: no request sent',
+  );
+  await expect(steps(page).nth(0)).toContainText('not sent (token reused)');
+  await expect(steps(page).nth(0)).not.toContainText('no answer');
   expect(errors).toEqual([]);
 });
 

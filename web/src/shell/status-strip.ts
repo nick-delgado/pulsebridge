@@ -67,7 +67,7 @@ function items(state: StripState): HTMLLIElement[] {
         : undefined,
     ),
     reach('FHIR store', status.fhirStore),
-    reach('OpenEMR', status.openemr),
+    reach('OpenEMR', status.openemr, OPENEMR_STATES),
   ];
 }
 
@@ -147,12 +147,47 @@ function noteItems(sync: WatchSyncStatus): HTMLLIElement[] {
   return out;
 }
 
-function reach(label: string, r: Reachability): HTMLLIElement {
+/**
+ * The OpenEMR probe's `detail` codes (fhir-proxy T15, `share/probe.py`) in words. A state that
+ * is set-up, not a fault, is neutral; the rest are warnings. Any other code (including the FHIR
+ * store's, which does not use this table) is shown as "Unreachable" with the code.
+ */
+const OPENEMR_STATES: Readonly<
+  Record<string, { tone: 'warn' | 'neutral'; text: string; detail?: string }>
+> = {
+  'not-configured': {
+    tone: 'neutral',
+    text: 'Not configured',
+    detail: 'Sharing with the clinic is not set up on this server.',
+  },
+  'client-not-registered': {
+    tone: 'neutral',
+    text: 'Not registered yet',
+    detail: 'The clinic system has not registered this server as a client yet.',
+  },
+  'client-document-invalid': {
+    tone: 'warn',
+    text: 'Misconfigured',
+    detail: 'client-document-invalid',
+  },
+  'tls-verification-failed': {
+    tone: 'warn',
+    text: 'Certificate mismatch',
+    detail: 'tls-verification-failed',
+  },
+  'not-ready': { tone: 'warn', text: 'Starting or not ready', detail: 'not-ready' },
+  timeout: { tone: 'warn', text: 'Unreachable', detail: 'timeout' },
+  unavailable: { tone: 'warn', text: 'Unreachable', detail: 'unavailable' },
+};
+
+function reach(label: string, r: Reachability, states: typeof OPENEMR_STATES = {}): HTMLLIElement {
   if (r.reachable) return item('ok', label, 'Reachable');
   // Nobody checked (no OpenEMR probe before T15, amendment 10): not a claim that it is down.
   if (r.detail === REACHABILITY_NOT_CHECKED) {
     return item('neutral', label, 'Not checked', 'The server does not check this yet.');
   }
+  const known = r.detail === null ? undefined : states[r.detail];
+  if (known) return item(known.tone, label, known.text, known.detail);
   return item('warn', label, 'Unreachable', r.detail ?? undefined);
 }
 

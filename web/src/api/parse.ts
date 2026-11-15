@@ -376,6 +376,7 @@ export function parseMessagesPage(wire: unknown): MessagesLogPage {
 
 const STEP_RESULTS: readonly Exclude<ShareStepResult, 'unknown'>[] = [
   'ok',
+  'reused',
   'found',
   'not-found',
   'already-shared',

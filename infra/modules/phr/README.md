@@ -413,7 +413,7 @@ module passes; a blank means the service's default applies.
 | `CUFF_FORWARD_TIMEOUT_SECONDS` | no (55) | `55` |
 | `REQUEST_TIMEOUT_SECONDS` | no (120) | `70`, the same as the Cloud Run request timeout ("Timeouts end to end") |
 | `SESSION_TTL_SECONDS`, `PASSWORD_CACHE_SECONDS`, `LOGIN_*`, `FHIR_TIMEOUT_SECONDS`, `SAMPLES_FORWARD_TIMEOUT_SECONDS`, `HEALTH_SYNC_TIMEOUT_SECONDS`, `STATUS_CACHE_SECONDS` | no | service defaults (8 h tokens, 30 s rotation delay, 5/60/60 login limits, ...) |
-| `OPENEMR_SITE_ADDRESS`, `OPENEMR_TOKEN_URL`, `OPENEMR_FHIR_BASE_URL`, `OPENEMR_SCOPES`, `OPENEMR_CLIENT_FILE` | not read yet (T15) | only when `openemr` is given; the file is `/secrets/openemr-client/value` |
+| `OPENEMR_SITE_ADDRESS`, `OPENEMR_TOKEN_URL`, `OPENEMR_FHIR_BASE_URL`, `OPENEMR_SCOPES`, `OPENEMR_CLIENT_FILE` | no (all or none; read by T15's share, services/fhir-proxy/README.md "Share to OpenEMR") | only when `openemr` is given; the file is `/secrets/openemr-client/value` |
 
 **Secrets are files, never environment variables.** Each is a secret volume at version `latest`
 in its own directory: `reviewer-password` → `/secrets/reviewer-password/value`, and with

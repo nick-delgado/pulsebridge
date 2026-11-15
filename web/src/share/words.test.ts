@@ -126,7 +126,14 @@ describe('result and failure words', () => {
     );
     const noBack = result({});
     noBack.readBack.observation.stored = null;
-    expect(resultHeadline(noBack)).toContain('Reading it back failed');
+    // Shared but not read back: only OpenEMR's word, never "stored" as a confirmed fact.
+    expect(resultHeadline(noBack)).toBe(
+      'OpenEMR answered that it stored the reading (HTTP 201), but it could not be read back to confirm. The Patient was created there for this first share.',
+    );
+    expect(resultHeadline(noBack)).not.toContain('Shared: OpenEMR stored');
+    const againNoBack = result({ outcome: 'already-shared' });
+    againNoBack.readBack.observation.stored = null;
+    expect(resultHeadline(againNoBack)).toContain('Reading it back failed');
   });
 
   it('refused before OpenEMR: nothing was sent', () => {
@@ -237,5 +244,75 @@ describe('result and failure words', () => {
     expect(failureSentences(lost)[0]).toContain(
       'The connection to the server failed, so it is not known what reached the clinic',
     );
+  });
+});
+
+describe('as built by T15 (review round)', () => {
+  it('a reused token is worded as such, never as an answer', () => {
+    expect(stepResult(step('token', 'reused', 0))).toEqual({
+      text: 'Token reused from the server’s memory: no request sent',
+      tone: 'ok',
+    });
+  });
+
+  const envelope = (steps: ShareStep[], status = 502): ShareError =>
+    new ShareError('openemr-refused', status, 'stopped.', OO, steps);
+
+  it('an observation refused with a 4xx was not stored', () => {
+    const lines = failureSentences(
+      envelope([step('token', 'ok'), step('observation-create', 'failed', 400)]),
+    );
+    expect(lines).toContain('Not done: OpenEMR refused the reading, so it was not stored.');
+  });
+
+  it.each([500, 503, 201, 200])(
+    'an observation that failed with HTTP %i may have been stored: not known',
+    (status) => {
+      const lines = failureSentences(
+        envelope([step('token', 'ok'), step('observation-create', 'failed', status)]),
+      );
+      expect(lines).toContain(
+        `It is not known whether OpenEMR stored the reading (HTTP ${String(status)}). ${SAFE_AGAIN}`,
+      );
+      expect(lines.join(' ')).not.toContain('so it was not stored');
+    },
+  );
+
+  it('a reused token counts as a token being available', () => {
+    const lines = failureSentences(
+      envelope([step('token', 'reused', 0), step('patient-search', 'failed', 500)]),
+    );
+    expect(lines.join(' ')).toContain('an access token from the server’s memory was used');
+  });
+
+  it('share-busy says another share was in progress, and that nothing was sent', () => {
+    const e = new ShareError('share-busy', 503, 'Another share is in progress.', OO, []);
+    expect(failureSentences(e)).toEqual([
+      'Not shared: another share was in progress on the server; try again in a few seconds.',
+      'Nothing was sent to the clinic.',
+    ]);
+  });
+
+  it('the confirm says how a heart rate is sent and what OpenEMR keeps', async () => {
+    const { CONFIRM_SENT, CONFIRM_LEFT_OUT } = await import('./words');
+    expect(CONFIRM_SENT.join(' ')).toContain(
+      'A heart rate is sent as one time, the start of its five-minute window',
+    );
+    expect(CONFIRM_SENT.join(' ')).toContain('OpenEMR keeps the average only');
+    expect(CONFIRM_LEFT_OUT).toMatch(
+      /Apart from the Patient’s PulseBridge identifier, which the clinic uses to find the Patient, nothing that points back into this record goes to the clinic\.$/,
+    );
+  });
+
+  it('the expected Observation of a heart-rate window has its start as effectiveDateTime', () => {
+    const window: Observation = {
+      resourceType: 'Observation',
+      status: 'final',
+      code: { coding: [{ system: 'http://loinc.org', code: '8867-4' }] },
+      effectivePeriod: { start: '2026-01-01T09:05:00-05:00', end: '2026-01-01T09:10:00-05:00' },
+    };
+    const sent = expectedShared(window);
+    expect(sent.effectiveDateTime).toBe('2026-01-01T09:05:00-05:00');
+    expect(sent.effectivePeriod).toBeUndefined();
   });
 });

@@ -437,6 +437,9 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
   carries an OperationOutcome with the proxy's reason code.
 - **Status**: `lastSyncAt` in UTC with milliseconds; `observationCounts` null when not known
   (switch); OpenEMR reachable (as with T15's probe) or `not-checked` (switch, the proxy before T15).
+- **The mock reuses its access token** for 240 s, as the proxy does: a second share in that
+  time shows a `token` step with `result: "reused"`. A heart-rate window is sent at its start
+  (`effectiveDateTime`), as the proxy sends it.
 - **The share walks T15's specified sequence** (see "For T15: the share route"): token, Patient
   search then create only if absent, Encounter search for the reading's UTC day then create only
   if none, the Observation POST (a repeat in the same Encounter gets OpenEMR's "already exists"
@@ -608,15 +611,15 @@ body}, result, durationMs}`:
   `null`; the page shows it as "Search parameters: …";
 - `request.body` is only a real request body (`null` for a GET).
 
-| `step`                                               | Request                                                                                                                       | `result`                                                                   |
-| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `token`                                              | `POST /oauth2/default/token` (client credentials, signed assertion)                                                           | `ok`, or `failed`                                                          |
-| `patient-search`                                     | `GET /apis/default/fhir/Patient`, query `{"identifier": ...}`                                                                 | `found` or `not-found`                                                     |
-| `patient-create`                                     | only after `not-found`: `POST /apis/default/fhir/Patient` with `patient_for_sharing(stored)`                                  | `ok` or `failed`                                                           |
-| `encounter-search`                                   | `GET /apis/default/fhir/Encounter`, query `{"patient": <uuid>, "date": "<YYYY-MM-DD>"}`                                       | `found` (reused) or `not-found`                                            |
-| `encounter-create`                                   | only after `not-found`: `POST /apis/default/fhir/Encounter`                                                                   | `ok` or `failed`                                                           |
-| `observation-create`                                 | `POST /apis/default/fhir/Observation` (subject and encounter OpenEMR's; no `performer`, `device`, `meta`, `identifier`, `id`) | `ok` (201), `already-shared` (OpenEMR's "already exists" 400), or `failed` |
-| `patient-read`, `encounter-read`, `observation-read` | `GET /apis/default/fhir/<Type>/<id>`                                                                                          | `ok` or `failed`                                                           |
+| `step`                                               | Request                                                                                                                       | `result`                                                                                                      |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `token`                                              | `POST /oauth2/default/token` (client credentials, signed assertion)                                                           | `ok`, `reused` (a token still valid in the proxy's memory: no request sent, status 0, no bodies), or `failed` |
+| `patient-search`                                     | `GET /apis/default/fhir/Patient`, query `{"identifier": ...}`                                                                 | `found` or `not-found`                                                                                        |
+| `patient-create`                                     | only after `not-found`: `POST /apis/default/fhir/Patient` with `patient_for_sharing(stored)`                                  | `ok` or `failed`                                                                                              |
+| `encounter-search`                                   | `GET /apis/default/fhir/Encounter`, query `{"patient": <uuid>, "date": "<YYYY-MM-DD>"}`                                       | `found` (reused) or `not-found`                                                                               |
+| `encounter-create`                                   | only after `not-found`: `POST /apis/default/fhir/Encounter`                                                                   | `ok` or `failed`                                                                                              |
+| `observation-create`                                 | `POST /apis/default/fhir/Observation` (subject and encounter OpenEMR's; no `performer`, `device`, `meta`, `identifier`, `id`) | `ok` (201), `already-shared` (OpenEMR's "already exists" 400), or `failed`                                    |
+| `patient-read`, `encounter-read`, `observation-read` | `GET /apis/default/fhir/<Type>/<id>`                                                                                          | `ok` or `failed`                                                                                              |
 
 **Redaction (final rule).** Values are replaced by `"[not shown]"`, at any depth, comparing key
 names without regard to case:
@@ -633,6 +636,29 @@ So FHIR codes (`Observation.code`, `Coding.code`, `issue.code`) stay visible in 
 T14's helper hides every `code` and `token` key; T15 changes it to this rule.) The page's note
 under the trace says only "Credentials are replaced by "[not shown]"."
 
+**As built by T15 (accepted differences from the first version of this contract).**
+
+- A cached token is a `token` step with `result: "reused"` (no request, no bodies, status 0);
+  the page says "Token reused from the server's memory: no request sent".
+- A heart-rate window is sent with `effectiveDateTime` = its `effectivePeriod.start` (offset
+  kept) and no `effectivePeriod`: OpenEMR 8.5.0's vitals write reads only `effectiveDateTime`.
+  OpenEMR keeps the average, not the min and max components. From the 8.5.0 source; not verified
+  live.
+- A create counts only as a 201 with a valid id. Any other 2xx is a `failed` step with that
+  status and a 502 envelope ("not known whether it was created"); for `observation-create` the
+  page then says it is not known whether the reading was stored. A 4xx there means refused, not
+  stored; anything else (5xx, 2xx) means not known.
+- `already-shared` only for OpenEMR's own phrase with the code that was sent; an id is read back
+  only when exactly one is named, and only shown if it is this reading (our Patient, Encounter
+  and code).
+- A request already sent when the proxy failed is still a step (status 0, `failed`, "whether it
+  took effect is not known"); a request never sent (the budget ran out) is not a step.
+- A shared reading that could not be read back is worded "OpenEMR answered that it stored the
+  reading (HTTP 201), but it could not be read back to confirm", never "stored" as confirmed.
+- New reasons: `share-busy` (503), `share-internal-error` (502), `share-blocked` (500).
+- Credentials OpenEMR echoes inside a message (the assertion in an OAuth error, the access token
+  in a FHIR error) are replaced by `[not shown]` too, not only values under credential key names.
+
 **Encounter day rule.** The Encounter is reused per patient and UTC calendar day of the reading
 (`effectiveDateTime`, or `effectivePeriod.start` for a heart-rate window), found with
 `Encounter?patient=<id>&date=<YYYY-MM-DD>` (the `encounter-search` step's query). If several are
@@ -643,8 +669,8 @@ created) and reuses that day's Encounter. OpenEMR refuses a repeated reading wit
 Encounter (same code, encounter and time) with its "already exists" 400, which names the
 existing Observation; the step's `result` is then `already-shared`, `observation-read` reads
 that Observation, and the answer is a 200 `already-shared`. Spike S1 saw that refusal for a
-blood-pressure reading only; for a heart rate (a period with components) it is not verified, and
-the page says so. T15 must handle `already-shared` for both.
+blood-pressure reading only; for a heart rate (sent at its window's start) it is not verified, and
+the page says so. T15 handles `already-shared` for both.
 
 **200** (the reading is in OpenEMR):
 
@@ -700,7 +726,9 @@ the page says so. T15 must handle `already-shared` for both.
 | 404    | `not-found`                                                                | no such Observation, or another patient's (answered alike)                                                                                                                   | OperationOutcome                                                                                                                                            |
 | 422    | `observation-not-final`, `observation-not-shareable`, `patient-incomplete` | before OpenEMR is called: not `final` (for example `amended`); not a heart rate or blood-pressure panel; the stored Patient incomplete (`diagnostics` names what is missing) | OperationOutcome                                                                                                                                            |
 | 503    | `share-not-configured`                                                     | T15's variables or key are missing                                                                                                                                           | OperationOutcome                                                                                                                                            |
-| 502    | `openemr-unreachable`, `openemr-refused`                                   | OpenEMR could not be reached, or refused a step unexpectedly                                                                                                                 | envelope, `Content-Type: application/json`: `{"operationOutcome": <exactly as Problem builds it>, "steps": [steps completed so far, the failing one last]}` |
+| 503    | `share-busy`                                                               | another share was in progress on this proxy instance and did not finish in time (`Retry-After: 5`); nothing was sent                                                         | OperationOutcome                                                                                                                                            |
+| 500    | `share-blocked`                                                            | the proxy's leak guard found a PulseBridge-internal value in what it was about to send; nothing was sent (a server fault)                                                    | OperationOutcome                                                                                                                                            |
+| 502    | `openemr-unreachable`, `openemr-refused`, `share-internal-error`           | OpenEMR could not be reached, refused a step or answered in a way the proxy could not understand; or the proxy itself failed after OpenEMR was called                        | envelope, `Content-Type: application/json`: `{"operationOutcome": <exactly as Problem builds it>, "steps": [steps completed so far, the failing one last]}` |
 | 504    | `openemr-timeout`                                                          | OpenEMR did not answer within the request budget                                                                                                                             | the same envelope; a step that got no answer has `response.status` 0                                                                                        |
 
 Why the envelope: an OperationOutcome cannot carry the steps without members FHIR does not

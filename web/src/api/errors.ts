@@ -98,6 +98,8 @@ const SHARE_REASONS: readonly ShareFailureReason[] = [
   'openemr-refused',
   'openemr-timeout',
   'share-not-configured',
+  'share-busy',
+  'share-internal-error',
 ];
 
 /**
