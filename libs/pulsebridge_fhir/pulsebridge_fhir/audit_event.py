@@ -404,6 +404,10 @@ def parse_send_attempt(resource: object) -> SendAttemptRecord:
     period = body.get("period") if isinstance(body.get("period"), dict) else {}
     sent_at = _instant(period.get("start"), "period.start")
     recorded = _instant(body.get("recorded"), "recorded")
+    # period.end is written equal to recorded; check it as an instant too (it may be spelled
+    # differently by the server, so it is not compared as text below).
+    if _instant(period.get("end"), "period.end") != recorded:
+        raise _not_ours("period.end is not the recorded time")
     agents = body.get("agent")
     sender = _one(
         agents,
@@ -475,7 +479,9 @@ def parse_send_attempt(resource: object) -> SendAttemptRecord:
     expected = {k: v for k, v in rebuilt.resource.items() if k != "id"}
     # The instants were parsed from the given strings; compare as instants, not as spellings.
     given = copy.deepcopy(body)
-    given["period"] = expected["period"]
+    # Only the spelling of the three instants is replaced; any other key in period still differs.
+    given["period"] = dict(given["period"], start=expected["period"]["start"])
+    given["period"]["end"] = expected["period"]["end"]
     given["recorded"] = expected["recorded"]
     if given != expected:
         raise _not_ours("it differs from the AuditEvent this library builds for the same attempt")

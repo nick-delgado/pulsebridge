@@ -655,6 +655,7 @@ def test_tolerates_what_a_server_adds_on_read():
     # A server may write the same instant another way.
     stored["recorded"] = "2026-01-01T14:30:01.125Z"
     stored["period"]["start"] = "2026-01-01T14:30:00.125Z"
+    stored["period"]["end"] = "2026-01-01T09:30:01.125-05:00"
     record = parse_send_attempt(stored)
     assert record.attempt == rejected()
     assert record.recorded == RECORDED
@@ -717,6 +718,15 @@ def _detail(stored, name):
         (_altered(lambda r: _detail(r, "MSA-1").pop("valueString")), "needs exactly one value"),
         (_altered(lambda r: r.update(recorded="yesterday")), "recorded is not a FHIR instant"),
         (_altered(lambda r: r.update(period={})), "period.start is not a FHIR instant"),
+        (
+            _altered(lambda r: r["period"].update(end="2026-01-01T14:40:00+00:00")),
+            "period.end is not the recorded time",
+        ),
+        (_altered(lambda r: r["period"].pop("end")), "period.end is not a FHIR instant"),
+        (
+            _altered(lambda r: r["period"].update(extension=[])),
+            "differs from the AuditEvent",
+        ),
         (
             _altered(lambda r: r.update(recorded="2026-02-30T00:00:00Z")),
             "recorded is not a real date",
