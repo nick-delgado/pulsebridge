@@ -69,10 +69,12 @@ resource "google_cloud_run_v2_service" "health_sync" {
         startup_cpu_boost = false
       }
 
-      # Proves the app really started. gunicorn's master opens port 8080 before its worker
-      # builds the app, so Cloud Run's default TCP probe can pass while the worker crashes on a
-      # bad configuration (for example an unknown TIME_ZONE). GET /status answers 200 in every
-      # state once create_app() has succeeded, and nothing at all otherwise. Probes come from
+      # Proves the app really answers. The image starts gunicorn with --preload, so a bad
+      # configuration (for example an unknown TIME_ZONE) fails create_app() before port 8080
+      # opens, and the default TCP probe alone would already fail. This probe is kept because it
+      # also proves the app answers HTTP on its own route, and it still protects an image built
+      # without --preload (README, "What a bad configuration does"). GET /status answers 200 in
+      # every state once create_app() has succeeded, and nothing at all otherwise. Probes come from
       # Cloud Run inside the instance, not through the service URL, so IAM and ingress do not
       # apply. /status makes one token request to Google when the secrets exist (README
       # "GET /status"); the probe stops at its first success, so that is once per instance

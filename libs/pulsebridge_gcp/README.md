@@ -56,6 +56,35 @@ client.patch_labels(name, {"application_outcome": "accepted", "reason": "mapped"
   1-63 of `[a-z0-9_-]` starting with a letter; values 0-63 of `[a-z0-9_-]`). Spike S5 found
   the store does not enforce them today; we keep to them anyway.
 
+## Stored heart-rate windows (`pulsebridge_gcp.stored`, T35)
+
+"Read once, write only what changed", shared by `health-sync` and the seeder. One FHIR search
+reads every heart-rate window already stored for a range, following `next` links; the caller
+then decides with `pulsebridge_fhir.stored.plan_writes` which windows to write (see that
+library's README, "Stored windows: read once, write only what changed").
+
+```python
+from pulsebridge_fhir.stored import StoredReadError, plan_writes
+from pulsebridge_gcp.stored import max_pages_for_range, stored_windows
+
+try:
+    stored = stored_windows(lambda: client, "fhir-store-id", "Patient/<server id>", start, end,
+                            max_pages=max_pages_for_range(start, end), logger=logger)
+except (HealthcareApiError, StoredReadError, ValueError):
+    stored = None  # reading is an optimisation: write everything
+plan = plan_writes(items, stored, key_of=..., status_of=...)
+```
+
+| Name | What it is |
+| --- | --- |
+| `stored_windows(client_for, store, patient_ref, start, end, *, max_pages=MAX_SEARCH_PAGES, logger=None)` | `{key: StoredWindow}` for every stored window overlapping `[start, end)`. `client_for()` is called for every request (the first search and each `next_page`, including the last), so a caller can give each page its own timeout (`health-sync`) or pass the same client (`lambda: client`, the seeder). A key found twice is left out (so it is written) and `stored-duplicate-key` with the count is logged on `logger` (the caller's; default `pulsebridge_gcp`). Raises `StoredReadError` for an unusable page (not a `Bundle`, an `entry` that is not an array, or an Observation of the wrong shape: `pulsebridge_fhir.stored.page_windows`) or when `max_pages` pages have been read, and the client's own errors for HTTP failures; a caller that catches those two (and `ValueError`) never crashes on what the store answers. |
+| `MAX_SEARCH_PAGES` | 20, `health-sync`'s bound (a 14-day backfill piece is five pages of 1,000). |
+| `max_pages_for_range(start, end)` | The seeder's bound: windows in the range plus two (a useful page holds at least one window). |
+
+The page bound counts pages read, including the `next_page` call after the last one: with
+`max_pages = N`, a chain of `N - 1` pages is read and one of `N` pages raises. Both services
+behaved like that before T35; it is kept exactly.
+
 ## Errors
 
 | Error | When | Usual response |
@@ -103,6 +132,7 @@ client = HealthcareClient(project="demo", location="l", dataset="d", transport=t
 
 | Package | Pin | Why |
 | --- | --- | --- |
+| `pulsebridge-fhir` | none (this repository's own library, from `libs/`) | Only `pulsebridge_gcp.stored` uses it, for the stored-window search and how a page is read. The direction is one way: `pulsebridge_fhir` is pure and never imports this library (its tests check that no network or cloud module is imported). |
 | `google-auth` | `2.62.0` | Application Default Credentials and token refresh. The official library; nothing else should touch tokens. |
 | `requests` | `2.34.2` | `google-auth` ships its authorised session (`AuthorizedSession`) for `requests`, including the refresh-and-retry on 401. Using another HTTP client would mean writing that again. Synchronous, which suits a handler that makes three calls in a row. |
 

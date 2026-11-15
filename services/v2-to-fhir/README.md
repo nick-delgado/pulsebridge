@@ -223,7 +223,7 @@ the HL7v2 store; see `infra/modules/healthcare/README.md`). No key file.
 ## Running
 
 ```bash
-gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "v2_to_fhir.app:create_app()"
+gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 --preload "v2_to_fhir.app:create_app()"
 ```
 
 - **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
@@ -232,6 +232,17 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "v2_to_fhir
   `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
   requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
   this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
+- **`--preload`** loads the app (`create_app()`, which reads and checks the configuration) in
+  gunicorn's master before it opens the port and forks the worker. A configuration error then
+  stops gunicorn (exit 1) before anything listens, so Cloud Run's startup probe fails and the
+  deploy fails; without it the port opened first and the probe could pass while the worker
+  crashed. What `create_app()` builds before the fork is safe to fork with one worker: the
+  logging handler, the configuration, and the `HealthcareClient` with its `AuthorizedSession`
+  (the session itself opens no connection and fetches no token until the first request).
+  On Cloud Run, finding Application Default Credentials (`google.auth.default()`) asks
+  the metadata server from inside the factory, through a session google-auth creates and
+  drops; at worst the worker inherits that idle connection, which neither process uses
+  again (services/README.md, "Fork safety"; not verified on Cloud Run). No thread is started.
 - Honours `PORT` (Cloud Run sets it). `--timeout 0` leaves request deadlines to Cloud Run, as
   Google's Cloud Run Python samples do.
 - One authorised session (`google-auth`'s `AuthorizedSession`, a `requests.Session`) is shared

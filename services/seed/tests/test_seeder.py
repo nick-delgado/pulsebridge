@@ -684,7 +684,8 @@ def test_an_unusable_read_writes_everything():
     assert report.windows_written == report.windows_generated
 
 
-def test_duplicate_keys_are_written_and_withdrawn_windows_left_alone():
+def test_duplicate_keys_are_written_and_withdrawn_windows_left_alone(caplog):
+    caplog.set_level(logging.WARNING)
     store = fresh_store()
     seed(store, length=timedelta(hours=2), until=UNTIL)
     keys = list(store.observations)
@@ -696,6 +697,54 @@ def test_duplicate_keys_are_written_and_withdrawn_windows_left_alone():
     assert report.windows_withdrawn_kept == 1
     assert report.windows_written == 1  # only the duplicated key
     assert store.observations[keys[0]]["status"] == "entered-in-error"
+    # Logged on the seeder's own logger (seeder.py passes it to the shared read).
+    duplicates = [
+        r for r in caplog.records if getattr(r, "fields", {}).get("event") == "stored-duplicate-key"
+    ]
+    assert [(r.name, r.fields["duplicate_keys"]) for r in duplicates] == [("pulsebridge_seed", 1)]
+
+
+def _observations_in_range(store, start, end):
+    from pulsebridge_seed.testing import _overlaps
+
+    return [r for r in store.observations.values() if _overlaps(r, start, end)]
+
+
+def test_a_chain_of_windows_plus_one_one_window_pages_is_read():
+    """The seeder's page bound is the range's windows plus two (pulsebridge_gcp.stored
+    max_pages_for_range): a server answering one window per page needs, at most, a page per
+    window plus the one ending at the range start. One hour is 12 windows; 13 one-window pages
+    must still be read, not counted as an endless chain."""
+    store = fresh_store()
+    first = seed(store, length=timedelta(hours=1), until=UNTIL)
+    start, end = first.range_start, first.range_end
+    found = _observations_in_range(store, start, end)
+    template = found[0]
+    for n in range(13 - len(found)):  # other keys in the range, up to 13 matches
+        extra = copy.deepcopy(template)
+        extra["identifier"] = [{"system": "urn:pulsebridge:observation", "value": f"extra-{n}"}]
+        store.observations[f"extra-{n}"] = extra
+    assert len(_observations_in_range(store, start, end)) == 13
+    store.page_size_cap = 1
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert report.stored_read == "ok"
+    assert report.windows_written == 0
+    assert len(store.calls("GET", "/fhir/Observation")) == 13
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [{"component": [{"code": "8867-4"}]}, {"component": 5}, {"identifier": 5}],
+)
+def test_a_stored_observation_with_a_wrong_shape_writes_every_window(shape):
+    store = fresh_store()
+    seed(store, length=timedelta(hours=1), until=UNTIL)
+    template = next(iter(store.observations.values()))
+    store.observations["odd"] = copy.deepcopy(template) | shape
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert report.outcome == Outcome.SEEDED
+    assert report.stored_read == "failed:StoredReadError"
+    assert report.windows_written == report.windows_generated > 0
 
 
 def test_changed_final_windows_are_written_amended():
