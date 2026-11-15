@@ -288,3 +288,27 @@ def test_deadline_used_up_by_connect_is_a_write_timeout(adapter, monkeypatch):
 def test_no_address_at_all_is_connection_closed(monkeypatch):
     monkeypatch.setattr(mllp_client.socket, "getaddrinfo", lambda *_a, **_k: [])
     assert send(1, host="adapter.internal").why == "connection-closed"
+
+
+def test_a_slow_refusal_uses_up_part_of_the_deadline(hanging, monkeypatch):
+    # The first address takes 0.3 s to refuse; the second hangs. With one deadline the second
+    # gets only the 0.1 s left, so the connect ends at about 0.4 s, not 0.3 + 0.4 s.
+    slow_address = ("127.0.0.1", 9)  # never really dialled: the fake socket refuses it
+    real_socket = socket.socket
+
+    class SlowRefusal(real_socket):
+        def connect(self, address):
+            if address == slow_address:
+                time.sleep(0.3)
+                raise ConnectionRefusedError
+            return super().connect(address)
+
+    entries = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", slow_address),
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", hanging.port)),
+    ]
+    monkeypatch.setattr(mllp_client.socket, "getaddrinfo", lambda *_a, **_k: entries)
+    monkeypatch.setattr(mllp_client.socket, "socket", SlowRefusal)
+    started = time.monotonic()
+    assert send(hanging.port, timeout=0.4, host="adapter.internal").why == "timeout"
+    assert time.monotonic() - started < 0.6

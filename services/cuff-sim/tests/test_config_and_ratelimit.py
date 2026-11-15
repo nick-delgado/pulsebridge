@@ -209,16 +209,18 @@ def test_bucket_needs_positive_limits(rate, burst):
         TokenBucket(per_minute=rate, burst=burst)
 
 
-def test_bucket_is_safe_across_threads():
-    # A clock that yields to other threads, so an unlocked read-modify-write would interleave
-    # and let more than `burst` sends through.
-    frozen = 1000.0
+class _SlowNow(float):
+    """A clock reading whose subtraction yields to other threads. ``take`` computes the refill
+    as ``tokens + (now - updated) * rate``: the pause falls inside that read-modify-write of the
+    token count, so without the lock another thread is sure to run in the middle of it."""
 
-    def slow_clock():
+    def __sub__(self, other):
         time.sleep(0.0005)
-        return frozen
+        return float(self) - float(other)
 
-    bucket = TokenBucket(per_minute=1, burst=40, clock=slow_clock)
+
+def test_bucket_is_safe_across_threads():
+    bucket = TokenBucket(per_minute=1, burst=40, clock=lambda: _SlowNow(1000.0))
     allowed = []
     lock = threading.Lock()
 
@@ -234,3 +236,18 @@ def test_bucket_is_safe_across_threads():
     for t in threads:
         t.join()
     assert len(allowed) == 40  # 160 tries, exactly the burst allowed
+
+
+def test_any_library_error_in_the_message_dry_run_is_a_clean_config_error(h, monkeypatch):
+    # The configuration limits make this unreachable today; it guards against a library that
+    # becomes stricter. hl7apy's own errors quote the value, as this stand-in does.
+    from cuff_sim import app as app_module
+
+    def strict(*_a, **_k):
+        raise LookupError("value 'TESTPATIENT-zq7' is too long")
+
+    monkeypatch.setattr(app_module, "build_reading", strict)
+    with pytest.raises(ConfigError) as caught:
+        check_configuration(ServiceConfig.from_env(h.ENV))
+    printed = "".join(traceback.format_exception(caught.value))
+    assert "PATIENT_FAMILY_NAME" in printed and "zq7" not in printed
