@@ -91,6 +91,42 @@ Every `services/<name>/Dockerfile` follows the same pattern (`v2-to-fhir`'s is t
   the service account's own (Application Default Credentials), and secrets are mounted from
   Secret Manager at run time (`health-sync`'s Google Health files).
 
+### Job images (`seed`)
+
+A **Cloud Run job** runs a command to completion and serves nothing; a **Cloud Run service**
+is an HTTP server. The seeder (`seed`) is a job: one execution per first seeding or hourly
+top-up (its README, "For T20, T22, T24 and T25"). Its image is the same pattern with three
+differences, and `tests/tooling/test_container_images.py` tells the two kinds apart by
+`JOB_IMAGES` and the README, never by the Dockerfile it is checking:
+
+- **`ENTRYPOINT ["pulsebridge-seed"]`, and no `CMD`.** The program is the console script its
+  README's "Running it" commands run (the test reads it from there, as it reads the gunicorn
+  command for a service). In Cloud Run a container's `args` replace the image's `CMD` and its
+  `command` replaces the `ENTRYPOINT` (Google provider 8.11.0, `google_cloud_run_v2_job`
+  `containers.args`: "Arguments to the entrypoint. The docker image's CMD is used if this is
+  not provided."; `command`: "The docker image's ENTRYPOINT is used if this is not
+  provided."). So **T20 sets only `args`**, for example `["--hours", "4"]`, never `command`,
+  and an execution override (Cloud Scheduler's `jobs.run` call) can replace them for one run.
+  With no `CMD`, a job created without `args` runs `pulsebridge-seed` alone and exits 2 ("one
+  of --days or --hours is required"): a mis-wired job fails visibly instead of succeeding
+  without doing anything. `ENTRYPOINT` also clears the base image's `CMD` (`python3`).
+- **No `PORT`, no `EXPOSE`, no `GUNICORN_CMD_ARGS`**, and no gunicorn in the image.
+- **Signals.** The script installs no SIGTERM handler and Linux applies no default signal
+  action to PID 1, so on SIGTERM (task timeout, cancelled execution) the run goes on until the
+  platform's SIGKILL. Every write is keyed and each transaction Bundle is all-or-nothing, so
+  that is safe; the next run carries on.
+
+The smoke test for a job (`JOB_CASES`): `--help` exits 0; `--dry-run --days 1` with
+`PATIENT_ID=SYN-SMOKE-0001` and a time zone prints the counts report and exits 0, makes no
+network call (run with `--network none`, and again under a CPython audit hook that records
+every `socket.*` operation, even a swallowed one), and leaves no file in the container
+(`docker diff` is empty); without arguments it exits 2; a non-`SYN-` `PATIENT_ID` exits 2 and
+names the variable. It also gets the checks every image gets: UID 10001, no stray files, code
+owned by root, no copy of the pip CA bundle.
+
+The image is about 219 MB uncompressed, about 53 MB gzip-compressed (`docker save | gzip`), a
+little smaller than the service images because it has no Flask or gunicorn.
+
 `cuff-sim`'s image also checks at build time that T07's HL7v2 samples (package data of
 `pulsebridge_hl7v2`) were installed. `health-sync`'s image also contains the
 `health-sync-backfill` command.
@@ -159,12 +195,14 @@ every `services/*/Dockerfile` it finds, in phases:
 ----- BEGIN tfvars (v0.1.0, 0123456789abcdef0123456789abcdef01234567) -----
 cuff_sim_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/cuff-sim@sha256:<64 hex>"
 health_sync_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/health-sync@sha256:<64 hex>"
+seed_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/seed@sha256:<64 hex>"
 v2_to_fhir_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
 ----- END tfvars -----
 ```
 
 Each variable name is the service directory with `-` turned into `_`, plus `_image`. The value
-is the image by digest, without a tag. T20 (`v2_to_fhir_image`, `health_sync_image`), T22
+is the image by digest, without a tag. T20 (`v2_to_fhir_image`, `health_sync_image`, and
+`seed_image` for the seeder's Cloud Run job, created only with `use_synthetic_data`), T22
 (`cuff_sim_image`, later `fhir_proxy_image`) and T25 should use these names, so the block can be
 pasted unchanged. The block is printed only by a build that succeeded, and then it lists
 every service, each digest read back from the registry. A failed build prints no block. It may
@@ -253,12 +291,12 @@ account.
 ### Cost
 
 Nothing here is always on. A build runs only when a tag is pushed (or you start one by hand) and
-is billed per build-minute. One build of the three images takes a few minutes on the default
+is billed per build-minute. One build of the four images takes a few minutes on the default
 `e2-standard-2` worker. That is inside Cloud Build's monthly free allowance (2,500 build-minutes
 at the time of writing), and about $0.006 per minute beyond it. These are not confirmed
 against the current pricing page.
 
-Storage is Artifact Registry's: each image is about 55 to 58 MB compressed. The three share the
+Storage is Artifact Registry's: each image is about 53 to 58 MB compressed. The four share the
 base layers, so a release adds about 100 MB, and the first 0.5 GB is free. Each release keeps
 its images, because tags are immutable and nothing deletes them. A cleanup policy on the
 repository (keep the last few releases) belongs in `project-base`. It is a suggested follow-up,
@@ -280,14 +318,15 @@ Bump the builder image in `cloudbuild.yaml` the same way. Use
 `docker buildx imagetools inspect gcr.io/cloud-builders/docker:<major>` and keep the major
 version tag in front of the digest.
 
-### Adding an image (T09 `seed`, T14 `fhir-proxy`)
+### Adding an image (T14 `fhir-proxy`; `seed` was added by T35)
 
 1. Copy `services/v2-to-fhir/Dockerfile` to `services/<name>/Dockerfile`. The directory name
    must be lower-case words joined by `-` (the build checks it).
 2. Change the `COPY libs/...` lines and the first `pip install` line to the local libraries your
    `pyproject.toml` declares, and `services/v2-to-fhir` to `services/<name>`.
 3. Set `CMD` to your README's command in exec form. For a gunicorn service, use the README's
-   arguments without `--bind ":${PORT:-8080}"`; the image's `PORT` covers that.
+   arguments without `--bind ":${PORT:-8080}"`; the image's `PORT` covers that. For a Cloud
+   Run job, follow "Job images" instead (`seed`'s Dockerfile) and add it to `JOB_IMAGES`.
 4. Delete the service from `NO_IMAGE_YET` in `tests/tooling/test_container_images.py`, or leave
    it (the Dockerfile is checked either way). Add a case to `tests/tooling/test_image_smoke.py`
    for its route and its bad-configuration error.
@@ -303,11 +342,7 @@ installed after the service, or if the CMD differs from the README. Expected res
   and `libs/pulsebridge_gcp`, but its `pyproject.toml` decides. The CMD is its README's gunicorn
   command. If the login rate limit is kept per process, as `cuff-sim`'s is, that means one
   worker.
-- **`seed` (T09)**: needs an image only if it runs on Cloud Run, as a job, for example with
-  `use_synthetic_data`. If it does, give it the same Dockerfile, with
-  `CMD ["<its console script>", ...]` instead of gunicorn, and no `PORT` (a job serves nothing).
-  `test_starts_with_the_readme_gunicorn_command` assumes a web service, so T09 would extend that
-  test for jobs. If `seed` is only run from a laptop, leave it on `NO_IMAGE_YET` with that reason.
+- **`seed`**: built by T35 as a job image; see "Job images".
 
 ### Not verified against Google Cloud
 

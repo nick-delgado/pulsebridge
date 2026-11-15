@@ -303,9 +303,12 @@ exists before any ingest Bundle's conditional create looks for it (D11).
 
 ## For T20, T22, T24 and T25: deploying it
 
-- **Image (T24).** Same pattern as the other services: install `libs/pulsebridge_fhir` and
-  `libs/pulsebridge_gcp`, then this package; the command is `pulsebridge-seed`. Run as a
-  non-root user. No port: it is a job, not a service.
+- **Image (`services/seed/Dockerfile`, T35).** Same pattern as the other images: install
+  `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp`, then this package; runs as UID 10001.
+  `ENTRYPOINT ["pulsebridge-seed"]` and no `CMD`: **the job supplies the arguments** as the
+  container's `args` (for example `["--days", "30"]` or `["--hours", "4"]`); do not set
+  `command`. Without args it exits 2. No port: it is a job, not a service (services/README.md,
+  "Job images"). The release build prints its digest as `seed_image`.
 - **Where it runs (T20 or T25).** A **Cloud Run job** (`google_cloud_run_v2_job`) with the
   `seeder` service account, the environment variables above, `max_retries = 0` (the next
   scheduled execution is the retry; every write is keyed), and created only when

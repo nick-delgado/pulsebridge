@@ -7,7 +7,10 @@ breaks the promise fails here:
 
 - the base image is pinned by digest, the same in every stage and every Dockerfile;
 - the image runs as a numeric, non-root user;
-- it starts with the gunicorn command from the service's README (exec form) and honours PORT;
+- a service image (a Cloud Run service, an HTTP server) starts with the gunicorn command from
+  the service's README (exec form) and honours PORT; a job image (a Cloud Run job, a command
+  that runs to completion, listed in JOB_IMAGES) has the README's console script as its
+  ENTRYPOINT, takes its arguments from the job, and has no PORT and no gunicorn settings;
 - it copies and installs exactly the local libraries the service declares (and what those
   declare), libraries first;
 - every service with a pyproject.toml has a Dockerfile, or is on a justified allow-list;
@@ -36,13 +39,20 @@ LIBS = REPO_ROOT / "libs"
 # cannot ship without an image by accident. When a task adds the Dockerfile it can leave the entry
 # (the Dockerfile is then checked like any other) or remove it.
 NO_IMAGE_YET = {
-    "seed": (
-        "T09 (synthetic data seeder) is being built. If it runs on Cloud Run (a job), T09 adds "
-        "services/seed/Dockerfile following services/README.md ('Adding an image')."
-    ),
     "fhir-proxy": (
         "T14/T15 (FHIR proxy) not built yet. T14 adds services/fhir-proxy/Dockerfile following "
         "services/README.md ('Adding an image'); the proxy is a Cloud Run service (T22)."
+    ),
+}
+
+# Images that run as a Cloud Run JOB, not a Cloud Run service: a command that runs to completion
+# and serves nothing (services/README.md, "Job images"). Every other image is a service, and its
+# README's "Running" section must hold a gunicorn command; a job's must not, and its command is
+# read from that section instead. Each entry needs a reason.
+JOB_IMAGES = {
+    "seed": (
+        "The synthetic data seeder (T09) runs as a Cloud Run job (google_cloud_run_v2_job, T20): "
+        "one execution per seeding or hourly top-up, its arguments set by the job."
     ),
 }
 
@@ -186,16 +196,39 @@ def needed_libraries(service_dir: Path) -> set[str]:
     return {libs[name].relative_to(REPO_ROOT).as_posix() for name in needed}
 
 
-def readme_gunicorn_argv(service_dir: Path) -> list[str]:
-    """The gunicorn command in the service README's "Running" section, as an argv."""
+def readme_running_section(service_dir: Path) -> str:
+    """The README's section whose heading starts with "## Running", up to the next heading."""
     text = (service_dir / "README.md").read_text()
     section = text.split("\n## Running", 1)
     assert len(section) == 2, f"{service_dir.name}/README.md has no '## Running' section"
-    commands = [
-        line.strip() for line in section[1].splitlines() if line.strip().startswith("gunicorn ")
-    ]
+    return section[1].split("\n## ", 1)[0]
+
+
+def readme_gunicorn_commands(service_dir: Path) -> list[str]:
+    section = readme_running_section(service_dir)
+    return [line.strip() for line in section.splitlines() if line.strip().startswith("gunicorn ")]
+
+
+def readme_gunicorn_argv(service_dir: Path) -> list[str]:
+    """The gunicorn command in the service README's "Running" section, as an argv."""
+    commands = readme_gunicorn_commands(service_dir)
     assert len(commands) == 1, f"expected one gunicorn command in {service_dir.name}'s README"
     return shlex.split(commands[0])
+
+
+def readme_job_program(service_dir: Path) -> str:
+    """The program a job's README runs: the first word of every command in the first code block
+    of its "Running" section. They must all be the same program."""
+    section = readme_running_section(service_dir)
+    blocks = re.findall(r"```(?:bash|sh|console)?\n(.*?)```", section, re.DOTALL)
+    assert blocks, f"{service_dir.name}/README.md: no code block in its 'Running' section"
+    programs = {
+        shlex.split(line, comments=True)[0]
+        for line in blocks[0].splitlines()
+        if shlex.split(line, comments=True)
+    }
+    assert len(programs) == 1, f"{service_dir.name}'s README runs more than one program: {programs}"
+    return programs.pop()
 
 
 # --- the services -------------------------------------------------------------------------------
@@ -210,16 +243,55 @@ def dockerfile_dirs() -> list[Path]:
 
 
 IMAGE_SERVICES = [d.name for d in dockerfile_dirs()]
+# Cloud Run services (gunicorn) and Cloud Run jobs (a console script), by JOB_IMAGES.
+WEB_IMAGES = [name for name in IMAGE_SERVICES if name not in JOB_IMAGES]
+JOB_IMAGE_NAMES = [name for name in IMAGE_SERVICES if name in JOB_IMAGES]
 
 
 @pytest.fixture(params=IMAGE_SERVICES)
 def service(request: pytest.FixtureRequest) -> Path:
+    """Every image, service or job: the checks that apply to both."""
+    return SERVICES / request.param
+
+
+@pytest.fixture(params=WEB_IMAGES)
+def web_service(request: pytest.FixtureRequest) -> Path:
+    return SERVICES / request.param
+
+
+@pytest.fixture(params=JOB_IMAGE_NAMES)
+def job(request: pytest.FixtureRequest) -> Path:
     return SERVICES / request.param
 
 
 def test_there_are_images_to_check() -> None:
     # Guards the parametrised tests below against silently checking nothing.
-    assert {"v2-to-fhir", "health-sync", "cuff-sim"} <= set(IMAGE_SERVICES)
+    assert {"v2-to-fhir", "health-sync", "cuff-sim"} <= set(WEB_IMAGES)
+    assert {"seed"} <= set(JOB_IMAGE_NAMES)
+
+
+def test_job_images_are_justified_and_exist() -> None:
+    for name, reason in JOB_IMAGES.items():
+        assert len(reason) > 40, f"JOB_IMAGES[{name!r}] needs a real reason"
+        assert (SERVICES / name / "Dockerfile").is_file(), f"JOB_IMAGES[{name!r}] has no Dockerfile"
+        assert name not in NO_IMAGE_YET, name
+
+
+def test_every_image_is_either_a_service_or_a_job() -> None:
+    # The kind comes from JOB_IMAGES and the README, never from the Dockerfile being checked: a
+    # job image given a gunicorn CMD is still checked as a job (and fails), and a service left
+    # out of JOB_IMAGES by mistake is checked as a service.
+    for d in dockerfile_dirs():
+        gunicorn = readme_gunicorn_commands(d)
+        declared = {requirement_name(r) for r in pyproject(d)["project"].get("dependencies", [])}
+        if d.name in JOB_IMAGES:
+            assert not gunicorn, f"{d.name} is a job, but its README runs gunicorn"
+            assert "gunicorn" not in declared, f"{d.name} is a job: it does not need gunicorn"
+        else:
+            assert len(gunicorn) == 1, (
+                f"{d.name}: its README has no gunicorn command. A Cloud Run job goes in "
+                "JOB_IMAGES with its README's command."
+            )
 
 
 def test_every_service_has_a_dockerfile() -> None:
@@ -310,7 +382,8 @@ def test_runs_as_a_numeric_non_root_user(service: Path) -> None:
     assert not [i for i in after if i.keyword in {"USER", "RUN"}], "no RUN or USER after USER"
 
 
-def test_starts_with_the_readme_gunicorn_command(service: Path) -> None:
+def test_starts_with_the_readme_gunicorn_command(web_service: Path) -> None:
+    service = web_service
     instructions = final_stage(read_dockerfile(service / "Dockerfile"))
     cmds = [i for i in instructions if i.keyword == "CMD"]
     assert len(cmds) == 1, "exactly one CMD"
@@ -338,6 +411,31 @@ def test_starts_with_the_readme_gunicorn_command(service: Path) -> None:
     # It holds exactly two settings the README leaves at gunicorn's defaults (see the Dockerfile).
     extra = shlex.split(env.get("GUNICORN_CMD_ARGS", ""))
     assert extra == ["--no-control-socket", "--graceful-timeout", "8"], extra
+
+
+def test_job_runs_the_readme_command_with_the_jobs_arguments(job: Path) -> None:
+    instructions = final_stage(read_dockerfile(job / "Dockerfile"))
+    program = readme_job_program(job)
+    scripts = pyproject(job)["project"].get("scripts", {})
+    assert program in scripts, f"{program} (README) is not a console script of {job.name}"
+
+    # ENTRYPOINT is the console script alone, in exec form. Cloud Run's container `args`
+    # replace the image's CMD and keep its ENTRYPOINT (`command` would replace it), so the job
+    # supplies the arguments (services/README.md, "Job images").
+    entrypoints = [i for i in instructions if i.keyword == "ENTRYPOINT"]
+    assert len(entrypoints) == 1, "exactly one ENTRYPOINT: the job's command"
+    assert exec_form(entrypoints[0]) == [program]
+    # No CMD: without args the command itself runs (and asks for its arguments) rather than a
+    # default that would make a mis-wired job succeed without doing anything.
+    assert not [i for i in instructions if i.keyword == "CMD"], "a job image has no CMD"
+
+    env = env_of(instructions)
+    assert env.get("PYTHONUNBUFFERED") == "1"
+    assert env.get("PATH", "").startswith("/opt/venv/bin:"), "the command comes from the venv"
+    # A job serves nothing: no port and no web server settings.
+    assert "PORT" not in env and "GUNICORN_CMD_ARGS" not in env, env
+    assert not [i for i in instructions if i.keyword == "EXPOSE"], "a job listens on nothing"
+    assert not [i for i in instructions if "gunicorn" in i.args.lower()], "a job runs no gunicorn"
 
 
 def test_copies_exactly_the_libraries_the_service_declares(service: Path) -> None:
@@ -508,6 +606,8 @@ MUST_BE_INCLUDED = [
     "services/v2-to-fhir/v2_to_fhir/app.py",
     "services/cuff-sim/cuff_sim/app.py",
     "services/health-sync/health_sync/app.py",
+    "services/seed/pulsebridge_seed/cli.py",
+    "services/seed/README.md",
 ]
 
 
