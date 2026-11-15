@@ -121,7 +121,7 @@ def test_unreachable_is_502_and_timeout_is_504(harness) -> None:
 
 def test_identity_token_failure_is_a_502_and_nothing_is_sent(harness) -> None:
     class Broken:
-        def token(self, audience: str) -> str:
+        def token(self, audience: str, timeout: float = 10.0) -> str:
             raise UpstreamError("identity-token-unavailable")
 
     harness.tokens.token = Broken().token  # type: ignore[method-assign]
@@ -249,3 +249,43 @@ def test_json_typed_cloud_run_errors_are_mapped_not_passed_through(harness, stat
     response = _post(harness, b"{}")
     assert response.status_code == 502
     assert "cuff-sim.example.test" not in response.get_data(as_text=True)
+
+
+def test_the_identity_token_fetch_counts_inside_the_budget(tmp_path) -> None:
+    import time
+
+    from fhir_proxy.testing import build_harness
+
+    h = build_harness(tmp_path, cuff_forward_timeout=2, request_budget=30)
+    h.sender.answer("/cuff/readings", 200, RESULT)
+    token = h.login()
+    h.tokens.delay = 1.2
+    started = time.monotonic()
+    response = h.client.post(
+        "/cuff/readings",
+        data=b"{}",
+        content_type="application/json",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+    assert h.tokens.timeouts[-1] <= 2  # the fetch was given only the time left
+    (call,) = h.sender.calls
+    assert call["timeout"] <= 0.85  # and the send only what the fetch left over
+    assert time.monotonic() - started < 2.5
+
+
+def test_a_token_fetch_that_uses_up_the_budget_sends_nothing(tmp_path) -> None:
+    from fhir_proxy.testing import build_harness
+
+    h = build_harness(tmp_path, cuff_forward_timeout=1, request_budget=30)
+    h.sender.answer("/cuff/readings", 200, RESULT)
+    token = h.login()
+    h.tokens.delay = 5  # the fake stops at the timeout it was given, like the real fetch
+    response = h.client.post(
+        "/cuff/readings",
+        data=b"{}",
+        content_type="application/json",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 504
+    assert h.sender.calls == []

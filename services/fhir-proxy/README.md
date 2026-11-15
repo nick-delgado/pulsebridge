@@ -89,11 +89,11 @@ Each is a deliberate change from T16/T34's proposal; the client and mock should 
 
 | # | What | Before (proposal / mock) | After (built) | Who follows |
 | --- | --- | --- | --- | --- |
-| 1 | `SendAttemptEntry.messageLookup` | absent | **new**: `'confirmed' \| 'not-found' \| 'failed' \| 'matched-by-time' \| null`. `confirmed`: the store has the name (labels read). `not-found`: it does not (the derived MLLP name was wrong, or the message was deleted). `failed`: the store could not be asked in time. `matched-by-time`: see 14. `null`: no name (rejected, no acknowledgment). An accepted row whose lookup is `not-found` or `failed` has `application: null` | T19, mock |
+| 1 | `SendAttemptEntry.messageLookup` | absent | **new**: `'confirmed' \| 'not-found' \| 'failed' \| null`. `confirmed`: the store has this attempt's name (its labels are the outcome). `not-found`: it does not (the derived MLLP name was wrong, or the message was deleted). `failed`: the store could not be asked in time. `null`: no name (rejected, no acknowledgment). An accepted row whose lookup is `not-found` or `failed` has `application: null` and `observation: null`, and matches **no** `outcome` filter (see 19) | T19, mock |
 | 2 | `FhirTransactionEntry.writer` | `'health-sync' \| 'v2-to-fhir'` | `'health-sync' \| 'v2-to-fhir' \| 'seed' \| 'unknown'` (the seeder's assembler is `PulseBridge seed (synthetic data)`) | T19, contract |
 | 3 | Messages `count` | default 50, cap 100 (mock) | default **25**, cap **50** | T19, mock |
 | 4 | Filtered log pages | mock filters a full list | with `outcome` or `kind`, a page may hold **fewer than `count` rows, even none, while `nextCursor` is not null**: the filter runs after the join. Follow `nextCursor` until null | T19, mock |
-| 5 | `store-only` rows | not produced by the mock | produced. `id` = the stored message name, `transport` `'https'` when the message has cuff-sim's `transport` label, else `null`; `controlId` read from the bytes; `messageLookup: 'confirmed'`; `matchedMessageName: null`. Sorted by the message's `createTime`. **No trace route**: `getCuffAttemptTrace` takes AuditEvent ids, so do not put a store-only row in the selection. A stored message matched to an attempt by time (14) is not listed again | T19, mock |
+| 5 | `store-only` rows | not produced by the mock | produced. `id` = the stored message name, `transport` `'https'` when the message has cuff-sim's `transport` label, else `null`; `controlId` read from the bytes; `messageLookup: 'confirmed'`; `application` from **its own** labels. Sorted by the message's `createTime`. **No trace route**: `getCuffAttemptTrace` takes AuditEvent ids, so do not put a store-only row in the selection. Only messages that no attempt anywhere in the audit store claims are listed | T19, mock |
 | 6 | `unreadable-send-attempt.id` | string | string, `""` when the AuditEvent had no id | T19 |
 | 7 | Search refusals | mock: `422` for an unsupported code | **`400`** with an OperationOutcome (R4: a refused search parameter is a 400), `issue.code` `not-supported` or `invalid` | mock |
 | 8 | Search Bundle | `link[next]` under the base URL, no `fullUrl` | `link` has `self` and `next` as **path-absolute** URLs (`/api/fhir/Observation?...`), never built from `Host`; **every entry has `fullUrl`** `"<PUBLIC_BASE_URL>/fhir/Observation/<id>"` (R4: SHALL for search results), which the new read route answers; no `total` (entries are post-filtered) | none (the client already resolves relative links; it can ignore `fullUrl`) |
@@ -102,11 +102,14 @@ Each is a deliberate change from T16/T34's proposal; the client and mock should 
 | 11 | `503` on protected routes | only login | when the secret is missing **every** route answers `503` (`login-not-configured`): no token can be checked | none (an `ApiError`) |
 | 12 | Cuff trace of an unreadable AuditEvent | `404` (mock) | **`422`** (`unreadable-send-attempt`); the row is in the log. The page treats only 404/410 as final today: it should treat 422 as final too (retrying cannot help) | T18 follow-up |
 | 13 | `lastSyncAt` | ISO | ISO in UTC with milliseconds (`2026-01-02T12:00:01.000Z`) | none |
-| 14 | `SendAttemptEntry.matchedMessageName` | absent | **new**: `string \| null`. When an accepted MLLP attempt's derived name is **not** in the store, the proxy looks for exactly one stored message no attempt claims with the same control ID and a `createTime` within 120 s of the send. If there is one, the row has `messageLookup: "matched-by-time"`, that message's name here, and its labels as `application`. A heuristic: show it as "probably", never as confirmed; `messageName` stays null | T19, contract |
+| 14 | `store-only` row `possibleDuplicateOf` | absent | **new**: `string \| null`, an AuditEvent id. Set only when exactly **one** attempt qualifies as the one this message may belong to: an accepted MLLP attempt with the same control ID, whose own derived name the store does not have (`not-found`), sent at most 120 s before the message was created. Show it as a hint ("this may be the message of that send"); it moves nothing: the attempt keeps `application: null`, the message keeps its own outcome. Two or more candidates give `null` | T19, contract |
 | 15 | `observationCounts` | `{watch: number, cuff: number}` | `{watch: number \| null, cuff: number \| null}`: `null` is "not known" (the store could not be asked in time), never 0. `0` means asked and none (also: no Patient yet) | T16 shell, contract, `parse.ts` (`count()` today turns null into 0) |
 | 16 | `MessagesLogPage.partial` | absent | **new** `boolean`: true when the page was cut short by the time budget or a store answer that could not be read completely. Rows of its window may be missing (lookups not finished show `messageLookup: "failed"`; unchecked store-only rows are left out, never guessed). Reloading may fill it in | T19, contract |
 | 17 | Messages order | `recordedAt` desc (mock) | **send time** desc (the AC): attempt rows by `sentAt`, store-only rows by the message's `createTime` (`recordedAt` on the row), transaction rows by `recordedAt`; ties by `id` desc | T19, mock |
 | 18 | Transaction rows | every Provenance in the store | **pinned to the configured patient**: only Provenances whose targets are the patient's Observations; `resources` lists only those | none |
+| 19 | `outcome` filter | matches `application.outcome` | matches only rows **with** an application-level outcome equal to it. A row with `application: null` (rejected, unacknowledged, or a name the store could not confirm) matches no filter, `pending` included: pending means "stored, not labelled yet", which is not known for such a row | T19, mock |
+| 20 | `GET /fhir/Observation/{id}` | absent | **new** read route, what each search `fullUrl` names: the Observation if it is the configured patient's, else `404` (another patient's answers like a missing one); any query parameter (`_format`, `_elements`, `_summary`, ...) `400`; `ETag: W/"<meta.versionId>"` and `Last-Modified` from `meta.lastUpdated` when present; listed as `read` in the CapabilityStatement | none (the page need not call it) |
+| 21 | Cursor | opaque | still opaque; a cursor whose instant is before 1970 or more than a day ahead is refused with `400` (`invalid-cursor`) | none |
 
 Unchanged and as proposed: the login body and `expires_at`; `getHeartRateTrace`'s wire shape
 with `kind: "reconstructed"`; `getCuffAttemptTrace`'s wire shape; `CommitAck` (`raw` decoded,
@@ -203,9 +206,31 @@ derived.
     would let about one wrong login a second, spread over twelve addresses, lock every reviewer
     out for good. So once the total is exceeded the password is still checked (a digest
     comparison and a cached key): a correct one gets in (`200`), a wrong one gets `429` and is
-    not counted again. The cost: while the total is exceeded, a guesser can tell a wrong guess
-    (`429`) from a right one (`200`), exactly as a `401` would have told it; each address is
-    still held to its own 5 a minute, and the long random password is the real defence.
+    not counted again.
+  - **What bounds guessing, stated plainly.** Once the total is exceeded it no longer limits
+    how many passwords can be tried; verifications are bounded only per address:
+
+    | Attacker | Guesses a minute |
+    | --- | --- |
+    | one address (an IPv6 /64 counts as one) | 5 |
+    | N addresses | 5 × N |
+    | a wrong `TRUSTED_PROXY_HOPS` (the key is then a value the caller writes) | as many as the service answers: bounded only by throughput (instances × threads) |
+
+    What protects the login then is the password: a random 16-character password (T27's
+    enforced minimum; 24 or more is recommended) has far more values than any of these rates
+    can try. T22 must set `TRUSTED_PROXY_HOPS` right for the one path that reaches the service.
+    The costs of a flood are log volume and Cloud Run usage (requests, CPU, instances up to
+    `max_instance_count`). No hard ceiling on verifications is applied: it would bring the
+    lockout back.
+  - **Log volume under a flood.** Below the total every failure is logged (at most 60 a minute
+    per instance). Above it, and for refusals by the per-address limit, the first event per
+    address per window is logged and the rest only counted; when the window has passed, one
+    `login-events-suppressed` line reports the count (tested: 200 refused attempts from 20
+    addresses write 3 + 20 + 20 lines, then two summaries).
+  - **The address table is capped** (10,000). Only entries whose window has expired are dropped
+    to make room, so a flood of fresh addresses cannot evict an attacker's history. When the
+    table is full of live entries, a new address is treated as at its limit: its password is
+    still checked, so a correct one gets in, and a wrong one gets `429`.
 - **The client address** (`client_address.py`): `X-Forwarded-For` is appended to by each proxy,
   so only right-hand entries are trustworthy. Google documents the load balancer's behaviour
   ("appends two IP addresses ... `EXISTING_VALUE, CLIENT_IP, LOAD_BALANCER_IP`" and "does not
@@ -292,11 +317,14 @@ provider and an audit log. The CapabilityStatement says so and claims no
 - **Transaction rows** are pinned: the Provenance search includes its targets
   (`_include=Provenance:target`), and only Provenances whose targets are the configured
   patient's Observations make a row.
-- **A wrong derived-name rule** would show every MLLP send twice (a `not-found` attempt and a
-  store-only row). Instead, an accepted MLLP attempt whose derived name is not found is matched
-  to the one stored message no attempt claims with the same control ID and a `createTime` within
-  120 s of its send: `messageLookup: "matched-by-time"`, `matchedMessageName`. Two or more
-  candidates match nothing. Never presented as confirmed.
+- **A wrong derived-name rule.** An accepted MLLP attempt whose derived name is not in the
+  store stays `messageLookup: "not-found"` with no outcome and no Observation: no outcome label
+  is ever moved from one record to another. Its real message, if stored, is a store-only row,
+  and carries `possibleDuplicateOf: <attempt id>` only when exactly one attempt qualifies (same
+  control ID, its own derived name `not-found`, sent at most 120 s before the message was
+  created). The candidates come from the same audit search that decides "store-only", which
+  reaches 130 s before the oldest message, so a page boundary cannot hide the attempt; only
+  messages no attempt anywhere claims are considered. The trace route shows the same lookup.
 - **Cost of one page** (50 rows): one attempt search (more pages only while their order is not
   settled) and one Provenance search, in parallel; then up to 50 message `get`s, in parallel,
   alongside the store listing (up to 3 pages); one audit search for all store-only candidates;
@@ -313,9 +341,16 @@ provider and an audit log. The CapabilityStatement says so and claims no
     joins the same table, so it gets the token check, CORS, the headers, the request budget,
     error handling and a line in the CapabilityStatement. Refused: a public route (the public
     set comes from the core table only), a core endpoint name, or a method and path that exist.
+  - Register only token-gated routes with **distinct literal paths** (no converters that could
+    overlap a core URL; such a rule is refused, and the app will not start if one slips by).
   - Read the request body with `fhir_proxy.bodies.read_body(limit)`, never
-    `request.get_data()` (see "Robustness"). The share's OpenEMR calls run inside the request
-    budget (50 s): use `fhir_proxy.deadline.capped(timeout)` for each.
+    `request.get_data()` (see "Robustness").
+  - The share's OpenEMR calls run inside the request budget (50 s): use
+    `fhir_proxy.deadline.capped(timeout)` for each, and bound `openemr_probe` the same way
+    (it runs inside `/status`'s budget).
+  - Never submit to the shared executor from inside a task running on it (a nested submission
+    can wait on itself); run independent calls with one flat `fhir_proxy.deadline.run_parallel`
+    from the request thread.
   - `proxy.set_openemr_probe(fn)`: `fn()` returns `{"reachable", "checkedAt", "detail"}` for the
     status strip.
   - `proxy.stores`: `patient_references()`, `read(type, id)`, `is_ours(resource, refs)`: read
@@ -382,7 +417,7 @@ failed logins through the hosting domain (one with a made-up `X-Forwarded-For: 1
 header) and read the `login-failed` log lines: the `forwarded_for_entries` count (without the
 made-up header) and which `client_address` came out tell you whether `1` or `2` is right. While
 `*.run.app` stays reachable directly, a hop count of 2 lets a direct caller choose its own key
-(the left of two entries); the total limit still bounds that.
+(the left of two entries), and then only throughput bounds its guesses (see "Reviewer login").
 
 **Timeouts under Firebase Hosting's 60 s.** Hosting ends a rewritten request at 60 s
 (documented). Everything is sized to answer before that:
@@ -401,9 +436,21 @@ made-up header) and which `client_address` came out tell you whether `1` or `2` 
   worst case (95 for its defaults), `REQUEST_BUDGET_SECONDS` as wanted, and
   `REQUEST_TIMEOUT_SECONDS` at least 10 s above both.
 
-**Instances.** `max_instance_count = 2` (s6). The login limit is in memory per process and the
-image runs one worker, so the real per-address limit is up to 5 × instances a minute and the
-total up to 60 × instances. Do not raise `--workers`.
+**Instances and concurrency.** `max_instance_count = 2` (s6). The login limit is in memory per
+process and the image runs one worker, so the real per-address limit is up to 5 × instances a
+minute and the total up to 60 × instances. Do not raise `--workers`. Set Cloud Run's
+**per-instance concurrency to the thread count (8)**: each request holds one gunicorn thread
+for its whole life, and a slow unauthenticated client trickling a body holds one until the body
+is complete or Cloud Run's request timeout (`REQUEST_TIMEOUT_SECONDS`, 120 s) ends it. That is
+what bounds it: at most 8 such requests per instance, for at most the request timeout each;
+with a higher concurrency Cloud Run would queue requests inside a busy instance instead of
+starting another one. (The body itself is capped at 16 KiB.)
+
+**`PUBLIC_BASE_URL` is required**: the service does not start without it.
+
+**cuff-sim's own request timeout** must be above the proxy's forward timeout (for example 60 s
+against the proxy's 55 s), so a send the proxy has answered 504 for can still finish and record
+its AuditEvent. services/cuff-sim/README.md, "Time limits", says so (wording updated by T14).
 
 **Egress: Direct VPC egress with `ALL_TRAFFIC`.** health-sync and cuff-sim are internal-only
 (`INGRESS_TRAFFIC_INTERNAL_ONLY`). A call from another Cloud Run service counts as internal only
@@ -497,7 +544,7 @@ notes, and must be confirmed on the first deployment (T25):
   and with `view=RAW_ONLY`; `hl7V2Consumer` allowing list and get.
 - The derived MLLP message name rule (spike S5, one message): the proxy confirms it with a
   `get` and reports `not-found` when wrong, so a wrong rule shows up rather than misleads; the
-  `matched-by-time` fallback is a heuristic by design.
+  `possibleDuplicateOf` hint is a heuristic pointer by design.
 - That an AuditEvent's `recorded` is never more than `SEND_RECORD_SKEW` (10 minutes) after its
   send time: true for cuff-sim as written (it records once, after at most about 80 s); a row
   recorded later than that could be placed out of order or missed across a page boundary.

@@ -16,8 +16,11 @@ code gets from :class:`ProxyContext`:
 - ``add_route``: the route joins the same route table, so it is behind the same session-token
   check, gets CORS, the security headers, the request budget and the error handling, and appears
   in the CapabilityStatement's route list. The public routes are fixed by the core table (login
-  only): an extension cannot add a public route, reuse a core endpoint name, or register a
-  method and path that already exist.
+  only): an extension cannot add a public route, reuse a core endpoint name, register a method
+  and path that already exist, or register a pattern that could match a core URL (for example
+  ``/fhir/Observation/<int:n>``, which would win over the patient-pinned read route). Use
+  distinct literal paths. ``create_app`` checks again after registering that every core URL
+  still reaches its core endpoint, and refuses to start otherwise.
 - ``stores``: read access to the health-data store with the patient pin
   (``stores.patient_references()``, ``stores.read(...)``, ``stores.is_ours(...)``).
 - ``config``: the proxy's validated configuration (T15 adds its own variables in its package).
@@ -38,8 +41,11 @@ import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
+from werkzeug.exceptions import MethodNotAllowed, NotFound
+from werkzeug.routing import Map, Rule
+
 from fhir_proxy.config import ServiceConfig
-from fhir_proxy.routes import Route
+from fhir_proxy.routes import CORE_ROUTES, Route
 from fhir_proxy.store import Stores
 
 EXTENSION_MODULE = "fhir_proxy.share"
@@ -104,6 +110,25 @@ def trace_step(
     }
 
 
+def sample_urls(path: str) -> list[str]:
+    """Concrete URLs a rule's pattern stands for, to test for overlaps: every ``<...>`` filled
+    with a word and with a number (so an ``<int:...>`` or ``<path:...>`` rule cannot slip by)."""
+    return [re.sub(r"<[^>]+>", value, path) for value in ("sample-id", "1", "a.b")]
+
+
+def shadows_core(route: Route) -> bool:
+    """Whether ``route``'s pattern could match the URL of a core route (with its method)."""
+    adapter = Map([Rule(route.path, endpoint="extension", methods=[route.method])]).bind("")
+    for core in CORE_ROUTES:
+        for url in sample_urls(core.path):
+            try:
+                adapter.match(url, method=core.method)
+            except (NotFound, MethodNotAllowed):
+                continue
+            return True
+    return False
+
+
 @dataclass
 class ProxyContext:
     config: ServiceConfig
@@ -113,7 +138,8 @@ class ProxyContext:
     openemr_probe: Callable[[], dict] | None = None
 
     def _taken(self) -> Iterable[Route]:
-        yield from self.core_routes
+        # The module-level core table, never a field an extension could change.
+        yield from CORE_ROUTES
         yield from (route for route, _ in self.routes)
 
     def add_route(self, route: Route, handler: Callable) -> None:
@@ -124,6 +150,8 @@ class ProxyContext:
                 raise ValueError("an extension cannot reuse an endpoint name")
             if (other.method, other.path) == (route.method, route.path):
                 raise ValueError("an extension cannot register a method and path that exist")
+        if shadows_core(route):
+            raise ValueError("an extension rule cannot match the URL of a core route")
         self.routes.append((route, handler))
 
     def set_openemr_probe(self, probe: Callable[[], dict]) -> None:

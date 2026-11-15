@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fhir_proxy.messages import Cursor, Item, Lookup, Stream, decode_cursor, merge
@@ -531,68 +531,203 @@ def test_attempts_are_ordered_by_send_time_not_recorded_time(harness) -> None:
     assert [r["id"] for r in second["entries"]] == [a]
 
 
-def test_a_wrong_derived_name_is_matched_by_time_and_listed_once(harness, map_into_store) -> None:
+def _mllp_attempt(harness, cid: str, sent: datetime, derived: str, code: str = "AA") -> str:  # noqa: ANN001
     from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
 
-    sent = datetime(2026, 1, 1, 16, 0, tzinfo=UTC)
-    data = sample_bytes("valid_bp_reading")
-    real_name = f"{STORE_NAME}/messages/cmVhbC1uYW1l"
+    built = build_send_attempt_audit_event(
+        SendAttempt(
+            sent_at=sent,
+            transport="mllp",
+            control_id=cid,
+            result=Acknowledged(
+                code=code, raw_ack=f"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|{code}|X".encode()
+            ),
+            patient_id="PB-SYN-0001",
+            agent="cuff-sim",
+            destination=STORE_NAME,
+            derived_message_name=derived,
+        ),
+        recorded=sent + timedelta(seconds=1),
+    )
+    harness.fake.put(AUDIT_STORE, built.resource)
+    return built.resource["id"]
+
+
+def _three_sends(harness, map_into_store, *, second_wrong: bool = False) -> dict:  # noqa: ANN001
+    """The reviewer's scenario. Z: HTTPS, accepted. A: MLLP whose derived name is wrong, and
+    whose real stored message ended in an application ERROR. B: MLLP one second after A, with
+    the same control ID; its derived name is right (accepted), or also wrong."""
+    from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
+
+    t0 = datetime(2026, 1, 1, 17, 0, tzinfo=UTC)
+    z_name = f"{STORE_NAME}/messages/ei1tZXNzYWdl"
+    z_data = sample_bytes("valid_bp_reading_offset")
     harness.fake.add_message(
-        real_name,
-        data,
-        labels=map_into_store(real_name, data),
-        create_time="2026-01-01T16:00:00.400000Z",
+        z_name,
+        z_data,
+        labels=map_into_store(z_name, z_data, prefix="z"),
+        create_time="2026-01-01T16:59:00.300000Z",
         patient_ids=["PB-SYN-0001"],
     )
-    built = build_send_attempt_audit_event(
+    z = build_send_attempt_audit_event(
         SendAttempt(
-            sent_at=sent,
-            transport="mllp",
-            control_id="SYN-VALID-0001",  # the sample's own MSH-10
+            sent_at=t0 - timedelta(minutes=1),
+            transport="https",
+            control_id="MSG-Z",
             result=Acknowledged(code="AA", raw_ack=b"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|AA|X"),
             patient_id="PB-SYN-0001",
             agent="cuff-sim",
             destination=STORE_NAME,
-            derived_message_name=f"{STORE_NAME}/messages/d3JvbmctcnVsZQ==",
+            message_name=z_name,
         ),
-        recorded=sent,
+        recorded=t0 - timedelta(minutes=1) + timedelta(seconds=1),
     )
-    harness.fake.put(AUDIT_STORE, built.resource)
-    rows = _rows(harness, "?kind=cuff-send")["entries"]
-    assert len(rows) == 1  # not an attempt row plus a store-only duplicate
-    (row,) = rows
-    assert row["messageLookup"] == "matched-by-time"
-    assert row["matchedMessageName"] == real_name
-    assert row["messageName"] is None  # never presented as the store's answer
-    assert row["application"] == {"outcome": "accepted", "reason": None}
-    assert row["observation"].startswith("Observation/")
+    harness.fake.put(AUDIT_STORE, z.resource)
+    a_real = f"{STORE_NAME}/messages/YS1yZWFsLW1lc3NhZ2U="
+    error_bytes = sample_bytes("unmappable_missing_obx14")
+    harness.fake.add_message(
+        a_real,
+        error_bytes,
+        labels={"application_outcome": "error", "reason": "missing-obx-14"},
+        create_time="2026-01-01T17:00:00.300000Z",
+        patient_ids=["PB-SYN-0001"],
+    )
+    from fhir_proxy import hl7
 
-
-def test_two_candidates_are_not_matched(harness) -> None:
-    from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
-
-    sent = datetime(2026, 1, 1, 16, 0, tzinfo=UTC)
-    data = sample_bytes("valid_bp_reading")
-    for n in (1, 2):
+    cid = hl7.control_id(error_bytes)
+    a = _mllp_attempt(harness, cid, t0, f"{STORE_NAME}/messages/d3JvbmctQQ==")
+    if second_wrong:
+        b = _mllp_attempt(
+            # Sent just before A's message was created, so it qualifies as well.
+            harness,
+            cid,
+            t0 - timedelta(seconds=1),
+            f"{STORE_NAME}/messages/d3JvbmctQg==",
+        )
+        b_name = None
+    else:
+        b_name = f"{STORE_NAME}/messages/Yi1tZXNzYWdl"
+        b_data = sample_bytes("valid_bp_reading")
         harness.fake.add_message(
-            f"{STORE_NAME}/messages/Y2FuZGlkYXRl{n}",
-            data,
-            create_time=f"2026-01-01T16:00:0{n}.000000Z",
+            b_name,
+            b_data,
+            labels=map_into_store(b_name, b_data, prefix="b"),
+            create_time="2026-01-01T17:00:01.300000Z",
             patient_ids=["PB-SYN-0001"],
         )
-    built = build_send_attempt_audit_event(
-        SendAttempt(
-            sent_at=sent,
-            transport="mllp",
-            control_id="SYN-VALID-0001",
-            result=Acknowledged(code="AA", raw_ack=b"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|AA|X"),
-            patient_id="PB-SYN-0001",
-            agent="cuff-sim",
-            destination=STORE_NAME,
-            derived_message_name=f"{STORE_NAME}/messages/d3JvbmctcnVsZQ==",
-        ),
-        recorded=sent,
+        # Also sent before A's message was created, but its own name IS in the store: it does
+        # not qualify, so the hint still names A alone.
+        b = _mllp_attempt(harness, cid, t0 - timedelta(milliseconds=500), b_name)
+    return {
+        "z": z.resource["id"],
+        "a": a,
+        "b": b,
+        "a_real": a_real,
+        "z_name": z_name,
+        "b_name": b_name,
+    }
+
+
+def _all_rows(harness, count: int, query: str = "") -> list[dict]:  # noqa: ANN001
+    rows, cursor = [], None
+    for _ in range(30):
+        page = _rows(
+            harness,
+            f"?kind=cuff-send&count={count}{query}" + (f"&cursor={cursor}" if cursor else ""),
+        )
+        rows += page["entries"]
+        cursor = page["nextCursor"]
+        if cursor is None:
+            return rows
+    raise AssertionError("paging did not end")
+
+
+@pytest.mark.parametrize("count", [1, 2, 50])
+def test_a_wrong_derived_name_never_borrows_an_outcome(harness, map_into_store, count: int) -> None:
+    ids = _three_sends(harness, map_into_store)
+    rows = _all_rows(harness, count)
+    by_id = {r["id"]: r for r in rows}
+    assert len(rows) == len(by_id) == 4  # Z, A, B and A's real message as store-only
+    a = by_id[ids["a"]]
+    assert a["messageLookup"] == "not-found"
+    assert a["application"] is None and a["observation"] is None
+    assert "matchedMessageName" not in a
+    # No stored message is attributed to two attempts.
+    names = [
+        r["messageName"] or r["derivedMessageName"] for r in rows if r["source"] == "audit-event"
+    ]
+    audit_rows = [r for r in rows if r["source"] == "audit-event"]
+    confirmed = [
+        n for n, r in zip(names, audit_rows, strict=True) if r["messageLookup"] == "confirmed"
+    ]
+    assert len(confirmed) == len(set(confirmed))
+    store_only = by_id[ids["a_real"]]
+    assert store_only["source"] == "store-only"
+    # Its own outcome, never moved onto the attempt; the hint names A (only A qualifies).
+    assert store_only["application"] == {"outcome": "error", "reason": "missing-obx-14"}
+    assert store_only["possibleDuplicateOf"] == ids["a"]
+    # Filters: A matches no outcome; the error filter finds the store-only row, not A.
+    for outcome in ("accepted", "error", "pending"):
+        found = {r["id"] for r in _all_rows(harness, count, f"&outcome={outcome}")}
+        assert ids["a"] not in found, outcome
+    assert ids["a_real"] in {r["id"] for r in _all_rows(harness, count, "&outcome=error")}
+    # The trace route agrees with the log.
+    trace = harness.get(f"/trace/cuff-attempts/{ids['a']}").get_json()
+    assert trace["attempt"]["messageLookup"] == "not-found"
+    assert trace["attempt"]["application"] is None
+    assert [e["resource"]["resourceType"] for e in trace["resources"]["entry"]] == ["AuditEvent"]
+
+
+@pytest.mark.parametrize("count", [1, 2, 50])
+def test_two_candidates_give_no_hint(harness, map_into_store, count: int) -> None:
+    ids = _three_sends(harness, map_into_store, second_wrong=True)
+    by_id = {r["id"]: r for r in _all_rows(harness, count)}
+    assert by_id[ids["a_real"]]["possibleDuplicateOf"] is None
+    assert by_id[ids["a"]]["application"] is None and by_id[ids["b"]]["application"] is None
+
+
+def test_a_message_outside_the_window_after_the_send_gets_no_hint(harness) -> None:
+    data = sample_bytes("unmappable_missing_obx14")
+    from fhir_proxy import hl7
+
+    sent = datetime(2026, 1, 1, 18, 0, tzinfo=UTC)
+    name = f"{STORE_NAME}/messages/bGF0ZQ=="
+    harness.fake.add_message(
+        name, data, create_time="2026-01-01T18:03:00.000000Z", patient_ids=["PB-SYN-0001"]
     )
-    harness.fake.put(AUDIT_STORE, built.resource)
-    row = _by_id(_rows(harness))[built.resource["id"]]
-    assert row["messageLookup"] == "not-found" and row["matchedMessageName"] is None
+    _mllp_attempt(harness, hl7.control_id(data), sent, f"{STORE_NAME}/messages/d3Jvbmc=")
+    row = _by_id(_rows(harness))[name]
+    assert row["possibleDuplicateOf"] is None
+
+
+@pytest.mark.parametrize(
+    "instant", ["9999-12-31T23:59:59Z", "0001-01-01T00:00:00Z", "2030-01-01T00:00:00Z"]
+)
+def test_a_cursor_outside_1970_to_tomorrow_is_refused(harness, instant: str) -> None:
+    import json as json_module
+
+    raw = json_module.dumps({"v": 1, "b": instant, "s": []}).encode()
+    cursor = base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    response = harness.get(f"/messages?cursor={cursor}")
+    assert response.status_code == 400
+    assert response.get_json()["issue"][0]["details"]["coding"][0]["code"] == "invalid-cursor"
+
+
+def test_the_hint_reaches_an_attempt_sent_well_before_the_message(harness) -> None:
+    # 100 s before the message: outside the 60 s an audit check used to reach, inside the
+    # 120 s window. Only the widened search finds the attempt.
+    data = sample_bytes("unmappable_missing_obx14")
+    from fhir_proxy import hl7
+
+    created = datetime(2026, 1, 1, 19, 0, tzinfo=UTC)
+    name = f"{STORE_NAME}/messages/ZWFybHk="
+    harness.fake.add_message(
+        name, data, create_time="2026-01-01T19:00:00.000000Z", patient_ids=["PB-SYN-0001"]
+    )
+    a = _mllp_attempt(
+        harness,
+        hl7.control_id(data),
+        created - timedelta(seconds=100),
+        f"{STORE_NAME}/messages/eA==",
+    )
+    assert _by_id(_rows(harness))[name]["possibleDuplicateOf"] == a

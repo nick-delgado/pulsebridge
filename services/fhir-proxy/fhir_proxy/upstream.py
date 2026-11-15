@@ -62,7 +62,9 @@ class UpstreamTimeout(UpstreamError):
 
 
 class IdTokenSource(Protocol):
-    def token(self, audience: str) -> str: ...
+    def token(self, audience: str, timeout: float) -> str:
+        """An identity token for ``audience``, fetched within ``timeout`` seconds."""
+        ...
 
 
 class GoogleIdTokens:
@@ -72,16 +74,17 @@ class GoogleIdTokens:
         self._lock = threading.Lock()
         self._credentials: dict[str, object] = {}
 
-    def token(self, audience: str) -> str:
+    def token(self, audience: str, timeout: float = TOKEN_FETCH_TIMEOUT_SECONDS) -> str:
         import google.auth.exceptions
         import google.auth.transport.requests
         import google.oauth2.id_token
 
         class _BoundedRequest(google.auth.transport.requests.Request):
             def __call__(self, *args: object, **kwargs: object) -> object:  # type: ignore[override]
-                kwargs["timeout"] = TOKEN_FETCH_TIMEOUT_SECONDS
+                kwargs["timeout"] = limit
                 return super().__call__(*args, **kwargs)
 
+        limit = min(TOKEN_FETCH_TIMEOUT_SECONDS, timeout)
         request = _BoundedRequest()
         try:
             with self._lock:
@@ -220,8 +223,15 @@ class Upstream:
         except deadline.BudgetExhausted:
             raise UpstreamTimeout() from None
         # Audience: the receiving service's URL, which Cloud Run accepts for its invoker check.
+        # Minting the token is part of the call, so it gets only the time left as well, and
+        # the send then gets what is left after it.
+        token = self._tokens.token(base, timeout)
+        try:
+            timeout = deadline.capped(timeout)
+        except deadline.BudgetExhausted:
+            raise UpstreamTimeout() from None
         headers = {
-            "Authorization": f"Bearer {self._tokens.token(base)}",
+            "Authorization": f"Bearer {token}",
             "Accept": "application/json",
         }
         if content_type is not None:

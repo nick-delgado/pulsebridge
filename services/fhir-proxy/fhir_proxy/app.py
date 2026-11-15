@@ -31,6 +31,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from email.utils import format_datetime
 
 from flask import Flask, Response, g, request
 from pulsebridge_gcp import HealthcareApiError, HealthcareClient, NotFoundError, default_transport
@@ -41,8 +42,8 @@ from fhir_proxy.bodies import MAX_BODY_BYTES, read_body, too_large
 from fhir_proxy.client_address import client_address
 from fhir_proxy.config import ServiceConfig
 from fhir_proxy.errors import FHIR_JSON, Problem, upstream_problem
-from fhir_proxy.extensions import EXTENSION_MODULE, ProxyContext, load_extension
-from fhir_proxy.login_limit import LoginLimiter
+from fhir_proxy.extensions import EXTENSION_MODULE, ProxyContext, load_extension, sample_urls
+from fhir_proxy.login_limit import FloodLogSampler, LoginLimiter
 from fhir_proxy.logs import configure_logging, log
 from fhir_proxy.messages import (
     DEFAULT_COUNT,
@@ -54,6 +55,7 @@ from fhir_proxy.messages import (
 )
 from fhir_proxy.password import PasswordFile, PasswordUnavailable
 from fhir_proxy.routes import CORE_ROUTES, Route
+from fhir_proxy.search import parse_instant
 from fhir_proxy.session_token import InvalidToken, TokenSigner, passwords_match
 from fhir_proxy.status import StatusService
 from fhir_proxy.store import SAFE_ID, Stores, entries, next_link
@@ -172,6 +174,8 @@ def create_app(
         window_seconds=config.login_window_seconds,
         monotonic=monotonic,
     )
+    failed_log = FloodLogSampler(window_seconds=config.login_window_seconds, monotonic=monotonic)
+    refused_log = FloodLogSampler(window_seconds=config.login_window_seconds, monotonic=monotonic)
     upstream = Upstream(
         tokens=id_tokens or GoogleIdTokens(),
         send=send or requests_sender(),
@@ -190,7 +194,6 @@ def create_app(
         upstream.health_sync_caller(),
         cache_seconds=config.status_cache_seconds,
         openemr_probe=context.openemr_probe,
-        executor=executor,
         clock=clock,
         monotonic=monotonic,
     )
@@ -342,8 +345,22 @@ def create_app(
             request.headers.get("X-Forwarded-For"), request.remote_addr, config.trusted_proxy_hops
         )
 
+        def sampled(sampler: FloodLogSampler, event: str, **fields: object) -> None:
+            # Under a flood: one line per address per window, plus a count of the rest.
+            log_it, suppressed = sampler.record(address)
+            if suppressed:
+                log(
+                    logging.WARNING,
+                    "login-events-suppressed",
+                    kind=event,
+                    count=suppressed,
+                    window_seconds=config.login_window_seconds,
+                )
+            if log_it:
+                log(logging.WARNING, event, client_address=address, **fields)
+
         def throttled(wait: int) -> Problem:
-            log(logging.WARNING, "login-rate-limited", client_address=address, retry_after=wait)
+            sampled(refused_log, "login-rate-limited", retry_after=wait)
             return Problem(
                 429,
                 "throttled",
@@ -392,14 +409,42 @@ def create_app(
             entries_count = len(
                 [p for p in (request.headers.get("X-Forwarded-For") or "").split(",") if p.strip()]
             )
-            log(
-                logging.WARNING,
-                "login-failed",
-                client_address=address,
-                forwarded_for_entries=entries_count,
-            )
-            if total_wait is not None:
-                raise throttled(total_wait)
+            if total_wait is None:
+                # Below the total, failures are already bounded (60 a minute): log each one,
+                # after any summary of a flood whose window has ended.
+                for sampler, kind in (
+                    (failed_log, "login-failed"),
+                    (refused_log, "login-rate-limited"),
+                ):
+                    suppressed = sampler.due()
+                    if suppressed:
+                        log(
+                            logging.WARNING,
+                            "login-events-suppressed",
+                            kind=kind,
+                            count=suppressed,
+                            window_seconds=config.login_window_seconds,
+                        )
+                log(
+                    logging.WARNING,
+                    "login-failed",
+                    client_address=address,
+                    forwarded_for_entries=entries_count,
+                )
+            else:
+                sampled(
+                    failed_log,
+                    "login-failed",
+                    forwarded_for_entries=entries_count,
+                    over_total=True,
+                )
+                raise Problem(
+                    429,
+                    "throttled",
+                    "rate-limited",
+                    "Too many failed logins; wait and try again.",
+                    headers={"Retry-After": str(total_wait)},
+                )
             raise Problem(
                 401,
                 "login",
@@ -469,6 +514,15 @@ def create_app(
         return _json(result, content_type=FHIR_JSON)
 
     def read_observation(observation_id: str) -> Response:
+        if request.args:
+            # Like the search: nothing that is not implemented is passed on or ignored
+            # (_format, _elements, _summary, anything else).
+            raise Problem(
+                400,
+                "not-supported",
+                "unsupported-parameter",
+                "The Observation read takes no parameters.",
+            )
         observation_id = _checked_id(observation_id)
         try:
             refs = stores.patient_references()
@@ -480,7 +534,23 @@ def create_app(
         if resource is None or not stores.is_ours(resource, refs):
             # Another patient's Observation answers exactly like a missing one.
             raise Problem(404, "not-found", "not-found", "The Observation was not found.")
-        return _json(resource, content_type=FHIR_JSON)
+        response = _json(resource, content_type=FHIR_JSON)
+        # R4 http.html "read": the server SHOULD return an ETag with the versionId (a weak
+        # validator) and Last-Modified from meta.lastUpdated.
+        meta = resource.get("meta") if isinstance(resource.get("meta"), dict) else {}
+        version = meta.get("versionId")
+        if isinstance(version, str) and re.fullmatch(r"[A-Za-z0-9.-]{1,64}", version):
+            response.headers["ETag"] = f'W/"{version}"'
+        updated = (
+            parse_instant(meta.get("lastUpdated"))
+            if isinstance(meta.get("lastUpdated"), str)
+            else None
+        )
+        if updated is not None:
+            response.headers["Last-Modified"] = format_datetime(
+                updated.astimezone(UTC), usegmt=True
+            )
+        return response
 
     def _checked_id(value: str) -> str:
         if not SAFE_ID.fullmatch(value):
@@ -541,7 +611,7 @@ def create_app(
                     expression=["count"],
                 )
             count = min(int(text), MAX_COUNT)
-        cursor = decode_cursor(given["cursor"]) if "cursor" in given else None
+        cursor = decode_cursor(given["cursor"], clock()) if "cursor" in given else None
         try:
             page = messages_log.page(kind=kind, outcome=outcome, count=count, cursor=cursor)
         except HealthcareApiError as exc:
@@ -618,4 +688,11 @@ def create_app(
             view_func=handlers[route.endpoint],
             methods=[route.method],
         )
+    # Every core URL must still reach its core endpoint: no extension rule may shadow one.
+    adapter = app.url_map.bind("")
+    for core in CORE_ROUTES:
+        for url in sample_urls(core.path):
+            endpoint, _ = adapter.match(f"{prefix}{url}", method=core.method)
+            if endpoint != core.endpoint:
+                raise RuntimeError("an extension route shadows a core route")
     return app

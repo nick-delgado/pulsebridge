@@ -36,7 +36,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
-from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from pulsebridge_gcp import HealthcareApiError
@@ -104,7 +104,7 @@ class StatusService:
         *,
         cache_seconds: float,
         openemr_probe: Callable[[], dict] | None = None,
-        executor: Executor | None = None,
+        workers: int = 8,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -112,7 +112,11 @@ class StatusService:
         self._health_sync = health_sync
         self._cache_seconds = cache_seconds
         self.openemr_probe = openemr_probe
-        self._executor = executor or ThreadPoolExecutor(max_workers=4)
+        # Two pools of /status's own: the outer one runs health-sync and the store part, the
+        # inner one the store part's three searches. Nothing is submitted into the pool it runs
+        # in, and slow /messages requests (which use the shared pool) cannot delay /status.
+        self._outer = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="status")
+        self._inner = ThreadPoolExecutor(max_workers=workers * 3, thread_name_prefix="status-q")
         self._clock = clock
         self._monotonic = monotonic
         self._lock = threading.Lock()
@@ -158,7 +162,7 @@ class StatusService:
             if refs:
                 # The three searches are independent: run them at once, within the budget.
                 parts = deadline.run_parallel(
-                    self._executor,
+                    self._inner,
                     [
                         lambda: self._stores.count_observations(HEART_RATE, refs),
                         lambda: self._stores.count_observations(BLOOD_PRESSURE_PANEL, refs),
@@ -170,6 +174,11 @@ class StatusService:
                         raise deadline.BudgetExhausted("status searches")
                     if isinstance(part, BaseException):
                         raise part
+                # Type guards: only a count or a time ever reaches the response.
+                if not all(
+                    isinstance(c, int) and not isinstance(c, bool) and c >= 0 for c in parts[:2]
+                ) or not (parts[2] is None or isinstance(parts[2], str)):
+                    raise ValueError("unexpected status search result")
                 counts = {"watch": parts[0], "cuff": parts[1]}
                 newest = parts[2]
             else:
@@ -193,7 +202,7 @@ class StatusService:
         budget; a part not answered in time is unknown (``state: unknown``, counts null)."""
         now = self._clock()
         watch, store = deadline.run_parallel(
-            self._executor, [lambda: self._watch(now), lambda: self._from_store(now)]
+            self._outer, [lambda: self._watch(now), lambda: self._from_store(now)]
         )
         if not isinstance(watch, dict):
             watch = unknown_watch("health-sync-timeout", now)

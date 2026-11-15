@@ -135,6 +135,8 @@ class FakeHealthcare:
     delays: list[tuple[str, str, float]] = field(default_factory=list)
     # A store that ignores the subject pin, to test the proxy's own post-filter.
     ignore_subject: bool = False
+    # (path, start, end) of every delayed call, monotonic seconds: for ordering assertions.
+    timeline: list[tuple[str, float, float]] = field(default_factory=list)
 
     # -- seeding --
 
@@ -187,7 +189,9 @@ class FakeHealthcare:
         self.requests.append((method, path, pairs))
         for delay_method, pattern, seconds in self.delays:
             if delay_method == method and re.search(pattern, path):
+                began = time.monotonic()
                 time.sleep(min(seconds, timeout))
+                self.timeline.append((path, began, time.monotonic()))
                 if seconds > timeout:
                     raise TimedOutError(f"{method} {path}", None)
         for fail_method, pattern, response in self.failures:
@@ -432,7 +436,12 @@ class FakeSender:
         return response
 
 
-def slow_answer(seconds: float, status: int, answer_body: object):  # noqa: ANN201
+def slow_answer(  # noqa: ANN201
+    seconds: float,
+    status: int,
+    answer_body: object,
+    timeline: list[tuple[str, float, float]] | None = None,
+):
     """A fake upstream answer that takes ``seconds``, honouring the caller's timeout as
     ``requests`` would (a timeout is ``UpstreamTimeout``)."""
     from fhir_proxy.upstream import UpstreamTimeout
@@ -440,7 +449,10 @@ def slow_answer(seconds: float, status: int, answer_body: object):  # noqa: ANN2
     payload = json.dumps(answer_body).encode()
 
     def answer(*, timeout: float, body: bytes | None) -> tuple:  # noqa: ARG001
+        began = time.monotonic()
         time.sleep(min(seconds, timeout))
+        if timeline is not None:
+            timeline.append(("upstream", began, time.monotonic()))
         if seconds > timeout:
             raise UpstreamTimeout()
         return status, {"content-type": "application/json"}, payload
@@ -451,8 +463,13 @@ def slow_answer(seconds: float, status: int, answer_body: object):  # noqa: ANN2
 class FakeIdTokens:
     def __init__(self) -> None:
         self.audiences: list[str] = []
+        self.timeouts: list[float] = []
+        self.delay = 0.0  # seconds a fetch takes, to test the budget
 
-    def token(self, audience: str) -> str:
+    def token(self, audience: str, timeout: float = 10.0) -> str:
+        self.timeouts.append(timeout)
+        if self.delay:
+            time.sleep(min(self.delay, timeout))
         self.audiences.append(audience)
         return f"fake-identity-token-for-{audience.split('//')[1]}"
 

@@ -155,19 +155,94 @@ def test_status_parts_run_at_once_and_unanswered_parts_are_unknown(tmp_path) -> 
 
 
 def test_status_parts_overlap_when_each_is_slow_but_in_budget(tmp_path) -> None:
-    h = build_harness(tmp_path, request_budget=10)
+    h = build_harness(tmp_path, request_budget=30)
     _patient(h)
-    h.sender.routes["/status"] = slow_answer(1, 200, {"googleHealth": "connected"})
+    upstream: list = []
+    h.sender.routes["/status"] = slow_answer(1, 200, {"googleHealth": "connected"}, upstream)
     h.fake.delays.append(("GET", r"/Observation$", 1))
     token = h.login()
-    started = time.monotonic()
     body = h.client.get("/status", headers={"Authorization": f"Bearer {token}"}).get_json()
-    elapsed = time.monotonic() - started
     assert body["watchSync"]["state"] == "connected"
     assert body["observationCounts"] == {"watch": 0, "cuff": 0}
-    # health-sync (1 s) alongside the store part (three 1 s searches at once): about 1 s, not
-    # the 2 s that running the two parts one after the other would take.
-    assert elapsed < 1.8, elapsed
+    # Event order, not wall time: health-sync's call and the store searches overlapped (each
+    # began before the other ended), and the three searches overlapped each other.
+    ((_, hs_start, hs_end),) = upstream
+    searches = [(a, b) for p, a, b in h.fake.timeline if p.endswith("/Observation")]
+    assert len(searches) == 3
+    assert all(a < hs_end and hs_start < b for a, b in searches)
+    assert max(a for a, _ in searches) < min(b for _, b in searches)
+
+
+def test_status_answers_promptly_while_the_messages_pool_is_saturated(tmp_path) -> None:
+    import threading
+
+    from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
+
+    h = build_harness(tmp_path, request_budget=30)
+    _patient(h)
+    for n in range(16):
+        sent = datetime(2026, 1, 1, 14, n, tzinfo=UTC)
+        name = f"{STORE_NAME}/messages/c2F0dXJhdGU{n:04d}"
+        built = build_send_attempt_audit_event(
+            SendAttempt(
+                sent_at=sent,
+                transport="https",
+                control_id=f"MSG-S{n}",
+                result=Acknowledged(code="AA", raw_ack=b"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|AA|X"),
+                patient_id="PB-SYN-0001",
+                agent="cuff-sim",
+                destination=STORE_NAME,
+                message_name=name,
+            ),
+            recorded=sent,
+        )
+        h.fake.put(AUDIT_STORE, built.resource)
+    h.fake.delays.append(("GET", r"/messages/c2F0dXJh", 1))
+    h.sender.answer("/status", 200, {"googleHealth": "connected"})
+    token = h.login()
+    auth = {"Authorization": f"Bearer {token}"}
+    threads = [
+        threading.Thread(target=lambda: h.app.test_client().get("/messages?count=16", headers=auth))
+        for _ in range(8)
+    ]
+    for t in threads:
+        t.start()
+    time.sleep(0.3)  # the shared pool is now busy with 8 x 16 one-second lookups
+    started = time.monotonic()
+    response = h.app.test_client().get("/status", headers=auth)
+    elapsed = time.monotonic() - started
+    for t in threads:
+        t.join(timeout=60)
+    assert response.status_code == 200
+    assert elapsed < 1.0, elapsed
+
+
+def test_failed_lookups_mark_the_page_partial(tmp_path) -> None:
+    from pulsebridge_gcp import HttpResponse
+
+    h = build_harness(tmp_path)
+    _patient(h)
+    h.fake.put(AUDIT_STORE, example("auditevent-send-accepted.json"))
+    h.fake.fail("GET", r"/messages/synthetic", HttpResponse(503, b"{}"))
+    page = h.get("/messages").get_json()
+    assert page["partial"] is True
+    (row,) = [r for r in page["entries"] if r["kind"] == "cuff-send"]
+    assert row["messageLookup"] == "failed"
+
+
+def test_an_inner_status_search_unfinished_at_the_deadline_is_unknown(tmp_path) -> None:
+    h = build_harness(tmp_path, request_budget=1)
+    _patient(h)
+    h.sender.answer("/status", 200, {"googleHealth": "connected"})
+    h.fake.delays.append(("GET", r"/Observation$", 5))
+    token = h.login()
+    response = h.client.get("/status", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["watchSync"]["state"] == "connected"  # health-sync answered in time
+    assert body["observationCounts"] == {"watch": None, "cuff": None}
+    assert body["watchSync"]["lastSyncAt"] is None
+    assert body["fhirStore"]["reachable"] is False
 
 
 def test_every_route_has_the_budget(tmp_path) -> None:

@@ -261,3 +261,26 @@ def test_the_proxy_filters_even_if_the_store_ignores_the_pin(
     harness.fake.ignore_subject = True
     ids = [e["resource"]["id"] for e in harness.get(f"/fhir/Observation?{HR}").get_json()["entry"]]
     assert "leak" not in ids and len(ids) == 2
+
+
+@pytest.mark.parametrize("query", ["_format=xml", "_elements=id", "_summary=true", "anything=1"])
+def test_read_route_refuses_parameters(harness, seed_heart_rate, query: str) -> None:
+    seed_heart_rate(DAY_START, 1)
+    obs_id = next(rid for (t, rid) in harness.fake.fhir[FHIR_STORE] if t == "Observation")
+    response = harness.get(f"/fhir/Observation/{obs_id}?{query}")
+    assert response.status_code == 400
+    assert response.get_json()["resourceType"] == "OperationOutcome"
+
+
+def test_read_route_sends_etag_and_last_modified(harness, seed_heart_rate) -> None:
+    seed_heart_rate(DAY_START, 1)
+    obs_id = next(rid for (t, rid) in harness.fake.fhir[FHIR_STORE] if t == "Observation")
+    harness.fake.fhir[FHIR_STORE][("Observation", obs_id)]["meta"]["versionId"] = "MTY4"
+    stored = harness.fake.fhir[FHIR_STORE][("Observation", obs_id)]["meta"]["lastUpdated"]
+    response = harness.get(f"/fhir/Observation/{obs_id}")
+    assert response.headers["ETag"] == 'W/"MTY4"'
+    from email.utils import parsedate_to_datetime
+
+    assert parsedate_to_datetime(response.headers["Last-Modified"]) == datetime.fromisoformat(
+        stored
+    ).replace(microsecond=0)

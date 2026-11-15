@@ -324,3 +324,49 @@ def test_bearer_scheme_is_case_insensitive(harness) -> None:
             "/fhir/metadata", headers={"Authorization": f"{scheme} {token}"}
         )
         assert response.status_code == 200, scheme
+
+
+# ---- a flood does not write one line per guess (second review, 2) --------------------------------
+
+
+def test_a_flood_of_failures_is_logged_once_per_address_per_window(tmp_path, logs) -> None:
+    h = build_harness(tmp_path, login_failures_total=3)
+    for n in range(3):
+        _login(h, "wrong", xff=f"198.51.100.{n}")
+    # 20 addresses x 5 wrong guesses, all over the total: 100 refused verifications.
+    for n in range(20):
+        for _ in range(5):
+            assert _login(h, "wrong", xff=f"203.0.113.{n}").status_code == 429
+    # Then each address is over its own limit too: 100 more, refused before the password.
+    for n in range(20):
+        for _ in range(5):
+            assert _login(h, "wrong", xff=f"203.0.113.{n}").status_code == 429
+    events = logs.events()
+    failed = [e for e in events if e["event"] == "login-failed"]
+    refused = [e for e in events if e["event"] == "login-rate-limited"]
+    assert len(failed) == 3 + 20  # the three below the total, then one per address
+    assert len(refused) == 20
+    h.clock.advance(61)
+    _login(h, "wrong", xff="203.0.113.99")
+    summaries = [e for e in logs.events() if e["event"] == "login-events-suppressed"]
+    counts = {e["kind"]: e["count"] for e in summaries}
+    assert counts.get("login-failed") == 80 and counts.get("login-rate-limited") == 80
+
+
+def test_a_full_address_table_keeps_live_entries_and_fails_closed(tmp_path, monkeypatch) -> None:
+    from fhir_proxy import login_limit
+
+    monkeypatch.setattr(login_limit, "MAX_TRACKED_ADDRESSES", 3)
+    h = build_harness(tmp_path, login_failures_total=1000)
+    for _ in range(5):
+        _login(h, "wrong", xff="203.0.113.1")  # the attacker's address, at its limit
+    _login(h, "wrong", xff="203.0.113.2")
+    _login(h, "wrong", xff="203.0.113.3")  # the table is now full of live entries
+    # A fresh address cannot push the attacker's history out...
+    assert _login(h, "wrong", xff="203.0.113.4").status_code == 429
+    assert _login(h, "wrong", xff="203.0.113.1").status_code == 429
+    # ...and is treated as at its limit, but a correct password still gets in.
+    assert _login(h, PASSWORD, xff="203.0.113.5").status_code == 200
+    # Once the window has passed, expired entries make room again.
+    h.clock.advance(61)
+    assert _login(h, "wrong", xff="203.0.113.6").status_code == 401

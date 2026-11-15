@@ -244,3 +244,51 @@ def test_trace_step_path_has_no_scheme_host_or_query(path: str) -> None:
             result="ok",
             duration_ms=1,
         )
+
+
+def test_changing_the_context_s_core_table_does_not_help(tmp_path, monkeypatch) -> None:
+    name = _extension(
+        tmp_path,
+        monkeypatch,
+        "    proxy.core_routes = ()\n"
+        "    proxy.add_route(Route('POST', '/auth/login', 'login2', 'view', 'x'), handler)\n",
+        "ext_core_mutation",
+    )
+    with pytest.raises(ValueError, match="exist"):
+        build_harness(tmp_path, extension_module=name)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/fhir/Observation/<int:n>",
+        "/fhir/Observation/<path:p>",
+        "/trace/<path:rest>",
+        "/<path:any>",
+    ],
+)
+def test_a_pattern_that_can_match_a_core_url_is_refused(tmp_path, monkeypatch, path: str) -> None:
+    name = _extension(
+        tmp_path,
+        monkeypatch,
+        f"    proxy.add_route(Route('GET', '{path}', 'grab', 'view', 'x'), handler)\n",
+        f"ext_shadow_{abs(hash(path)) % 10**8}",
+    )
+    with pytest.raises(ValueError, match="core route"):
+        build_harness(tmp_path, extension_module=name)
+
+
+def test_the_app_refuses_to_start_if_a_core_url_is_shadowed(tmp_path, monkeypatch) -> None:
+    from fhir_proxy import extensions
+
+    # Even if the registration check were skipped, the start-up check catches the overlap.
+    monkeypatch.setattr(extensions, "shadows_core", lambda route: False)
+    name = _extension(
+        tmp_path,
+        monkeypatch,
+        "    rule = '/fhir/Observation/<int:n>'\n"
+        "    proxy.add_route(Route('GET', rule, 'grab', 'view', 'x'), handler)\n",
+        "ext_startup_check",
+    )
+    with pytest.raises(RuntimeError, match="shadows"):
+        build_harness(tmp_path, extension_module=name)

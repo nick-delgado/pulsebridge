@@ -49,12 +49,16 @@ request's budget is spent (``fhir_proxy.deadline``). A page cut short that way s
 ``partial: true``: rows of its window may be missing (a message lookup not finished is
 ``messageLookup: "failed"``; store-only rows not yet checked are left out, never guessed).
 
-**A wrong derived-name rule.** If cuff-sim's derived MLLP name is not in the store, the same
-message would otherwise appear twice: as the attempt (``not-found``) and as a store-only row.
-The proxy then looks, among the window's stored messages no attempt claims, for exactly one
-with the attempt's control ID and a ``createTime`` within ``MATCH_WINDOW`` of the send time. That
-is a heuristic, so it is labelled ``messageLookup: "matched-by-time"`` with the stored name in
-``matchedMessageName``, and never presented as confirmed; the matched message is not listed again.
+**A wrong derived-name rule.** If cuff-sim's derived MLLP name is not in the store, the attempt
+stays ``messageLookup: "not-found"`` with no application-level outcome and no Observation: no
+outcome label is ever moved from one record to another. Its real message, if stored, then
+appears as a store-only row. That row carries ``possibleDuplicateOf: <attempt id>`` only when
+exactly one attempt qualifies: an accepted MLLP attempt with the same control ID whose own
+derived name the store does not have, sent at most ``MATCH_WINDOW`` (120 s) before the message
+was created. Candidates come from the same audit search that decides "store-only" (it spans
+``MATCH_WINDOW`` before the oldest message, so a page boundary cannot hide the attempt), and
+only messages that no attempt anywhere claims are considered. Two or more candidates give no
+hint. The hint is a pointer for the page, not a join.
 """
 
 from __future__ import annotations
@@ -96,12 +100,14 @@ STORE_ONLY_SCAN_PAGES = 3  # of 100 messages each, per page of the log
 # An attempt is recorded after its ACK or timeout: cuff-sim's worst case is about 80 s after the
 # send (its README, "Time limits"). The margin is generous on purpose.
 SEND_RECORD_SKEW = timedelta(minutes=10)
-AUDIT_CHECK_BEFORE = timedelta(seconds=60)
+MATCH_WINDOW = timedelta(seconds=120)
+# Wide enough to read every attempt that could be a store-only message's possible duplicate
+# (sent up to MATCH_WINDOW before the message was created; its recorded time is later still).
+AUDIT_CHECK_BEFORE = MATCH_WINDOW + timedelta(seconds=10)
 AUDIT_CHECK_AFTER = SEND_RECORD_SKEW
 AUDIT_CHECK_PAGE = 1000  # Cloud Healthcare's largest _count
 AUDIT_CHECK_PAGES = 3
 ATTEMPT_PAGES = 5
-MATCH_WINDOW = timedelta(seconds=120)
 MAX_CURSOR_LENGTH = 8192
 MAX_CURSOR_SEEN = 200
 LOOKUP_WORKERS = 8
@@ -156,8 +162,13 @@ class Cursor:
         return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def decode_cursor(text: str) -> Cursor:
-    """A cursor the proxy wrote, checked strictly: it comes back from the caller."""
+EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+
+def decode_cursor(text: str, now: datetime | None = None) -> Cursor:
+    """A cursor the proxy wrote, checked strictly: it comes back from the caller. Its instant
+    must lie between 1970 and a day from now: a forged far-future time would otherwise overflow
+    the search bounds computed from it."""
     bad = Problem(
         400,
         "invalid",
@@ -180,6 +191,9 @@ def decode_cursor(text: str) -> Cursor:
     seen = body["s"]
     if before is None or not isinstance(seen, list) or len(seen) > MAX_CURSOR_SEEN:
         raise bad
+    latest = (now or datetime.now(UTC)) + timedelta(days=1)
+    if not EPOCH <= before <= latest:
+        raise bad
     if not all(isinstance(i, str) and _CURSOR_ID.fullmatch(i) for i in seen):
         raise bad
     return Cursor(before, frozenset(seen))
@@ -191,9 +205,7 @@ def decode_cursor(text: str) -> Cursor:
 @dataclass(frozen=True)
 class Lookup:
     """What the HL7v2 store said about a message name: ``confirmed`` (it exists),
-    ``not-found``, ``failed`` (the store could not be asked in time), or ``matched-by-time``
-    (the name was not found, and ``message`` is the one stored message that plausibly is it:
-    a heuristic, never presented as confirmed)."""
+    ``not-found``, or ``failed`` (the store could not be asked in time)."""
 
     status: str
     message: Hl7v2Message | None = None
@@ -248,10 +260,9 @@ def commit_ack(record: SendAttemptRecord) -> dict:
 
 def attempt_row(record: SendAttemptRecord, lookup: Lookup | None, observation: str | None) -> dict:
     application = None
-    usable = ("confirmed", "matched-by-time")
-    if record.result == "accepted" and lookup is not None and lookup.status in usable:
+    # Only the store's own confirmation of THIS attempt's name gives it an outcome.
+    if record.result == "accepted" and lookup is not None and lookup.status == "confirmed":
         application = application_from_labels(lookup.message.labels if lookup.message else {})
-    matched = lookup.message.name if lookup and lookup.status == "matched-by-time" else None
     return {
         "kind": "cuff-send",
         "id": record.id,
@@ -266,16 +277,19 @@ def attempt_row(record: SendAttemptRecord, lookup: Lookup | None, observation: s
         "application": application,
         "messageName": record.message_name,
         "derivedMessageName": record.derived_message_name,
-        # Amendments to the dashboard contract (README): whether the name was confirmed, and
-        # the heuristic match when it was not.
+        # Amendment to the dashboard contract (README): whether the name was confirmed.
         "messageLookup": None if lookup is None else lookup.status,
-        "matchedMessageName": matched,
         "observation": observation,
         "source": "audit-event",
     }
 
 
-def store_only_row(message: Hl7v2Message, at: datetime, observation: str | None) -> dict:
+def store_only_row(
+    message: Hl7v2Message,
+    at: datetime,
+    observation: str | None,
+    possible_duplicate_of: str | None = None,
+) -> dict:
     sent = _parse_instant(message.send_time)
     transport = "https" if message.labels.get("transport") == "https" else None
     return {
@@ -301,9 +315,11 @@ def store_only_row(message: Hl7v2Message, at: datetime, observation: str | None)
         "messageName": message.name,
         "derivedMessageName": None,
         "messageLookup": "confirmed",
-        "matchedMessageName": None,
         "observation": observation,
         "source": "store-only",
+        # Amendment: the one attempt this message may belong to (a wrong derived name), as a
+        # pointer only; the message's outcome stays its own and the attempt gets none.
+        "possibleDuplicateOf": possible_duplicate_of,
     }
 
 
@@ -611,16 +627,16 @@ class MessagesLog:
             log(logging.WARNING, "store-only-scan-truncated", pages=STORE_ONLY_SCAN_PAGES)
         return _Listing(found, token is None)
 
-    def _audited_names(self, times: list[datetime]) -> set[str] | None:
-        """Every message name the attempts recorded around ``times`` claim, from ONE audit
-        search over the whole span (oldest - 60 s to newest + 10 min), paged to the end. None
-        when that could not be read completely: then nothing can be called store-only."""
+    def _audited(self, times: list[datetime]) -> list[SendAttemptRecord] | None:
+        """Every readable attempt recorded around ``times``, from ONE audit search over the
+        whole span (oldest - 130 s to newest + 10 min), paged to the end. None when that could
+        not be read completely: then nothing can be called store-only."""
         params = send_attempt_search_params(
             count=AUDIT_CHECK_PAGE,
             since=min(times) - AUDIT_CHECK_BEFORE,
             before=max(times) + AUDIT_CHECK_AFTER,
         )
-        names: set[str] = set()
+        records: list[SendAttemptRecord] = []
         try:
             bundle = self._stores.audit_events(params)
             for _ in range(AUDIT_CHECK_PAGES):
@@ -629,16 +645,37 @@ class MessagesLog:
                         record = parse_send_attempt(resource)
                     except (NotASendAttempt, UnreadableSendAttempt):
                         continue
-                    names.update(n for n in (record.message_name, record.derived_message_name) if n)
+                    if record.patient_id == self._patient_id:
+                        records.append(record)
                 if next_link(bundle) is None:
-                    return names
+                    return records
                 bundle = self._stores.next_audit_page(bundle)
                 if bundle is None:
-                    return names
+                    return records
         except HealthcareApiError:
             return None
         log(logging.WARNING, "store-only-check-truncated", pages=AUDIT_CHECK_PAGES)
         return None  # cut off: cannot tell which messages have an AuditEvent
+
+    @staticmethod
+    def _duplicate_candidates(
+        message: Hl7v2Message, at: datetime, records: list[SendAttemptRecord]
+    ) -> list[SendAttemptRecord]:
+        """Attempts a store-only message may belong to: accepted MLLP with a derived name (whose
+        lookup the caller checks), the same control ID, sent at most MATCH_WINDOW before the
+        message was created."""
+        control_id = hl7.control_id(message.data)
+        if control_id is None:
+            return []
+        return [
+            r
+            for r in records
+            if r.transport == "mllp"
+            and r.result == "accepted"
+            and r.derived_message_name is not None
+            and r.control_id == control_id
+            and r.sent_at <= at <= r.sent_at + MATCH_WINDOW
+        ]
 
     def _observations(self, data_by_ref: dict[str, bytes | None]) -> dict[str, str]:
         """``Observation/<id>`` per key of ``data_by_ref`` whose stored bytes map to one."""
@@ -661,22 +698,6 @@ class MessagesLog:
             ):
                 result[ref] = f"Observation/{resource['id']}"
         return result
-
-    @staticmethod
-    def _match_by_time(
-        record: SendAttemptRecord, unclaimed: list[tuple[datetime, Hl7v2Message]]
-    ) -> Hl7v2Message | None:
-        """The one stored message that plausibly is this MLLP attempt's (see the module
-        docstring): same control ID, created within ``MATCH_WINDOW`` of the send."""
-        if record.control_id is None:
-            return None
-        hits = [
-            m
-            for at, m in unclaimed
-            if abs(at - record.sent_at) <= MATCH_WINDOW
-            and hl7.control_id(m.data) == record.control_id
-        ]
-        return hits[0] if len(hits) == 1 else None
 
     # ---- one page ------------------------------------------------------------------------
 
@@ -716,48 +737,77 @@ class MessagesLog:
                 streams.append(result)
         merged = merge(streams, count, cursor)
 
-        # 2. Message lookups and the store listing, in parallel.
+        # 2. Message lookups and the store listing, in parallel: one flat submission (no task
+        # submits into the pool it runs in).
         records = [i.payload for i in merged.page if i.kind == "attempt"]
-        names = [
-            n
-            for r in records
-            if r.result == "accepted"
-            for n in (r.message_name or r.derived_message_name,)
-            if n
-        ]
+        names = sorted(
+            {
+                n
+                for r in records
+                if r.result == "accepted"
+                for n in (r.message_name or r.derived_message_name,)
+                if n
+            }
+        )
         lower = merged.lower if merged.more else None
-        step = [lambda: self.lookups(names)]
+        step = [partial(self._lookup, n) for n in names]
         if want_store_only:
-            step.append(lambda: self._listing(lower, cursor))
-        looked, *listed = deadline.run_parallel(self._executor, step)
-        if not isinstance(looked, dict):
-            looked = {n: Lookup("failed") for n in names}
-            partial_page = True
+            step.append(partial(self._listing, lower, cursor))
+        results = deadline.run_parallel(self._executor, step)
+        looked = {
+            n: (r if isinstance(r, Lookup) else Lookup("failed"))
+            for n, r in zip(names, results[: len(names)], strict=True)
+        }
         partial_page |= any(v.status == "failed" for v in looked.values())
-        listing = listed[0] if listed else _Listing([], True)
+        listing = results[-1] if want_store_only else _Listing([], True)
         if not isinstance(listing, _Listing):
             listing = _Listing([], False)
 
-        # 3. Store-only rows, and the heuristic match for a derived name that was not found.
+        # 3. Store-only rows: stored messages that NO attempt in the audit span claims. The
+        # same audit search gives the candidates for a possible-duplicate hint.
         claimed = {n for r in records for n in (r.message_name, r.derived_message_name) if n}
         unclaimed = [(at, m) for at, m in listing.messages if m.name not in claimed]
         lookup_for: dict[str, Lookup | None] = {}
         for record in records:
             name = record.message_name or record.derived_message_name
-            lookup = looked.get(name) if (record.result == "accepted" and name) else None
-            if lookup is not None and lookup.status == "not-found" and record.transport == "mllp":
-                match = self._match_by_time(record, unclaimed)
-                if match is not None:
-                    lookup = Lookup("matched-by-time", match)
-                    unclaimed = [(at, m) for at, m in unclaimed if m.name != match.name]
-            lookup_for[record.id] = lookup
-        store_only: list[tuple[datetime, Hl7v2Message]] = []
+            lookup_for[record.id] = (
+                looked.get(name) if (record.result == "accepted" and name) else None
+            )
+        store_only: list[tuple[datetime, Hl7v2Message, str | None]] = []
         if want_store_only and unclaimed:
-            audited = self._audited_names([at for at, _ in unclaimed])
+            audited = self._audited([at for at, _ in unclaimed])
             if audited is None:
                 partial_page = True  # cannot tell; never guess "store-only"
             else:
-                store_only = [(at, m) for at, m in unclaimed if m.name not in audited]
+                everywhere = {
+                    n for r in audited for n in (r.message_name, r.derived_message_name) if n
+                }
+                orphans = [(at, m) for at, m in unclaimed if m.name not in everywhere]
+                candidates = {
+                    m.name: self._duplicate_candidates(m, at, audited) for at, m in orphans
+                }
+                # A candidate qualifies only if the store does not have its own derived name.
+                to_check = sorted(
+                    {r.derived_message_name for rs in candidates.values() for r in rs} - set(looked)
+                )
+                extra = deadline.run_parallel(
+                    self._executor, [partial(self._lookup, n) for n in to_check]
+                )
+                known = dict(looked)
+                known.update(
+                    {
+                        n: (r if isinstance(r, Lookup) else Lookup("failed"))
+                        for n, r in zip(to_check, extra, strict=True)
+                    }
+                )
+                for at, m in orphans:
+                    qualifying = [
+                        r
+                        for r in candidates[m.name]
+                        if known.get(r.derived_message_name, Lookup("failed")).status == "not-found"
+                    ]
+                    hint = qualifying[0].id if len(qualifying) == 1 else None
+                    store_only.append((at, m, hint))
         if want_store_only and not listing.complete:
             partial_page = True
 
@@ -770,7 +820,7 @@ class MessagesLog:
                 and application_from_labels(lookup.message.labels)["outcome"] == "accepted"
             ):
                 data_by_ref[lookup.message.name] = lookup.message.data
-        for _, message in store_only:
+        for _, message, _ in store_only:
             if application_from_labels(message.labels)["outcome"] == "accepted":
                 data_by_ref[message.name] = message.data
         observations: dict[str, str] = {}
@@ -789,25 +839,30 @@ class MessagesLog:
                 rows.append((item.at, item.id, attempt_row(record, lookup, obs)))
             else:
                 rows.append((item.at, item.id, item.payload))
-        for at, message in store_only:
+        for at, message, hint in store_only:
             obs = observations.get(message.name)
-            rows.append((at, message.name, store_only_row(message, at, obs)))
+            rows.append((at, message.name, store_only_row(message, at, obs, hint)))
         rows.sort(key=lambda r: (r[0], r[1]), reverse=True)
         ordered = [r[2] for r in rows] + [i.payload for i in merged.undated]
 
         if kind is not None:
             ordered = [r for r in ordered if r["kind"] == kind]
         if outcome is not None:
+            # A row with no application-level outcome (not stored, or a name the store could
+            # not confirm) matches no outcome filter, "pending" included: pending means "stored,
+            # not labelled yet", which is not known for such a row.
             ordered = [
                 r
                 for r in ordered
-                if r["kind"] == "cuff-send" and (r["application"] or {}).get("outcome") == outcome
+                if r["kind"] == "cuff-send"
+                and r["application"] is not None
+                and r["application"]["outcome"] == outcome
             ]
 
         next_cursor = None
         if merged.more and merged.lower is not None:
             seen = {i.id for i in merged.page if i.at == merged.lower}
-            seen |= {m.name for at, m in store_only if at == merged.lower}
+            seen |= {m.name for at, m, _ in store_only if at == merged.lower}
             if cursor is not None and cursor.before == merged.lower:
                 seen |= cursor.seen
             next_cursor = Cursor(merged.lower, frozenset(sorted(seen)[:MAX_CURSOR_SEEN])).encode()
