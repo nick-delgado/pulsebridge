@@ -366,7 +366,9 @@ is not created.
 | Alert policies (only with channels) | per condition per month | Google's pricing page lists $0.10 per condition per month (charging starts no sooner than 1 May 2026; another Google page cites $1.50); 2 conditions: $0.20 to $3 a month. $0 without channels |
 | Logs | Cloud Logging ingestion beyond the free 50 GiB a month | a few MB a month |
 
-Pricing comes from search-result summaries of Google's pricing pages, not read directly.
+Alerting and metric pricing comes from search-result summaries of Google's pricing pages, not
+read directly; the Cloud Scheduler and Cloud Run free tiers are from general knowledge of
+Google's pricing, not checked in this task.
 
 ## What T25 must wire, and what other modules must provide
 
