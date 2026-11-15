@@ -10,6 +10,7 @@ import dataclasses
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
+from enum import StrEnum
 from pathlib import Path
 
 import pytest
@@ -297,6 +298,18 @@ def test_outcome_follows_the_acknowledgment_code(code, outcome):
         message_name=attempt().message_name if accepted else None,
     )
     assert build(a)["outcome"] == outcome
+
+
+def test_code_given_as_a_str_enum_is_stored_as_plain_text():
+    """T07's Ack.code is a StrEnum; the resource and the record hold the plain code."""
+
+    class AckCode(StrEnum):
+        AE = "AE"
+
+    result = Acknowledged(code=AckCode.AE, raw_ack=S4_NACK)
+    assert type(result.code) is str
+    plain = Acknowledged(code="AE", raw_ack=S4_NACK)
+    assert json.dumps(build(rejected(result=result))) == json.dumps(build(rejected(result=plain)))
 
 
 def test_accepted_with_an_msa3_text_keeps_it():

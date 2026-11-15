@@ -376,6 +376,8 @@ class Acknowledged:
             raise FhirInputError(
                 f"{where}: code {self.code!r} is not one of {', '.join(ACK_CODES)}"
             )
+        # A str subclass such as T07's AckCode (a StrEnum) is stored as the plain code.
+        object.__setattr__(self, "code", str.__str__(self.code))
         if not isinstance(self.raw_ack, bytes):
             raise FhirInputError(
                 f"{where}: raw_ack must be bytes, got {type(self.raw_ack).__name__}"

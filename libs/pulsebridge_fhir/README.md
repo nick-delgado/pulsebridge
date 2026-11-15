@@ -1,8 +1,9 @@
 # pulsebridge_fhir
 
 Builds the FHIR R4 resources PulseBridge writes: `Patient`, `Device`, heart-rate and
-blood-pressure `Observation`s, `Provenance`, and the transaction `Bundle`s that write them
-idempotently. Pure Python, no runtime dependencies, no network or GCP calls.
+blood-pressure `Observation`s, `Provenance`, the transaction `Bundle`s that write them
+idempotently, and the `AuditEvent` that records each cuff send attempt (T31). Pure Python, no
+runtime dependencies, no network or GCP calls.
 
 Callers pass plain values (frozen dataclasses that validate themselves) and get plain dicts back,
 ready for `json.dumps`. Any bad input raises `FhirInputError` (a `ValueError`) whose message names
@@ -138,6 +139,12 @@ Fallback, matching decision D11 (not implemented):
 | `window_from_rollup(point)`, `parse_google_utc_offset("-18000s")`, `window_status(window, complete_before)` | Google helpers. |
 | `GoogleDataSource(*, platform, recording_method)`, `rollup_source(window, data_source)` | Provenance source for a roll-up window. No defaults. |
 | `heart_rate_key`, `blood_pressure_key` | The idempotency keys. |
+| `SendAttempt(*, sent_at, transport, control_id, result, patient_id, agent, destination, message_name=None, sample_name=None)` | One cuff send attempt (T31). `result` is `Acknowledged(*, code, raw_ack, reason=None)` or `NotAcknowledged(*, why, http_status=None)`. |
+| `build_send_attempt_audit_event(attempt, *, recorded)` | The AuditEvent for one attempt; a `BuiltResource`. |
+| `audit_event_write(built)` | The single-resource write: `{method: "PUT", url: "AuditEvent/<id>", content_type, body}`. AuditEvent only. |
+| `parse_send_attempt(resource)` | An AuditEvent read back from the store, as a `SendAttemptRecord`. |
+| `send_attempt_search_params(*, count=50, since=None, before=None)` | Query parameters to list attempts newest first. |
+| `send_attempt_key(attempt)`, `sanitise_reason(text)` | The attempt's id; the MSA-3 cleaning rule. |
 
 A `BuiltResource` has `.resource` (the dict), `.full_url` (`urn:uuid:…`), `.key` and
 `.reference()`. `.update` (the `PUT` request) and `.create_if_absent` (the conditional create,
@@ -222,6 +229,7 @@ store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observa
 | Observation (HR) | `PUT Observation?identifier=urn:pulsebridge:observation\|<uuid>` | not written | UUIDv5(patient, `8867-4`, window start UTC) |
 | Observation (BP) | same | not written | UUIDv5(patient, `85354-9`, source key) |
 | Provenance | `PUT Provenance/<uuid>` | not written | UUIDv5(the Observation's key) |
+| AuditEvent | not written (refused as a record) | not written | written alone, `PUT AuditEvent/<uuid>`: UUIDv5(sender, transport, MSH-10, sent time) |
 
 - Observations are conditional updates on purpose: a window that was only partly synced has new
   values and must replace the old ones. The key leaves out the window end and the values.
@@ -351,12 +359,251 @@ Checked against the R4 (4.0.1) StructureDefinitions `vitalsigns`, `heartrate` an
 | `component.code` bound **extensible** to observation-vitalsignresult | **deliberate divergence** for the heart-rate min/max components: that 13-code value set has no min/max codes, which is when an extensible binding allows another code. Expect a validator warning. |
 | `urn:pulsebridge:*` code systems | local, undefined; the validator may report it cannot check them. |
 
+## AuditEvent for a cuff send attempt (T31)
+
+### What it is, and how it differs from Provenance
+
+An **AuditEvent** is FHIR's record of something that happened in or between systems: who did
+what to which thing, when, and whether it worked. It was designed to carry the same content as a
+DICOM / IHE ATNA audit message, which is why most of its codes come from DICOM.
+
+A **Provenance** (which T06 already writes) is about one resource: where an Observation came
+from and who made it. It is written in the same transaction as the Observation, and only when a
+message was mapped. A rejected message or one that never got an answer produces no Observation,
+so there is nothing for a Provenance to describe. The AuditEvent describes the **send** itself,
+whatever happened to it (decision D12). The HL7v2 store keeps neither rejected messages nor ACK
+bytes (spikes S4 and S5), so this record is the only place they survive.
+
+### The model
+
+| Element | Value | Why |
+| --- | --- | --- |
+| `type` | DICOM `110106` Export | "Data has been exported out of a system": the simulator sends a reading out to the HL7v2 store. |
+| `subtype` | v2-0003 `R01` ORU/ACK | The HL7v2 trigger event attempted. A malformed sample is still an attempt at this transaction. |
+| `action` | `R` (read) | DICOM PS3.15 A.5.3.4 (Data Export) and IHE (for example the ITI-41 source audit) fix an Export's action to R: the sender reads what it sends. The receiver would record its own Import (`110107`) with action C. |
+| `period` | `start`: sent; `end`: recorded | When the activity happened: the send, then the wait for the answer. |
+| `recorded` | when the attempt was recorded | R4 requires it. Passed in by the caller, so the builder stays deterministic. |
+| `outcome` | `0` / `4` / `8` | See the mapping table below. |
+| `outcomeDesc` | fixed wording, plus the cleaned MSA-3 reason | Only for a failure, or an accept that carried MSA-3 text. No caller text enters it. |
+| `agent[0]` | DICOM `110153` Source Role ID, `who` = `urn:pulsebridge:service\|cuff-sim`, `requestor: true` | The sender, which started the activity. |
+| `agent[1]` | DICOM `110152` Destination Role ID, `who` = `urn:pulsebridge:hl7v2-store\|<store name>`, `requestor: false` | The receiver. Over MLLP it is reached through the adapter, but the store is the destination. |
+| `source.observer` | `urn:pulsebridge:service\|cuff-sim`; `source.type` security-source-type `4` Application Server | R4 requires an observer: the system that reports the event, here the simulator itself (a Cloud Run service). |
+| `entity[0]` | the patient: `what` = `{type: Patient, identifier: urn:pulsebridge:patient\|<id>}`; `type` audit-entity-type `1` Person; `role` object-role `1` Patient | What the reading was about. **The patient is not an agent**: they took no part in sending it. |
+| `entity[1]` | the message: `what` = `urn:pulsebridge:source-record:hl7v2-message\|<stored name>` when stored; `type` `2` System Object; `role` `3` Report; `detail` (below) | An ORU^R01 is an unsolicited observation report. Its identifier system is the one T06's Provenance uses for the same message, so the trace panel can join the two. |
+
+Not used: `entity.lifecycle` (R4's DICOM lifecycle code system is marked "not currently used",
+and the element is optional) and `purposeOfEvent`.
+
+`entity[1].detail` is a list of name/value pairs. In R4 `detail.type` is a plain string, so no
+code system is involved. HL7v2 field names are used where the value is an HL7v2 field, as IHE's
+audit messages for HL7v2 transactions do for MSH-10.
+
+| `detail.type` | Value | Present when |
+| --- | --- | --- |
+| `transport` | `mllp` or `https` | always |
+| `MSH-10` | the message control ID | the message had one (a "no MSH" sample has none) |
+| `MSA-1` | `AA`, `AE`, `AR`, `CA`, `CE`, `CR` | an ACK came back |
+| `MSA-3` | the cleaned reason | the ACK carried one |
+| `ack-message` | the raw ACK, `valueBase64Binary` | an ACK came back |
+| `no-ack-reason` | `timeout`, `connection-closed`, `api-error` | no ACK came back |
+| `http-status` | for example `"503"` | `api-error` only |
+| `malformed-sample` | the T07 sample name, for example `unparseable_no_msh` | "send malformed" was used |
+
+### Code systems
+
+| System | Codes used | Kind |
+| --- | --- | --- |
+| `http://dicom.nema.org/resources/ontology/DCM` | `110106` Export, `110153` Source Role ID, `110152` Destination Role ID | standard (DICOM PS3.16); in R4's AuditEventID and ParticipationRoleType value sets |
+| `http://terminology.hl7.org/CodeSystem/v2-0003` | `R01` | standard (HL7v2 table 0003) |
+| `http://hl7.org/fhir/audit-event-action` | `R` (the `action` code) | standard, required binding |
+| `http://hl7.org/fhir/audit-event-outcome` | `0`, `4`, `8` (the `outcome` code) | standard, required binding |
+| `http://terminology.hl7.org/CodeSystem/security-source-type` | `4` Application Server | standard |
+| `http://terminology.hl7.org/CodeSystem/audit-entity-type` | `1` Person, `2` System Object | standard |
+| `http://terminology.hl7.org/CodeSystem/object-role` | `1` Patient, `3` Report | standard |
+| `urn:pulsebridge:service` | identifier system for a PulseBridge service name (`cuff-sim`) | local: our software has no standard identifier |
+| `urn:pulsebridge:hl7v2-store` | identifier system for a Cloud Healthcare HL7v2 store name | local |
+| `urn:pulsebridge:source-record:hl7v2-message` | identifier system for a stored message name (shared with Provenance) | local, from T06 |
+| `urn:pulsebridge:patient` | the patient identifier (from T06) | local, from T06 |
+
+The code meanings were checked through web search against DICOM PS3.15 and PS3.16, IHE audit
+definitions and published FHIR value set listings; hl7.org itself was not reachable from the build
+environment. The examples parse with an R4 (4.0.1) model library (`fhir.resources` 6.4.0, used in
+a scratch environment only, not a dependency). The HL7 validator (T08) is the definitive check.
+
+### Results and `outcome`
+
+R4 `audit-event-outcome`: `0` Success; `4` Minor failure, "often equivalent to an HTTP 400
+response"; `8` Serious failure, "some kind of unexpected error (often equivalent to an HTTP 500
+response)"; `12` Major failure, "the system is no longer available for use".
+
+| Result | Input | `outcome` | Why |
+| --- | --- | --- | --- |
+| accepted | `Acknowledged(code="AA")` or `CA` | `0` | The store took the message (commit-level accept, D7). |
+| rejected | `Acknowledged(code="AE")`, `AR`, `CE`, `CR` | `4` | The receiver answered and refused the message itself, like an HTTP 400. S4 found the store only returns AE; AR is treated the same way so the mapping depends only on accept or refuse. |
+| no acknowledgment | `NotAcknowledged(why="timeout" \| "connection-closed" \| "api-error")` | `8` | No answer at all: the delivery path failed, like an HTTP 500, and the message's fate is unknown. |
+
+`12` is never used. A timeout or a closed connection does not show that the store is down, only
+that this attempt got no answer.
+
+The AuditEvent records only the **commit-level** acknowledgment. Whether `v2-to-fhir` could map
+an accepted message (the application-level outcome) is in the stored message's labels (D7).
+
+### Inputs and validation
+
+- `SendAttempt` takes plain values only, with no HL7v2 or Google types. Exactly one result shape:
+  `Acknowledged` or `NotAcknowledged`. There is no field for the message itself.
+- `sent_at` and `recorded`: time-zone aware, **whole milliseconds**, and `recorded` must not be
+  before `sent_at`. This is milliseconds, not whole seconds as for heart-rate windows, because a
+  resend can follow within the same second and the key includes the send time.
+- `transport`: `mllp` or `https`. `api-error` happens only over `https` and always has an
+  `http_status` of 400 to 599. The status is allowed with nothing else.
+- `control_id` (MSH-10): 1 to 64 of `A-Za-z0-9._-` (T07 builds 1 to 20 of them). It may be `None`
+  only for a malformed sample.
+- `raw_ack`: 1 to 4096 bytes, the ACK message without the MLLP frame (no `0x0B`, no `0x1C`),
+  starting with `MSH`. This library does not parse HL7v2: `code` and `reason` come from T07's
+  ACK parser.
+- `message_name`: only with an accepting ACK (a rejected message is not stored), and it must be
+  `<destination>/messages/<id>`.
+- `destination`: `projects/<p>/locations/<l>/datasets/<d>/hl7V2Stores/<s>`. `agent`: a Cloud
+  Run-style service name. `sample_name`: a T07 sample name. `patient_id`: the same rule as
+  `PatientInput`, so the reference always matches the Patient T06 writes.
+
+**The MSA-3 reason is cleaned, not rejected** (`sanitise_reason`). The text comes from the store,
+not from a person. Rejecting it would lose the audit record of a real attempt, and the raw ACK
+keeps the original bytes anyway. The steps:
+
+1. normalise to NFC;
+2. replace every control, format, private-use, surrogate or unassigned character (Unicode `C*`)
+   and every line or paragraph separator with U+FFFD, so a CR cannot forge a log line and a
+   bidirectional override cannot disguise the text, and the reader can see that something was
+   replaced;
+3. trim the ends;
+4. cut text over 200 characters to 199 plus an ellipsis. MSA-3 is 80 characters in v2.5.1, so a
+   conforming reason is never cut.
+
+Applying it twice gives the same result, so a stored reason validates to itself on read. The
+reason is stored as the caller passes it. T07's `parse_ack` decodes HL7v2 escapes (`\E\` becomes
+`\`), and the raw ACK keeps them as sent.
+
+### Privacy
+
+- The raw HL7v2 **message** is never stored. An accepted message is in the HL7v2 store, and a
+  malformed one is a fixed synthetic sample identified by name. Only the raw **ACK** is kept,
+  which is MSH and MSA with no patient data.
+- The patient appears by identifier only: no name, no display.
+
+### References by identifier
+
+The patient, the sender and the store are **logical references**: a `Reference` with an
+`identifier` and no `reference` (no `Patient/<id>`). R4 allows a Reference to carry only an
+identifier when the target is known by identifier rather than by server id.
+
+This suits an AuditEvent written **outside a transaction Bundle**:
+
+- There is no Bundle, so there is no `urn:uuid` to point at.
+- D11 says ingest never assumes the Patient's server id.
+- The simulator writes the AuditEvent before, and whether or not, `v2-to-fhir` has created
+  anything.
+- The sender and the store are not FHIR resources at all.
+
+A logical reference names the patient the same way every other PulseBridge resource does
+(`urn:pulsebridge:patient|<id>`) and never dangles. The cost: the server does not resolve it, so
+the R4 `patient` and `agent` reference searches will not find these events (see Listing).
+
+### Idempotency
+
+R4 AuditEvent has no `identifier` element, and Cloud Healthcare's conditional update matches on
+identifier only. So, as for Provenance, the AuditEvent is written by a deterministic id:
+`PUT AuditEvent/<uuid>` ("update as create", which needs the store's `enableUpdateCreate`, T05).
+
+The id is UUIDv5 of `["AuditEvent", "cuff-send-attempt", <agent>, <transport>, <MSH-10 or "">,
+<sent time, UTC, milliseconds>]`:
+
+- **Sent time**: the same control ID can legitimately be sent twice (a resend reuses MSH-10), and
+  those are two attempts with two AuditEvents.
+- **Agent and transport** keep two simulators, or an MLLP and an HTTPS send at the same
+  millisecond, apart.
+- **Not the result, the destination or `recorded`**: they are what is recorded about the
+  attempt. Writing the same attempt again (a retried write) replaces the same AuditEvent.
+
+The three example ids are pinned by a test.
+
+`audit_event_write` derives method and URL from the resource with `request_for`, like every other
+request in this library. It refuses anything but an AuditEvent, so it cannot write a Patient or
+Device outside the two bundle functions. `build_ingest_bundle` still refuses an AuditEvent as a
+record.
+
+### Usage: cuff simulator (T13), recording an attempt
+
+```python
+from pulsebridge_fhir import (Acknowledged, NotAcknowledged, SendAttempt, FhirInputError,
+                              audit_event_write, build_send_attempt_audit_event)
+
+if ack is not None:   # T07 parse_ack(payload): the frame payload, or base64-decoded hl7Ack/hl7Nack
+    result = Acknowledged(code=ack.code, raw_ack=ack.raw, reason=ack.reason)
+else:                 # timeout, connection closed, or an HTTPS error with no hl7Nack
+    result = NotAcknowledged(why=why, http_status=status if why == "api-error" else None)
+attempt = SendAttempt(
+    sent_at=sent_at, transport=transport, control_id=control_id, result=result,
+    patient_id=configured_patient_id, agent="cuff-sim", destination=configured_hl7v2_store,
+    message_name=ingest_response_name,          # HTTPS 200 only; None otherwise
+    sample_name=malformed_sample_name,          # None unless "send malformed"
+)
+write = audit_event_write(build_send_attempt_audit_event(attempt, recorded=datetime.now(UTC)))
+# PUT {fhir_base}/{write["url"]}, Content-Type: write["content_type"], body json.dumps(write["body"])
+```
+
+Truncate `datetime.now(UTC)` and `sent_at` to milliseconds
+(`.replace(microsecond=t.microsecond // 1000 * 1000)`). A `FhirInputError` or a failed write is
+logged and reported, and never hides the send's result (T13 AC).
+
+### Usage: FHIR proxy (T14), the messages log
+
+```python
+from urllib.parse import urlencode
+from pulsebridge_fhir import parse_send_attempt, send_attempt_search_params, FhirInputError
+
+url = f"{fhir_base}/AuditEvent?{urlencode(send_attempt_search_params(count=50, since=since))}"
+for entry in bundle.get("entry", []):
+    try:
+        row = parse_send_attempt(entry["resource"])
+    except FhirInputError:
+        continue                                # not one of ours; skip it, log at debug
+    row.sent_at, row.transport, row.control_id, row.result          # accepted / rejected / no-acknowledgment
+    row.ack_code, row.reason, row.raw_ack, row.no_ack_reason, row.http_status
+    row.message_name                            # join to the stored message and its labels
+```
+
+`parse_send_attempt` tolerates what a server adds on read (`id`, `meta`, `text`) and a time
+written in another valid form (`Z` for `+00:00`). Otherwise the values are read out, validated as
+a `SendAttempt`, built again, and the result must equal the given resource. Anything else, or
+an id that does not match, is a `FhirInputError`.
+
+### Listing
+
+`send_attempt_search_params()` returns `type=http://dicom.nema.org/resources/ontology/DCM|110106`,
+`subtype=http://terminology.hl7.org/CodeSystem/v2-0003|R01`, optionally `date=ge…` and
+`date=lt…` (UTC, `Z`), `_sort=-date` and `_count`. All are standard R4 AuditEvent search
+parameters: `type` and `subtype` are tokens, and `date` searches `AuditEvent.recorded`. **Cloud
+Healthcare's support for each of them on AuditEvent is unverified until the first real call in
+T14.**
+
+`date` sorts by `recorded`, not by the send time. One simulator sends one message at a time, so
+the order is the same. `outcome` (token) is also a standard parameter if a filter is wanted. The
+`patient` and `agent` reference searches do not apply, because those references are logical.
+
 ## Examples for the validator (T08)
 
 `examples/` holds one file per resource type plus three transaction Bundles, all synthetic:
 `bundle-patient-setup.json` (the Patient upsert), `bundle-heart-rate-ingest.json` and
 `bundle-blood-pressure-ingest.json` (conditional creates; the latter built from PID-3 and PID-5
-only, and the former with one `preliminary` window). They are generated, never edited by hand:
+only, and the former with one `preliminary` window). Three AuditEvents (T31) cover each send
+result: `auditevent-send-accepted.json` (HTTPS, `AA`, stored message name),
+`auditevent-send-rejected.json` (MLLP, the `unparseable_no_msh` sample, `AE` with reason) and
+`auditevent-send-no-ack.json` (MLLP, the `noack_missing_end_block` sample, timeout). That makes
+twelve files. The store name in them uses the placeholder project `example-project`. Expected
+validator warnings, beyond those listed above: the local `urn:pulsebridge:*` identifier systems.
+They are generated, never edited by hand:
 
 ```bash
 .venv/bin/python -m pulsebridge_fhir.examples   # rewrites libs/pulsebridge_fhir/examples/
