@@ -1,4 +1,5 @@
-# Cloud Healthcare API: one dataset holding a FHIR R4 store and an HL7v2 store.
+# Cloud Healthcare API: one dataset holding two FHIR R4 stores (health data, and audit data for
+# cuff send attempts, D15) and an HL7v2 store.
 #
 # A dataset is a regional container; the stores inside it hold the data. Deleting the dataset
 # deletes every store and every resource or message in it.
@@ -7,6 +8,9 @@ locals {
   dataset_name     = var.name_prefix
   fhir_store_name  = "${var.name_prefix}-fhir"
   hl7v2_store_name = "${var.name_prefix}-hl7v2"
+
+  # In the Healthcare API a store's name is also its ID (the last segment of its path).
+  audit_fhir_store_name = coalesce(var.audit_fhir_store_name, "${var.name_prefix}-fhir-audit")
 }
 
 resource "google_healthcare_dataset" "this" {
@@ -80,6 +84,57 @@ resource "google_healthcare_fhir_store" "this" {
 
   # validation_config is left at its defaults: required-field, reference-type, FHIRPath and
   # base-profile validation all stay ON.
+
+  labels          = var.labels
+  deletion_policy = var.deletion_policy
+}
+
+# ---------------------------------------------------------------------------------------------
+# Audit FHIR R4 store (D15): only the AuditEvents that record cuff send attempts (D12, T31).
+# It exists so the cuff simulator can write its audit records without any access to the store
+# above, which holds health data. Same dataset, so the same location and the same lifecycle.
+# Settings are chosen for AuditEvents, not copied blindly; several are immutable.
+# ---------------------------------------------------------------------------------------------
+resource "google_healthcare_fhir_store" "audit" {
+  name    = local.audit_fhir_store_name
+  dataset = google_healthcare_dataset.this.id
+
+  # FHIR R4, as in the main store: T31's AuditEvent builder and the validator (T08) are R4.
+  version = "R4"
+
+  # Update-create ON: T31 writes PUT AuditEvent/<id> with an ID derived from the attempt, so
+  # writing the same attempt twice leaves one resource. With this off, the first PUT to a new
+  # ID would fail.
+  enable_update_create = true
+
+  # Referential integrity ON (the API default). The AuditEvent identifies the patient and the
+  # services by identifier-only logical references (Reference.identifier, no
+  # Reference.reference), which the store does not resolve, so integrity does not get in the
+  # way. If a literal reference such as Patient/<id> were ever added, the write would be
+  # refused, because that Patient lives in the other store: a useful guard against
+  # accidentally linking audit data to health data. Immutable after creation.
+  disable_referential_integrity = false
+
+  # Versioning ON (the API default). An attempt may be recorded first as "no acknowledgment"
+  # and overwritten later with the same ID once the outcome is known; keeping versions keeps
+  # that history readable with _history. Immutable after creation.
+  disable_resource_versioning = false
+
+  # History import OFF: nothing bulk-imports past versions, and none may be fabricated.
+  enable_history_import = false
+
+  # As in the main store: parse references inside complex types too, set explicitly because
+  # Google plans to change the default for new stores.
+  complex_data_type_reference_parsing = "ENABLED"
+
+  # Strict search, as in the main store: a mistyped search parameter in the messages log
+  # query (T14) is an error instead of returning every AuditEvent.
+  default_search_handling_strict = true
+
+  # No notification_configs: nothing reacts to new AuditEvents; fhir-proxy reads them on
+  # request.
+
+  # validation_config left at its defaults (all validation on).
 
   labels          = var.labels
   deletion_policy = var.deletion_policy

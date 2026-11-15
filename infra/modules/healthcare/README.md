@@ -1,7 +1,9 @@
 # Module `healthcare`
 
-The Cloud Healthcare API side of PulseBridge: one **dataset** holding a **FHIR R4 store** and an
-**HL7v2 store**, plus the Pub/Sub path that tells `v2-to-fhir` when an HL7v2 message has arrived.
+The Cloud Healthcare API side of PulseBridge: one **dataset** holding a **FHIR R4 store** for
+health data, a second **audit FHIR R4 store** for the cuff simulator's send-attempt records
+(D15), and an **HL7v2 store**, plus the Pub/Sub path that tells `v2-to-fhir` when an HL7v2
+message has arrived.
 
 ```
 cuff-sim ──MLLP──> edge VM adapter ──┐
@@ -12,6 +14,7 @@ cuff-sim ──HTTPS messages:ingest─────┴─> HL7v2 store ──not
                      dead-letter pull subscription                        v
                                                                       v2-to-fhir ──> FHIR R4 store
 health-sync ─────────────────────────────────────────────────────────────────────> FHIR R4 store
+cuff-sim ──PUT AuditEvent/<id> (one per send attempt, D12, D15)──────────> audit FHIR R4 store
 ```
 
 - A **dataset** is a regional container in the Healthcare API. It holds stores and decides where
@@ -21,6 +24,10 @@ health-sync ──────────────────────�
 - An **HL7v2 store** receives HL7v2 messages (over the MLLP adapter or the REST `messages:ingest`
   call), replies with the HL7 ACK, keeps each accepted message, and publishes a notification.
   Our own `v2-to-fhir` code turns those messages into FHIR resources in the FHIR store.
+- The **audit FHIR store** is a second FHIR server in the same dataset that holds only
+  `AuditEvent`s: one per cuff send attempt, recording what was sent and which acknowledgment
+  came back (D12). It is separate so that the cuff simulator, which writes those records, has
+  no access at all to the store with health data (D15; see "IAM").
 
 ## Usage
 
@@ -49,7 +56,7 @@ module "healthcare" {
 `module.identity.service_account_emails` is module identity's output (T04). The
 `module.ingestion` output name above is illustrative; T20 and T25 settle it.
 
-## FHIR store settings
+## FHIR store settings (health data)
 
 Several of these cannot be changed after the store is created; changing them here would replace
 the store and **delete its data**.
@@ -65,6 +72,26 @@ the store and **delete its data**.
 | `default_search_handling_strict` | `true` | An unknown search parameter is an error. | Lenient (the FHIR default) ignores it: `Observation?dat=2026-11-01` (a typo) would return every Observation. |
 | `notification_configs` | none | Nothing consumes FHIR change events; the dashboard reads through `fhir-proxy`. | About 300 notifications a day to a topic nobody reads. |
 | `validation_config` | defaults | Required-field, reference-type, FHIRPath and base-profile validation all stay on. | |
+
+## Audit FHIR store settings
+
+The audit store (`google_healthcare_fhir_store.audit`, named `<name_prefix>-fhir-audit` unless
+`audit_fhir_store_name` is set) holds only the `AuditEvent`s that T31 builds and the cuff
+simulator writes. Its settings are chosen for that job; where they match the main store, the
+reason is the same.
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `version` | `R4` | T31's builder and the validator (T08) are R4. Immutable. |
+| `enable_update_create` | `true` | The simulator writes `PUT AuditEvent/<id>` with an ID derived from the attempt (T31), so writing the same attempt twice leaves one resource. With `false`, every first `PUT` to a new ID would fail. |
+| `disable_referential_integrity` | `false` (integrity on) | **Referential integrity** means the store refuses a resource whose reference points at something that does not exist. The AuditEvent names the patient and the services with **identifier-only logical references**: `Reference.identifier` (a system and value), with no `Reference.reference` such as `Patient/<id>`. The store does not try to resolve those, so integrity costs nothing. It stays on as a guard: if a literal reference to a health-data resource were ever added, the write would be refused, because that resource lives in the other store. Immutable. |
+| `disable_resource_versioning` | `false` (versioning on) | An attempt may first be recorded as "no acknowledgment" and later overwritten with the same ID once the outcome is known. Versioning keeps the earlier record readable with `_history`, so the overwrite does not erase what was first recorded. Immutable. |
+| `enable_history_import` | `false` | Nothing imports past versions, and none may be fabricated. |
+| `complex_data_type_reference_parsing` | `ENABLED` | Same as the main store: set explicitly ahead of Google's planned default change. |
+| `default_search_handling_strict` | `true` | Same as the main store: a mistyped search parameter in the messages log query (T14) is an error instead of returning every AuditEvent. |
+| `notification_configs` | none | Nothing reacts to new AuditEvents; `fhir-proxy` reads them on request. |
+| `validation_config` | defaults | All validation on. |
+| `deletion_policy`, `labels` | the module's variables | Same lifecycle as the main store: destroyed with the dataset under `"DELETE"`, protected under `"PREVENT"`. |
 
 ## HL7v2 store settings
 
@@ -131,18 +158,71 @@ with the retry policy above that costs a few delivery attempts, not messages.
 
 **Application service accounts** (module identity's map, passed as it is to
 `store_iam_service_accounts`). Every key is optional, and keys not listed here (for example
-`scheduler-invoker`, `pubsub-push`) are ignored. The narrowest predefined Healthcare roles:
+`scheduler-invoker`, `pubsub-push`) are ignored. One role table in `iam.tf` (`store_role_matrix`)
+drives every binding below; each is the narrowest predefined Healthcare role for the job, and
+each column says plainly what the role allows, reading included.
 
-| Key (account) | Role | Resource | Needed for |
+*Main FHIR store (health data):*
+
+| Key (account) | Role | Allows | Needed for |
 | --- | --- | --- | --- |
-| `health-sync` | `roles/healthcare.fhirResourceEditor` | FHIR store | Conditional updates in a transaction Bundle |
-| `seeder` | `roles/healthcare.fhirResourceEditor` | FHIR store | Synthetic-data seeder (T09), same write pattern as health-sync. Nothing on the HL7v2 store. Present only when module identity creates that account. |
-| `v2-to-fhir` | `roles/healthcare.fhirResourceEditor` | FHIR store | Writing Patient, Device, Observation, Provenance |
-| `v2-to-fhir` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.get` and `messages.patch` with `updateMask=labels` (outcome labels, S5). Google's IAM reference describes Consumer as "list and read HL7v2 messages, update message labels, and publish new messages", which covers `healthcare.hl7V2Messages.update` (the permission `messages.patch` needs). Found through search-result summaries of that page, not by reading the role directly; the first apply must confirm the label patch. Editor would also allow delete and ingest. |
-| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | FHIR store | Search and read for the dashboard and share |
-| `fhir-proxy` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.list` filtered by label, `messages.get` for the trace. Consumer also lets it patch labels and create messages, which the proxy does not need; no narrower predefined role covers list + get, so a custom role would be the next step. |
-| `edge-vm` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | MLLP adapter `messages:ingest` (S4) |
-| `cuff-sim` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | HTTPS ingest transport |
+| `health-sync` | `roles/healthcare.fhirResourceEditor` | Create, read, search, update and delete any resource in the store | Conditional updates in a transaction Bundle |
+| `seeder` | `roles/healthcare.fhirResourceEditor` | Same as above | Synthetic-data seeder (T09), same write pattern as health-sync. Nothing on the other stores. Present only when module identity creates that account. |
+| `v2-to-fhir` | `roles/healthcare.fhirResourceEditor` | Same as above | Writing Patient, Device, Observation, Provenance |
+| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | Read and search any resource; no writes | Search and read for the dashboard and share |
+
+`cuff-sim`, `edge-vm` and every other account have **nothing** on this store.
+
+*Audit FHIR store (send-attempt AuditEvents, D15):*
+
+| Key (account) | Role | Allows | Needed for |
+| --- | --- | --- | --- |
+| `cuff-sim` | `roles/healthcare.fhirResourceEditor` | Create, read, search, update and delete any resource **in the audit store** | Writing one `AuditEvent` per send attempt with `PUT AuditEvent/<id>` (D12, T13, T31). It can also read, search and delete the audit records, which it does not need; Google's role list shows no predefined FHIR role that writes without reading. |
+| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | Read and search any resource in the audit store; no writes | The messages log (T14, T19) |
+
+No other account has anything on this store.
+
+*HL7v2 store:*
+
+| Key (account) | Role | Allows | Needed for |
+| --- | --- | --- | --- |
+| `v2-to-fhir` | `roles/healthcare.hl7V2Consumer` | List and read messages, update their labels, create messages | `messages.get` and `messages.patch` with `updateMask=labels` (outcome labels, S5). Google's IAM reference describes Consumer as "list and read HL7v2 messages, update message labels, and publish new messages", which covers `healthcare.hl7V2Messages.update` (the permission `messages.patch` needs). Found through search-result summaries of that page, not by reading the role directly; the first apply must confirm the label patch. Editor would also allow delete and ingest. |
+| `fhir-proxy` | `roles/healthcare.hl7V2Consumer` | Same as above | `messages.list` filtered by label, `messages.get` for the trace. Consumer also lets it patch labels and create messages, which the proxy does not need; no narrower predefined role covers list + get, so a custom role would be the next step. |
+| `edge-vm` | `roles/healthcare.hl7V2Ingest` | Ingest messages only | MLLP adapter `messages:ingest` (S4) |
+| `cuff-sim` | `roles/healthcare.hl7V2Ingest` | Ingest messages only | HTTPS ingest transport |
+
+**Why a separate audit store (D15).** The cuff simulator must write an `AuditEvent` for every
+send attempt (D12). It writes, rather than `fhir-proxy`, because it holds the raw ACK and because
+the proxy is the one public service (D10) and should stay read-only. The simple option was to give
+the simulator `fhirResourceEditor` on the main store. Healthcare IAM roles apply to a whole store
+(from Google's IAM documentation, not tested here), so that would have let the simulator read,
+search and delete every resource there, including the author's real heart-rate data. That is far
+more than recording a send attempt needs. A custom role would not solve it either: it could
+leave out read and delete, but it still could not limit writes to one resource type, so the
+simulator could still create or overwrite Observations and Patients. A second store makes the
+store itself the boundary. The simulator's editor role reaches only audit records, and it has no
+binding on the health-data store.
+
+What remains: on the audit store the simulator can also read, search and delete audit records,
+so a compromised simulator could alter the messages log. It cannot touch health data. Two further
+mitigations are meant to apply: the simulator will not be publicly invocable, and only
+`fhir-proxy` may call it (enforced in T22, D10); and it builds each AuditEvent itself from
+validated values and never forwards caller-supplied FHIR (T13). A custom role on the audit store
+without read and delete would be the next tightening.
+
+Which permissions a `PUT` that creates a resource (update-create) checks is **unconfirmed**:
+it is expected to be covered by `fhirResourceEditor` (create and update), but not tested
+against the API. Confirm on the first apply (T25/T29).
+
+**What the tests prove, and what they do not.** `tests/iam.tftest.hcl` compares the whole table
+of bindings on each of the three stores, store IDs included. It checks that `cuff-sim` alone gets
+exactly the audit-store editor and HL7v2 ingest bindings, that `fhir-proxy` is exactly reader on
+both FHIR stores, and that no other workload appears on the audit store. Those tests only see the
+role-table-driven resources. So `tests/check_store_iam.sh` reads the source and fails if the
+module declares any other Healthcare store or dataset IAM resource (including `_iam_binding` and
+`_iam_policy`), any project-level IAM, or a child module. Together they cover this module's role
+table and its declared resources. They say nothing about grants made outside this module, such
+as a project-level role given by hand or by another module.
 
 None of these least-privilege roles has been exercised against the API yet: spikes S4 and S5 used
 broadly privileged accounts. Confirm each on the first apply (T25/T29).
@@ -157,8 +237,10 @@ account to create a push subscription with its OIDC token (T02's deployer accoun
   are not used. Unacknowledged messages older than a day can be billed as storage; at a few
   hundred small notifications this is negligible, and retention is capped at 7 days (Pub/Sub
   allows 31) to keep it that way.
-- `deletion_policy = "DELETE"` (default) lets `terraform destroy` delete the dataset and both
-  stores together with every stored resource and message, so a destroyed dev stack leaves nothing
+- The audit FHIR store adds no hourly charge either: it is billed only for the AuditEvents it
+  stores (a few KB each) and the requests made to it.
+- `deletion_policy = "DELETE"` (default) lets `terraform destroy` delete the dataset and all
+  three stores (the audit store included) together with every stored resource and message, so a destroyed dev stack leaves nothing
   billable. Topics and subscriptions are always deleted.
 - Use `"PREVENT"` in prod: destroy then fails instead of deleting real data. The value is read
   from state, so going back to `"DELETE"` needs an apply before the destroy. `"ABANDON"` is
@@ -175,7 +257,7 @@ From spike S5's "What was not verified" and this module's own choices:
   no endpoint. First confirmation comes with T20/T29.
 - **Service agents exist** once the APIs are enabled (module project-base). If an apply runs
   before the agent is created, the IAM binding fails; re-running the apply fixes it.
-- **Least-privilege roles** in the table above are untested.
+- **Least-privilege roles** in the IAM tables above are untested, and so is which permission an update-create `PUT` checks.
 - **Parser V1 vs V2/V3**: only V1 was exercised.
 
 ## Tests
@@ -183,8 +265,13 @@ From spike S5's "What was not verified" and this module's own choices:
 `terraform test` in this directory runs the files under `tests/` against a mocked Google provider:
 no credentials, nothing created.
 
-`terraform test` cannot see `depends_on` or which module owns a grant, so a static script checks
-both. It needs no credentials after `terraform init -backend=false`, and fails if:
+`terraform test` cannot see `depends_on`, which module owns a grant, or IAM resources outside
+the role table, so two static scripts check those. `tests/check_store_iam.sh` reads the `.tf`
+files only (no init needed) and fails if the module declares any Healthcare store or dataset IAM
+resource other than the three role-table-driven ones (`google_healthcare_fhir_store_iam_member`
+`app` and `audit`, `google_healthcare_hl7_v2_store_iam_member` `app`), if one of those uses a
+different `for_each` or store, or if the module declares project-level IAM or a child module.
+`tests/check_ordering.sh` checks the rest. It needs no credentials after `terraform init -backend=false`, and fails if:
 
 - any `.tf` file here manages a service account's IAM or grants
   `roles/iam.serviceAccountTokenCreator` (module identity owns that grant);
@@ -199,6 +286,7 @@ mock that fails to apply can never reach a real project.
 ```bash
 terraform init -backend=false   # once
 tests/check_ordering.sh         # from this directory, or pass the module path as $1
+tests/check_store_iam.sh        # same
 ```
 
 <!-- BEGIN_TF_DOCS -->
@@ -215,13 +303,19 @@ tests/check_ordering.sh         # from this directory, or pass the module path a
 |------|---------|
 | <a name="provider_google"></a> [google](#provider\_google) | 8.11.0 |
 
+## Modules
+
+No modules.
+
 ## Resources
 
 | Name | Type |
 |------|------|
 | [google_healthcare_dataset.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_dataset) | resource |
+| [google_healthcare_fhir_store.audit](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_fhir_store) | resource |
 | [google_healthcare_fhir_store.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_fhir_store) | resource |
 | [google_healthcare_fhir_store_iam_member.app](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_fhir_store_iam_member) | resource |
+| [google_healthcare_fhir_store_iam_member.audit](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_fhir_store_iam_member) | resource |
 | [google_healthcare_hl7_v2_store.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_hl7_v2_store) | resource |
 | [google_healthcare_hl7_v2_store_iam_member.app](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_hl7_v2_store_iam_member) | resource |
 | [google_pubsub_subscription.dead_letter](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_subscription) | resource |
@@ -238,10 +332,11 @@ tests/check_ordering.sh         # from this directory, or pass the module path a
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
 | <a name="input_ack_deadline_seconds"></a> [ack\_deadline\_seconds](#input\_ack\_deadline\_seconds) | How long Pub/Sub waits for v2-to-fhir to answer a push before treating it as failed and retrying. 60 s covers a Cloud Run cold start plus a FHIR write; the Pub/Sub default of 10 s does not. | `number` | `60` | no |
-| <a name="input_deletion_policy"></a> [deletion\_policy](#input\_deletion\_policy) | What `terraform destroy` (or a replacing apply) may do to the dataset and the two stores.<br/>"DELETE" (default) deletes them together with every stored FHIR resource and HL7v2 message,<br/>so a destroyed dev stack leaves nothing billable. "PREVENT" makes destroy fail instead, which<br/>suits prod where the data is real. The setting is read from state, so switching from PREVENT<br/>to DELETE needs an apply before the destroy. "ABANDON" is not offered: it would leave the<br/>stores, and their storage bill, behind without Terraform knowing. | `string` | `"DELETE"` | no |
+| <a name="input_audit_fhir_store_name"></a> [audit\_fhir\_store\_name](#input\_audit\_fhir\_store\_name) | Name (which is also the ID) of the second FHIR R4 store, which holds only the AuditEvents<br/>that record cuff send attempts (D15). null (default) gives "<name\_prefix>-fhir-audit".<br/>Must differ from the main FHIR store's name, "<name\_prefix>-fhir". Changing it replaces<br/>the store and deletes its records. | `string` | `null` | no |
+| <a name="input_deletion_policy"></a> [deletion\_policy](#input\_deletion\_policy) | What `terraform destroy` (or a replacing apply) may do to the dataset and its three stores<br/>(FHIR, audit FHIR, HL7v2).<br/>"DELETE" (default) deletes them together with every stored FHIR resource and HL7v2 message,<br/>so a destroyed dev stack leaves nothing billable. "PREVENT" makes destroy fail instead, which<br/>suits prod where the data is real. The setting is read from state, so switching from PREVENT<br/>to DELETE needs an apply before the destroy. "ABANDON" is not offered: it would leave the<br/>stores, and their storage bill, behind without Terraform knowing. | `string` | `"DELETE"` | no |
 | <a name="input_hl7v2_parser_version"></a> [hl7v2\_parser\_version](#input\_hl7v2\_parser\_version) | Version of the HL7v2 store's built-in (unschematized) parser, which fills the stored message's parsedData. Cannot be changed after the store is created (spike S4). V1 is the version spikes S4 and S5 tested; see the README before changing it. | `string` | `"V1"` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the stores, topics and subscriptions (the dataset resource has no labels). | `map(string)` | `{}` | no |
-| <a name="input_location"></a> [location](#input\_location) | Cloud Healthcare API location for the dataset and both stores (a region such as "us-central1", or a multi-region such as "us"). Stored health data stays in this location. | `string` | `"us-central1"` | no |
+| <a name="input_location"></a> [location](#input\_location) | Cloud Healthcare API location for the dataset and all its stores (a region such as "us-central1", or a multi-region such as "us"). Stored health data stays in this location. | `string` | `"us-central1"` | no |
 | <a name="input_max_delivery_attempts"></a> [max\_delivery\_attempts](#input\_max\_delivery\_attempts) | Delivery attempts before a notification is moved to the dead-letter topic. v2-to-fhir acknowledges mapping errors itself (D7), so only infrastructure failures retry; 10 attempts with the default backoff span roughly 40 minutes, enough to ride out a cold start or a short API outage. | `number` | `10` | no |
 | <a name="input_message_retention_duration"></a> [message\_retention\_duration](#input\_message\_retention\_duration) | How long the ingest and dead-letter subscriptions keep unacknowledged notifications (a duration such as "604800s" = 7 days, Pub/Sub's default). Pub/Sub allows up to 31 days; this module caps it at 7 days as a cost choice, since unacknowledged messages older than a day can be billed as storage (negligible at this volume, but not zero). | `string` | `"604800s"` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every resource name in this module (dataset, stores, topics, subscriptions). Lets two stacks share one project without colliding. | `string` | `"pulsebridge"` | no |
@@ -252,13 +347,16 @@ tests/check_ordering.sh         # from this directory, or pass the module path a
 | <a name="input_push_service_account_email"></a> [push\_service\_account\_email](#input\_push\_service\_account\_email) | Service account Pub/Sub signs the push request's OIDC token as: module identity's "pubsub-push" account. It needs roles/run.invoker on v2-to-fhir (module ingestion), and the Pub/Sub service agent needs roles/iam.serviceAccountTokenCreator on it, which module identity grants. Required when push\_enabled is true. | `string` | `null` | no |
 | <a name="input_retry_maximum_backoff"></a> [retry\_maximum\_backoff](#input\_retry\_maximum\_backoff) | Longest wait between redeliveries of one notification (a duration such as "600s"). | `string` | `"600s"` | no |
 | <a name="input_retry_minimum_backoff"></a> [retry\_minimum\_backoff](#input\_retry\_minimum\_backoff) | Shortest wait before Pub/Sub redelivers a notification v2-to-fhir did not acknowledge (a duration such as "10s"). Waits grow exponentially up to retry\_maximum\_backoff. | `string` | `"10s"` | no |
-| <a name="input_store_iam_service_accounts"></a> [store\_iam\_service\_accounts](#input\_store\_iam\_service\_accounts) | Module identity's map of account name to service account email, passed as it is<br/>(store\_iam\_service\_accounts = module.identity.service\_account\_emails). Keys this module<br/>knows get store-level roles (see the README table); every key is optional, and keys it does<br/>not know (for example scheduler-invoker, pubsub-push) are ignored:<br/>  health-sync -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  seeder      -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  v2-to-fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)<br/>  fhir-proxy  -> FHIR store: roles/healthcare.fhirResourceReader;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)<br/>  edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)<br/>  cuff-sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)<br/>Bindings are chosen by key name only, so Terraform knows at plan time which exist even<br/>while the emails are still unknown (first apply, accounts not yet created). | `map(string)` | `{}` | no |
+| <a name="input_store_iam_service_accounts"></a> [store\_iam\_service\_accounts](#input\_store\_iam\_service\_accounts) | Module identity's map of account name to service account email, passed as it is<br/>(store\_iam\_service\_accounts = module.identity.service\_account\_emails). Keys this module<br/>knows get store-level roles (see the README table); every key is optional, and keys it does<br/>not know (for example scheduler-invoker, pubsub-push) are ignored:<br/>  health-sync -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  seeder      -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  v2-to-fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)<br/>  fhir-proxy  -> FHIR store and audit FHIR store: roles/healthcare.fhirResourceReader;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)<br/>  edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)<br/>  cuff-sim    -> audit FHIR store: roles/healthcare.fhirResourceEditor (AuditEvents, D15);<br/>                 HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport);<br/>                 nothing on the main FHIR store<br/>Bindings are chosen by key name only, so Terraform knows at plan time which exist even<br/>while the emails are still unknown (first apply, accounts not yet created). | `map(string)` | `{}` | no |
 | <a name="input_time_zone"></a> [time\_zone](#input\_time\_zone) | IANA time zone of the Healthcare dataset. The API uses it to read HL7v2 times that carry no UTC offset (for example an OBX-14 without '+hhmm'). UTC is the safe default; the cuff simulator sends explicit offsets anyway. | `string` | `"UTC"` | no |
 
 ## Outputs
 
 | Name | Description |
 |------|-------------|
+| <a name="output_audit_fhir_base_url"></a> [audit\_fhir\_base\_url](#output\_audit\_fhir\_base\_url) | FHIR REST base URL of the audit store (append e.g. /AuditEvent/<id>). The cuff simulator writes here (T13); fhir-proxy reads the messages log from here (T14). |
+| <a name="output_audit_fhir_store_id"></a> [audit\_fhir\_store\_id](#output\_audit\_fhir\_store\_id) | Full resource path of the audit FHIR R4 store (send-attempt AuditEvents, D15): projects/{p}/locations/{l}/datasets/{d}/fhirStores/{s}. |
+| <a name="output_audit_fhir_store_name"></a> [audit\_fhir\_store\_name](#output\_audit\_fhir\_store\_name) | Short name of the audit FHIR store. |
 | <a name="output_dataset_id"></a> [dataset\_id](#output\_dataset\_id) | Full resource path of the dataset: projects/{project}/locations/{location}/datasets/{dataset}. |
 | <a name="output_dataset_name"></a> [dataset\_name](#output\_dataset\_name) | Short dataset name (MLLP adapter flag --hl7\_v2\_dataset\_id). |
 | <a name="output_dead_letter_subscription_name"></a> [dead\_letter\_subscription\_name](#output\_dead\_letter\_subscription\_name) | Pull subscription that keeps dead-lettered notifications for inspection. |
