@@ -1,3 +1,4 @@
+import type { ShareFailureReason, ShareStep } from './contract';
 import type { OperationOutcome } from './fhir';
 
 /**
@@ -40,6 +41,84 @@ export class ApiError extends Error {
     readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
+  }
+}
+
+/**
+ * The code system fhir-proxy puts its own reason codes in: every error body it sends is an
+ * OperationOutcome whose `issue[0].details.coding[0]` has this system and a fixed reason code
+ * (services/fhir-proxy/README.md, "Routes as built").
+ */
+export const PROXY_REASON_SYSTEM = 'urn:pulsebridge:fhir-proxy:reason';
+
+/** The proxy's reason code in an OperationOutcome (for example `login-not-configured`), or null. */
+export function proxyReason(outcome: OperationOutcome | null): string | null {
+  for (const issue of outcome?.issue ?? []) {
+    for (const coding of issue.details?.coding ?? []) {
+      if (coding.system === PROXY_REASON_SYSTEM && typeof coding.code === 'string') {
+        return coding.code;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * True for the proxy's 503 that means its reviewer-password secret is missing (amendment 11):
+ * then EVERY route answers 503 `login-not-configured`, because no token can be checked. The
+ * session is not over (no 401): the page keeps it and says the service is not configured.
+ */
+export function isServiceNotConfigured(error: unknown): boolean {
+  return (
+    error instanceof ApiError &&
+    error.status === 503 &&
+    proxyReason(error.outcome) === 'login-not-configured'
+  );
+}
+
+/**
+ * True for a trace answer that retrying cannot change (amendment 12): 404 (no such record, or
+ * another patient's), 410 (gone), and 422 (the AuditEvent is ours but unreadable).
+ */
+export function isFinalTraceAnswer(error: unknown): boolean {
+  return error instanceof ApiError && [404, 410, 422].includes(error.status);
+}
+
+/** The share's documented reason codes (contract.ts `ShareFailureReason`). */
+const SHARE_REASONS: readonly ShareFailureReason[] = [
+  'invalid-body',
+  'not-found',
+  'observation-not-final',
+  'observation-not-shareable',
+  'patient-incomplete',
+  'openemr-unreachable',
+  'openemr-refused',
+  'openemr-timeout',
+  'share-not-configured',
+];
+
+/**
+ * A share that did not end with the reading in OpenEMR. `reason` is the proxy's code (`other`
+ * when it sent none this page knows); `steps` are the steps completed before it stopped, empty
+ * when it was refused before OpenEMR was called (400, 404, 422, 503).
+ */
+export class ShareError extends ApiError {
+  override readonly name: string = 'ShareError';
+  constructor(
+    readonly reason: ShareFailureReason,
+    status: number,
+    message: string,
+    outcome: OperationOutcome | null,
+    readonly steps: ShareStep[],
+  ) {
+    super(status, message, outcome);
+  }
+
+  /** The typed error for an `ApiError` from the share route, with the steps the body carried. */
+  static from(error: ApiError, steps: ShareStep[] = []): ShareError {
+    const code = proxyReason(error.outcome);
+    const reason = SHARE_REASONS.find((r) => r === code) ?? 'other';
+    return new ShareError(reason, error.status, error.message, error.outcome, steps);
   }
 }
 

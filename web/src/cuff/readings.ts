@@ -38,6 +38,17 @@ export type OutcomeLookup =
   | 'gave-up'
   /** The trace lookup answered 404: the attempt is not (or no longer) in the audit store. */
   | 'missing'
+  /**
+   * The proxy looked for the stored message and the HL7v2 store does not have it
+   * (`messageLookup: "not-found"`, amendment 1): the derived MLLP name was wrong, or the message
+   * was deleted. There is no outcome to wait for, so polling stops.
+   */
+  | 'message-not-found'
+  /**
+   * The proxy could not ask the HL7v2 store in time (`messageLookup: "failed"`). Polling stops
+   * (the proxy says so rather than "pending"); "Check again" asks once more.
+   */
+  | 'message-unchecked'
   /** The outcome is accepted or error. */
   | 'settled';
 
@@ -83,9 +94,18 @@ export function newReading(
   };
 }
 
-/** True while the outcome may still change, so the row should be polled. */
+/**
+ * True while the outcome may still change, so the row should be polled. Not once the proxy has
+ * said the stored message could not be found or checked (`message-not-found`,
+ * `message-unchecked`): there is then nothing to wait for.
+ */
 export function isPending(r: Reading): boolean {
-  return r.recorded && r.application?.outcome === 'pending';
+  return (
+    r.recorded &&
+    r.application?.outcome === 'pending' &&
+    r.lookup !== 'message-not-found' &&
+    r.lookup !== 'message-unchecked'
+  );
 }
 
 /**
@@ -94,6 +114,18 @@ export function isPending(r: Reading): boolean {
  */
 export function withTrace(r: Reading, trace: CuffAttemptTrace): Reading {
   if (isStaleTrace(r, trace)) return r;
+  const settled = r.application !== null && r.application.outcome !== 'pending';
+  const lookupFailed =
+    trace.attempt.messageLookup === 'not-found' || trace.attempt.messageLookup === 'failed';
+  // The store could not confirm this attempt's message (amendment 1): it has no outcome and no
+  // Observation, so the row stops waiting and says why. A row that already settled keeps what
+  // it learnt (an older answer cannot undo it).
+  if (lookupFailed && !settled && r.application !== null) {
+    const lookup: OutcomeLookup =
+      trace.attempt.messageLookup === 'not-found' ? 'message-not-found' : 'message-unchecked';
+    if (r.lookup === lookup && r.observationId === null) return r;
+    return { ...r, lookup, observationId: null, observationStatus: null };
+  }
   const application = trace.attempt.application ?? r.application;
   const fromRef = trace.attempt.observation?.replace(/^Observation\//, '') ?? null;
   const next: Reading = {
@@ -220,6 +252,22 @@ export function applicationPhrase(r: Reading): Phrase {
       tone: 'error',
     };
   }
+  if (r.lookup === 'message-not-found') {
+    return {
+      label: 'Not found',
+      detail:
+        'Not known: the HL7v2 store has no message under the name the simulator derived for this send, so its outcome cannot be looked up. The page stopped checking. The messages log may list the stored message separately.',
+      tone: 'warn',
+    };
+  }
+  if (r.lookup === 'message-unchecked') {
+    return {
+      label: 'Could not be checked',
+      detail:
+        'Not known: the proxy could not ask the HL7v2 store in time, so the outcome could not be checked. The page stopped checking; use "Check again".',
+      tone: 'warn',
+    };
+  }
   // pending
   const waiting: Record<OutcomeLookup, string> = {
     polling: 'Pending: stored, waiting for the mapper (checking every few seconds).',
@@ -231,6 +279,8 @@ export function applicationPhrase(r: Reading): Phrase {
       'Not known: this attempt was not recorded, so its outcome cannot be looked up here.',
     'not-stored': 'Pending.',
     settled: 'Pending.',
+    'message-not-found': 'Pending.',
+    'message-unchecked': 'Pending.',
   };
   return {
     label: r.lookup === 'not-recorded' ? 'Not known' : 'Pending',
@@ -277,6 +327,12 @@ export function unshareableReason(r: Reading): string | null {
   }
   if (r.result.result !== 'accepted' || r.application === null) {
     return 'the HL7v2 store rejected this message, so it was never stored and there is no Observation.';
+  }
+  if (r.lookup === 'message-not-found') {
+    return 'the HL7v2 store has no message under this send’s derived name, so its Observation cannot be found.';
+  }
+  if (r.lookup === 'message-unchecked') {
+    return 'its stored message could not be checked, so its Observation is not known.';
   }
   if (r.application.outcome === 'pending') {
     return 'not mapped to FHIR yet (application-level outcome pending), so there is no Observation to share.';

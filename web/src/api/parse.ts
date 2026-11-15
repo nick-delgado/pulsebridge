@@ -12,9 +12,19 @@
  */
 import type {
   AckCode,
+  ApplicationOutcome,
   CommitAck,
   CuffSendResult,
+  FhirTransactionEntry,
+  MessageLookup,
+  MessagesLogEntry,
+  MessagesLogPage,
   NoAckReason,
+  SendAttemptEntry,
+  SentAndStored,
+  ShareResult,
+  ShareStep,
+  ShareStepResult,
   Transport,
   GoogleHealthConnection,
   GoogleHealthRollUpWindow,
@@ -28,7 +38,9 @@ import type {
   WatchSyncNote,
   WatchSyncStatus,
 } from './contract';
+import { SHARE_URL_HIDDEN } from './contract';
 import { ApiError } from './errors';
+import type { Encounter, Observation, Patient, Resource } from './fhir';
 
 const CONNECTION_STATES: readonly GoogleHealthConnection[] = [
   'connected',
@@ -80,8 +92,9 @@ export function parseWatchSync(wire: unknown): WatchSyncStatus {
   };
 }
 
-function count(value: unknown): number {
-  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : 0;
+/** A count is a whole number; anything else (null included) is "not known", never zero. */
+function count(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null;
 }
 
 function reachability(value: unknown): Reachability {
@@ -96,7 +109,8 @@ function reachability(value: unknown): Reachability {
 
 /**
  * `GET /status`. Never throws on an odd body (for example JSON `null`): every part is read from
- * a checked object, so a missing part reads as "not known" (`unknown`, unreachable, 0).
+ * a checked object, so a missing part reads as "not known" (`unknown`, unreachable, a null
+ * count: amendment 15, never 0).
  */
 export function parseStatus(wire: unknown): StatusSummary {
   const body = isObject(wire) ? wire : {};
@@ -215,5 +229,231 @@ export function parseCuffSendResult(wire: unknown): CuffSendResult {
     framing: oneOf(FRAMINGS, body.framing),
     messageName,
     messageNameSource,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The messages log (GET /messages) and the cuff trace's `attempt` row
+
+const LOOKUPS: readonly Exclude<MessageLookup, null>[] = ['confirmed', 'not-found', 'failed'];
+const OUTCOMES: readonly ApplicationOutcome['outcome'][] = ['accepted', 'error', 'pending'];
+const WRITERS: readonly FhirTransactionEntry['writer'][] = [
+  'health-sync',
+  'v2-to-fhir',
+  'seed',
+  'unknown',
+];
+const ROW_OUTCOMES: readonly SendAttemptEntry['outcome'][] = ['0', '4', '8'];
+
+function parseApplication(wire: unknown): ApplicationOutcome | null {
+  if (!isObject(wire)) return null;
+  // An outcome the page does not know is "not mapped yet", never a stronger claim.
+  const outcome = oneOf(OUTCOMES, wire.outcome) ?? 'pending';
+  return { outcome, reason: outcome === 'error' ? stringOrNull(wire.reason) : null };
+}
+
+/** A log row's commit-level acknowledgment; one that cannot be read is "no acknowledgment". */
+function parseRowAck(wire: unknown): CommitAck {
+  try {
+    return parseCommitAck(wire);
+  } catch {
+    return {
+      received: false,
+      why: 'unreadable-reply',
+      httpStatus: null,
+      detail: 'The proxy sent an acknowledgment this page could not read.',
+      replyPrefixBase64: null,
+    };
+  }
+}
+
+/**
+ * One `cuff-send` row (an attempt, or a store-only message), with every value the page builds a
+ * claim on checked. The rules (amendments 1, 5 and 14):
+ * - `messageLookup` is one of the three codes or null; an ACCEPTED audit-event row whose lookup
+ *   is missing or unknown is treated as `failed` (not confirmed);
+ * - only a `confirmed` lookup carries an application-level outcome and an Observation: for any
+ *   other lookup both are null, whatever the body said;
+ * - `possibleDuplicateOf` is kept only on a store-only row;
+ * - a row without an id or a send time cannot be shown and is dropped (null).
+ */
+export function parseSendAttemptEntry(wire: unknown): SendAttemptEntry | null {
+  if (!isObject(wire) || wire.kind !== 'cuff-send') return null;
+  const id = stringOrNull(wire.id);
+  const sentAt = stringOrNull(wire.sentAt);
+  if (id === null || id === '' || sentAt === null) return null;
+  const commitAck = parseRowAck(wire.commitAck);
+  const source = wire.source === 'store-only' ? 'store-only' : 'audit-event';
+  const result = oneOf(RESULTS, wire.result) ?? resultFromAck(commitAck);
+  let messageLookup: MessageLookup = oneOf(LOOKUPS, wire.messageLookup);
+  if (messageLookup === null && result === 'accepted') messageLookup = 'failed';
+  if (source === 'store-only') messageLookup = 'confirmed';
+  const confirmed = messageLookup === 'confirmed';
+  const observation = stringOrNull(wire.observation);
+  return {
+    kind: 'cuff-send',
+    id,
+    sentAt,
+    recordedAt: stringOrNull(wire.recordedAt) ?? sentAt,
+    transport: oneOf(TRANSPORTS, wire.transport),
+    controlId: stringOrNull(wire.controlId),
+    result,
+    outcome:
+      oneOf(ROW_OUTCOMES, wire.outcome) ??
+      (result === 'accepted' ? '0' : result === 'rejected' ? '4' : '8'),
+    sample: stringOrNull(wire.sample),
+    commitAck,
+    application: confirmed ? parseApplication(wire.application) : null,
+    messageName: stringOrNull(wire.messageName),
+    derivedMessageName: stringOrNull(wire.derivedMessageName),
+    messageLookup,
+    observation: confirmed && observation?.startsWith('Observation/') ? observation : null,
+    source,
+    possibleDuplicateOf: source === 'store-only' ? stringOrNull(wire.possibleDuplicateOf) : null,
+  };
+}
+
+function parseLogEntry(wire: unknown): MessagesLogEntry | null {
+  if (!isObject(wire)) return null;
+  if (wire.kind === 'cuff-send') return parseSendAttemptEntry(wire);
+  if (wire.kind === 'unreadable-send-attempt') {
+    return {
+      kind: 'unreadable-send-attempt',
+      // Amendment 6: "" when the AuditEvent had no id.
+      id: stringOrNull(wire.id) ?? '',
+      recordedAt: stringOrNull(wire.recordedAt),
+      problem: stringOrNull(wire.problem) ?? 'The proxy gave no description of the problem.',
+    };
+  }
+  if (wire.kind === 'fhir-transaction') {
+    const id = stringOrNull(wire.id);
+    const recordedAt = stringOrNull(wire.recordedAt);
+    if (id === null || recordedAt === null) return null;
+    return {
+      kind: 'fhir-transaction',
+      id,
+      recordedAt,
+      writer: oneOf(WRITERS, wire.writer) ?? 'unknown',
+      httpStatus:
+        typeof wire.httpStatus === 'number' && Number.isInteger(wire.httpStatus)
+          ? wire.httpStatus
+          : null,
+      resources: Array.isArray(wire.resources)
+        ? wire.resources.filter((r): r is string => typeof r === 'string')
+        : [],
+    };
+  }
+  return null; // a row kind this page does not know: not shown (counted in `dropped`)
+}
+
+/**
+ * `GET /messages`. Rows the page cannot read are dropped rather than guessed, and a page that
+ * dropped any is marked `partial` (it is then incomplete as far as the page is concerned).
+ * `partial` is true unless the body says exactly `false`: a body that does not say is not a
+ * claim that the page is complete.
+ */
+export function parseMessagesPage(wire: unknown): MessagesLogPage {
+  if (!isObject(wire) || !Array.isArray(wire.entries)) {
+    throw new ApiError(502, 'The messages log answered, but its page could not be read.');
+  }
+  const entries = wire.entries.map(parseLogEntry);
+  const kept = entries.filter((e): e is MessagesLogEntry => e !== null);
+  const unreadable = wire.unreadable;
+  return {
+    entries: kept,
+    nextCursor: stringOrNull(wire.nextCursor),
+    unreadable:
+      typeof unreadable === 'number' && Number.isInteger(unreadable) && unreadable >= 0
+        ? unreadable
+        : kept.filter((e) => e.kind === 'unreadable-send-attempt').length,
+    partial: wire.partial !== false || kept.length !== entries.length,
+  };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The share (POST /share), specified for T15 in contract.ts and web/README.md
+
+const STEP_RESULTS: readonly Exclude<ShareStepResult, 'unknown'>[] = [
+  'ok',
+  'found',
+  'not-found',
+  'already-shared',
+  'failed',
+];
+
+/** A path as `extensions.trace_step` requires: starts with one `/`, no scheme, host or query. */
+function isPathOnly(url: unknown): url is string {
+  return typeof url === 'string' && /^\/(?!\/)[^?#\s]*$/.test(url);
+}
+
+/** One trace step; null when it is not an object. Anything odd is shown as not known. */
+function parseShareStep(wire: unknown): ShareStep | null {
+  if (!isObject(wire)) return null;
+  const request = isObject(wire.request) ? wire.request : {};
+  const response = isObject(wire.response) ? wire.response : {};
+  const status = response.status;
+  const duration = wire.durationMs;
+  return {
+    step: stringOrNull(wire.step) ?? 'unknown',
+    label: stringOrNull(wire.label) ?? 'A step the proxy did not describe',
+    request: {
+      method: stringOrNull(request.method) ?? '?',
+      // Never a host: a url that is not a path is not shown at all.
+      url: isPathOnly(request.url) ? request.url : SHARE_URL_HIDDEN,
+      body: request.body ?? null,
+    },
+    response: {
+      status: typeof status === 'number' && Number.isInteger(status) ? status : 0,
+      body: response.body ?? null,
+    },
+    result: oneOf(STEP_RESULTS, wire.result) ?? 'unknown',
+    durationMs: typeof duration === 'number' && duration >= 0 ? duration : 0,
+  };
+}
+
+/** The `steps` array of a share answer or a share failure; [] when there is none. */
+export function parseShareSteps(wire: unknown): ShareStep[] {
+  return Array.isArray(wire)
+    ? wire.map(parseShareStep).filter((s): s is ShareStep => s !== null)
+    : [];
+}
+
+function resourceOf<T extends Resource>(wire: unknown, type: T['resourceType']): T | null {
+  return isObject(wire) && wire.resourceType === type ? (wire as T) : null;
+}
+
+function sentAndStored<T extends Resource>(
+  wire: unknown,
+  type: T['resourceType'],
+): SentAndStored<T> {
+  const w = isObject(wire) ? wire : {};
+  return { sent: resourceOf<T>(w.sent, type), stored: resourceOf<T>(w.stored, type) };
+}
+
+/**
+ * The 200 body of `POST /share`. `outcome` must be `shared` or `already-shared` (a 200 means the
+ * reading is in OpenEMR); anything else throws `ApiError(502)`, so the page never reports a
+ * share it cannot read as done. Read-back resources of the wrong type are null.
+ */
+export function parseShareResult(wire: unknown): ShareResult {
+  if (!isObject(wire))
+    throw new ApiError(502, 'The share answered, but its result could not be read.');
+  const outcome =
+    wire.outcome === 'shared' || wire.outcome === 'already-shared' ? wire.outcome : null;
+  if (outcome === null) {
+    throw new ApiError(
+      502,
+      'The share answered, but did not say whether the reading is in OpenEMR. Check the trace before sharing again.',
+    );
+  }
+  const readBack = isObject(wire.readBack) ? wire.readBack : {};
+  return {
+    outcome,
+    steps: parseShareSteps(wire.steps),
+    readBack: {
+      patient: sentAndStored<Patient>(readBack.patient, 'Patient'),
+      encounter: sentAndStored<Encounter>(readBack.encounter, 'Encounter'),
+      observation: sentAndStored<Observation>(readBack.observation, 'Observation'),
+    },
   };
 }

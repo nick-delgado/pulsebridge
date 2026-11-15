@@ -1,6 +1,7 @@
 /**
- * The real client: calls fhir-proxy over HTTPS. The routes are T16's proposal for T14/T15 and are
- * listed in web/README.md ("HTTP contract").
+ * The real client: calls fhir-proxy over HTTPS. The routes are the ones T14 built
+ * (services/fhir-proxy/README.md, "Routes as built") plus the share route specified for T15;
+ * they are listed in web/README.md ("HTTP contract").
  *
  * Every protected request carries `Authorization: Bearer <token>`. A 401 on any of them clears the
  * session and calls `onUnauthorized`, which the app uses to show the login form again.
@@ -17,7 +18,6 @@ import type {
   CallOptions,
   ObservationQuery,
   PulseBridgeApi,
-  SendAttemptEntry,
   ShareRequest,
   ShareResult,
   StatusSummary,
@@ -27,6 +27,7 @@ import {
   CuffSendError,
   LoginError,
   retryAfterSeconds,
+  ShareError,
   UnauthorizedError,
 } from './errors';
 import {
@@ -36,13 +37,19 @@ import {
   type AuditEvent,
   type Bundle,
   type Device,
-  type Encounter,
   type Observation,
-  type Patient,
   type Provenance,
   type Resource,
 } from './fhir';
-import { parseCuffSendResult, parseHeartRateSource, parseStatus } from './parse';
+import {
+  parseCuffSendResult,
+  parseHeartRateSource,
+  parseMessagesPage,
+  parseSendAttemptEntry,
+  parseShareResult,
+  parseShareSteps,
+  parseStatus,
+} from './parse';
 import type { Session } from './session';
 
 export interface HttpClientOptions {
@@ -71,6 +78,8 @@ interface RequestOptions {
   /** False only for the login route, which is the one route without a token. */
   auth?: boolean;
   signal?: AbortSignal | undefined;
+  /** Return a non-2xx response (after the 401 handling) instead of throwing; the share uses it. */
+  allowError?: boolean;
 }
 
 export class HttpClient implements PulseBridgeApi {
@@ -174,6 +183,20 @@ export class HttpClient implements PulseBridgeApi {
     return results;
   }
 
+  async getObservation(observationId: string, options: CallOptions = {}): Promise<Observation> {
+    // The read route each search entry's fullUrl names (amendment 20). It takes no parameters.
+    const body = await this.#json<unknown>(
+      `fhir/Observation/${encodeURIComponent(observationId)}`,
+      FHIR_JSON,
+      options.signal,
+    );
+    const resource = body as Partial<Observation> | null;
+    if (resource?.resourceType !== 'Observation' || resource.id !== observationId) {
+      throw new ApiError(502, 'The proxy answered with something that is not this Observation.');
+    }
+    return resource as Observation;
+  }
+
   async getHeartRateTrace(
     observationId: string,
     options: CallOptions = {},
@@ -223,51 +246,78 @@ export class HttpClient implements PulseBridgeApi {
     options: CallOptions = {},
   ): Promise<CuffAttemptTrace> {
     const body = await this.#json<{
-      attempt: SendAttemptEntry;
-      messageSent: string | null;
+      attempt: unknown;
+      messageSent: unknown;
       resources: Bundle;
     }>(`trace/cuff-attempts/${encodeURIComponent(attemptId)}`, JSON_TYPE, options.signal);
+    // The attempt is a log row, checked as one (messageLookup, no outcome unless confirmed).
+    const attempt = parseSendAttemptEntry(body.attempt);
+    if (attempt === null) throw new ApiError(502, 'The trace has no readable send attempt.');
     const resources = bundleResources(body.resources);
     return {
-      attempt: body.attempt,
-      messageSent: body.messageSent,
+      attempt,
+      messageSent: typeof body.messageSent === 'string' ? body.messageSent : null,
       auditEvent: first<AuditEvent>(resources, 'AuditEvent'),
       observation: first<Observation>(resources, 'Observation'),
       provenance: first<Provenance>(resources, 'Provenance'),
     };
   }
 
-  listMessages(query: MessagesLogQuery = {}, options: CallOptions = {}): Promise<MessagesLogPage> {
+  async listMessages(
+    query: MessagesLogQuery = {},
+    options: CallOptions = {},
+  ): Promise<MessagesLogPage> {
     const params = new URLSearchParams();
     if (query.kind) params.set('kind', query.kind);
     if (query.outcome) params.set('outcome', query.outcome);
     if (query.count !== undefined) params.set('count', String(query.count));
     if (query.cursor) params.set('cursor', query.cursor);
     const qs = params.toString();
-    return this.#json<MessagesLogPage>(
-      qs === '' ? 'messages' : `messages?${qs}`,
-      JSON_TYPE,
-      options.signal,
+    // Checked row by row (parse.ts): messageLookup, store-only rows, writers, `partial`.
+    return parseMessagesPage(
+      await this.#json<unknown>(
+        qs === '' ? 'messages' : `messages?${qs}`,
+        JSON_TYPE,
+        options.signal,
+      ),
     );
   }
 
   async share(request: ShareRequest, options: CallOptions = {}): Promise<ShareResult> {
-    const response = await this.#send('share', {
-      method: 'POST',
-      body: request,
-      signal: options.signal,
-    });
-    const body = (await response.json()) as Omit<ShareResult, 'readBack'> & { readBack: Bundle };
-    const resources = bundleResources(body.readBack);
-    return {
-      outcome: body.outcome,
-      steps: body.steps,
-      readBack: {
-        patient: first<Patient>(resources, 'Patient'),
-        encounter: first<Encounter>(resources, 'Encounter'),
-        observations: resources.filter((r): r is Observation => r.resourceType === 'Observation'),
-      },
-    };
+    let response: Response;
+    try {
+      // Exactly the documented body: the Observation id, nothing a caller could widen.
+      response = await this.#send('share', {
+        method: 'POST',
+        body: { observationId: request.observationId },
+        signal: options.signal,
+        allowError: true,
+      });
+    } catch (error) {
+      throw error instanceof ApiError && !(error instanceof ShareError)
+        ? ShareError.from(error)
+        : error;
+    }
+    if (response.ok) return parseShareResult(await response.json());
+    // A failure: an OperationOutcome, or (502/504 part-way) `{operationOutcome, steps}`
+    // with the steps completed so far (web/README.md, "For T15: the share route").
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch {
+      // Not JSON.
+    }
+    const envelope =
+      typeof body === 'object' && body !== null && 'operationOutcome' in body
+        ? (body as { operationOutcome: unknown; steps?: unknown })
+        : null;
+    const outcomeBody = envelope ? envelope.operationOutcome : body;
+    const outcome = isOperationOutcome(outcomeBody) ? outcomeBody : null;
+    const text = outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`;
+    throw ShareError.from(
+      new ApiError(response.status, text, outcome),
+      parseShareSteps(envelope?.steps),
+    );
   }
 
   // -- plumbing ---------------------------------------------------------------------------------
@@ -294,7 +344,14 @@ export class HttpClient implements PulseBridgeApi {
   }
 
   async #send(path: string | URL, options: RequestOptions = {}): Promise<Response> {
-    const { method = 'GET', body, accept = JSON_TYPE, auth = true, signal } = options;
+    const {
+      method = 'GET',
+      body,
+      accept = JSON_TYPE,
+      auth = true,
+      signal,
+      allowError = false,
+    } = options;
     const headers = new Headers({ Accept: accept });
     if (body !== undefined) headers.set('Content-Type', JSON_TYPE);
     let token: string | null = null;
@@ -338,7 +395,7 @@ export class HttpClient implements PulseBridgeApi {
       if (current === null || current === token) this.#unauthorized();
       throw new UnauthorizedError();
     }
-    if (!auth || response.ok) return response;
+    if (!auth || response.ok || allowError) return response;
     throw await toApiError(response);
   }
 

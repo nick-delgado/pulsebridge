@@ -164,7 +164,8 @@ describe('status: odd bodies and health-sync names', () => {
       expect(status.watchSync.state, JSON.stringify(body)).toBe('unknown');
       expect(status.fhirStore.reachable).toBe(false);
       expect(status.openemr.reachable).toBe(false);
-      expect(status.observationCounts).toEqual({ watch: 0, cuff: 0 });
+      // Not known is null, never 0 (amendment 15).
+      expect(status.observationCounts).toEqual({ watch: null, cuff: null });
     }
   });
 
@@ -455,7 +456,7 @@ describe('cuff send: refusals are typed', () => {
 
   it('only the cuff route is typed: another route keeps a plain ApiError for 422', async () => {
     const error: unknown = await client(fhir(422, oo('invalid', [['x', 'no']])))
-      .share({ observations: [] })
+      .share({ observationId: 'bp-1' })
       .catch((e: unknown) => e);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).not.toBeInstanceOf(CuffSendError);

@@ -11,9 +11,19 @@
  *   same per-instance rate limit (429 with `retryAfterSeconds`);
  * - a send result has cuff-sim's fields, including the DERIVED message name over MLLP;
  * - heart-rate data arrives only at a mock sync run (every 15 minutes), so `lastSyncAt` (the newest write),
- *   the windows and their status change together, as they do with health-sync.
+ *   the windows and their status change together, as they do with health-sync;
+ * - the messages log is assembled as fhir-proxy assembles it (services/fhir-proxy/README.md and
+ *   messages.py): `messageLookup` on every attempt, store-only rows with `possibleDuplicateOf`,
+ *   transaction rows from Provenances with `httpStatus: null`, newest first by send time, pages
+ *   of 25 (at most 50) cut BEFORE the kind/outcome filter (so a filtered page can be short or
+ *   empty while `nextCursor` is set), an opaque cursor refused with 400 `invalid-cursor`;
+ * - its refusals are the proxy's: 400 for a refused search, 422 for an unreadable attempt's
+ *   trace, 503 `login-not-configured` on every route when its secret is missing (a switch);
+ * - the share walks the sequence T15 will (contract.ts `ShareStepName`), with trace steps
+ *   redacted exactly as T14's `extensions.trace_step` does it (`traceStep` below).
  */
 import type {
+  ApplicationOutcome,
   CommitAck,
   CuffAttemptTrace,
   CuffReadingRequest,
@@ -22,6 +32,7 @@ import type {
   HeartRateTrace,
   LoginResult,
   MalformedSample,
+  MessageLookup,
   MessagesLogEntry,
   MessagesLogPage,
   MessagesLogQuery,
@@ -32,13 +43,34 @@ import type {
   ShareRequest,
   ShareResult,
   ShareStep,
+  ShareStepResult,
   UnreadableSendAttemptEntry,
   StatusSummary,
   Transport,
 } from './contract';
-import { CUFF_SERVICE_LIMITS, MAPPER_PLAUSIBLE_RANGE } from './contract';
-import { ApiError, CuffSendError, LoginError, UnauthorizedError } from './errors';
-import { LOINC, type Observation, type OperationOutcome, type Resource } from './fhir';
+import {
+  CUFF_SERVICE_LIMITS,
+  MAPPER_PLAUSIBLE_RANGE,
+  MESSAGES_DEFAULT_COUNT,
+  MESSAGES_MAX_COUNT,
+  REACHABILITY_NOT_CHECKED,
+} from './contract';
+import {
+  ApiError,
+  CuffSendError,
+  LoginError,
+  PROXY_REASON_SYSTEM,
+  ShareError,
+  UnauthorizedError,
+} from './errors';
+import {
+  LOINC,
+  type Encounter,
+  type Observation,
+  type OperationOutcome,
+  type Patient,
+  type Resource,
+} from './fhir';
 import {
   bloodPressureObservation,
   derivedMessageName,
@@ -55,7 +87,11 @@ import {
   MOCK_WATCH,
   mockAck,
   MOCK_HL7V2_STORE,
+  MOCK_PATIENT_IDENTIFIER,
   mockControlId,
+  type MockLookupFailure,
+  type MockShareFailure,
+  type MockStatusMode,
   mockSendAuditEvent,
   outcomeCode,
   sendResult,
@@ -91,6 +127,14 @@ export interface MockClientOptions {
    * itself happened, `audit.recorded` is false, and the attempt is not in the messages log.
    */
   auditFailure?: 'build' | 'write' | null;
+  /** `?mock-lookup=`: the store does not have (or cannot be asked for) any accepted send's name. */
+  lookupFailure?: MockLookupFailure | null;
+  /** `?mock-log=partial`: every messages-log page is `partial`. */
+  partialLog?: boolean;
+  /** `?mock-status=`: the status (or the 503) the proxy sends in that state. */
+  statusMode?: MockStatusMode | null;
+  /** `?mock-share=`: where a share stops or is refused. */
+  shareFailure?: MockShareFailure | null;
 }
 
 /** cuff-sim's defaults (RATE_LIMIT_BURST=3, RATE_LIMIT_PER_MINUTE=6). */
@@ -117,6 +161,39 @@ interface MockAttempt {
    * in the browser). `#settleDerivedNames` writes it into `entry.derivedMessageName`.
    */
   derivedName: Promise<string> | null;
+  /**
+   * Set for a seeded attempt whose derived name is WRONG: the store has its message under
+   * another name, so the attempt's lookup is `not-found` and the real message is a store-only
+   * row (the case amendment 14's hint is for).
+   */
+  storedAs: string | null;
+  /** When the mock mapper labelled the stored message (its v2-to-fhir transaction time). */
+  mappedAt: number | null;
+}
+
+/** A message in the HL7v2 store that no send attempt names: a store-only row (amendment 5). */
+interface MockStoredMessage {
+  name: string;
+  /** The store's createTime: what the row sorts on. */
+  createdAt: number;
+  /** MSH-7 (the row's `sentAt`). */
+  sentAt: number;
+  /** `https` only when cuff-sim labelled it; the adapter cannot label an MLLP message. */
+  transport: Transport | null;
+  controlId: string | null;
+  application: ApplicationOutcome;
+  observation: string | null;
+  mappedAt: number | null;
+}
+
+/** What the mock OpenEMR holds after shares, keyed as OpenEMR keys them (spike S1). */
+interface MockOpenEmr {
+  patientId: string | null;
+  /** Encounter id per reading day (T15 reuses one Encounter per patient and day). */
+  encounters: Map<string, string>;
+  /** Observation id per (code, Encounter, effective time): OpenEMR's duplicate rule. */
+  observations: Map<string, string>;
+  stored: Map<string, Resource>;
 }
 
 export class MockClient implements PulseBridgeApi {
@@ -127,7 +204,13 @@ export class MockClient implements PulseBridgeApi {
   readonly #attempts: MockAttempt[] = [];
   readonly #transactions: FhirTransactionEntry[] = [];
   readonly #unreadable: UnreadableSendAttemptEntry[] = [];
-  readonly #shared = new Set<string>();
+  readonly #direct: MockStoredMessage[] = [];
+  readonly #openemr: MockOpenEmr = {
+    patientId: null,
+    encounters: new Map(),
+    observations: new Map(),
+    stored: new Map(),
+  };
   readonly #zone: string | null;
   /** The `hostile` data set: markup in text from other systems (mock-data.ts, HOSTILE_MARKUP). */
   readonly #hostile: boolean;
@@ -182,16 +265,36 @@ export class MockClient implements PulseBridgeApi {
     const now = this.#now();
     const sync = this.#lastSync();
     const checkedAt = new Date(now).toISOString();
+    const mode = this.options.statusMode ?? null;
+    if (mode === 'counts-unknown') {
+      // The store searches did not finish in the budget (status.py `_store_unknown`): counts and
+      // lastSyncAt are not known, and the store is reported unreachable with a short code.
+      return {
+        watchSync: {
+          state: 'connected',
+          reason: null,
+          notes: [],
+          strandedPreliminary: null,
+          checkedAt,
+          lastSyncAt: null,
+        },
+        observationCounts: { watch: null, cuff: null },
+        fhirStore: { reachable: false, checkedAt, detail: 'timeout' },
+        openemr: { reachable: true, checkedAt, detail: null },
+      };
+    }
     return {
       // health-sync's /status shape (services/health-sync/README.md), plus the proxy's lastSyncAt.
       watchSync: {
-        state: 'connected',
-        reason: null,
+        // health-sync not answering is `unknown` with the proxy's own reason (amendment 9).
+        state: mode === 'health-sync-timeout' ? 'unknown' : 'connected',
+        reason: mode === 'health-sync-timeout' ? 'health-sync-timeout' : null,
         notes: [],
         // health-sync's count is per instance and in memory, so with scale to zero it is
         // usually null ("not known") between runs; the strip must cope with that.
         strandedPreliminary: null,
         checkedAt,
+        // The proxy writes it in UTC with milliseconds (amendment 13), as toISOString does.
         lastSyncAt: new Date(sync).toISOString(),
       },
       observationCounts: {
@@ -199,7 +302,12 @@ export class MockClient implements PulseBridgeApi {
         cuff: this.#bloodPressure().length,
       },
       fhirStore: { reachable: true, checkedAt, detail: null },
-      openemr: { reachable: true, checkedAt, detail: null },
+      // The mock implements the share, so it reports OpenEMR as T15's probe would. Before T15
+      // the proxy says `not-checked` (amendment 10).
+      openemr:
+        mode === 'openemr-not-checked'
+          ? { reachable: false, checkedAt, detail: REACHABILITY_NOT_CHECKED }
+          : { reachable: true, checkedAt, detail: null },
     };
   }
 
@@ -219,7 +327,24 @@ export class MockClient implements PulseBridgeApi {
         return t > start && t < end; // date=gt<start>&date=lt<end>
       });
     }
-    throw this.#unprocessable(`Searching for code ${query.code} is not supported.`);
+    // A refused search parameter is a 400 (R4; amendment 7), as search.py `_refuse` words it.
+    throw proxyProblem(
+      400,
+      'not-supported',
+      'unsupported-value',
+      'code must be http://loinc.org|8867-4 or http://loinc.org|85354-9.',
+      ['code'],
+    );
+  }
+
+  async getObservation(observationId: string, options: CallOptions = {}): Promise<Observation> {
+    await this.#authorised(options.signal);
+    if (!SAFE_ID.test(observationId)) {
+      throw proxyProblem(400, 'invalid', 'invalid-id', 'That is not a valid id.');
+    }
+    const found = await this.#findObservation(observationId);
+    if (!found) throw proxyProblem(404, 'not-found', 'not-found', 'The Observation was not found.');
+    return found;
   }
 
   async getHeartRateTrace(
@@ -348,12 +473,31 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     this.#resolve();
     await this.#settleDerivedNames();
+    // The proxy checks a path id first (a store-only row's message name is not one).
+    if (!SAFE_ID.test(attemptId)) {
+      throw proxyProblem(400, 'invalid', 'invalid-id', 'That is not a valid id.');
+    }
+    if (this.#unreadable.some((u) => u.id === attemptId)) {
+      // Amendment 12: final, like a 404; the row stays in the log as unreadable.
+      throw proxyProblem(
+        422,
+        'processing',
+        'unreadable-send-attempt',
+        "This send attempt's AuditEvent could not be read; it is listed in the messages log as unreadable.",
+      );
+    }
     const attempt = this.#attempts.find((a) => a.audited && a.entry.id === attemptId);
     if (!attempt) throw notFound(`AuditEvent/${attemptId}`);
-    const observation = this.#observationFor(attempt);
+    const row = this.#present(attempt);
+    const observation = row.observation === null ? null : this.#observationFor(attempt);
     return {
-      attempt: structuredClone(attempt.entry),
-      messageSent: attempt.messageSent,
+      attempt: row,
+      // The proxy reads the stored bytes by the confirmed name, or a sample's own bytes; a built
+      // reading whose message it could not find has none (T31 keeps no bytes).
+      messageSent:
+        row.messageLookup === 'confirmed' || attempt.entry.sample !== null
+          ? attempt.messageSent
+          : null,
       // The resource as stored: the raw ACK stays base64 here (T31's model).
       auditEvent: mockSendAuditEvent(attempt.entry),
       observation,
@@ -375,173 +519,506 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     this.#resolve();
     await this.#settleDerivedNames();
-    const all: MessagesLogEntry[] = [
-      // An attempt whose AuditEvent was not recorded is not in the audit store, so not listed.
-      // (The proxy may show its stored message as a `store-only` row; the mock does not.)
-      ...this.#attempts.filter((a) => a.audited).map((a) => structuredClone(a.entry)),
-      ...this.#unreadable.map((u) => structuredClone(u)),
-      ...this.#transactions.map((t) => structuredClone(t)),
-    ]
-      .filter((e) => !query.kind || e.kind === query.kind)
+    // The proxy's parameter checks (app.py `messages`), in its order.
+    let count = MESSAGES_DEFAULT_COUNT;
+    if (query.count !== undefined) {
+      if (!Number.isInteger(query.count) || query.count < 1 || query.count > 999) {
+        throw proxyProblem(
+          400,
+          'invalid',
+          'unsupported-value',
+          'count must be a whole number from 1.',
+          ['count'],
+        );
+      }
+      count = Math.min(query.count, MESSAGES_MAX_COUNT);
+    }
+    const offset = query.cursor === undefined ? 0 : decodeMockCursor(query.cursor);
+
+    // The sources the proxy reads for this query (messages.py `page`): attempts (with the
+    // unreadable ones) unless only transactions are asked for; store-only rows with them unless
+    // only unreadable rows are; transactions only with no outcome filter.
+    const { kind, outcome } = query;
+    const wantAttempts = kind === undefined || kind !== 'fhir-transaction';
+    const wantStoreOnly = kind === undefined || kind === 'cuff-send';
+    const wantTransactions =
+      (kind === undefined || kind === 'fhir-transaction') && outcome === undefined;
+    const rows: { at: string | null; entry: MessagesLogEntry }[] = [];
+    if (wantAttempts) {
+      for (const a of this.#attempts) {
+        // An attempt whose AuditEvent was not recorded is not in the audit store.
+        if (a.audited) rows.push({ at: a.entry.sentAt, entry: this.#present(a) });
+      }
+      for (const u of this.#unreadable) rows.push({ at: u.recordedAt, entry: structuredClone(u) });
+    }
+    if (wantStoreOnly) {
+      for (const entry of this.#storeOnlyRows()) rows.push({ at: entry.recordedAt, entry });
+    }
+    if (wantTransactions) {
+      for (const t of this.#allTransactions()) rows.push({ at: t.recordedAt, entry: t });
+    }
+    // Newest first by send time, ties by id descending; undated rows last (amendment 17).
+    rows.sort((x, y) => {
+      if (x.at === null || y.at === null) return x.at === y.at ? 0 : x.at === null ? 1 : -1;
+      const byTime = Date.parse(y.at) - Date.parse(x.at);
+      return byTime !== 0 ? byTime : y.entry.id.localeCompare(x.entry.id);
+    });
+
+    // The page is cut BEFORE the filter, as the proxy filters after the join (amendment 4).
+    const window = rows.slice(offset, offset + count).map((r) => r.entry);
+    const entries = window
+      .filter((e) => kind === undefined || e.kind === kind)
+      // Amendment 19: only rows WITH an outcome equal to it; transactions never match.
       .filter(
         (e) =>
-          !query.outcome || (e.kind === 'cuff-send' && e.application?.outcome === query.outcome),
-      )
-      // Newest first; an unreadable row without a time goes last.
-      .sort((a, b) => (b.recordedAt ?? '').localeCompare(a.recordedAt ?? ''));
-    const offset = query.cursor ? Number.parseInt(query.cursor, 10) || 0 : 0;
-    const count = Math.min(query.count ?? 50, 100);
-    const entries = all.slice(offset, offset + count);
+          outcome === undefined ||
+          (e.kind === 'cuff-send' && e.application !== null && e.application.outcome === outcome),
+      );
+    const failedLookup = window.some((e) => e.kind === 'cuff-send' && e.messageLookup === 'failed');
     return {
       entries,
-      nextCursor: offset + count < all.length ? String(offset + count) : null,
+      nextCursor: offset + count < rows.length ? encodeMockCursor(offset + count) : null,
       unreadable: entries.filter((e) => e.kind === 'unreadable-send-attempt').length,
+      partial: this.options.partialLog === true || failedLookup,
     };
+  }
+
+  /** The lookup the proxy reports for an attempt (amendment 1). */
+  #lookupOf(a: MockAttempt): MessageLookup {
+    if (a.entry.result !== 'accepted') return null;
+    if (a.storedAs !== null) return 'not-found';
+    return this.options.lookupFailure ?? 'confirmed';
+  }
+
+  /** An attempt as the proxy presents it: no outcome or Observation unless confirmed. */
+  #present(a: MockAttempt): SendAttemptEntry {
+    const entry = structuredClone(a.entry);
+    const lookup = this.#lookupOf(a);
+    const confirmed = lookup === 'confirmed';
+    return {
+      ...entry,
+      messageLookup: lookup,
+      application: confirmed ? entry.application : null,
+      observation: confirmed ? entry.observation : null,
+      possibleDuplicateOf: null,
+    };
+  }
+
+  /**
+   * The stored messages no attempt claims, as store-only rows (amendments 5 and 14): a send
+   * whose AuditEvent was not recorded, the real message behind a wrong derived name, and
+   * messages sent straight to the adapter. The hint names an attempt only when exactly ONE
+   * qualifies: accepted, MLLP, the same control ID, its own name `not-found`, sent at most
+   * 120 s before the message was created.
+   */
+  #storeOnlyRows(): SendAttemptEntry[] {
+    const messages: MockStoredMessage[] = [...this.#direct];
+    for (const a of this.#attempts) {
+      if (a.entry.result !== 'accepted') continue;
+      const lookup = this.#lookupOf(a);
+      let name: string | null = null;
+      if (!a.audited) name = a.entry.messageName ?? a.entry.derivedMessageName;
+      else if (a.storedAs !== null) name = a.storedAs;
+      else if (lookup === 'not-found' && a.entry.transport === 'mllp') {
+        // The derived rule was wrong for every send (the switch): the store holds the message
+        // under a name of its own.
+        name = `${MOCK_HL7V2_STORE}/messages/stored-${hash32(a.entry.id).toString(16)}`;
+      }
+      if (name === null) continue;
+      const sentAt = Date.parse(a.entry.sentAt);
+      messages.push({
+        name,
+        createdAt: sentAt + 500,
+        sentAt,
+        // cuff-sim labels an HTTPS ingest; the adapter cannot label (store_only_row).
+        transport: a.entry.transport === 'https' ? 'https' : null,
+        controlId: a.entry.controlId,
+        application: structuredClone(a.entry.application ?? { outcome: 'pending', reason: null }),
+        observation: a.entry.observation,
+        mappedAt: a.mappedAt,
+      });
+    }
+    const candidates = this.#attempts.filter(
+      (a) => a.audited && a.entry.transport === 'mllp' && this.#lookupOf(a) === 'not-found',
+    );
+    return messages.map((m) => {
+      const qualifying = candidates.filter((a) => {
+        const gap = m.createdAt - Date.parse(a.entry.sentAt);
+        return a.entry.controlId === m.controlId && gap >= 0 && gap <= 120_000;
+      });
+      return {
+        kind: 'cuff-send',
+        id: m.name,
+        sentAt: new Date(m.sentAt).toISOString(),
+        recordedAt: new Date(m.createdAt).toISOString(),
+        transport: m.transport,
+        controlId: m.controlId,
+        result: 'accepted',
+        outcome: '0',
+        sample: null,
+        commitAck: { received: true, code: 'AA', controlId: null, reason: null, raw: null },
+        application: m.application,
+        messageName: m.name,
+        derivedMessageName: null,
+        messageLookup: 'confirmed',
+        observation: m.observation,
+        source: 'store-only',
+        possibleDuplicateOf: qualifying.length === 1 ? (qualifying[0]?.entry.id ?? null) : null,
+      };
+    });
+  }
+
+  /**
+   * Transaction rows as the proxy derives them from Provenances (amendment 18): health-sync's
+   * runs (seeded), and one v2-to-fhir Bundle per message the mock mapper accepted. Resources
+   * are the patient's Observations and their Provenances; `httpStatus` is never recorded.
+   */
+  #allTransactions(): FhirTransactionEntry[] {
+    const out = this.#transactions.map((t) => structuredClone(t));
+    const mapped: { at: number; observation: string }[] = [];
+    for (const a of this.#attempts) {
+      if (a.mappedAt !== null && a.entry.observation !== null) {
+        mapped.push({ at: a.mappedAt, observation: a.entry.observation });
+      }
+    }
+    for (const m of this.#direct) {
+      if (m.mappedAt !== null && m.observation !== null) {
+        mapped.push({ at: m.mappedAt, observation: m.observation });
+      }
+    }
+    for (const { at, observation } of mapped) {
+      out.push({
+        kind: 'fhir-transaction',
+        id: pseudoUuid(`tx-v2-${observation}`),
+        recordedAt: new Date(at).toISOString(),
+        writer: 'v2-to-fhir',
+        httpStatus: null,
+        resources: [observation, `Provenance/mock-prov-${hash32(observation).toString(16)}`].sort(),
+      });
+    }
+    return out;
   }
 
   // -- share ------------------------------------------------------------------------------------
 
+  /**
+   * The share as T15 will perform it (contract.ts `ShareStepName`; docs/spikes/s1.md): refusals
+   * before OpenEMR is called, then token, Patient search (create only if absent), Encounter
+   * search for the reading's day (create only if none: reused otherwise), the Observation POST
+   * (OpenEMR refuses a repeat in the same Encounter with its "already exists" 400, reported as
+   * already shared), and the Patient, Encounter and Observation read back by id. The mock
+   * OpenEMR changes what it stores the way spike S1 saw OpenEMR do (see `openemrStores`).
+   */
   async share(request: ShareRequest, options: CallOptions = {}): Promise<ShareResult> {
     await this.#authorised(options.signal);
-    if (request.observations.length === 0) throw this.#unprocessable('Nothing selected to share.');
-    const observations = await Promise.all(request.observations.map((ref) => this.#lookup(ref)));
-    const notFinal = observations.filter((o) => o.status !== 'final');
-    if (notFinal.length > 0) {
-      throw this.#unprocessable(
-        'Only final Observations are shared; this window is still preliminary.',
+    const failure = this.options.shareFailure ?? null;
+    if (failure === 'not-configured') {
+      throw shareProblem(
+        503,
+        'transient',
+        'share-not-configured',
+        'Sharing with the clinic is not configured on the server.',
+      );
+    }
+    const id = (request as { observationId?: unknown }).observationId;
+    if (typeof id !== 'string' || !SAFE_ID.test(id) || Object.keys(request).length !== 1) {
+      throw shareProblem(
+        400,
+        'invalid',
+        'invalid-body',
+        'The body must be {"observationId": "<id>"}.',
+      );
+    }
+    const obs = await this.#findObservation(id);
+    if (!obs) throw shareProblem(404, 'not-found', 'not-found', 'The Observation was not found.');
+    if (obs.status !== 'final') {
+      throw shareProblem(
+        422,
+        'business-rule',
+        'observation-not-final',
+        `Only final Observations are shared; this one is ${obs.status}.`,
+      );
+    }
+    const code = obs.code.coding?.[0]?.code;
+    if (code !== LOINC.heartRate && code !== LOINC.bloodPressurePanel) {
+      throw shareProblem(
+        422,
+        'business-rule',
+        'observation-not-shareable',
+        'Only heart-rate and blood-pressure readings are shared.',
+      );
+    }
+    if (failure === 'patient-incomplete') {
+      throw shareProblem(
+        422,
+        'required',
+        'patient-incomplete',
+        'The stored Patient is incomplete: missing birthDate.',
       );
     }
 
-    const firstShare = this.#shared.size === 0;
-    const patientId = pseudoUuid('openemr-patient');
-    const encounterId = pseudoUuid(`openemr-encounter-${String(this.#sequence++)}`);
-    const steps: ShareStep[] = [
-      step(
+    const emr = this.#openemr;
+    const steps: ShareStep[] = [];
+    /** A failure part-way: 502 or 504 with the steps so far (web/README.md, "For T15"). */
+    const stop = (
+      status: 502 | 504,
+      reason: 'openemr-unreachable' | 'openemr-refused' | 'openemr-timeout',
+      text: string,
+    ): ShareError =>
+      new ShareError(
+        reason,
+        status,
+        text,
+        operationOutcome(status === 504 ? 'timeout' : 'exception', text, reason),
+        steps,
+      );
+    const scope =
+      'system/Patient.rs system/Patient.c system/Encounter.rs system/Encounter.c system/Observation.rs system/Observation.c';
+    const tokenRequest = {
+      grant_type: 'client_credentials',
+      scope,
+      client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
+      client_assertion: 'eyJhbGciOiJSUzM4NCJ9.mock-assertion.mock-signature',
+    };
+    if (failure === 'openemr-unreachable') {
+      steps.push(
+        traceStep(
+          'token',
+          'Access token (client credentials, signed assertion)',
+          'POST',
+          '/oauth2/default/token',
+          tokenRequest,
+          0,
+          null,
+          'failed',
+        ),
+      );
+      throw stop(502, 'openemr-unreachable', 'OpenEMR could not be reached; nothing was sent.');
+    }
+    steps.push(
+      traceStep(
         'token',
-        'Token request (client credentials, private_key_jwt)',
+        'Access token (client credentials, signed assertion)',
         'POST',
         '/oauth2/default/token',
-        {
-          grant_type: 'client_credentials',
-          client_assertion_type: 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-          client_assertion: '[not shown]',
-          scope: 'system/Patient.rs system/Encounter.crs system/Observation.crs',
-        },
+        tokenRequest,
         200,
-        { token_type: 'Bearer', expires_in: 300, access_token: '[not shown]' },
+        {
+          access_token: 'mock-access-token-never-shown',
+          token_type: 'Bearer',
+          expires_in: 300,
+          scope,
+        },
       ),
-      step(
+    );
+
+    // Patient: search by the PT identifier; create only if absent (OpenEMR ignores conditional
+    // create, so a second create would be a second patient).
+    const sentPatient = patientForSharing();
+    const patientFound = emr.patientId !== null;
+    steps.push(
+      traceStep(
         'patient-search',
         'Search Patient by identifier',
         'GET',
-        '/apis/default/fhir/Patient?identifier=SYN-000123',
-        null,
+        '/apis/default/fhir/Patient',
+        { identifier: MOCK_PATIENT_IDENTIFIER },
         200,
-        { resourceType: 'Bundle', type: 'searchset', total: firstShare ? 0 : 1 },
+        searchset(patientFound ? [emr.stored.get(`Patient/${emr.patientId ?? ''}`)] : []),
+        patientFound ? 'found' : 'not-found',
       ),
-    ];
-    if (firstShare) {
+    );
+    if (emr.patientId === null) {
+      const uuid = pseudoUuid(`openemr-patient-${String(this.#now())}`);
       steps.push(
-        step(
+        traceStep(
           'patient-create',
           'Create Patient',
           'POST',
           '/apis/default/fhir/Patient',
-          withoutServerFields(openemrPatient('')),
+          sentPatient,
           201,
-          { resourceType: 'Patient', id: patientId },
+          {
+            pid: 3,
+            uuid,
+          },
         ),
       );
+      emr.patientId = uuid;
+      emr.stored.set(`Patient/${uuid}`, openemrStoredPatient(uuid, sentPatient));
     }
+    const patientRef = `Patient/${emr.patientId}`;
+
+    // Encounter: one per patient and reading day, reused (so a repeat is caught as a duplicate).
+    const effective = obs.effectiveDateTime ?? obs.effectivePeriod?.start ?? '';
+    const day = new Date(Date.parse(effective)).toISOString().slice(0, 10);
+    const existingEncounter = emr.encounters.get(day) ?? null;
     steps.push(
-      step(
-        'encounter-create',
-        'Create Encounter for this share',
-        'POST',
+      traceStep(
+        'encounter-search',
+        'Search Encounter for the reading’s day',
+        'GET',
         '/apis/default/fhir/Encounter',
-        {
-          resourceType: 'Encounter',
-          status: 'finished',
-          subject: { reference: `Patient/${patientId}` },
-        },
-        201,
-        { resourceType: 'Encounter', id: encounterId },
+        { patient: emr.patientId, date: day },
+        200,
+        searchset(existingEncounter ? [emr.stored.get(`Encounter/${existingEncounter}`)] : []),
+        existingEncounter ? 'found' : 'not-found',
       ),
     );
-
-    let already = 0;
-    const stored: Observation[] = [];
-    for (const obs of observations) {
-      const ref = `Observation/${obs.id ?? ''}`;
-      const body: Observation = {
-        ...observationForSharing(obs),
-        subject: { reference: `Patient/${patientId}` },
-        encounter: { reference: `Encounter/${encounterId}` },
+    let sentEncounter: Encounter | null = null;
+    let encounterId = existingEncounter;
+    if (encounterId === null) {
+      sentEncounter = {
+        resourceType: 'Encounter',
+        status: 'finished',
+        class: { system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode', code: 'AMB' },
+        subject: { reference: patientRef },
+        period: { start: `${day}T00:00:00Z`, end: `${day}T23:59:59Z` },
       };
-      if (this.#shared.has(ref)) {
-        already++;
-        steps.push({
-          ...step(
-            'observation-create',
-            `Create ${ref}`,
-            'POST',
-            '/apis/default/fhir/Observation',
-            body,
-            400,
-            operationOutcome('duplicate', 'Observation already exists'),
-          ),
-          result: 'already-shared',
-        });
-      } else {
-        this.#shared.add(ref);
-        const id = pseudoUuid(`openemr-${ref}`);
+      if (failure === 'encounter-refused') {
         steps.push(
-          step(
-            'observation-create',
-            `Create ${ref}`,
+          traceStep(
+            'encounter-create',
+            'Create Encounter for the reading’s day',
             'POST',
-            '/apis/default/fhir/Observation',
-            body,
-            201,
-            { resourceType: 'Observation', id },
+            '/apis/default/fhir/Encounter',
+            sentEncounter,
+            400,
+            {
+              validationErrors: {
+                class: 'Encounter.class must be one of the configured visit categories',
+              },
+            },
+            'failed',
           ),
         );
-        stored.push({ ...body, id });
+        throw stop(
+          502,
+          'openemr-refused',
+          'OpenEMR refused to create the Encounter; the reading was not sent.',
+        );
       }
-    }
-    for (const o of stored) {
+      const uuid = pseudoUuid(`openemr-encounter-${day}`);
       steps.push(
-        step(
-          'read-back',
-          `Read back Observation/${o.id ?? ''}`,
-          'GET',
-          `/apis/default/fhir/Observation/${o.id ?? ''}`,
-          null,
-          200,
-          o,
+        traceStep(
+          'encounter-create',
+          'Create Encounter for the reading’s day',
+          'POST',
+          '/apis/default/fhir/Encounter',
+          sentEncounter,
+          201,
+          {
+            euuid: uuid,
+            encounter: 7 + emr.encounters.size,
+            pid: 3,
+          },
         ),
+      );
+      encounterId = uuid;
+      emr.encounters.set(day, uuid);
+      emr.stored.set(`Encounter/${uuid}`, {
+        ...sentEncounter,
+        id: uuid,
+        meta: { lastUpdated: new Date(this.#now()).toISOString() },
+        subject: { reference: patientRef, type: 'Patient' },
+      });
+    }
+
+    // The Observation: no reference to our store (T06: drop performer, device, meta, identifier).
+    const sentObservation: Observation = {
+      ...observationForSharing(obs),
+      subject: { reference: patientRef },
+      encounter: { reference: `Encounter/${encounterId}` },
+    };
+    const duplicateKey = `${code}|${encounterId}|${String(Date.parse(effective))}`;
+    const existing = emr.observations.get(duplicateKey) ?? null;
+    if (failure === 'observation-timeout') {
+      steps.push(
+        traceStep(
+          'observation-create',
+          `Create Observation (${obs.id ?? ''})`,
+          'POST',
+          '/apis/default/fhir/Observation',
+          sentObservation,
+          0,
+          null,
+          'failed',
+        ),
+      );
+      throw stop(504, 'openemr-timeout', 'OpenEMR did not answer the Observation request in time.');
+    }
+    let observationId: string;
+    if (existing !== null) {
+      observationId = existing;
+      steps.push(
+        traceStep(
+          'observation-create',
+          `Create Observation (${obs.id ?? ''})`,
+          'POST',
+          '/apis/default/fhir/Observation',
+          sentObservation,
+          400,
+          {
+            validationErrors: {
+              effectiveDateTime: `A "${code}" reading already exists for this encounter at this effectiveDateTime (Observation/${existing}); POST does not overwrite a stored reading -- update that Observation with PUT`,
+            },
+          },
+          'already-shared',
+        ),
+      );
+    } else {
+      observationId = pseudoUuid(`openemr-${duplicateKey}`);
+      steps.push(
+        traceStep(
+          'observation-create',
+          `Create Observation (${obs.id ?? ''})`,
+          'POST',
+          '/apis/default/fhir/Observation',
+          sentObservation,
+          201,
+          { uuid: observationId },
+        ),
+      );
+      emr.observations.set(duplicateKey, observationId);
+      emr.stored.set(
+        `Observation/${observationId}`,
+        openemrStoredObservation(observationId, sentObservation),
       );
     }
 
+    // The read-back (D13), by id.
+    const read = (step: ShareStep['step'], label: string, ref: string, fail = false) => {
+      const stored = emr.stored.get(ref) ?? null;
+      steps.push(
+        fail
+          ? traceStep(step, label, 'GET', `/apis/default/fhir/${ref}`, null, 502, null, 'failed')
+          : traceStep(step, label, 'GET', `/apis/default/fhir/${ref}`, null, 200, stored),
+      );
+      return fail ? null : stored;
+    };
+    const storedPatient = read(
+      'patient-read',
+      'Read back the Patient',
+      patientRef,
+    ) as Patient | null;
+    const storedEncounter = read(
+      'encounter-read',
+      'Read back the Encounter',
+      `Encounter/${encounterId}`,
+    ) as Encounter | null;
+    const storedObservation = read(
+      'observation-read',
+      'Read back the Observation',
+      `Observation/${observationId}`,
+      failure === 'read-back',
+    ) as Observation | null;
     return {
-      outcome:
-        already === observations.length
-          ? 'already-shared'
-          : already > 0
-            ? 'partly-shared'
-            : 'shared',
+      outcome: existing === null ? 'shared' : 'already-shared',
       steps,
       readBack: {
-        patient: openemrPatient(patientId),
-        encounter: {
-          resourceType: 'Encounter',
-          id: encounterId,
-          status: 'finished',
-          class: { system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode', code: 'AMB' },
-          subject: { reference: `Patient/${patientId}` },
-          period: { start: new Date(this.#now()).toISOString() },
-        },
-        observations: stored,
+        patient: { sent: patientFound ? null : sentPatient, stored: storedPatient },
+        encounter: { sent: sentEncounter, stored: storedEncounter },
+        observation: { sent: sentObservation, stored: storedObservation },
       },
     };
   }
@@ -555,6 +1032,16 @@ export class MockClient implements PulseBridgeApi {
     // an AbortError, which callers ignore.
     signal?.throwIfAborted();
     const token = this.options.session.token();
+    if (token !== null && this.options.statusMode === 'not-configured') {
+      // The proxy cannot check any token without its password secret, so every route but
+      // login answers 503 (amendment 11). The session is not ended: there was no 401.
+      throw proxyProblem(
+        503,
+        'transient',
+        'login-not-configured',
+        'Reviewer login is not configured on the server.',
+      );
+    }
     if (token === null || !token.startsWith(MOCK_TOKEN_PREFIX)) {
       this.options.session.clear();
       this.options.onUnauthorized();
@@ -564,10 +1051,6 @@ export class MockClient implements PulseBridgeApi {
 
   async #delay(): Promise<void> {
     if (this.#latency > 0) await new Promise((r) => setTimeout(r, this.#latency));
-  }
-
-  #unprocessable(message: string): ApiError {
-    return new ApiError(422, message, operationOutcome('invalid', message));
   }
 
   /**
@@ -657,12 +1140,15 @@ export class MockClient implements PulseBridgeApi {
     throw cuffRefusal(429, [['body', 'too many sends; try again later']], 'throttled', wait);
   }
 
-  async #lookup(reference: string): Promise<Observation> {
-    const [type, id = ''] = reference.split('/');
-    if (type !== 'Observation') throw this.#unprocessable(`${reference} is not an Observation.`);
+  /** The configured patient's Observation with this id (heart rate or blood pressure), or null. */
+  async #findObservation(id: string): Promise<Observation | null> {
     const bp = this.#bloodPressure().find((o) => o.id === id);
     if (bp) return bp;
-    return (await this.getHeartRateTrace(id)).observation;
+    const start = windowStartFromId(id);
+    const window = start === null ? null : syntheticRollUp(start);
+    const sync = this.#lastSync();
+    if (start === null || window === null || start + 5 * 60 * 1000 > sync) return null;
+    return Promise.resolve(heartRateObservation(window, sync, this.#zone));
   }
 
   #observationFor(attempt: MockAttempt): Observation | null {
@@ -677,8 +1163,20 @@ export class MockClient implements PulseBridgeApi {
 
   #bloodPressure(): Observation[] {
     this.#resolve();
-    return this.#attempts
-      .map((a) => this.#observationFor(a))
+    // Every mapped message has its Observation in the FHIR store, whatever the log can confirm.
+    const fromDirect = this.#direct.flatMap((m) =>
+      m.observation === null
+        ? []
+        : [
+            bloodPressureObservation(
+              m.observation.replace('Observation/', ''),
+              new Date(m.sentAt).toISOString(),
+              131,
+              84,
+            ),
+          ],
+    );
+    return [...this.#attempts.map((a) => this.#observationFor(a)), ...fromDirect]
       .filter((o): o is Observation => o !== null)
       .sort((a, b) => (a.effectiveDateTime ?? '').localeCompare(b.effectiveDateTime ?? ''));
   }
@@ -690,6 +1188,8 @@ export class MockClient implements PulseBridgeApi {
       if (a.entry.application?.outcome !== 'pending' || a.finalOutcome === null) continue;
       if (now < a.resolveAt) continue;
       a.entry.application = { ...a.finalOutcome };
+      // When the mapper wrote its Bundle: a few seconds after the send (also for seeded rows).
+      a.mappedAt = Math.min(a.resolveAt, Date.parse(a.entry.sentAt) + this.#mappingDelay);
       if (a.finalOutcome.outcome === 'accepted') {
         a.entry.observation = `Observation/mock-bp-${String(a.seq)}`;
       }
@@ -708,6 +1208,7 @@ export class MockClient implements PulseBridgeApi {
     resolveAt: number;
     noAck?: CommitAck & { received: false };
     audited?: boolean;
+    storedAs?: string;
   }): MockAttempt {
     const n = this.#sequence++;
     const sample = MOCK_SAMPLES.find((x) => x.name === input.sample);
@@ -756,8 +1257,11 @@ export class MockClient implements PulseBridgeApi {
             : null,
         // Over MLLP cuff-sim derives the name (T33); filled in by #settleDerivedNames.
         derivedMessageName: null,
+        // Presented by #present (the proxy's lookup); never read from here.
+        messageLookup: null,
         observation: null,
         source: 'audit-event',
+        possibleDuplicateOf: null,
       },
       // A malformed send shows the sample's own bytes (T07), not a message built from the inputs.
       messageSent: sample
@@ -770,6 +1274,8 @@ export class MockClient implements PulseBridgeApi {
       seq: n,
       audited: input.audited ?? true,
       derivedName: null,
+      storedAs: input.storedAs ?? null,
+      mappedAt: null,
     };
     if (stored && input.transport === 'mllp') {
       // cuff-sim hashes the bytes it actually sent. In the mock the configured patient is T07's
@@ -885,6 +1391,35 @@ export class MockClient implements PulseBridgeApi {
       },
     });
     fromSample(now - 60 * min, 'unmappable_missing_obx14', 'mllp');
+    // An accepted MLLP send whose DERIVED name is wrong: the store has the message under another
+    // name, so the attempt's lookup is `not-found` (no outcome, no Observation) and the real
+    // message is a store-only row created 2 s later with the same control ID: exactly one
+    // candidate, so it carries `possibleDuplicateOf` (amendment 14).
+    const wrongAt = now - 45 * min;
+    this.#record({
+      at: wrongAt,
+      transport: 'mllp',
+      systolic: 128,
+      diastolic: 83,
+      sample: null,
+      commit: 'AA',
+      commitReason: null,
+      final: accepted,
+      resolveAt: done,
+      storedAs: `${MOCK_HL7V2_STORE}/messages/stored-${hash32('wrong-derived-name').toString(16)}`,
+    });
+    // A message sent straight to the adapter: no attempt anywhere, so a store-only row with
+    // no hint, an unknown transport (the adapter cannot label) and its own outcome.
+    this.#direct.push({
+      name: `${MOCK_HL7V2_STORE}/messages/direct-${hash32('direct-adapter').toString(16)}`,
+      createdAt: now - 100 * min,
+      sentAt: now - 100 * min - 1000,
+      transport: null,
+      controlId: 'ADAPTER-0001',
+      application: { outcome: 'accepted', reason: null },
+      observation: 'Observation/mock-bp-direct',
+      mappedAt: now - 100 * min + 4000,
+    });
     this.#record({
       at: now - 30 * min,
       transport: 'mllp',
@@ -918,24 +1453,41 @@ export class MockClient implements PulseBridgeApi {
       problem:
         "written in format version 2, newer than this library's 1: the MSA-1 detail is missing",
     });
+    // One without an id or a readable time (amendment 6): id "", sorted last.
+    this.#unreadable.push({
+      kind: 'unreadable-send-attempt',
+      id: '',
+      recordedAt: null,
+      problem: 'the AuditEvent has no id and no recorded time',
+    });
 
     // health-sync runs every 15 minutes (brief, "Ingestion, wearable"): the last eight runs.
     for (let i = 0; i < 8; i++) {
       const at = lastSyncRun(now) - 15 * i * min;
       const ids = heartRateObservations(at - 30 * min, at, at, this.#zone).slice(-3);
-      this.#transactions.push({
-        kind: 'fhir-transaction',
-        id: `mock-tx-${String(i)}`,
-        recordedAt: new Date(at).toISOString(),
-        writer: 'health-sync',
-        httpStatus: 200,
-        resources: [
-          'Patient/mock-patient',
-          'Device/mock-watch',
-          ...ids.map((o) => `Observation/${o.id ?? ''}`),
-        ],
-      });
+      this.#transactions.push(
+        transactionRow(
+          `mock-tx-${String(i)}`,
+          at,
+          'health-sync',
+          ids.map((o) => `Observation/${o.id ?? ''}`),
+        ),
+      );
     }
+    // The seeder's assembler (amendment 2) and one the proxy does not recognise.
+    const older = lastSyncRun(now) - 26 * 60 * min;
+    const seeded = heartRateObservations(older - 10 * min, older, older, this.#zone);
+    this.#transactions.push(
+      transactionRow(
+        'mock-tx-seed',
+        older,
+        'seed',
+        seeded.map((o) => `Observation/${o.id ?? ''}`),
+      ),
+      transactionRow('mock-tx-unknown', older - 60 * min, 'unknown', [
+        seeded[0] ? `Observation/${seeded[0].id ?? ''}` : 'Observation/mock-unknown',
+      ]),
+    );
   }
 }
 
@@ -989,33 +1541,251 @@ function withoutServerFields<T extends Resource>(resource: T): T {
   return copy;
 }
 
-function operationOutcome(code: string, diagnostics: string): OperationOutcome {
-  return { resourceType: 'OperationOutcome', issue: [{ severity: 'error', code, diagnostics }] };
+/** A FHIR id as the proxy checks a path id (store.py SAFE_ID): at least one letter or digit. */
+const SAFE_ID = /^(?=[A-Za-z0-9.-]*[A-Za-z0-9])[A-Za-z0-9.-]{1,64}$/;
+
+/** An OperationOutcome as fhir-proxy writes one (errors.py `Problem.outcome`). */
+function operationOutcome(
+  code: string,
+  diagnostics: string,
+  reason?: string,
+  expression?: string[],
+): OperationOutcome {
+  return {
+    resourceType: 'OperationOutcome',
+    issue: [
+      {
+        severity: 'error',
+        code,
+        ...(reason ? { details: { coding: [{ system: PROXY_REASON_SYSTEM, code: reason }] } } : {}),
+        diagnostics,
+        ...(expression ? { expression } : {}),
+      },
+    ],
+  };
+}
+
+/** The error the HTTP client makes of one of the proxy's refusals. */
+function proxyProblem(
+  status: number,
+  code: string,
+  reason: string,
+  text: string,
+  expression?: string[],
+): ApiError {
+  return new ApiError(status, text, operationOutcome(code, text, reason, expression));
+}
+
+/** A refusal of the share route, before anything is sent (no steps). */
+function shareProblem(status: number, code: string, reason: string, text: string): ShareError {
+  return ShareError.from(proxyProblem(status, code, reason, text));
 }
 
 function notFound(what: string): ApiError {
-  return new ApiError(
-    404,
-    `${what} was not found.`,
-    operationOutcome('not-found', `${what} was not found.`),
-  );
+  return proxyProblem(404, 'not-found', 'not-found', `${what} was not found.`);
 }
 
-function step(
+/** The mock's cursor: opaque to the page, like the proxy's (base64url JSON with a version). */
+function encodeMockCursor(offset: number): string {
+  return btoa(JSON.stringify({ v: 1, o: offset }))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/, '');
+}
+
+/** The offset in a mock cursor; anything else is refused as the proxy does (amendment 21). */
+function decodeMockCursor(cursor: string): number {
+  const bad = proxyProblem(
+    400,
+    'invalid',
+    'invalid-cursor',
+    'The cursor is not valid; load the log from the start.',
+    ['cursor'],
+  );
+  if (!/^[A-Za-z0-9_-]{1,8192}$/.test(cursor)) throw bad;
+  try {
+    const body = JSON.parse(atob(cursor.replaceAll('-', '+').replaceAll('_', '/'))) as unknown;
+    const o = (body as { v?: unknown; o?: unknown } | null)?.o;
+    if (
+      (body as { v?: unknown }).v === 1 &&
+      typeof o === 'number' &&
+      Number.isInteger(o) &&
+      o >= 0
+    ) {
+      return o;
+    }
+  } catch {
+    // fall through
+  }
+  throw bad;
+}
+
+function transactionRow(
+  id: string,
+  at: number,
+  writer: FhirTransactionEntry['writer'],
+  observations: string[],
+): FhirTransactionEntry {
+  return {
+    kind: 'fhir-transaction',
+    id,
+    recordedAt: new Date(at).toISOString(),
+    writer,
+    // Nothing records the executeBundle status, so the proxy always sends null.
+    httpStatus: null,
+    resources: [
+      ...observations,
+      ...observations.map((o) => `Provenance/mock-prov-${hash32(o).toString(16)}`),
+    ].sort(),
+  };
+}
+
+/**
+ * The key names T14's `extensions.SECRET_KEYS` replaces with "[not shown]" at any depth,
+ * compared without regard to case. Copied exactly, so the mock trace is what the proxy's will
+ * be. Note: the list includes `code` and `token`, so every FHIR `code` element in a step body
+ * (Observation.code, each Coding.code) is hidden too; web/README.md reports this to T14/T15.
+ */
+const SECRET_KEYS = new Set([
+  'authorization',
+  'client_secret',
+  'client_assertion',
+  'assertion',
+  'password',
+  'token',
+  'access_token',
+  'refresh_token',
+  'id_token',
+  'code',
+  'code_verifier',
+  'private_key',
+]);
+const NOT_SHOWN = '[not shown]';
+
+/** `extensions.redact`: a copy with every secret key's value replaced. */
+export function redact(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redact);
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [
+        k,
+        SECRET_KEYS.has(k.toLowerCase()) ? NOT_SHOWN : redact(v),
+      ]),
+    );
+  }
+  return value;
+}
+
+/** `extensions.trace_step`: the contract's ShareStep, bodies redacted, the url a path only. */
+function traceStep(
   name: ShareStep['step'],
   label: string,
   method: string,
-  url: string,
-  body: unknown,
+  path: string,
+  requestBody: unknown,
   status: number,
-  response: unknown,
+  responseBody: unknown,
+  result?: ShareStepResult,
 ): ShareStep {
+  if (!/^\/(?!\/)[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/.test(path)) {
+    throw new Error("a trace step's url is a path with no scheme, host or query");
+  }
   return {
     step: name,
     label,
-    request: { method, url, body },
-    response: { status, body: response },
-    result: status < 300 ? 'ok' : 'failed',
+    request: { method, url: path, body: redact(requestBody) },
+    response: { status, body: redact(responseBody) },
+    result: result ?? (status >= 200 && status < 300 ? 'ok' : 'failed'),
     durationMs: 40 + (hash32(label) % 160),
   };
+}
+
+function searchset(resources: (Resource | undefined)[]): unknown {
+  const found = resources.filter((r): r is Resource => r !== undefined);
+  return {
+    resourceType: 'Bundle',
+    type: 'searchset',
+    total: found.length,
+    entry: found.map((resource) => ({ resource })),
+  };
+}
+
+/** T06's `patient_for_sharing` of the mock patient: PT identifier, official name, gender, birth date. */
+function patientForSharing(): Patient {
+  const stored = openemrPatient('');
+  return {
+    resourceType: 'Patient',
+    identifier: stored.identifier ?? [],
+    name: stored.name ?? [],
+    gender: stored.gender ?? 'unknown',
+    birthDate: stored.birthDate ?? '',
+  };
+}
+
+/**
+ * What the mock OpenEMR keeps of a Patient: spike S1 saw it drop the identifier's `system`
+ * (the value goes into its "external ID" field) and add its own id and meta.
+ */
+function openemrStoredPatient(id: string, sent: Patient): Patient {
+  return {
+    ...sent,
+    id,
+    meta: { lastUpdated: '2026-01-01T00:00:00Z' },
+    identifier: (sent.identifier ?? []).map((i) => {
+      const copy = { ...i };
+      delete copy.system;
+      return copy;
+    }),
+  };
+}
+
+/**
+ * What the mock OpenEMR returns for an Observation read back by id. Modelled on spike S1
+ * ("what is lost on the round trip"): it adds `id` and `meta.profile`, adds `type` to the
+ * references, rewrites the `display` texts and unit texts, and writes the time in its own zone
+ * (UTC, `+00:00`). For a heart rate it keeps one pulse value: the minimum and maximum
+ * components and the period are not kept (its Vitals form has one pulse at one time). The
+ * last two are this mock's assumption, not something S1 measured.
+ */
+function openemrStoredObservation(id: string, sent: Observation): Observation {
+  const heartRate = sent.code.coding?.[0]?.code === LOINC.heartRate;
+  const utc = (iso: string | undefined) =>
+    iso === undefined
+      ? undefined
+      : new Date(Date.parse(iso)).toISOString().replace('.000Z', '+00:00');
+  const stored: Observation = {
+    ...structuredClone(sent),
+    id,
+    meta: {
+      profile: [
+        heartRate
+          ? 'http://hl7.org/fhir/StructureDefinition/heartrate'
+          : 'http://hl7.org/fhir/StructureDefinition/bp',
+      ],
+    },
+    code: {
+      coding: (sent.code.coding ?? []).map((c) => ({
+        ...c,
+        display: heartRate ? 'Heart rate' : 'Blood pressure systolic and diastolic',
+      })),
+    },
+    subject: { ...sent.subject, type: 'Patient' },
+    encounter: { ...sent.encounter, type: 'Encounter' },
+  };
+  if (heartRate) {
+    delete stored.component;
+    delete stored.effectivePeriod;
+    delete stored.method;
+    const at = utc(sent.effectivePeriod?.start ?? sent.effectiveDateTime);
+    if (at !== undefined) stored.effectiveDateTime = at;
+    if (stored.valueQuantity) stored.valueQuantity = { ...stored.valueQuantity, unit: '/min' };
+  } else {
+    const at = utc(sent.effectiveDateTime);
+    if (at !== undefined) stored.effectiveDateTime = at;
+    stored.component = (sent.component ?? []).map((c) => ({
+      ...c,
+      valueQuantity: { ...c.valueQuantity, unit: 'mmHg' },
+    }));
+  }
+  return stored;
 }

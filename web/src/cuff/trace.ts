@@ -52,7 +52,7 @@ export type TraceState =
   | { kind: 'empty' }
   | { kind: 'loading'; summary: string }
   | { kind: 'error'; summary: string; message: string; retry: () => void }
-  | { kind: 'gone'; summary: string }
+  | { kind: 'gone'; summary: string; unreadable?: boolean }
   | { kind: 'ready'; reading: Reading; trace: CuffAttemptTrace; summary: string };
 
 export interface TracePanel {
@@ -109,7 +109,9 @@ export function tracePanel(slot: HTMLElement, signal: AbortSignal): TracePanel {
           body,
           el('p', {
             class: 'cuff-note cuff-note--warn',
-            text: 'This send attempt is no longer in the audit store, so it has no trace and is no longer selected.',
+            text: state.unreadable
+              ? 'This send attempt’s record in the audit store could not be read, so it has no trace and is no longer selected. The messages log lists it as unreadable.'
+              : 'This send attempt is no longer in the audit store, so it has no trace and is no longer selected.',
             attrs: { role: 'status' },
           }),
         );
@@ -237,12 +239,19 @@ export function messageNameFacts(reading: Reading): [string, string][] {
     ];
   }
   if (isDerivedMessageName(r)) {
+    const check: [string, string][] =
+      reading.lookup === 'message-not-found'
+        ? [['Store check', 'Not found: the HL7v2 store has no message under this derived name.']]
+        : reading.lookup === 'message-unchecked'
+          ? [['Store check', 'Could not be checked: the proxy could not ask the store in time.']]
+          : [];
     return [
       ['Stored message name (derived, unconfirmed)', r.messageName],
       [
         'Why derived',
         'An MLLP acknowledgment does not carry the stored name, so the simulator computed it from the SHA-256 of the bytes it sent. The store has not confirmed it.',
       ],
+      ...check,
     ];
   }
   return [['Stored message name (returned by the store)', r.messageName]];

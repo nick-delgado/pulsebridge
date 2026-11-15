@@ -28,7 +28,7 @@ import {
   type CuffReadingRequest,
   type MalformedSample,
 } from '../api/contract';
-import { ApiError, CuffSendError, UnauthorizedError } from '../api/errors';
+import { CuffSendError, isFinalTraceAnswer, UnauthorizedError } from '../api/errors';
 import type { CuffSlot, FeatureContext } from '../shell/features';
 import { pollUntil, type PollOptions } from '../state/poll';
 import type { Selection } from '../state/selection';
@@ -102,6 +102,11 @@ function childController(parent: AbortSignal): AbortController {
 function selectionTarget(s: Selection | null): string {
   if (s === null) return 'none';
   return s.source === 'cuff' ? `cuff:${s.attemptId}` : `watch:${s.observationId}`;
+}
+
+/** True for the 422 that means the attempt's AuditEvent is unreadable (amendment 12). */
+function unreadableAnswer(error: unknown): boolean {
+  return isFinalTraceAnswer(error) && (error as { status: number }).status === 422;
 }
 
 function errorMessage(error: unknown): string {
@@ -642,7 +647,12 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
       on: {
         click: () => {
           const now = find(r.key);
-          if (now) startPolling(now);
+          // A lookup that could not be checked is asked again from "pending".
+          if (now?.lookup === 'message-unchecked') {
+            const again: Reading = { ...now, lookup: 'polling' };
+            replace(again);
+            startPolling(again);
+          } else if (now) startPolling(now);
         },
       },
       signal,
@@ -682,7 +692,10 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     view.root.classList.toggle('cuff-reading--selected', isSelected);
     view.selected.hidden = !isSelected;
     view.show?.setAttribute('aria-pressed', String(isSelected));
-    view.checkAgain.hidden = !(r.lookup === 'gave-up' && r.application?.outcome === 'pending');
+    view.checkAgain.hidden = !(
+      (r.lookup === 'gave-up' && r.application?.outcome === 'pending') ||
+      r.lookup === 'message-unchecked'
+    );
   };
 
   const renderAllRows = () => {
@@ -715,10 +728,10 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
 
   // -- selection and trace ---------------------------------------------------------------------
   /** Clears the selection because its attempt is gone from the audit store, and says so. */
-  const dropSelection = (r: Reading) => {
+  const dropSelection = (r: Reading, unreadable = false) => {
     selectedKey = null;
     setOwn(null);
-    trace.render({ kind: 'gone', summary: readingSummary(r, deps.timeZone) });
+    trace.render({ kind: 'gone', summary: readingSummary(r, deps.timeZone), unreadable });
     renderAllRows();
   };
 
@@ -779,10 +792,11 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
         if (isAbort(error, c.signal) || error instanceof UnauthorizedError) return;
         if (selectedKey !== r.key) return;
         const current = find(r.key) ?? r;
-        if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
+        // 404/410 and 422 (an unreadable AuditEvent, amendment 12) are final: no retry helps.
+        if (isFinalTraceAnswer(error)) {
           pollers.get(r.key)?.abort();
           replace({ ...current, lookup: isPending(current) ? 'missing' : current.lookup });
-          dropSelection(current);
+          dropSelection(current, unreadableAnswer(error));
           return;
         }
         // Not knowing is not shareable: say why on the selection, and offer a retry.
@@ -870,11 +884,11 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
           return now === undefined || !isPending(now);
         } catch (error) {
           if (isAbort(error, c.signal) || error instanceof UnauthorizedError) throw error;
-          if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
+          if (isFinalTraceAnswer(error)) {
             const now = find(r.key);
             if (now) replace({ ...now, lookup: 'missing' });
             // The same as a 404 from a trace load: the selected attempt is gone.
-            if (now && selectedKey === r.key) dropSelection(now);
+            if (now && selectedKey === r.key) dropSelection(now, unreadableAnswer(error));
             return true;
           }
           return false; // a passing failure: try again at the next tick

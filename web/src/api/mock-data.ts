@@ -119,6 +119,75 @@ export function mockAuditFailureFromSearch(search: string): 'build' | 'write' | 
   return value === 'build' || value === 'write' ? value : null;
 }
 
+/**
+ * The switches for states the built mock page cannot otherwise reach (browser tests only; mock
+ * builds only: this module is not in an HTTP build, which scripts/check-bundle.mjs proves
+ * through the markers this module holds):
+ * - `?mock-lookup=not-found|failed`: the HL7v2 store does not have (or cannot be asked for) the
+ *   message name of ANY accepted send, as when cuff-sim's derived MLLP name is wrong
+ *   (`messageLookup`, amendment 1). With `not-found`, an MLLP message nobody else claims is
+ *   listed as a store-only row with a `possibleDuplicateOf` hint (amendment 14).
+ * - `?mock-log=partial`: every messages-log page says `partial: true` (amendment 16).
+ * - `?mock-status=openemr-not-checked|counts-unknown|health-sync-timeout|not-configured`: the
+ *   status the proxy sends before T15 installs its OpenEMR probe (amendment 10), when the store
+ *   could not be counted (null counts, amendment 15), when health-sync did not answer (amendment
+ *   9), or when its password secret is missing, so every route but login answers 503 (amendment
+ *   11).
+ * - `?mock-share=<MockShareFailure>`: a share that stops or is refused at a given point.
+ */
+export type MockLookupFailure = 'not-found' | 'failed';
+export type MockStatusMode =
+  'openemr-not-checked' | 'counts-unknown' | 'health-sync-timeout' | 'not-configured';
+export type MockShareFailure =
+  /** 422 before OpenEMR is called: the stored Patient has no birth date. */
+  | 'patient-incomplete'
+  /** 503: the share is not configured on the server. */
+  | 'not-configured'
+  /** 502 at the first step: the token request gets no answer. */
+  | 'openemr-unreachable'
+  /** 502 part-way: OpenEMR refuses to create the Encounter. */
+  | 'encounter-refused'
+  /** 504 part-way: the Observation POST gets no answer in time. */
+  | 'observation-timeout'
+  /** 200, but reading the Observation back fails. */
+  | 'read-back';
+
+export interface MockSwitches {
+  lookupFailure: MockLookupFailure | null;
+  partialLog: boolean;
+  statusMode: MockStatusMode | null;
+  shareFailure: MockShareFailure | null;
+}
+
+const LOOKUP_FAILURES: readonly MockLookupFailure[] = ['not-found', 'failed'];
+const STATUS_MODES: readonly MockStatusMode[] = [
+  'openemr-not-checked',
+  'counts-unknown',
+  'health-sync-timeout',
+  'not-configured',
+];
+const SHARE_FAILURES: readonly MockShareFailure[] = [
+  'patient-incomplete',
+  'not-configured',
+  'openemr-unreachable',
+  'encounter-refused',
+  'observation-timeout',
+  'read-back',
+];
+
+/** The switches named in a page URL's query string; each is off unless spelled exactly. */
+export function mockSwitchesFromSearch(search: string): MockSwitches {
+  const q = new URLSearchParams(search);
+  const pick = <T extends string>(allowed: readonly T[], name: string): T | null =>
+    allowed.find((v) => v === q.get(name)) ?? null;
+  return {
+    lookupFailure: pick(LOOKUP_FAILURES, 'mock-lookup'),
+    partialLog: q.get('mock-log') === 'partial',
+    statusMode: pick(STATUS_MODES, 'mock-status'),
+    shareFailure: pick(SHARE_FAILURES, 'mock-share'),
+  };
+}
+
 export type MockDataSetId = keyof typeof MOCK_DATA_SETS;
 export type MockDataSet = (typeof MOCK_DATA_SETS)[MockDataSetId];
 
