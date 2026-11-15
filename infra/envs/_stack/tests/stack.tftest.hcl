@@ -604,7 +604,8 @@ run "image_builds_are_wired_when_enabled" {
     condition = (
       contains(keys(module.identity.service_account_emails), "build") &&
       module.project_base.build_account_registry_grants == tolist(["pulsebridge-dockerhub=roles/artifactregistry.reader", "pulsebridge-services=roles/artifactregistry.writer"]) &&
-      output.build_trigger_name == "pulsebridge-images-on-tag"
+      output.build_trigger_name == "pulsebridge-images-on-tag" &&
+      module.project_base.build_trigger_approval_required == true
     )
     error_message = "With create_build_service_account and build_trigger_repository the build account, its two repository grants and the trigger must exist."
   }
@@ -631,4 +632,19 @@ run "trigger_without_build_account_is_refused" {
   }
 
   expect_failures = [var.build_trigger_repository]
+}
+
+run "the_build_approval_reaches_the_trigger" {
+  command = plan
+
+  variables {
+    create_build_service_account    = true
+    build_trigger_repository        = "projects/example-project/locations/us-central1/connections/github/repositories/pulsebridge"
+    build_trigger_approval_required = false
+  }
+
+  assert {
+    condition     = module.project_base.build_trigger_approval_required == false
+    error_message = "_stack must pass build_trigger_approval_required to project-base."
+  }
 }

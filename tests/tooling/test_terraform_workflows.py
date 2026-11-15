@@ -278,9 +278,11 @@ def test_each_job_uses_the_narrowest_identity(workflow: str, job_id: str, job: d
         assert not re.search(r"\b(npm|npx|make web)", runs(job)), job_id
         assert set(commands) & {"apply", "destroy"}, job_id
         assert "deploy-page" not in commands
-    else:  # the page deployer: Hosting only, nothing of Terraform
-        assert commands == ["deploy-page"], job_id
+    else:  # the page deployer: Hosting only, nothing of Terraform of any kind
+        assert "deploy-page" in commands and set(commands) <= {"deploy-page", "require-tip"}, job_id
         assert "hashicorp/setup-terraform" not in uses
+        assert not re.search(r"terraform", runs(job)), f"{job_id} runs Terraform"
+        assert "TF_STATE_BUCKET" not in yaml.safe_dump(job)
         assert "token_format" not in auth_steps(job)[0]["with"]
     if workflow == "plan":
         assert identity == "planner", "pull requests must never get the deployer"
@@ -312,12 +314,25 @@ def test_only_dev_is_planned_on_pull_requests_by_the_planner() -> None:
     assert "DEV_GCP_DEPLOYER_SA" not in text("plan"), "no fallback to the deployer"
 
 
+# The Environment each authenticating job must name: it decides the job's CI context, and so
+# which ONE account the job can become (bootstrap's bindings; test_wif_truth_table.py).
+EXPECTED_ENVIRONMENT = {
+    ("dev", "planner"): None,  # pull-request
+    ("dev", "deployer"): None,  # main
+    ("dev", "page"): "dev-page",  # env-dev-page-main
+    ("prod", "planner"): "prod-plan",
+    ("prod", "deployer"): "prod",
+    ("prod", "page"): "prod-page",
+}
+
+
+@pytest.mark.parametrize("workflow,job_id,job", AUTH_JOBS)
+def test_each_identity_runs_in_its_own_environment(workflow: str, job_id: str, job: dict) -> None:
+    assert environment_of(job) == EXPECTED_ENVIRONMENT[identity_of(job)], job_id
+
+
 def test_prod_only_from_its_environments() -> None:
     jobs = load("apply")["jobs"]
-    for job_id, job in jobs.items():
-        if auth_steps(job) and identity_of(job)[0] == "prod":
-            expected = "prod-plan" if identity_of(job)[1] == "planner" else "prod"
-            assert environment_of(job) == expected, job_id
     assert [j for j, job in jobs.items() if "apply --env prod" in runs(job)] == ["prod-apply"]
 
 
@@ -353,9 +368,28 @@ def test_prod_plan_follows_the_preflight_and_a_deployed_dev() -> None:
     assert load("apply")["jobs"]["dev"]["outputs"]["up"] == "${{ steps.up.outputs.up }}"
 
 
+def test_dev_preflight_guards_the_dev_page_deploy() -> None:
+    jobs = load("apply")["jobs"]
+    job = jobs["dev-preflight"]
+    assert runs(job).strip() == "python3 infra/envs/ci/tf_ci.py check-environments --env dev"
+    assert job["permissions"] == {"contents": "read", "actions": "read"} and not auth_steps(job)
+    assert "dev-preflight" in jobs["dev-page"]["needs"]
+    assert "needs.dev-preflight.result == 'success'" in top_level_conjuncts(jobs["dev-page"]["if"])
+
+
+def test_page_deploys_never_overlap_and_prod_page_checks_the_tip() -> None:
+    jobs = load("apply")["jobs"]
+    for job_id, env in (("dev-page", "dev"), ("prod-page", "prod")):
+        assert jobs[job_id]["concurrency"] == {"group": f"page-{env}", "cancel-in-progress": False}
+    names = [s.get("name") or s.get("uses", "").split("@")[0] for s in steps(jobs["prod-page"])]
+    assert names.index("Require this commit to be the tip of main") < names.index(
+        "Deploy prod's page"
+    )
+
+
 def test_prod_preflight_runs_the_environment_check() -> None:
     job = load("apply")["jobs"]["prod-preflight"]
-    assert runs(job).strip() == "python3 infra/envs/ci/tf_ci.py check-environments"
+    assert runs(job).strip() == "python3 infra/envs/ci/tf_ci.py check-environments --env prod"
     assert job["permissions"] == {"contents": "read", "actions": "read"}
     [step] = [s for s in steps(job) if "run" in s]
     assert step["env"]["GH_TOKEN"] == "${{ github.token }}"  # noqa: S105
@@ -416,7 +450,7 @@ def test_the_page_is_built_without_credentials_and_deployed_after_every_apply() 
     for apply_job, page_job in (("dev", "dev-page"), ("prod-apply", "prod-page")):
         page = jobs[page_job]
         needs = page["needs"] if isinstance(page["needs"], list) else [page["needs"]]
-        assert set(needs) == {apply_job, "build-page"}
+        assert set(needs) >= {apply_job, "build-page"}
         conjuncts = top_level_conjuncts(page["if"])
         assert f"needs.{apply_job}.result == 'success'" in conjuncts
         assert "needs.build-page.result == 'success'" in conjuncts

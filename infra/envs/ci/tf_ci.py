@@ -21,7 +21,7 @@ Commands (most take --env dev|prod and work in infra/envs/<env>):
   export-page-config  write the page deploy's inputs (firebase.json, project) for the deploy job
   deploy-page         install the pinned Firebase CLI (deploy-tools/) and deploy web/dist
   require-tip         refuse unless this run's commit is still the tip of main
-  check-environments  refuse unless prod's two GitHub Environments are protected as required
+  check-environments  refuse unless the environment's GitHub Environments are protected as required
 
 Environment: TF_STATE_BUCKET (bootstrap's bucket, from a repository variable), GCP_ACCESS_TOKEN
 (fetch-tfvars only: a short-lived token from the auth step), GH_TOKEN, GITHUB_REPOSITORY and
@@ -74,8 +74,13 @@ ALLOWED_DESTROY_LEFTOVERS = (
     "module.stack.module.project_base.google_compute_network.this",
 )
 
-# prod's two GitHub Environments and the one branch allowed to deploy to them.
-PROD_ENVIRONMENTS = ("prod-plan", "prod")
+# The GitHub Environments each environment's jobs use, and whether each needs required reviewers.
+# The page deploy jobs have their own (dev-page, prod-page), so the page deployer's context is
+# never a context of the deployer or the planner (bootstrap's bindings).
+GITHUB_ENVIRONMENTS = {
+    "prod": (("prod-plan", False), ("prod", True), ("prod-page", False)),
+    "dev": (("dev-page", False),),
+}
 MAIN_BRANCH = "main"
 
 TFVARS_STRING = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"\s*(?:#.*)?$')
@@ -324,10 +329,13 @@ def _redact(value: object, mask: object) -> object:
 
 def plan_digest(plan_json: dict) -> tuple[str, int]:
     """A digest of what the plan does: for every resource that is not a no-op, its address, its
-    actions and its before and after values, and the output changes, with every SENSITIVE value
-    replaced by a placeholder (so the digest cannot be used to guess a patient ID or a name).
-    Two plans with the same digest make the same changes with the same non-sensitive values; a
-    change to a sensitive value alone comes from the tfvars, which apply pins by generation."""
+    actions and the values it will have afterwards (`after`, and which are still unknown), and the
+    output changes, with every SENSITIVE value replaced by a placeholder (so the digest cannot be
+    used to guess a patient ID or a name). Two plans with the same digest end in the same
+    non-sensitive values; a change to a sensitive value alone comes from the tfvars, which apply
+    pins by generation. `before` (the refreshed current values) is left out on purpose: a value
+    that drifted between the review and the apply, and that the plan sets back anyway, would
+    otherwise change the digest without changing the outcome the reviewer approved."""
     changes = []
     for rc in plan_json.get("resource_changes", []):
         change = rc["change"]
@@ -337,7 +345,6 @@ def plan_digest(plan_json: dict) -> tuple[str, int]:
             {
                 "address": rc["address"],
                 "actions": change["actions"],
-                "before": _redact(change.get("before"), change.get("before_sensitive", False)),
                 "after": _redact(change.get("after"), change.get("after_sensitive", False)),
                 "after_unknown": change.get("after_unknown"),
             }
@@ -345,7 +352,6 @@ def plan_digest(plan_json: dict) -> tuple[str, int]:
     outputs = {
         name: {
             "actions": c["actions"],
-            "before": _redact(c.get("before"), c.get("before_sensitive", False)),
             "after": _redact(c.get("after"), c.get("after_sensitive", False)),
         }
         for name, c in (plan_json.get("output_changes") or {}).items()
@@ -436,8 +442,9 @@ def read_reviewed(path: Path, env: str) -> dict:
 def apply(env: str, reviewed: Path | None) -> None:
     meta = read_reviewed(reviewed, env) if reviewed is not None else None
     if meta is not None:
-        # The reviewer approved a plan made from one commit and one tfvars generation. Anything
-        # else (a newer commit, an edited tfvars) is a different change that has not been reviewed.
+        # The reviewer approved a plan made from one commit and one tfvars generation. The job
+        # fetched exactly that generation (a later edit waits for the next run); this re-checks it,
+        # and refuses another commit.
         if meta["tfvars_generation"] != recorded_generation(env):
             raise CiError("the tfvars are not the generation the reviewed plan used")
         if meta.get("commit") != os.environ.get("GITHUB_SHA", ""):
@@ -589,49 +596,93 @@ def require_tip(branch: str) -> None:
     print(f"{sha[:12]} is the tip of {branch}")
 
 
-def check_environments() -> None:
-    """prod's deployer and planner trust these two Environments; GitHub creates a missing one
-    with no rules the first time a job names it, and "protected branches only" lets every branch
-    deploy when no branch is protected. So each must allow exactly the main branch through a
-    custom policy, with no admin bypass, and prod must have required reviewers. Anything else,
-    including an API error or an answer of an unexpected shape, fails."""
+def _is_bool(value: object, expected: bool) -> bool:
+    return type(value) is bool and value is expected
+
+
+def _environment_problems(repo: str, name: str, needs_reviewers: bool) -> list[str]:
+    """What is wrong with one Environment, checked type-exactly: GitHub answers booleans and
+    integers, and anything else (0 for false, "false", a missing key) is refused."""
+    problems: list[str] = []
+    env = github_api(f"/repos/{repo}/environments/{name}")
+    policy = env.get("deployment_branch_policy")
+    if not (
+        isinstance(policy, dict)
+        and set(policy) == {"protected_branches", "custom_branch_policies"}
+        and _is_bool(policy["protected_branches"], False)
+        and _is_bool(policy["custom_branch_policies"], True)
+    ):
+        problems.append(
+            f"{name}: deployment branches must be 'Selected branches and tags' "
+            "(custom_branch_policies true, protected_branches false)"
+        )
+    if not _is_bool(env.get("can_admins_bypass"), False):
+        problems.append(f"{name}: 'Allow administrators to bypass' must be off")
+    listing = github_api(f"/repos/{repo}/environments/{name}/deployment-branch-policies")
+    policies = listing.get("branch_policies")
+    count = listing.get("total_count")
+    if not (
+        type(count) is int
+        and count == 1
+        and isinstance(policies, list)
+        and len(policies) == 1
+        and isinstance(policies[0], dict)
+        and policies[0].get("name") == MAIN_BRANCH
+        and policies[0].get("type") == "branch"
+    ):
+        problems.append(
+            f"{name}: the only deployment branch policy must be the branch '{MAIN_BRANCH}'"
+        )
+    rules = env.get("protection_rules")
+    if not isinstance(rules, list) or not all(isinstance(r, dict) for r in rules):
+        problems.append(f"{name}: unexpected protection_rules")
+        rules = []
+    if needs_reviewers:
+        reviewers = [
+            r
+            for rule in rules
+            if rule.get("type") == "required_reviewers"
+            for r in (rule.get("reviewers") if isinstance(rule.get("reviewers"), list) else [None])
+        ]
+        valid = [
+            r
+            for r in reviewers
+            if isinstance(r, dict)
+            and r.get("type") in ("User", "Team")
+            and isinstance(r.get("reviewer"), dict)
+            and type(r["reviewer"].get("id")) is int
+        ]
+        if not reviewers or len(valid) != len(reviewers):
+            problems.append(
+                f"{name}: required reviewers are missing or malformed (the manual gate)"
+            )
+    return problems
+
+
+def check_environments(env_name: str) -> None:
+    """The deployer, the planner and the page deployer trust GitHub Environments by name; GitHub
+    creates a missing one with no rules the first time a job names it, and "protected branches
+    only" lets every branch deploy when no branch is protected. So each must allow exactly the main
+    branch through a custom policy, with no admin bypass, and `prod` must have required reviewers.
+    Anything else, including an API error or an answer of an unexpected shape, fails."""
     repo = repository()
     problems: list[str] = []
-    for name in PROD_ENVIRONMENTS:
+    for name, needs_reviewers in GITHUB_ENVIRONMENTS[env_name]:
         try:
-            env = github_api(f"/repos/{repo}/environments/{name}")
-            policy = env.get("deployment_branch_policy")
-            if policy != {"protected_branches": False, "custom_branch_policies": True}:
-                problems.append(
-                    f"{name}: deployment branches must be 'Selected branches and tags' "
-                    "(custom_branch_policies true, protected_branches false)"
-                )
-            if env.get("can_admins_bypass") is not False:
-                problems.append(f"{name}: 'Allow administrators to bypass' must be off")
-            listing = github_api(f"/repos/{repo}/environments/{name}/deployment-branch-policies")
-            branches = [(p.get("name"), p.get("type")) for p in listing.get("branch_policies", [])]
-            if branches != [(MAIN_BRANCH, "branch")] or listing.get("total_count") != 1:
-                problems.append(
-                    f"{name}: the only deployment branch policy must be '{MAIN_BRANCH}'"
-                )
-            if name == "prod":
-                reviewers = [
-                    r
-                    for rule in env.get("protection_rules") or []
-                    if isinstance(rule, dict) and rule.get("type") == "required_reviewers"
-                    for r in rule.get("reviewers") or []
-                ]
-                if not reviewers:
-                    problems.append("prod: required reviewers are missing (the manual gate)")
+            problems += _environment_problems(repo, name, needs_reviewers)
         except CiError as e:
             problems.append(str(e))
-        except (AttributeError, TypeError):
+        except (AttributeError, TypeError, KeyError, IndexError):
             problems.append(f"{name}: unexpected answer from the GitHub API")
     if problems:
         raise CiError(
-            "prod's GitHub Environments are not protected as required: " + "; ".join(problems)
+            "the GitHub Environments are not protected as required: " + "; ".join(problems)
         )
-    print("prod-plan and prod: main only, no admin bypass; prod has required reviewers")
+    names = ", ".join(n for n, _ in GITHUB_ENVIRONMENTS[env_name])
+    print(
+        f"{names}: main only, no admin bypass"
+        + ("; prod has required reviewers" if env_name == "prod" else "")
+    )
 
 
 # --- entry point ---------------------------------------------------------------------------------
@@ -649,6 +700,7 @@ NEEDS_ENV = {
     "apply",
     "destroy",
     "export-page-config",
+    "check-environments",
 }
 
 
@@ -695,7 +747,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "require-tip":
             require_tip(args.branch)
         elif args.command == "check-environments":
-            check_environments()
+            check_environments(args.env)
     except CiError as e:
         print(f"::error::{e}" if os.environ.get("GITHUB_ACTIONS") == "true" else f"ERROR: {e}")
         return 1

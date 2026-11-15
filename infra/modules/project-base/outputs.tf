@@ -109,3 +109,8 @@ output "build_account_registry_grants" {
     [for g in google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader : "${g.repository}=${g.role}"],
   ))
 }
+
+output "build_trigger_approval_required" {
+  description = "Whether the image build trigger's builds wait for an approval (T26), or null without a trigger."
+  value       = one(google_cloudbuild_trigger.images_on_tag[*].approval_config[0].approval_required)
+}

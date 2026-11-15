@@ -290,6 +290,14 @@ def test_digest_changes_with_a_non_sensitive_value(ci) -> None:
     assert module.plan_digest(changed_output)[0] != module.plan_digest(PLAN)[0]
 
 
+def test_digest_ignores_drift_the_plan_overwrites(ci) -> None:
+    module, _, _ = ci
+    # Only `before` (the refreshed value) differs: the outcome is the same, so is the digest.
+    drifted = copy.deepcopy(PLAN)
+    drifted["resource_changes"][2]["change"]["before"]["x"] = 7
+    assert module.plan_digest(drifted)[0] == module.plan_digest(PLAN)[0]
+
+
 def test_digest_does_not_carry_sensitive_values(ci) -> None:
     module, _, _ = ci
     # Two plans that differ only in a sensitive value have the same digest: the hash input has a
@@ -691,9 +699,9 @@ def fake_github(monkeypatch, module, answers: dict[str, object]):
 REPO = "/repos/example-owner/example-repo"
 
 
-def good_environments() -> dict[str, object]:
+def good_environments(names=("prod-plan", "prod", "prod-page")) -> dict[str, object]:
     answers: dict[str, object] = {}
-    for name in ("prod-plan", "prod"):
+    for name in names:
         answers[f"{REPO}/environments/{name}"] = {
             "name": name,
             "can_admins_bypass": False,
@@ -725,66 +733,167 @@ def test_check_environments_passes_the_required_settings(
 ) -> None:
     module, _, _ = ci
     fake_github(monkeypatch, module, good_environments())
-    assert module.main(["check-environments"]) == 0
+    assert module.main(["check-environments", "--env", "prod"]) == 0
+    fake_github(monkeypatch, module, good_environments(("dev-page",)))
+    assert module.main(["check-environments", "--env", "dev"]) == 0
 
 
-@pytest.mark.parametrize(
-    "breakage",
-    [
-        "missing-environment",
-        "protected-branches-only",
-        "no-branch-policy",
-        "admin-bypass",
-        "admin-bypass-absent",
-        "second-branch",
-        "tag-policy",
-        "type-absent",
-        "no-reviewers",
-        "empty-reviewers",
-        "unexpected-shape",
-    ],
-)
-def test_check_environments_fails_closed(
-    ci, monkeypatch: pytest.MonkeyPatch, breakage: str
+def test_check_environments_checks_every_environment_of_prod(
+    ci, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _, _ = ci
+    for missing in ("prod-plan", "prod", "prod-page"):
+        answers = good_environments()
+        del answers[f"{REPO}/environments/{missing}"]
+        fake_github(monkeypatch, module, answers)
+        assert module.main(["check-environments", "--env", "prod"]) == 1, missing
+
+
+def test_check_environments_needs_an_env(ci) -> None:
+    module, _, _ = ci
+    assert module.main(["check-environments"]) == 1
+
+
+# The reviewer's fuzz cases (T26 review 2, m2), applied to each Environment in turn: every one
+# must fail; GitHub answers booleans, integers, lists and dicts, and nothing else may pass.
+ENV_CASES = {
+    "policy null": {"deployment_branch_policy": None},
+    "protected true": {
+        "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": False}
+    },
+    "both true": {
+        "deployment_branch_policy": {"protected_branches": True, "custom_branch_policies": True}
+    },
+    "policy extra key": {
+        "deployment_branch_policy": {
+            "protected_branches": False,
+            "custom_branch_policies": True,
+            "x": 1,
+        }
+    },
+    "policy as 0/1": {
+        "deployment_branch_policy": {"protected_branches": 0, "custom_branch_policies": 1}
+    },
+    "bypass missing": "DEL can_admins_bypass",
+    "bypass null": {"can_admins_bypass": None},
+    "bypass 0": {"can_admins_bypass": 0},
+    "bypass 'false'": {"can_admins_bypass": "false"},
+    "bypass true": {"can_admins_bypass": True},
+    "rules null": {"protection_rules": None},
+    "rules dict": {"protection_rules": {"type": "required_reviewers"}},
+    "rules str": {"protection_rules": "x"},
+    "rules [null]": {"protection_rules": [None]},
+}
+REVIEWER_CASES = {
+    "reviewers empty": [],
+    "reviewers str": "abc",
+    "reviewers dict": {"a": 1},
+    "reviewers [null]": [None],
+    "reviewers [{}]": [{}],
+    "reviewer type Bot": [{"type": "Bot", "reviewer": {"id": 1}}],
+    "reviewer id str": [{"type": "User", "reviewer": {"id": "1"}}],
+    "reviewer id bool": [{"type": "User", "reviewer": {"id": True}}],
+    "reviewer without reviewer": [{"type": "Team"}],
+    "one good, one bad": [{"type": "User", "reviewer": {"id": 1}}, None],
+}
+LIST_CASES = {
+    "list two": {
+        "total_count": 2,
+        "branch_policies": [{"name": "main", "type": "branch"}, {"name": "*", "type": "branch"}],
+    },
+    "list count lies": {
+        "total_count": 1,
+        "branch_policies": [{"name": "main", "type": "branch"}, {"name": "*", "type": "branch"}],
+    },
+    "list paginated count 31": {
+        "total_count": 31,
+        "branch_policies": [{"name": "main", "type": "branch"}],
+    },
+    "list tag main": {"total_count": 1, "branch_policies": [{"name": "main", "type": "tag"}]},
+    "list no type": {"total_count": 1, "branch_policies": [{"name": "main"}]},
+    "list pattern main*": {
+        "total_count": 1,
+        "branch_policies": [{"name": "main*", "type": "branch"}],
+    },
+    "list Main": {"total_count": 1, "branch_policies": [{"name": "Main", "type": "branch"}]},
+    "list policies dict": {"total_count": 1, "branch_policies": {"name": "main"}},
+    "list policies null": {"total_count": 1, "branch_policies": None},
+    "list policies [str]": {"total_count": 1, "branch_policies": ["main"]},
+    "list missing count": {"branch_policies": [{"name": "main", "type": "branch"}]},
+    "list count '1'": {"total_count": "1", "branch_policies": [{"name": "main", "type": "branch"}]},
+    "list count True": {
+        "total_count": True,
+        "branch_policies": [{"name": "main", "type": "branch"}],
+    },
+}
+
+
+@pytest.mark.parametrize("target", ["prod-plan", "prod", "prod-page"])
+@pytest.mark.parametrize("case", sorted(ENV_CASES))
+def test_check_environments_refuses_a_malformed_environment(
+    ci, monkeypatch: pytest.MonkeyPatch, case: str, target: str
 ) -> None:
     module, _, _ = ci
     answers = good_environments()
-    prod = answers[f"{REPO}/environments/prod"]
-    plan_policies = answers[f"{REPO}/environments/prod-plan/deployment-branch-policies"]
-    if breakage == "missing-environment":
-        del answers[f"{REPO}/environments/prod-plan"]
-    elif breakage == "protected-branches-only":
-        prod["deployment_branch_policy"] = {
-            "protected_branches": True,
-            "custom_branch_policies": False,
-        }
-    elif breakage == "no-branch-policy":
-        prod["deployment_branch_policy"] = None
-    elif breakage == "admin-bypass":
-        prod["can_admins_bypass"] = True
-    elif breakage == "admin-bypass-absent":
-        del prod["can_admins_bypass"]
-    elif breakage == "second-branch":
-        plan_policies["branch_policies"].append({"id": 2, "name": "release/*", "type": "branch"})
-        plan_policies["total_count"] = 2
-    elif breakage == "tag-policy":
-        plan_policies["branch_policies"][0]["type"] = "tag"
-    elif breakage == "type-absent":
-        del plan_policies["branch_policies"][0]["type"]
-    elif breakage == "no-reviewers":
-        prod["protection_rules"] = [{"type": "branch_policy"}]
-    elif breakage == "empty-reviewers":
-        prod["protection_rules"][1]["reviewers"] = []
+    env = answers[f"{REPO}/environments/{target}"]
+    change = ENV_CASES[case]
+    if change == "DEL can_admins_bypass":
+        del env["can_admins_bypass"]
     else:
-        prod["protection_rules"] = "not a list"
+        env.update(change)
     fake_github(monkeypatch, module, answers)
-    assert module.main(["check-environments"]) == 1
+    assert module.main(["check-environments", "--env", "prod"]) == 1
+
+
+@pytest.mark.parametrize("case", sorted(REVIEWER_CASES))
+def test_check_environments_refuses_malformed_reviewers(
+    ci, monkeypatch: pytest.MonkeyPatch, case: str
+) -> None:
+    module, _, _ = ci
+    answers = good_environments()
+    answers[f"{REPO}/environments/prod"]["protection_rules"] = [
+        {"type": "required_reviewers", "reviewers": REVIEWER_CASES[case]}
+    ]
+    fake_github(monkeypatch, module, answers)
+    assert module.main(["check-environments", "--env", "prod"]) == 1
+
+
+def test_check_environments_accepts_a_team_reviewer(ci, monkeypatch: pytest.MonkeyPatch) -> None:
+    module, _, _ = ci
+    answers = good_environments()
+    answers[f"{REPO}/environments/prod"]["protection_rules"] = [
+        {"type": "required_reviewers", "reviewers": [{"type": "Team", "reviewer": {"id": 7}}]}
+    ]
+    fake_github(monkeypatch, module, answers)
+    assert module.main(["check-environments", "--env", "prod"]) == 0
+
+
+@pytest.mark.parametrize("target", ["prod-plan", "prod", "prod-page"])
+@pytest.mark.parametrize("case", sorted(LIST_CASES))
+def test_check_environments_refuses_a_malformed_branch_policy_list(
+    ci, monkeypatch: pytest.MonkeyPatch, case: str, target: str
+) -> None:
+    module, _, _ = ci
+    answers = good_environments()
+    answers[f"{REPO}/environments/{target}/deployment-branch-policies"] = copy.deepcopy(
+        LIST_CASES[case]
+    )
+    fake_github(monkeypatch, module, answers)
+    assert module.main(["check-environments", "--env", "prod"]) == 1
+
+
+def test_check_environments_refuses_an_api_error_or_a_non_dict(
+    ci, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module, _, _ = ci
+    fake_github(monkeypatch, module, {})
+    assert module.main(["check-environments", "--env", "dev"]) == 1
 
 
 def test_github_api_needs_a_token(ci, monkeypatch: pytest.MonkeyPatch) -> None:
     module, _, _ = ci
     monkeypatch.delenv("GH_TOKEN", raising=False)
-    assert module.main(["check-environments"]) == 1
+    assert module.main(["check-environments", "--env", "prod"]) == 1
 
 
 def test_require_tip_passes_on_the_tip(ci, monkeypatch: pytest.MonkeyPatch) -> None:

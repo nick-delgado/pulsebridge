@@ -3,15 +3,22 @@
 #
 #   build-page      build web/dist (npm ci, Vite) with NO cloud credential; upload it
 #   dev             apply infra/envs/dev as dev's deployer (no npm code runs in this job)
-#   dev-page        deploy web/dist to dev's Hosting as dev's PAGE DEPLOYER (Hosting only)
-#   prod-preflight  refuse to go on unless "prod-plan" and "prod" allow exactly main, with no
-#                   admin bypass, and "prod" has required reviewers
+#   dev-preflight   refuse to go on unless "dev-page" allows exactly main, with no admin bypass
+#   dev-page        (environment dev-page) deploy web/dist as dev's PAGE DEPLOYER (Hosting only)
+#   prod-preflight  refuse to go on unless "prod-plan", "prod" and "prod-page" allow exactly
+#                   main, with no admin bypass, and "prod" has required reviewers
 #   prod-plan       (environment prod-plan) plan prod as prod's READ-ONLY PLANNER; record the
 #                   redacted plan, its digest, the tfvars generation and the commit
 #   prod-apply      (environment prod: waits for a reviewer) as prod's deployer: refuse unless the
-#                   commit is still the tip of main; fetch exactly the reviewed tfvars generation;
-#                   plan again and apply only if the digest matches the reviewed plan
-#   prod-page       (environment prod, a second approval) deploy web/dist as prod's page deployer
+#                   commit is still the tip of main; fetch exactly the reviewed tfvars generation
+#                   (a later edit waits for the next run); plan again and apply only if the digest
+#                   matches the reviewed plan
+#   prod-page       (environment prod-page, after a successful approved apply of this run) deploy
+#                   web/dist as prod's page deployer
+#
+# Each page job runs in its OWN Environment (dev-page, prod-page), so its OIDC token maps to a CI
+# context only the page deployer is bound to: an npm package in that job could ask for a token,
+# but it can never become the deployer or the planner (tests/tooling/test_wif_truth_table.py).
 #
 # Skips cleanly (no failure) until the user has set it up (infra/envs/README.md, "CI/CD"): each
 # job needs its repository variables, and CI applies an environment only after a person has done
@@ -142,9 +149,29 @@ jobs:
         if: always()
         run: python3 infra/envs/ci/tf_ci.py cleanup --env dev
 
+  dev-preflight:
+    name: Check dev's GitHub Environment
+    if: >-
+      github.ref == 'refs/heads/main'
+      && vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+      && vars.DEV_GCP_PAGE_DEPLOYER_SA != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # GET /repos/{owner}/{repo}/environments/{name} needs Actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require the protection rules
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 infra/envs/ci/tf_ci.py check-environments --env dev
+
   dev-page:
     name: Deploy dev's page (page deployer)
-    needs: [dev, build-page]
+    needs: [dev, build-page, dev-preflight]
     if: >-
       github.ref == 'refs/heads/main'
       && vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
@@ -152,8 +179,15 @@ jobs:
       && needs.dev.result == 'success'
       && needs.dev.outputs.up == 'true'
       && needs.build-page.result == 'success'
+      && needs.dev-preflight.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    # Its own Environment: the token's context is env-dev-page-main, bound only to the page
+    # deployer (bootstrap). No reviewers: it runs only after this run's successful dev apply.
+    environment: dev-page
+    concurrency:
+      group: page-dev
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -204,7 +238,7 @@ jobs:
       - name: Require the protection rules
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 infra/envs/ci/tf_ci.py check-environments
+        run: python3 infra/envs/ci/tf_ci.py check-environments --env prod
 
   prod-plan:
     name: Plan prod (read-only planner)
@@ -319,7 +353,8 @@ jobs:
           service_account: ${{ vars.PROD_GCP_DEPLOYER_SA }}
           token_format: access_token
           access_token_lifetime: 300s
-      # Exactly the tfvars generation the reviewed plan used: an edit since then is refused.
+      # Exactly the tfvars generation the reviewed plan used: an edit made since then is not
+      # applied by this run; it waits for the next run's plan and review.
       - name: Fetch the reviewed tfvars generation
         env:
           GCP_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
@@ -343,7 +378,7 @@ jobs:
         run: python3 infra/envs/ci/tf_ci.py cleanup --env prod
 
   prod-page:
-    name: Deploy prod's page (page deployer, after approval)
+    name: Deploy prod's page (page deployer)
     needs: [prod-apply, build-page]
     if: >-
       !cancelled()
@@ -354,9 +389,12 @@ jobs:
       && needs.build-page.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    # prod's page deployer is bound to the prod Environment on main, so this waits for a reviewer
-    # too (a second approval in the same run).
-    environment: prod
+    # Its own Environment (main only, no reviewers): the token's context is env-prod-page-main,
+    # bound only to the page deployer. The approval happened for prod-apply, which this job needs.
+    environment: prod-page
+    concurrency:
+      group: page-prod
+      cancel-in-progress: false
     permissions:
       contents: read
       id-token: write
@@ -364,6 +402,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # A newer merge deploys the newer page; this run's page must not overwrite it.
+      - name: Require this commit to be the tip of main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 infra/envs/ci/tf_ci.py require-tip
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
