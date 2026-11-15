@@ -80,7 +80,7 @@ variable "secret_deletion_protection" {
 # ----------------------------------------------------------------------------------------------
 
 variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through the write-only argument secret_data_wo, so it never enters Terraform state or plan files. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set the password EITHER this way OR with scripts/secrets/set-reviewer-password (T27), never both: while Terraform manages a version, the next apply undoes a script that disabled it. Leave unset in prod."
+  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through the write-only argument secret_data_wo, so it never enters Terraform state or plan files. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set the password EITHER this way OR with scripts/secrets/set-reviewer-password.sh (T27), never both: while Terraform manages a version, the next apply undoes a script that disabled it. Leave unset in prod."
   type        = string
   default     = null
   sensitive   = true

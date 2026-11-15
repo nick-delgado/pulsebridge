@@ -222,8 +222,6 @@ PENDING_PATHS = {
     "scripts/secrets/README.md": "T27",
     "scripts/secrets/set-secret.sh": "T27",
     "scripts/secrets/set-reviewer-password.sh": "T27",
-    # Being built by T26 (Terraform CI/CD).
-    ".github/workflows/terraform-*.yml": "T26",
     # Planned in T29 (end-to-end smoke test).
     "tests/e2e/": "T29",
 }

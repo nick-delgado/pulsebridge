@@ -45,7 +45,7 @@ ingest_enabled = false
 
 # --- Reviewer password ----------------------------------------------------------------------------
 # prod refuses reviewer_password from tfvars: set and rotate it with
-# scripts/secrets/set-reviewer-password (README, step 5, and "Rotating the reviewer password").
+# scripts/secrets/set-reviewer-password.sh (README, step 5, and "Rotating the reviewer password").
 
 # --- Optional -------------------------------------------------------------------------------------
 # enable_iap_ssh     = true   # during the first-boot checklist only; set false again afterwards

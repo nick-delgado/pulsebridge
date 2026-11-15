@@ -289,7 +289,7 @@ variable "alert_notification_channels" {
 # ---------------------------------------------------------------------------------------------
 
 variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password, never both. Prefer giving it to one apply as TF_VAR_reviewer_password (read with `IFS= read -rs`, unset afterwards whether or not the apply succeeded; dev terraform.tfvars.example) over writing it into terraform.tfvars."
+  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password.sh, never both. Prefer giving it to one apply as TF_VAR_reviewer_password (read with `IFS= read -rs`, unset afterwards whether or not the apply succeeded; dev terraform.tfvars.example) over writing it into terraform.tfvars."
   type        = string
   default     = null
   sensitive   = true
@@ -303,7 +303,7 @@ variable "reviewer_password" {
     # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod. In
     # prod a password here would be silently unused; refuse it so nobody thinks it was set.
     condition     = var.reviewer_password == null || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): unset reviewer_password (and TF_VAR_reviewer_password) and use scripts/secrets/set-reviewer-password."
+    error_message = "This environment does not take the reviewer password from tfvars (prod): unset reviewer_password (and TF_VAR_reviewer_password) and use scripts/secrets/set-reviewer-password.sh."
   }
 }
 
@@ -320,7 +320,7 @@ variable "reviewer_password_wo_version" {
   validation {
     # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod.
     condition     = var.reviewer_password_wo_version == 0 || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password."
+    error_message = "This environment does not take the reviewer password from tfvars (prod): leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
   }
   validation {
     condition     = var.reviewer_password_wo_version == 0 || var.reviewer_password != null

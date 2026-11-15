@@ -137,8 +137,14 @@ repositories:
   default, tagged or not) and `keep-most-recent` (KEEP the newest `services_keep_recent_versions`,
   10 by default). A KEEP policy wins over DELETE, so the newest ten of each image are never
   deleted, however old. That matters because Cloud Run pulls the image by digest again whenever it
-  starts an instance: an image a revision still uses must stay. `services_cleanup_dry_run = true`
-  only logs what would be deleted. Artifact Registry runs cleanup about once a day (not verified).
+  starts an instance: an image a revision still uses must stay. A cleanup policy cannot exclude the
+  digests Cloud Run uses (its conditions are tag state, tag and package name prefixes, age and
+  version count, nothing about who pulls an image), so a deployed image that is older than the
+  limit and outside the newest ten would be deleted; whether Cloud Run then still starts new
+  instances of that revision is not verified (infra/envs/README.md, CI14). Deploy a release at
+  least every 90 days, or raise `services_delete_older_than_days`. `services_cleanup_dry_run =
+  true` only logs what would be deleted. Artifact Registry runs cleanup about once a day (not
+  verified).
 - **The build account's grants** (`build_service_account_email`, module identity's `build`
   account, with `grant_build_account_registry_access = true`): `roles/artifactregistry.writer` on
   the services repository (push, read tags, add a tag to an existing manifest; it cannot delete
@@ -163,9 +169,15 @@ repositories:
      require it to be in this project and in `region` (a 2nd-gen trigger lives in its
      repository's region).
 
-  The deployer needs `roles/cloudbuild.builds.editor` to create the trigger (bootstrap's default
-  `deployer_roles` has it from T26) and `iam.serviceAccounts.actAs` on the build account (its
-  project-level `roles/iam.serviceAccountUser`). Whether it also needs read access to the
+  Each triggered build **waits for an approval** (`approval_config`, on by default with
+  `build_trigger_approval_required = true`) by someone with `roles/cloudbuild.builds.approver`
+  (the project Owner has it): without it, anyone who may push a `v*` tag publishes images. With a
+  GitHub tag ruleset that limits who may create, move or delete `v*` tags, the approval can be
+  turned off.
+
+  The deployer needs `roles/cloudbuild.builds.editor` to create the trigger (bootstrap's
+  `allow_build_trigger = true`, off by default) and `iam.serviceAccounts.actAs` on the build
+  account (its project-level `roles/iam.serviceAccountUser`). Whether it also needs read access to the
   connection's repository (`cloudbuild.repositories.get`, in `roles/cloudbuild.connectionViewer`)
   is **not verified**; if the first apply is refused on that permission, add that role to
   `deployer_roles`.
@@ -212,7 +224,7 @@ build account as writer on the services repository and reader on the mirror, not
 grants refused without an account; the trigger (location, `cloudbuild.yaml`, the build account,
 the repository, tags only, the substitutions, an empty mirror substitution without the mirror),
 refused without the build account and with a repository in another region or project or of the
-wrong form; `tests/unknown_email/` also feeds an unknown build account email with the trigger on,
+wrong form; the approval on by default and switchable off; `tests/unknown_email/` also feeds an unknown build account email with the trigger on,
 so their counts are known on a first plan.
 
 ## Not confirmed against primary documentation
@@ -271,36 +283,37 @@ No modules.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_build_service_account_email"></a> [build\_service\_account\_email](#input\_build\_service\_account\_email) | Email of the image-build service account (module identity's "build" account, T26); the trigger runs as it. | `string` | `null` | no |
-| <a name="input_build_trigger_repository"></a> [build\_trigger\_repository](#input\_build\_trigger\_repository) | Opt-in: full name of a 2nd-gen Cloud Build repository (projects/.../locations/<region>/connections/.../repositories/...) in this project and region. null: no trigger. | `string` | `null` | no |
-| <a name="input_build_trigger_tag_pattern"></a> [build\_trigger\_tag\_pattern](#input\_build\_trigger\_tag\_pattern) | RE2 pattern of the git tags that start a build. | `string` | `"^v[0-9]+\\.[0-9]+\\.[0-9]+$"` | no |
+| <a name="input_build_service_account_email"></a> [build\_service\_account\_email](#input\_build\_service\_account\_email) | Email of the image-build service account (module identity's "build" account, T26). With grant\_build\_account\_registry\_access it gets roles/artifactregistry.writer on the services repository and roles/artifactregistry.reader on the Docker Hub mirror, those two repositories only; the build trigger runs as it. null: no build account. | `string` | `null` | no |
+| <a name="input_build_trigger_approval_required"></a> [build\_trigger\_approval\_required](#input\_build\_trigger\_approval\_required) | Triggered builds wait for a manual approval in the Cloud Build console (roles/cloudbuild.builds.approver) before they run. Default true: anyone who can push a v* tag can otherwise publish images. Set false once a GitHub tag ruleset limits who may create v* tags. | `bool` | `true` | no |
+| <a name="input_build_trigger_repository"></a> [build\_trigger\_repository](#input\_build\_trigger\_repository) | Opt-in Cloud Build trigger (T26): the full resource name of a 2nd-gen Cloud Build repository, projects/<project>/locations/<region>/connections/<connection>/repositories/<repository>, which you create once in the console by connecting GitHub (it needs the Cloud Build GitHub App and your GitHub login, so Terraform cannot do it). Its location must be var.region. When set, a trigger runs cloudbuild.yaml as the build account on every tag matching build\_trigger\_tag\_pattern. null (default): no trigger. | `string` | `null` | no |
+| <a name="input_build_trigger_tag_pattern"></a> [build\_trigger\_tag\_pattern](#input\_build\_trigger\_tag\_pattern) | RE2 regular expression of the git tags that start a build (cloudbuild.yaml: "Meant to run on a git tag"). Default: release tags like v1.2.3. | `string` | `"^v[0-9]+\\.[0-9]+\\.[0-9]+$"` | no |
 | <a name="input_create_dockerhub_mirror"></a> [create\_dockerhub\_mirror](#input\_create\_dockerhub\_mirror) | Create an Artifact Registry remote repository that proxies and caches Docker Hub, so the edge VM can pull the OpenEMR and MariaDB images through Private Google Access without Cloud NAT or an external IP. No hourly cost; cached images are billed as Artifact Registry storage. | `bool` | `true` | no |
 | <a name="input_docker_repository_id"></a> [docker\_repository\_id](#input\_docker\_repository\_id) | ID of the Artifact Registry Docker repository that holds the service images built by Cloud Build. | `string` | `"pulsebridge-services"` | no |
 | <a name="input_dockerhub_mirror_repository_id"></a> [dockerhub\_mirror\_repository\_id](#input\_dockerhub\_mirror\_repository\_id) | ID of the Docker Hub remote (mirror) repository, used when create\_dockerhub\_mirror is true. | `string` | `"pulsebridge-dockerhub"` | no |
 | <a name="input_edge_subnet_cidr"></a> [edge\_subnet\_cidr](#input\_edge\_subnet\_cidr) | Primary IPv4 range of the edge subnet, where the e2-micro VM (OpenEMR, MariaDB, MLLP adapter) gets its internal address. Must not overlap serverless\_subnet\_cidr. | `string` | `"10.10.0.0/24"` | no |
 | <a name="input_edge_vm_service_account_email"></a> [edge\_vm\_service\_account\_email](#input\_edge\_vm\_service\_account\_email) | Email of the edge VM's service account (created by the identity module). When set, (1) firewall rules target that service account instead of the edge network tag, which is stronger: anyone allowed to edit an instance can add a tag, but attaching a service account needs IAM permission on it; and (2) the account gets roles/artifactregistry.reader on the Docker Hub mirror repository, which the edge VM needs to pull MariaDB and OpenEMR. Leave null only when no edge VM is deployed: the VM cannot pull its images without it. | `string` | `null` | no |
 | <a name="input_enable_cloud_nat"></a> [enable\_cloud\_nat](#input\_enable\_cloud\_nat) | Create a Cloud Router and Cloud NAT gateway so the edge VM can reach the public internet (apt, Docker Hub) without an external IP. Off by default because it is billed by the hour: about $0.0014 per VM per hour using the gateway, plus $0.005 per hour per NAT IP address, plus $0.045 per GiB processed (about $4.70 a month for one VM and one IP before data: 730 h x ($0.0014 + $0.005)). | `bool` | `false` | no |
-| <a name="input_grant_build_account_registry_access"></a> [grant\_build\_account\_registry\_access](#input\_grant\_build\_account\_registry\_access) | Grant the build account writer on the services repository and reader on the mirror. A plain bool (count known at plan). | `bool` | `false` | no |
-| <a name="input_grant_edge_vm_mirror_reader"></a> [grant\_edge\_vm\_mirror\_reader](#input\_grant\_edge\_vm\_mirror\_reader) | Grant edge\_vm\_service\_account\_email roles/artifactregistry.reader on the Docker Hub mirror (when create\_dockerhub\_mirror is true). Default true: the edge VM cannot pull MariaDB and OpenEMR without it, and then edge\_vm\_service\_account\_email must be set (a precondition checks it). Set false only when no edge VM is deployed. A plain bool, so the grant's count is known at plan time even while the account's email is not (it is unknown until the account exists). | `bool` | `true` | no |
 | <a name="input_enable_iap_ssh"></a> [enable\_iap\_ssh](#input\_enable\_iap\_ssh) | Allow SSH (TCP 22) to the edge VM from Identity-Aware Proxy's TCP forwarding range only (35.235.240.0/20), for `gcloud compute ssh --tunnel-through-iap`. Off by default: nothing else in the design needs SSH. When true, the module also enables iap.googleapis.com, which IAP TCP forwarding is understood to require (not confirmed against Google's documentation). | `bool` | `false` | no |
 | <a name="input_enabled_apis"></a> [enabled\_apis](#input\_enabled\_apis) | Google APIs (service names) to enable in the project. The default covers every component in<br/>the brief. Identity Platform (identitytoolkit.googleapis.com) is deliberately absent and is<br/>rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Firebase<br/>Hosting (D4) is included. | `set(string)` | <pre>[<br/>  "artifactregistry.googleapis.com",<br/>  "cloudbuild.googleapis.com",<br/>  "cloudresourcemanager.googleapis.com",<br/>  "cloudscheduler.googleapis.com",<br/>  "compute.googleapis.com",<br/>  "firebase.googleapis.com",<br/>  "firebasehosting.googleapis.com",<br/>  "health.googleapis.com",<br/>  "healthcare.googleapis.com",<br/>  "iam.googleapis.com",<br/>  "iamcredentials.googleapis.com",<br/>  "logging.googleapis.com",<br/>  "monitoring.googleapis.com",<br/>  "pubsub.googleapis.com",<br/>  "run.googleapis.com",<br/>  "secretmanager.googleapis.com",<br/>  "serviceusage.googleapis.com",<br/>  "storage.googleapis.com"<br/>]</pre> | no |
+| <a name="input_grant_build_account_registry_access"></a> [grant\_build\_account\_registry\_access](#input\_grant\_build\_account\_registry\_access) | Grant build\_service\_account\_email writer on the services repository and reader on the Docker Hub mirror (when it exists). A plain bool, like grant\_edge\_vm\_mirror\_reader, so the grants' count is known at plan time while the account's email is not; a precondition requires the email. Default false. | `bool` | `false` | no |
+| <a name="input_grant_edge_vm_mirror_reader"></a> [grant\_edge\_vm\_mirror\_reader](#input\_grant\_edge\_vm\_mirror\_reader) | Grant edge\_vm\_service\_account\_email roles/artifactregistry.reader on the Docker Hub mirror (when create\_dockerhub\_mirror is true). Default true: the edge VM cannot pull MariaDB and OpenEMR without it, and then edge\_vm\_service\_account\_email must be set (a precondition checks it). Set false only when no edge VM is deployed. A plain bool, so the grant's count is known at plan time even while the account's email is not (it is unknown until the account exists). | `bool` | `true` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the resources that support them (Artifact Registry repositories). | `map(string)` | `{}` | no |
 | <a name="input_mllp_port"></a> [mllp\_port](#input\_mllp\_port) | TCP port the MLLP adapter on the edge VM listens on. 2575 is the port registered with IANA for HL7 over MLLP. | `number` | `2575` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for the names of every resource this module creates, so two deployments in one project do not collide. | `string` | `"pulsebridge"` | no |
 | <a name="input_openemr_https_port"></a> [openemr\_https\_port](#input\_openemr\_https\_port) | TCP port OpenEMR serves HTTPS on at the edge VM; fhir-proxy calls OpenEMR's FHIR API there for the Share action. | `number` | `443` | no |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the existing GCP project to configure (created or adopted by infra/bootstrap). | `string` | n/a | yes |
 | <a name="input_region"></a> [region](#input\_region) | Region for the subnets, Cloud Router/NAT and Artifact Registry repositories. Use the same region as the edge VM and the Cloud Run services; us-central1 is one of the e2-micro free-tier regions. | `string` | `"us-central1"` | no |
-| <a name="input_services_cleanup_dry_run"></a> [services\_cleanup\_dry\_run](#input\_services\_cleanup\_dry\_run) | true: the cleanup policy only logs what it would delete. | `bool` | `false` | no |
-| <a name="input_services_delete_older_than_days"></a> [services\_delete\_older\_than\_days](#input\_services\_delete\_older\_than\_days) | Cleanup: versions older than this are deleted unless kept. | `number` | `90` | no |
-| <a name="input_services_keep_recent_versions"></a> [services\_keep\_recent\_versions](#input\_services\_keep\_recent\_versions) | Cleanup: the newest N versions of each image are always kept. | `number` | `10` | no |
 | <a name="input_serverless_subnet_cidr"></a> [serverless\_subnet\_cidr](#input\_serverless\_subnet\_cidr) | Primary IPv4 range of the subnet that Cloud Run services join through Direct VPC egress (cuff simulator, fhir-proxy). Each Cloud Run instance holds several addresses from it, and Google requires /26 or larger. Must not overlap edge\_subnet\_cidr. | `string` | `"10.10.1.0/24"` | no |
+| <a name="input_services_cleanup_dry_run"></a> [services\_cleanup\_dry\_run](#input\_services\_cleanup\_dry\_run) | true: Artifact Registry only logs what the cleanup policy would delete (useful the first week, to check the policy); false (default): it deletes. | `bool` | `false` | no |
+| <a name="input_services_delete_older_than_days"></a> [services\_delete\_older\_than\_days](#input\_services\_delete\_older\_than\_days) | Cleanup policy of the services repository: versions older than this many days are deleted, unless the KEEP policy keeps them. | `number` | `90` | no |
+| <a name="input_services_keep_recent_versions"></a> [services\_keep\_recent\_versions](#input\_services\_keep\_recent\_versions) | Cleanup policy of the services repository: the newest N versions of each image are always kept (a KEEP policy, which wins over DELETE). Keep it above the number of releases you might roll back to: Cloud Run pulls an image again when it starts a new instance, so an image a revision still uses must not be deleted. | `number` | `10` | no |
 
 ## Outputs
 
 | Name | Description |
 |------|-------------|
-| <a name="output_build_account_registry_grants"></a> [build\_account\_registry\_grants](#output\_build\_account\_registry\_grants) | The build account's repository grants as "<repository>=<role>" (T26). |
-| <a name="output_build_trigger_name"></a> [build\_trigger\_name](#output\_build\_trigger\_name) | Name of the image build trigger, or null (T26). |
+| <a name="output_build_account_registry_grants"></a> [build\_account\_registry\_grants](#output\_build\_account\_registry\_grants) | The build account's repository grants (T26), as "<repository>=<role>": empty without grant\_build\_account\_registry\_access. |
+| <a name="output_build_trigger_name"></a> [build\_trigger\_name](#output\_build\_trigger\_name) | Name of the Cloud Build trigger that builds the images on a release tag, or null when build\_trigger\_repository is not set (T26). |
 | <a name="output_cloud_nat_enabled"></a> [cloud\_nat\_enabled](#output\_cloud\_nat\_enabled) | Whether Cloud NAT exists. When false, the edge VM has no internet access unless it gets an external IP. |
 | <a name="output_docker_repository_url"></a> [docker\_repository\_url](#output\_docker\_repository\_url) | Registry path for service images: <region>-docker.pkg.dev/<project>/<repository>. |
 | <a name="output_dockerhub_mirror_url"></a> [dockerhub\_mirror\_url](#output\_dockerhub\_mirror\_url) | Registry path of the Docker Hub pull-through cache, or null when it is not created. Official images live under `library/`, e.g. <url>/library/mariadb@sha256:... |

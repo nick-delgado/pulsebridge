@@ -112,7 +112,7 @@ locals {
     # Decision D9: shared reviewer password, checked by fhir-proxy only.
     "reviewer-password" = {
       readers    = ["fhir-proxy"]
-      written_by = "scripts/secrets/set-reviewer-password (T27), or in dev the optional write-only version below"
+      written_by = "scripts/secrets/set-reviewer-password.sh (T27), or in dev the optional write-only version below"
       purpose    = "Shared reviewer password for the dashboard login; fhir-proxy also derives its token-signing key from it."
     }
     # Spike S2: the edge VM's compose file needs three passwords; the startup script reads them.

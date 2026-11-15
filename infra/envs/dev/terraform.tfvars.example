@@ -44,7 +44,7 @@ ingest_enabled = false
 # v2_to_fhir_image  = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
 
 # --- Reviewer password (dev may set it here; prod refuses) --------------------------------------
-# Either here OR with scripts/secrets/set-reviewer-password, never both. Better than writing it in
+# Either here OR with scripts/secrets/set-reviewer-password.sh, never both. Better than writing it in
 # this file: give it to the one apply through the environment, read without echo, and remove it
 # whether or not the apply succeeds:
 #   IFS= read -rs TF_VAR_reviewer_password; export TF_VAR_reviewer_password

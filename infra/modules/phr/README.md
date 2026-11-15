@@ -278,7 +278,7 @@ should stay live, the teardown runs `firebase hosting:disable --project <project
 serving the site; the site itself remains). A non-default site (`hosting_site_id` set to another
 ID) is deleted with its releases.
 
-### Deploying the page (T26, or the deployer by hand)
+### Deploying the page (CI since T26, or the deployer by hand)
 
 Run after `terraform apply` (the rewrite needs the service to exist), from the repository root,
 as the deployer (`roles/firebasehosting.admin`):
@@ -295,9 +295,13 @@ terraform -chdir=infra/envs/<env> output -raw firebase_json > web/firebase.json 
 - The CLI uploads `web/dist` (minus the ignore list) as a new version with this configuration
   and releases it. A deploy that changes nothing in Terraform still takes the current
   `firebase.json`; a Terraform change to the headers or the rewrite takes effect only on the
-  next page deploy, so T26 deploys the page after every apply.
-- In CI, the Firebase CLI uses Application Default Credentials (the deployer through Workload
-  Identity Federation). That the CLI accepts WIF external-account credentials is not verified.
+  next page deploy, so CI deploys the page after every apply.
+- In CI (infra/envs/README.md, "CI/CD") the page is built in a job with no cloud credential, and
+  deployed by a separate job as the **page deployer** (bootstrap `create_page_deployer`:
+  `roles/firebasehosting.admin` only) through Workload Identity Federation, with the
+  `firebase-tools` tree locked in `infra/envs/ci/deploy-tools/package-lock.json`. The CLI uses
+  Application Default Credentials; the documentation, its source and an offline experiment say it
+  accepts the external-account credential file, but that is not verified live.
 
 ## Public access and ingress
 
@@ -421,7 +425,7 @@ in its own directory: `reviewer-password` → `/secrets/reviewer-password/value`
 volume, Cloud Run always fetches the secret value from the Secret Manager to use the value with
 the latest version", whereas "Environment variables are resolved at instance startup time"
 (docs.cloud.google.com/run/docs/configuring/services/secrets). The proxy re-reads the file after
-`PASSWORD_CACHE_SECONDS` (30 s), so `set-reviewer-password` (T27) takes effect within 30 s with
+`PASSWORD_CACHE_SECONDS` (30 s), so `scripts/secrets/set-reviewer-password.sh` (T27) takes effect within 30 s with
 no redeploy, and every session ends at once (the token key derives from the password). "During
 service deployment, Cloud Run checks all the secrets you use", so the accessor grant (module
 identity) must exist first; a secret with no version yet does not stop the deploy ("If you mount
@@ -579,20 +583,20 @@ defaults, not through anything hardcoded here:
 - bootstrap adds Firebase to the project (`add_firebase`, default `true`), so the deployer never
   needs `roles/firebase.admin`.
 
-## For T26: the page deploy and the nightly destroy
+## The page deploy and the nightly destroy (built in T26)
 
-- **Deploy the page after every apply** of an env root: write `firebase_json` to
-  `web/firebase.json`, build the page, `firebase deploy --only hosting --project <project>`
-  (commands in "Deploying the page"), with a pinned `firebase-tools` version. A Terraform change
-  to the rewrite or the headers reaches the site only with that deploy.
-- **Identity**: the deployer service account through Workload Identity Federation, with
-  `roles/firebasehosting.admin`. No key in GitHub. Whether the Firebase CLI accepts WIF
-  (external-account) credentials is unverified; check it on the first CI run.
-- **The nightly destroy test of dev will fail on the serverless subnet** ("wait 1-2 hours" after
-  the services that used it are gone) unless it retries the destroy later or keeps the network
-  (destroy everything but project-base's network, or target the rest).
+- **The page is deployed after every apply** of an env root by CI: `firebase_json` is written to
+  `web/firebase.json`, the page built, and `firebase deploy --only hosting --project <project>` run
+  with the locked `firebase-tools` (infra/envs/README.md, "CI/CD"). A Terraform change to the
+  rewrite or the headers reaches the site only with that deploy.
+- **Identity**: the page deployer service account (`roles/firebasehosting.admin` only) through
+  Workload Identity Federation. No key in GitHub. Whether the Firebase CLI accepts WIF
+  (external-account) credentials live is checklist item CI6.
+- **The nightly destroy of dev runs twice**: at 03:17 UTC, when the serverless subnet and the VPC
+  may remain ("wait 1-2 hours" after the services that used the subnet are gone), and a retry at
+  06:17 UTC that must leave nothing.
 - After the destroy, the default site still serves the last page (see "For T25"); the nightly job
-  can run `firebase hosting:disable` or leave it, knowing `/api` fails there.
+  leaves it, knowing `/api` fails there.
 
 ## For T15: the share to OpenEMR
 
@@ -640,7 +644,7 @@ Nothing in this module has been applied; every test runs against mocked provider
 5. **MLLP through the VPC.** A cuff send over MLLP returns an `AA` acknowledgment (cuff-sim →
    VM `mllp_host:2575` through the serverless subnet and project-base's firewall).
 6. **The secret mount.** Before any version exists, login answers 503; after
-   `set-reviewer-password`, login works within about 30 s with no redeploy; after a second new
+   `scripts/secrets/set-reviewer-password.sh`, login works within about 30 s with no redeploy; after a second new
    version, the old token is refused (401) and the new password works.
 7. **The CSP in the browser.** The browser tests ran the mock build (`connect-src 'none'`), so
    this is the first run of the real connections under the header. Open the page with the

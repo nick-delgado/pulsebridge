@@ -29,7 +29,7 @@ variable "protect_from_destroy" {
 }
 
 variable "allow_reviewer_password_from_tfvars" {
-  description = "true (dev only): reviewer_password and reviewer_password_wo_version may write the reviewer-password secret version from tfvars (module identity, write-only, never in state). false (prod): the password is set only with scripts/secrets/set-reviewer-password (T27) and rotated there."
+  description = "true (dev only): reviewer_password and reviewer_password_wo_version may write the reviewer-password secret version from tfvars (module identity, write-only, never in state). false (prod): the password is set only with scripts/secrets/set-reviewer-password.sh (T27) and rotated there."
   type        = bool
   nullable    = false
 }
@@ -222,7 +222,7 @@ variable "reviewer_password_wo_version" {
     # Prod rotates the password with T27's script; a tfvars-managed version would be partly undone
     # by the script and partly undo it (module identity README, "Dev only").
     condition     = var.reviewer_password_wo_version == 0 || var.allow_reviewer_password_from_tfvars
-    error_message = "The reviewer password may come from tfvars only in dev. In prod leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password."
+    error_message = "The reviewer password may come from tfvars only in dev. In prod leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
   }
 }
 
