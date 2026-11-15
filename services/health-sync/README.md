@@ -55,7 +55,7 @@ ignored. The answer is the run report as JSON (counts, UTC range bounds and code
  "ranges_completed": 1, "complete_before": "2026-01-15T14:05:00Z", "pages": 1,
  "windows_fetched": 36, "windows_empty": 0, "windows_invalid": 0,
  "windows_unchanged": 33, "windows_new": 3, "windows_changed": 0, "windows_finalised": 3,
- "windows_amended": 0, "windows_written": 6, "windows_final": 3, "windows_preliminary": 3,
+ "windows_amended": 0, "windows_withdrawn_kept": 0, "windows_written": 6, "windows_final": 3, "windows_preliminary": 3,
  "bundles_written": 1, "stored_read": "ok", "stranded_preliminary": 0,
  "google_statuses": [200], "fhir_status": null, "fhir_issues": [], "token_refreshes": 1,
  "refresh_token_rotated": false, "scope_not_listed": false,
@@ -101,7 +101,24 @@ the first is still writing. Three things prevent that:
    a whole transfer, so a server that trickles bytes could still overrun by one request.)
 2. **No range or Bundle is started with less than 10 s left**; the run then ends as
    `deadline-reached` (503), and the next run, whose range overlaps, picks up the rest.
-3. **An in-process lock** around `/sync`: a second call answers `already-running`.
+3. **Reads never starve writes.** Each FHIR search has its own 10 s timeout, and the searches
+   are skipped altogether (`stored_read: "skipped-for-time"`, every window written) when the time
+   left is less than three searches (30 s) plus, per Bundle, one device lookup and one
+   `executeBundle` at their full timeouts (30 s + 60 s). With a FHIR store answering in 45 s, the
+   first search times out after 10 s and the run writes everything (a test checks this).
+4. **An in-process lock** around `/sync`: a second call answers `already-running`.
+
+The `reason` of a `deadline-reached` outcome is one of these constant codes, naming the step
+that was not started:
+
+| `reason` | Not started |
+| --- | --- |
+| `before-range` | the next 14-day range (backfill pieces, or the sync's one range) |
+| `before-bundle` | the next Bundle (its device lookup and write) |
+| `before-token-request` | a request to Google's token endpoint |
+| `before-google-request` | a Google Health API request |
+| `before-fhir-search` | a FHIR search |
+| `before-fhir-write` | an `executeBundle` (first attempt or a retry) |
 
 **For T20:** Scheduler job `retry_config.retry_count = 0` (the next scheduled run is the retry:
 its range overlaps) and `attempt_deadline = "180s"` (the default for HTTP targets); Cloud Run
@@ -122,8 +139,9 @@ stale data:
 ### `GET /status`
 
 Whether the Google Health connection works **now**, worked out statelessly: it reads the secret
-files and attempts a token refresh, exactly as a run would (the access token is thrown away), and
-counts stranded preliminary windows in the FHIR store.
+files and attempts a token refresh, exactly as a run would (the access token is thrown away). It
+makes **no FHIR request**, so it stays inside its 20 s budget (one token retry at most) whatever
+the store is doing.
 
 | `googleHealth` | When |
 | --- | --- |
@@ -144,7 +162,11 @@ from "health-sync is down" (any other status, or no answer).
   refresh token, which this service cannot store; reconnecting soon keeps the connection) and
   `backfill-needed` (`strandedPreliminary` windows are still `preliminary` but older than any
   future run's range, because runs were missed; `health-sync-backfill` finalises them).
-  `strandedPreliminary` is `null` when the store could not be asked.
+  `strandedPreliminary` is the count made by **the most recent sync run on this instance**, held
+  in memory: `null` when no run has counted since the instance started (for example right after
+  a cold start), or when the last run could not count (the search failed, was skipped for time,
+  or found duplicate Patients). With scale to zero, expect `null` between runs on a quiet
+  instance; the next scheduled run fills it in.
 - `not-configured` covers both secret cases on purpose: for the dashboard the action is the
   same (the deployer fixes the secret), and the `reason` says which it is.
 - No secret material is ever in the response.
@@ -309,7 +331,8 @@ avoid rewriting it (next section), never to decide the range.
 
 ### Read once, write what changed
 
-Each run makes three FHIR searches (`stored.py`; standard R4 search parameters):
+Each run makes three FHIR searches (`stored.py`; standard R4 search parameters), each with its
+own 10 s timeout, a fresh client per page so each page's timeout is cut to the time left:
 
 1. `Patient?identifier=urn:pulsebridge:patient|<PATIENT_ID>&_elements=id`: the Patient's id;
 2. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&status=preliminary&date=lt<range start>&_summary=count`:
@@ -323,9 +346,21 @@ status it would get now (or already final) is skipped. With prompt data, each wi
 twice: once `preliminary` (when it first appears, under 60 minutes old) and once `final`. A test
 runs twelve consecutive runs and checks no window is written more than twice.
 
-- **If a search fails** (any error), the run logs `stored-read-failed` with the HTTP status and
-  writes every window, as before: reading only saves writes. No Patient yet (`patient-not-found`)
-  means nothing is stored, so everything is new.
+- **Read states** (`stored_read` in the report): `ok`; `patient-not-found` (no Patient yet, so
+  nothing is stored and everything is new); `patients-duplicated` (more than one Patient has the
+  identifier: a `WARNING`, every window written, and the conditional creates will report the
+  412 until the duplicate is removed by hand, T06 README); `skipped-for-time` (see "Deadline");
+  `failed:<HTTP status or error type>` (`stored-read-failed` logged, every window written:
+  reading only saves writes); `not-attempted` (the run had no windows).
+- **A stranded-count failure alone** is logged (`stranded-count-failed`); the stored-window read
+  and the writes go on as normal, and `stranded_preliminary` is `null`.
+- **A key found twice** in the search result (two Observations with one identifier, which should
+  not exist) counts as not stored: the window is written and `stored-duplicate-key` is logged
+  with the number of such keys (never the keys).
+- **Withdrawn copies are kept.** A window stored `entered-in-error` ("withdrawn following
+  previous final release") or `cancelled` was set so by a person or another system; rewriting it
+  `final` would undo that. Such windows are skipped whatever their values and counted
+  (`windows_withdrawn_kept`).
 - **Stranded preliminary windows**: the count from search 2 is in the report
   (`stranded_preliminary`) with a `WARNING` (`stranded-preliminary`) when above zero, and in
   `/status` as the note `backfill-needed`.
@@ -387,6 +422,9 @@ across the autumn change would be 337 hours and refused. Example, 30 days from 2
   or not configured; `1` another failure (the report says how many ranges completed; re-run);
   `2` bad arguments or configuration. `--days` is 1 to 366.
 - Safe to re-run: every window lands on the same Observation.
+- **It does not take the `/sync` lock** (it is a separate process) and may run while a
+  scheduled sync is writing the same windows. That is safe: every write is keyed, so both land on
+  the same resources, and a 409 from two writes to one Observation at once is retried.
 - Where to run it (T20/T25 to decide): as a Cloud Run **job** from the same image with the same
   environment and secret mounts (`health-sync-backfill --days N` as the command), or locally with
   the same environment variables pointing at files the deployer creates and deletes themselves.
@@ -436,10 +474,11 @@ FHIR store returns decimals exactly as sent (FHIR `decimal` is meant to preserve
 
 One JSON object per line on stdout (stderr for the backfill). Logged: `event` (`sync-run`,
 `backfill-run`, `status-check`, `google-retry`, `fhir-retry`, `secrets-missing`,
-`stored-read-failed`, `stranded-preliminary`, `stranded-count-failed`, `scope-not-listed`,
+`stored-read-failed`, `stored-read-skipped`, `stored-duplicate-key`, `patients-duplicated`,
+`stranded-preliminary`, `stranded-count-failed`, `scope-not-listed`,
 `refresh-token-rotated`, `bug`), `outcome` and `reason` codes, the UTC range bounds and cutoff,
 counts (pages, windows fetched, empty, invalid, unchanged, new, changed, finalised, amended,
-written, final, preliminary, stranded, Bundles), HTTP statuses, retry attempts and delays,
+withdrawn kept, written, final, preliminary, stranded, Bundles), HTTP statuses, retry attempts and delays,
 response status counts per resource type, durations. Never logged: heart-rate values, tokens,
 the client ID or secret, the patient id, the device name, response bodies, exception messages
 from the mapping (they can quote a value), or Google's free-text error descriptions. A test runs
@@ -473,9 +512,12 @@ history. A day is 288 windows, about 0.9 MB of current data.
 | Before (every run rewrote its 36 windows) | about 6,900 Observation + Provenance writes (each window about 12 times) | about 10 MB |
 | Now (read once, write what changed) | about 1,150 (each window twice: preliminary, then final) plus any changed windows | about 1.7 MB |
 
-Reads added: three searches per run with data (about 290 a day), each returning a few kilobytes
-(`_elements` keeps only the compared fields). Google calls per run: one token refresh, one
-roll-up page, and one data-source call per Bundle written (none when nothing changed).
+Reads added: three FHIR searches per run that has windows (Patient, stranded count, stored
+windows), plus one per extra result page: with a run every 15 minutes, at most 96 × 3 = 288 a
+day. `/status` makes none. Each returns a few kilobytes (`_elements` keeps only the compared
+fields). Google calls per run: one token refresh, one roll-up page, and one data-source call
+per Bundle written (two when the name falls back to an earlier point; none when nothing
+changed).
 
 ## What is confirmed, and where from
 
@@ -494,12 +536,6 @@ roll-up page, and one data-source call per Bundle written (none when nothing cha
 | Cloud Run volume secrets read the latest version on every read; env vars at start-up; no start-up check for volumes | Cloud Run docs, "Configure secrets for services" |
 | `executeBundle` limits (1,000 entries may time out, 4,500 rejected, 50 MB) | Cloud Healthcare "Quotas and limits" |
 | Scheduler `attemptDeadline` default 3 min for HTTP; `retryCount = 0` waits for the next run | Cloud Scheduler REST reference |
-
-**Not verified against the real FHIR store:** that Cloud Healthcare supports `_elements` and
-`_summary=count` on these searches, and that `date` on an `effectivePeriod` matches overlapping
-periods as R4 describes. Each is a standard R4 search parameter; if one is refused, the search
-fails and the run writes everything (logged as `stored-read-failed`), so a wrong assumption costs
-writes, not data.
 
 **Not verified (no call to Google or GCP was made in this task):** the exact JSON of Google's
 `401`/`403`/`429` error bodies (handled whether or not they carry an `ErrorInfo` reason); whether
@@ -523,6 +559,20 @@ task made no GCP calls, so it is **not yet confirmed**; the check belongs to the
 
 If any fails, switch to the fixed-ID fallback in the T06 README ("Unverified server behaviour,
 and the fallback"); that is a change to `libs/pulsebridge_fhir`, not to this service.
+
+**The read step.** These search features are standard R4 but unverified on Cloud Healthcare:
+`_elements` on Patient and Observation searches; `_summary=count` returning `Bundle.total`;
+`date` on an `effectivePeriod` with R4's overlap semantics; `_count=1000`; and `next` links on
+the store's own base URL (`next_page` refuses any other). If one is refused, the search fails
+and the run writes everything (`stored_read: "failed:…"`), so a wrong assumption costs writes,
+not data. It can also fail silently (for example `date` matching nothing), so check:
+
+4. On the **second** sync run after deployment, the report has `stored_read: "ok"` and
+   `windows_unchanged > 0`. If `windows_unchanged` stays 0 run after run while `stored_read` is
+   `ok`, the read step is silently not working and every window is being rewritten.
+5. `stranded_preliminary` is a number (not `null`) in the run report.
+6. `GET /status` answers within a second or two (it makes one token request and no FHIR
+   request); a slow answer means it is waiting on Google's token endpoint.
 
 ## Tests
 

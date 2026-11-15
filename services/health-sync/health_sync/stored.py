@@ -22,6 +22,7 @@ never a condition for writing. Values here are compared, never logged.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -34,6 +35,13 @@ SEARCH_PAGE_SIZE = 1000  # 14 days of windows is 4,032: five pages at most
 MAX_SEARCH_PAGES = 20
 ELEMENTS = "identifier,status,effectivePeriod,valueQuantity,component"
 FINAL_STATUSES = ("final", "amended", "corrected")
+# R4 observation-status: "entered-in-error" ("the observation has been withdrawn following
+# previous final release") and "cancelled" ("the observation is unavailable because the
+# measurement was not started or not completed"). Either is a decision someone made about the
+# stored copy; rewriting the window as final would undo it, so such windows are left alone.
+WITHDRAWN_STATUSES = ("entered-in-error", "cancelled")
+
+logger = logging.getLogger("health_sync")
 
 
 class SearchClient(Protocol):
@@ -65,10 +73,10 @@ def _token(system: str, value: str) -> str:
     return f"{escape_search_value(system)}|{escape_search_value(value)}"
 
 
-def find_patient_id(client: SearchClient, store: str, patient_id: str) -> str | None:
-    """The server id of the one Patient with our identifier; ``None`` if there is none yet.
-    More than one is the duplicate case T06's README warns about: also ``None``, and the run
-    then writes everything (the conditional creates will report the 412)."""
+def find_patient_ids(client: SearchClient, store: str, patient_id: str) -> list[str]:
+    """The server ids of the Patients with our identifier: normally exactly one (the setup
+    step's). None means no Patient yet; more than one is the duplicate case T06's README warns
+    about (the conditional creates will then fail with 412 until it is fixed by hand)."""
     bundle = client.search(
         store,
         "Patient",
@@ -81,7 +89,7 @@ def find_patient_id(client: SearchClient, store: str, patient_id: str) -> str | 
         and isinstance(entry.get("resource"), dict)
         and isinstance(entry["resource"].get("id"), str)
     ]
-    return ids[0] if len(ids) == 1 else None
+    return ids
 
 
 def _number(quantity: object) -> float | int | None:
@@ -128,9 +136,18 @@ def _parse(resource: dict) -> tuple[str, StoredWindow] | None:
 
 
 def stored_windows(
-    client: SearchClient, store: str, patient_ref: str, start: datetime, end: datetime
+    client_for: Callable[[], SearchClient],
+    store: str,
+    patient_ref: str,
+    start: datetime,
+    end: datetime,
 ) -> dict[str, StoredWindow]:
-    """Every stored heart-rate window overlapping ``[start, end)``, by idempotency key."""
+    """Every stored heart-rate window overlapping ``[start, end)``, by idempotency key.
+
+    ``client_for`` gives a client for each page, so each page's timeout is cut to the time the
+    run has left. A key found more than once (two Observations with one identifier, which should
+    not exist) is left out, so the window is written; the write's conditional update then
+    reports the duplicate itself. Only the count is logged, never the keys."""
     params = [
         ("subject", patient_ref),
         ("code", _token(codes.LOINC, codes.HEART_RATE["code"])),
@@ -140,18 +157,32 @@ def stored_windows(
         ("_count", str(SEARCH_PAGE_SIZE)),
     ]
     found: dict[str, StoredWindow] = {}
-    page: dict | None = client.search(store, "Observation", params)
+    duplicated: set[str] = set()
+    page: dict | None = client_for().search(store, "Observation", params)
     for _ in range(MAX_SEARCH_PAGES):
         if page is None:
-            return found
+            if duplicated:
+                logger.warning(
+                    "an observation key is stored more than once; writing those windows",
+                    extra={
+                        "fields": {
+                            "event": "stored-duplicate-key",
+                            "duplicate_keys": len(duplicated),
+                        }
+                    },
+                )
+            return {k: v for k, v in found.items() if k not in duplicated}
         if not isinstance(page, dict) or page.get("resourceType") != "Bundle":
             raise StoredReadError("search did not return a Bundle")
         for entry in page.get("entry") or []:
             resource = entry.get("resource") if isinstance(entry, dict) else None
             parsed = _parse(resource) if isinstance(resource, dict) else None
-            if parsed is not None:
-                found[parsed[0]] = parsed[1]
-        page = client.next_page(store, page)
+            if parsed is None:
+                continue
+            if parsed[0] in found:
+                duplicated.add(parsed[0])
+            found[parsed[0]] = parsed[1]
+        page = client_for().next_page(store, page)
     raise StoredReadError("too many search pages")
 
 
@@ -186,6 +217,7 @@ class Plan:
     changed: int
     finalised: int
     amended: int
+    withdrawn_kept: int = 0
 
 
 def plan_writes(
@@ -203,10 +235,11 @@ def plan_writes(
     - stored preliminary, now complete, same values: write as final (finalised);
     - stored final (or amended), values changed: write (amended; see the README for the status
       it is written with);
+    - stored ``entered-in-error`` or ``cancelled``: skip, whatever the values (withdrawn_kept);
     - otherwise (preliminary with new values): write (changed).
     """
     write: list[dict] = []
-    unchanged = new = changed = finalised = amended = 0
+    unchanged = new = changed = finalised = amended = withdrawn = 0
     for item in items:
         key, end, values = key_of(item)
         if stored is None or key not in stored:
@@ -214,6 +247,9 @@ def plan_writes(
             write.append(item)
             continue
         before = stored[key]
+        if before.status in WITHDRAWN_STATUSES:
+            withdrawn += 1
+            continue
         same = before.values == values and before.end == end
         wanted = status_of(item)
         if same and (before.status == wanted or before.is_final):
@@ -226,4 +262,4 @@ def plan_writes(
             amended += 1
         else:
             changed += 1
-    return Plan(write, unchanged, new, changed, finalised, amended)
+    return Plan(write, unchanged, new, changed, finalised, amended, withdrawn)

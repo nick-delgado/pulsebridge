@@ -4,11 +4,14 @@ The clock starts at 2026-01-15T15:07:30Z, so a run asks for [12:05, 15:05) UTC w
 14:05 UTC (windows ending later are preliminary).
 """
 
+import copy
 import logging
 from collections import Counter
 from datetime import timedelta
 
-from health_sync.sync import Outcome, run_sync, split_range, sync_range
+import pytest
+from health_sync.stored import stored_windows
+from health_sync.sync import DEADLINE_STEPS, Outcome, run_sync, split_range, sync_range
 from health_sync.testing import (
     FHIR_PATH,
     SlowTransport,
@@ -240,32 +243,83 @@ def test_no_stranded_windows_no_warning(world, caplog):
 # ---- the deadline ----------------------------------------------------------------------------
 
 
-def test_fhir_requests_get_a_timeout_cut_to_the_time_left(world):
-    """FHIR answers take 45 s. Three searches use 135 of the 150 s; the Bundle gets a 15 s
-    timeout instead of 60, times out, and the run ends exactly at its deadline."""
+def test_a_slow_fhir_store_does_not_starve_the_writes(world):
+    """Google answers in 5 s, the FHIR store in 45 s. The Patient search has its own 10 s
+    timeout, times out, and the run writes everything instead of spending its budget reading."""
     world.fhir_transport.patient_server_id = "p-7"
     world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
-    slow = SlowTransport(world.fhir_transport, world.clock, latency=45)
+    slow_fhir = SlowTransport(world.fhir_transport, world.clock, latency=45)
+    slow_google = SlowTransport(world.google, world.clock, latency=5)
     google(world, rollup_page([W1300]))
     begin = world.clock.mono
-    report = run(world, fhir_transport=slow)
-    assert slow.timeouts == [60, 60, 60, 15]
-    assert world.clock.mono - begin <= 150
+    report = run(world, fhir_transport=slow_fhir, google_transport=slow_google)
+    assert report.outcome == Outcome.SYNCED
+    assert (report.windows_written, report.bundles_written) == (1, 1)
+    assert report.stored_read == "failed:RetryableError"
+    assert slow_fhir.timeouts == [10, 60]  # the search capped, the Bundle at its full timeout
+    assert world.clock.mono - begin == 70  # 5 token + 5 roll-up + 10 search + 5 device + 45
+
+
+def test_reads_are_skipped_when_they_would_not_leave_time_for_the_writes(world, caplog):
+    world.fhir_transport.patient_server_id = "p-7"
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    google(world, rollup_page([W1300]))
+    slow_google = SlowTransport(world.google, world.clock, latency=20)
+    # 150 s budget, 40 s used: 110 s left < 3 searches x 10 s + one Bundle (30 s + 60 s).
+    with caplog.at_level(logging.WARNING):
+        report = run(world, google_transport=slow_google)
+    assert report.stored_read == "skipped-for-time"
+    assert fhir_searches(world) == []
+    assert report.windows_written == 1
+    assert "stored-read-skipped" in formatted_logs(caplog.records)
+
+
+def test_reads_go_ahead_when_there_is_time(world):
+    world.fhir_transport.patient_server_id = "p-7"
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    google(world, rollup_page([W1300]))
+    slow_google = SlowTransport(world.google, world.clock, latency=14)
+    # 28 s used: 122 s left >= 120 s needed.
+    report = run(world, google_transport=slow_google)
+    assert report.stored_read == "ok"
+
+
+def test_fhir_requests_get_a_timeout_cut_to_the_time_left(world):
+    """Google answers in 35 s (timeout 40): token, roll-up and device lookup use 105 of the
+    150 s, the reads are skipped for time, and the Bundle gets a 45 s timeout instead of 60."""
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    slow_google = SlowTransport(world.google, world.clock, latency=35)
+    slow_fhir = SlowTransport(world.fhir_transport, world.clock, latency=50)
+    google(world, rollup_page([W1300]))
+    begin = world.clock.mono
+    report = run(
+        world,
+        world.config(http_timeout=40.0),
+        fhir_transport=slow_fhir,
+        google_transport=slow_google,
+    )
+    assert slow_fhir.timeouts == [45]
+    assert world.clock.mono - begin == 150
     assert report.outcome == Outcome.FHIR_UNAVAILABLE
     assert report.http_status == 503
 
 
 def test_no_bundle_is_started_with_too_little_time_left(world):
-    world.fhir_transport.patient_server_id = "p-7"
     world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
-    slow = SlowTransport(world.fhir_transport, world.clock, latency=48)
-    google(world, rollup_page([W1300]))
+    slow_google = SlowTransport(world.google, world.clock, latency=31)
+    google(world, rollup_page([W1405, W1300]))
     begin = world.clock.mono
-    report = run(world, fhir_transport=slow)
+    report = run(
+        world,
+        world.config(http_timeout=40.0, run_deadline=100.0, batch_windows=1),
+        google_transport=slow_google,
+    )
+    # 31 s token + 31 s roll-up; first Bundle: 31 s device lookup, then written (fast store).
+    # At 93 s only 7 s are left, under the 10 s step minimum: the second Bundle is not started.
     assert (report.outcome, report.reason) == (Outcome.DEADLINE_REACHED, "before-bundle")
     assert report.http_status == 503
-    assert world.bundles() == []
-    assert world.clock.mono - begin <= 150
+    assert (report.bundles_written, len(world.bundles())) == (1, 1)
+    assert world.clock.mono - begin == 93
 
 
 def test_a_range_started_late_gets_a_cut_timeout(world):
@@ -353,3 +407,118 @@ def test_the_device_lookup_is_per_batch(world):
         f'heart_rate.sample_time.physical_time < "2026-01-15T{b}:00Z"'
         for a, b in spans
     ]
+
+
+# ---- second review ---------------------------------------------------------------------------
+
+
+def stored_copy(world, item, **changes):
+    """Write ``item`` once with auto_store on, then edit the stored copy like a person or
+    another system would."""
+    world.fhir_transport.auto_store = True
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    google(world, rollup_page([item]))
+    run(world)
+    (resource,) = world.fhir_transport.stored
+    resource.update(changes)
+    return resource
+
+
+@pytest.mark.parametrize("status", ["entered-in-error", "cancelled"])
+def test_a_withdrawn_window_is_kept_not_rewritten(world, status):
+    stored_copy(world, W1300, status=status)
+    world.google._routes = [r for r in world.google._routes if r.suffix != ":rollUp"]
+    world.google.add("POST", ":rollUp", rollup_page([window("2026-01-15T13:00:00Z", 50, 55, 58)]))
+    report = run(world)
+    assert (report.windows_withdrawn_kept, report.windows_written) == (1, 0)
+    assert report.as_dict()["windows_withdrawn_kept"] == 1
+    assert len(world.bundles()) == 1
+
+
+def test_a_stored_window_with_a_different_end_is_written(world):
+    resource = stored_copy(world, W1300)
+    resource["effectivePeriod"] = dict(resource["effectivePeriod"], end="2026-01-15T08:04:00-05:00")
+    report = run(world)
+    assert (report.windows_changed + report.windows_amended, report.windows_written) == (1, 1)
+
+
+@pytest.mark.parametrize("first_is_newer", [True, False])
+def test_a_key_stored_twice_counts_as_not_stored(world, caplog, first_is_newer):
+    resource = stored_copy(world, W1300)
+    other = copy.deepcopy(resource) | {"status": "preliminary"}
+    pair = [resource, other] if first_is_newer else [other, resource]
+    world.fhir_transport.stored = pair
+    with caplog.at_level(logging.WARNING):
+        report = run(world)
+    assert (report.windows_new, report.windows_written) == (1, 1)
+    events = [r.fields for r in caplog.records if r.fields.get("event") == "stored-duplicate-key"]
+    assert events == [{"event": "stored-duplicate-key", "duplicate_keys": 1}]
+
+
+def test_duplicate_patients_are_a_read_state_of_their_own(world, caplog):
+    world.fhir_transport.patient_server_id = "p-7"
+    world.fhir_transport.duplicate_patient = True
+    google(world, rollup_page([W1300]))
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    with caplog.at_level(logging.WARNING):
+        report = run(world)
+    assert (report.stored_read, report.stranded_preliminary) == ("patients-duplicated", None)
+    assert report.windows_written == 1
+    assert [
+        r.fields.get("patients")
+        for r in caplog.records
+        if r.fields.get("event") == "patients-duplicated"
+    ] == [2]
+    assert [r.path.rsplit("/", 1)[-1] for r in fhir_searches(world)] == ["Patient"]
+
+
+def test_a_failed_stranded_count_alone_changes_nothing_else(world, caplog):
+    resource = stored_copy(world, W1300)
+    assert resource["status"] == "final"
+    world.fhir_transport.count_failure = json_response(500, {})
+    with caplog.at_level(logging.WARNING):
+        report = run(world)
+    assert report.outcome == Outcome.SYNCED
+    assert (report.stored_read, report.stranded_preliminary) == ("ok", None)
+    assert (report.windows_unchanged, report.windows_written) == (1, 0)  # still read, not write-all
+    assert "stranded-count-failed" in formatted_logs(caplog.records)
+
+
+def test_each_search_page_gets_a_fresh_client(world):
+    """So each page's timeout is cut to the time left, not fixed at the first page's."""
+    world.fhir_transport.patient_server_id = "p-7"
+    world.fhir_transport.page_size = 1
+    world.fhir_transport.stored = [
+        {
+            "resourceType": "Observation",
+            "identifier": [{"system": "urn:pulsebridge:observation", "value": f"k{i}"}],
+            "status": "final",
+        }
+        for i in range(3)
+    ]
+    made = []
+
+    def client_for():
+        made.append(1)
+        return world.deps().fhir(10.0)
+
+    found = stored_windows(
+        client_for, "fhir", "Patient/p-7", utc("2026-01-15T12:00:00Z"), utc("2026-01-15T15:00:00Z")
+    )
+    assert sorted(found) == ["k0", "k1", "k2"]
+    assert len(made) == 4  # the first page, two next pages, and the call that finds no next
+
+
+def test_deadline_reasons_are_constant_codes(world):
+    google(world, rollup_page([]))
+    report = run(world, deadline=5.0)
+    assert (report.outcome, report.reason) == (Outcome.DEADLINE_REACHED, "before-range")
+    assert DEADLINE_STEPS == (
+        "range",
+        "bundle",
+        "token-request",
+        "google-request",
+        "fhir-search",
+        "fhir-write",
+    )
+    assert all(code.replace("-", "").isalpha() for code in DEADLINE_STEPS)

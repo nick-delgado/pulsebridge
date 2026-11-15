@@ -161,6 +161,8 @@ class FhirFake(FakeTransport):
     auto_store: bool = False
     page_size: int | None = None  # page the Observation search, with a ``next`` link
     observation_failure: HttpResponse | None = None  # only the stored-windows search fails
+    count_failure: HttpResponse | None = None  # only the stranded count fails
+    duplicate_patient: bool = False  # the identifier matches two Patients
 
     def request(self, method, url, *, params, body, headers, timeout):  # noqa: ANN001
         path = urlsplit(url).path
@@ -173,10 +175,14 @@ class FhirFake(FakeTransport):
                 return self.read_failure
             if path.endswith("/Patient"):
                 ids = [self.patient_server_id] if self.patient_server_id else []
+                if self.duplicate_patient:
+                    ids = ids + ["p-duplicate"]
                 entries = [{"resource": {"resourceType": "Patient", "id": i}} for i in ids]
                 return json_response(200, _searchset(entries))
             if self.observation_failure is not None and "_summary" not in dict(pairs):
                 return self.observation_failure
+            if self.count_failure is not None and dict(pairs).get("_summary") == "count":
+                return self.count_failure
             if dict(pairs).get("_summary") == "count":
                 return json_response(
                     200, {"resourceType": "Bundle", "type": "searchset", "total": self.stranded}

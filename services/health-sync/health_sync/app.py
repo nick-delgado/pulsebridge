@@ -172,6 +172,9 @@ def create_app(config: ServiceConfig | None = None, deps: SyncDependencies | Non
     # answers at once instead of writing the same windows in parallel. With Cloud Run's
     # max_instance_count = 1 (README, T20) this covers the whole service.
     sync_lock = threading.Lock()
+    # The stranded-preliminary count from the most recent run that tried to count, for
+    # /status (which makes no FHIR request of its own). None until a run has counted.
+    last_stranded: list[int | None] = [None]
     app = Flask("health_sync")
     app.extensions["health_sync_lock"] = sync_lock
 
@@ -200,7 +203,9 @@ def create_app(config: ServiceConfig | None = None, deps: SyncDependencies | Non
         finally:
             sync_lock.release()
         log_report("sync-run", report)
-        stranded = report.stranded_preliminary
+        if report.stored_read != "not-attempted":
+            last_stranded[0] = report.stranded_preliminary
+        stranded = last_stranded[0]
         notes = (["refresh-token-rotated"] if report.refresh_token_rotated else []) + (
             ["backfill-needed"] if stranded else []
         )
@@ -224,8 +229,7 @@ def create_app(config: ServiceConfig | None = None, deps: SyncDependencies | Non
                 result = check_connection(
                     config,
                     deps.google_transport,
-                    fhir=deps.fhir,
-                    range_start=sync_range(deps.now(), config.lookback).start,
+                    stranded=last_stranded[0],
                     now=deps.now,
                     monotonic=deps.monotonic,
                     sleep=deps.sleep,

@@ -82,7 +82,7 @@ from health_sync.stored import (
     StoredReadError,
     StoredWindow,
     count_stranded,
-    find_patient_id,
+    find_patient_ids,
     plan_writes,
     stored_windows,
 )
@@ -93,6 +93,14 @@ ASSEMBLER = "PulseBridge health-sync"
 # Used only when the user has no raw heart-rate point with a device name at all. T06's Device
 # needs a name; this one claims nothing about the hardware. See README, "Device and data source".
 UNNAMED_DEVICE = "Unnamed Google Health device"
+
+# A search is an optimisation, so it gets a short timeout of its own: a slow FHIR store must
+# not spend the run's budget on reading and leave nothing for writing.
+SEARCH_TIMEOUT_SECONDS = 10.0
+SEARCHES_PER_RUN = 3  # Patient, stranded count, stored windows (one page)
+
+# Where a run can stop for lack of time. The reason is "before-<code>" (README, "Deadline").
+DEADLINE_STEPS = ("range", "bundle", "token-request", "google-request", "fhir-search", "fhir-write")
 
 
 class Outcome(StrEnum):
@@ -259,12 +267,15 @@ class RunReport:
     windows_changed: int = 0
     windows_finalised: int = 0
     windows_amended: int = 0
+    windows_withdrawn_kept: int = 0
     windows_written: int = 0
     windows_final: int = 0
     windows_preliminary: int = 0
     bundles_written: int = 0
     ranges_completed: int = 0
-    stored_read: str = "not-attempted"  # "ok", "patient-not-found", "failed:<status>"
+    # "not-attempted", "ok", "patient-not-found", "patients-duplicated", "skipped-for-time",
+    # "failed:<status or error type>"
+    stored_read: str = "not-attempted"
     stranded_preliminary: int | None = None
     google_statuses: list[int] = field(default_factory=list)
     fhir_status: int | None = None
@@ -295,6 +306,7 @@ class RunReport:
             "windows_changed": self.windows_changed,
             "windows_finalised": self.windows_finalised,
             "windows_amended": self.windows_amended,
+            "windows_withdrawn_kept": self.windows_withdrawn_kept,
             "windows_written": self.windows_written,
             "windows_final": self.windows_final,
             "windows_preliminary": self.windows_preliminary,
@@ -338,8 +350,21 @@ def _record_entry_statuses(report: RunReport, bundle: dict, response: dict) -> N
         report.entry_statuses[key] = report.entry_statuses.get(key, 0) + 1
 
 
-def _fhir(deps: SyncDependencies, config: ServiceConfig, deadline: Deadline, where: str):
-    return deps.fhir(deadline.timeout_for(config.fhir_timeout, where))
+def _fhir(
+    deps: SyncDependencies,
+    config: ServiceConfig,
+    deadline: Deadline,
+    where: str,
+    cap: float | None = None,
+):
+    """A FHIR client whose timeout is ``cap`` (default ``FHIR_TIMEOUT_SECONDS``), cut to the
+    time the run has left."""
+    timeout = config.fhir_timeout if cap is None else min(cap, config.fhir_timeout)
+    return deps.fhir(deadline.timeout_for(timeout, where))
+
+
+def _search_client(run: _Run):
+    return _fhir(run.deps, run.config, run.deadline, "fhir-search", SEARCH_TIMEOUT_SECONDS)
 
 
 def write_bundle(
@@ -357,7 +382,7 @@ def write_bundle(
     attempt = 0
     while True:
         attempt += 1
-        client = _fhir(deps, config, deadline, "executeBundle")
+        client = _fhir(deps, config, deadline, "fhir-write")
         try:
             return client.execute_bundle(config.fhir_store_id, bundle)
         except (RetryableError, ConflictError) as exc:
@@ -481,36 +506,60 @@ def _read_failed(report: RunReport, exc: Exception) -> None:
     )
 
 
+def _reads_affordable(run: _Run, windows: int) -> bool:
+    """Whether the searches fit in the time left together with the writes they would save:
+    each search at most ``SEARCH_TIMEOUT_SECONDS``, and each Bundle one data-source call and one
+    ``executeBundle`` at their full timeouts. If not, the run skips the reads and writes
+    everything: writing never waits for reading."""
+    remaining = run.deadline.remaining()
+    if remaining is None:
+        return True
+    bundles = -(-windows // run.config.batch_windows)
+    needed = SEARCHES_PER_RUN * SEARCH_TIMEOUT_SECONDS + bundles * (
+        run.config.http_timeout + run.config.fhir_timeout
+    )
+    return remaining >= needed
+
+
 def _read_patient(run: _Run, earliest: datetime | None) -> None:
     """The Patient's server id, and the stranded-preliminary count. A failure is logged and
     the run goes on, writing everything (reading is only an optimisation)."""
     report = run.report
     try:
-        client = _fhir(run.deps, run.config, run.deadline, "patient search")
-        patient_id = find_patient_id(client, run.config.fhir_store_id, run.config.patient_id)
-        if patient_id is None:
-            report.stored_read = "patient-not-found"
-            return
-        run.patient_ref = f"Patient/{patient_id}"
-        report.stored_read = "ok"
-        if earliest is not None:
-            client = _fhir(run.deps, run.config, run.deadline, "stranded count")
-            report.stranded_preliminary = count_stranded(
-                client, run.config.fhir_store_id, run.patient_ref, earliest
-            )
+        ids = find_patient_ids(_search_client(run), run.config.fhir_store_id, run.config.patient_id)
     except (HealthcareApiError, StoredReadError, ValueError) as exc:
-        if run.patient_ref is None:
-            _read_failed(report, exc)
-        else:
-            logger.warning(
-                "stranded preliminary windows could not be counted",
-                extra={
-                    "fields": {
-                        "event": "stranded-count-failed",
-                        "http_status": getattr(exc, "status", None),
-                    }
-                },
-            )
+        _read_failed(report, exc)
+        return
+    if not ids:
+        report.stored_read = "patient-not-found"
+        report.stranded_preliminary = 0  # no Patient, so nothing of theirs is stored
+        return
+    if len(ids) > 1:
+        report.stored_read = "patients-duplicated"
+        logger.warning(
+            "more than one Patient has the configured identifier; writing every window",
+            extra={"fields": {"event": "patients-duplicated", "patients": len(ids)}},
+        )
+        return
+    run.patient_ref = f"Patient/{ids[0]}"
+    report.stored_read = "ok"
+    if earliest is None:
+        return
+    try:
+        report.stranded_preliminary = count_stranded(
+            _search_client(run), run.config.fhir_store_id, run.patient_ref, earliest
+        )
+    except (HealthcareApiError, StoredReadError, ValueError) as exc:
+        # Only the count is lost: the stored-window read and the writes go on.
+        logger.warning(
+            "stranded preliminary windows could not be counted",
+            extra={
+                "fields": {
+                    "event": "stranded-count-failed",
+                    "http_status": getattr(exc, "status", None),
+                }
+            },
+        )
         return
     if report.stranded_preliminary:
         logger.warning(
@@ -524,14 +573,29 @@ def _read_patient(run: _Run, earliest: datetime | None) -> None:
         )
 
 
-def _stored_for(run: _Run, piece: TimeRange) -> dict[str, StoredWindow] | None:
+def _skip_reads(report: RunReport) -> None:
+    report.stored_read = "skipped-for-time"
+    logger.warning(
+        "too little time to read the store and write; writing every window",
+        extra={"fields": {"event": "stored-read-skipped"}},
+    )
+
+
+def _stored_for(run: _Run, piece: TimeRange, windows: int) -> dict[str, StoredWindow] | None:
     if run.patient_ref is None:
-        # No Patient in the store (or it could not be read): nothing can be stored for it.
+        # No Patient in the store: nothing of theirs can be stored. Otherwise the read was
+        # skipped, failed or found duplicate Patients: write everything.
         return {} if run.report.stored_read == "patient-not-found" else None
+    if not _reads_affordable(run, windows):
+        _skip_reads(run.report)
+        return None
     try:
-        client = _fhir(run.deps, run.config, run.deadline, "stored windows")
         return stored_windows(
-            client, run.config.fhir_store_id, run.patient_ref, piece.start, piece.end
+            lambda: _search_client(run),
+            run.config.fhir_store_id,
+            run.patient_ref,
+            piece.start,
+            piece.end,
         )
     except (HealthcareApiError, StoredReadError, ValueError) as exc:
         _read_failed(run.report, exc)
@@ -568,6 +632,7 @@ def _apply(report: RunReport, plan: Plan) -> None:
     report.windows_changed += plan.changed
     report.windows_finalised += plan.finalised
     report.windows_amended += plan.amended
+    report.windows_withdrawn_kept += plan.withdrawn_kept
 
 
 def _sync_one(run: _Run, piece: TimeRange) -> None:
@@ -584,9 +649,15 @@ def _sync_one(run: _Run, piece: TimeRange) -> None:
         # Once per run, and only when there is something to write: a run that ends at the
         # token refresh or finds no data does not touch the FHIR store at all.
         run.patient_read = True
-        _read_patient(run, run.earliest)
+        if _reads_affordable(run, len(clean.items)):
+            _read_patient(run, run.earliest)
+        else:
+            _skip_reads(report)
     plan = plan_writes(
-        clean.items, _stored_for(run, piece), key_of=run.key_of, status_of=run.status_of
+        clean.items,
+        _stored_for(run, piece, len(clean.items)),
+        key_of=run.key_of,
+        status_of=run.status_of,
     )
     _apply(report, plan)
     for batch in batches(plan.write, config.batch_windows):

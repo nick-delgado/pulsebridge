@@ -91,7 +91,7 @@ def test_status_connected(world, http):
         "googleHealth": "connected",
         "reason": None,
         "notes": [],
-        "strandedPreliminary": 0,
+        "strandedPreliminary": None,  # no run on this instance yet
         "checkedAt": "2026-01-15T15:07:30Z",
     }
 
@@ -243,25 +243,53 @@ def test_status_notes_a_rotated_refresh_token(world, http, caplog):
     assert leaked(formatted_logs(caplog.records) + str(body), fake("rotated", "x")) == []
 
 
-def test_status_notes_that_a_backfill_is_needed(world, http):
+def test_status_reports_the_last_runs_stranded_count_without_searching(world, http):
     world.fhir_transport.patient_server_id = "p-7"
     world.fhir_transport.stranded = 4
     world.google.add("POST", "/token", token_response())
-    body = http().get(STATUS_PATH).get_json()
+    world.google.add("POST", ":rollUp", rollup_page([window("2026-01-15T13:00:00Z", 60, 61, 62)]))
+    world.google.add("GET", "/dataPoints", list_response())
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    client = http()
+    assert client.get(STATUS_PATH).get_json()["strandedPreliminary"] is None
+    client.post(SYNC_PATH)
+    searches = len([r for r in world.fhir_transport.requests if r.method == "GET"])
+    body = client.get(STATUS_PATH).get_json()
     assert (body["notes"], body["strandedPreliminary"]) == (["backfill-needed"], 4)
-    (count,) = [r for r in world.fhir_transport.requests if r.params.get("_summary") == "count"]
-    assert ("date", "lt2026-01-15T12:05:00Z") in count.param_pairs
+    assert len([r for r in world.fhir_transport.requests if r.method == "GET"]) == searches
 
 
-def test_status_still_answers_when_the_store_cannot_be_counted(world, http):
-    world.fhir_transport.read_failure = json_response(503, {})
+def test_status_makes_no_fhir_request(world, http):
+    world.fhir_transport.patient_server_id = "p-7"
     world.google.add("POST", "/token", token_response())
-    body = http().get(STATUS_PATH).get_json()
-    assert (body["googleHealth"], body["strandedPreliminary"], body["notes"]) == (
-        "connected",
-        None,
-        [],
-    )
+    http().get(STATUS_PATH)
+    assert world.fhir_transport.requests == []
+
+
+def test_a_run_that_could_not_count_clears_the_stranded_count(world, http):
+    world.fhir_transport.patient_server_id = "p-7"
+    world.fhir_transport.stranded = 4
+    world.google.add("POST", "/token", token_response())
+    world.google.add("POST", ":rollUp", rollup_page([window("2026-01-15T13:00:00Z", 60, 61, 62)]))
+    world.google.add("GET", "/dataPoints", list_response())
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    client = http()
+    client.post(SYNC_PATH)
+    world.fhir_transport.duplicate_patient = True
+    client.post(SYNC_PATH)
+    body = client.get(STATUS_PATH).get_json()
+    assert (body["strandedPreliminary"], body["notes"]) == (None, [])
+
+
+def test_the_rotated_token_note_survives_in_the_entry_sync_caches(world, http):
+    rotated = json_response(200, token_response().json() | {"refresh_token": fake("rotated", "y")})
+    world.google.add("POST", "/token", rotated)
+    world.google.add("POST", ":rollUp", rollup_page([]))
+    client = http(status_cache_seconds=60.0)
+    assert client.post(SYNC_PATH).get_json()["refresh_token_rotated"] is True
+    body = client.get(STATUS_PATH).get_json()
+    assert body["notes"] == ["refresh-token-rotated"]
+    assert world.token_calls() == 1  # the answer came from the entry /sync cached
 
 
 def test_status_says_secret_unreadable_when_a_file_is_wrong(world, http):

@@ -408,9 +408,20 @@ def test_no_request_is_started_after_the_deadline(world):
     world.google.add("POST", "/token", token_response())
     tokens, _ = make(world, deadline=10.0)
     world.clock.mono += 9
-    with pytest.raises(DeadlineReached):
+    with pytest.raises(DeadlineReached) as caught:
         tokens.token()
+    assert caught.value.where == "token-request"
     assert world.google.requests == []
+
+
+def test_an_api_request_after_the_deadline_is_named_google_request(world):
+    world.google.add("POST", "/token", token_response())
+    tokens, client = make(world, deadline=10.0)
+    tokens.token()
+    world.clock.mono += 9
+    with pytest.raises(DeadlineReached) as caught:
+        client.rollup(START, END)
+    assert caught.value.where == "google-request"
 
 
 def test_no_backoff_wait_is_taken_that_leaves_no_room_for_the_next_request(world):

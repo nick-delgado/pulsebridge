@@ -127,7 +127,8 @@ class HttpSender:
             attempt += 1
             # Cut to the time left; raises DeadlineReached instead of starting a request that
             # could not finish before the run's deadline.
-            timeout = self.deadline.timeout_for(self.timeout, operation)
+            where = "token-request" if url == TOKEN_URL else "google-request"
+            timeout = self.deadline.timeout_for(self.timeout, where)
             retry_after = None
             try:
                 response = self.transport.request(
