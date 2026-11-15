@@ -115,7 +115,7 @@ variable "ingest_enabled" {
 
 # ---------------------------------------------------------------------------------------------
 # Images, by digest. Paste the image build's "BEGIN tfvars" block (services/README.md) unchanged.
-# They are optional here only because the first, targeted applies (README steps 3 and 4) create
+# They are optional here only because the first, targeted applies (README steps 3, 4 and 6) create
 # the registry they are pushed to; a full plan without them stops with a clear error.
 # ---------------------------------------------------------------------------------------------
 
@@ -181,6 +181,7 @@ variable "seed_image" {
 variable "patient_id" {
   description = "The one patient identifier (value in the urn:pulsebridge:patient system). Every service gets it (v2-to-fhir, health-sync or the seeder, fhir-proxy, cuff-sim) and the setup_env output hands it to the connect script, so there is one source. With use_synthetic_data it must start with \"SYN-\" (for example SYN-0001); without it, it must NOT, so a real Google Health account can never be connected to a synthetic patient. An identifier, not a secret, but never commit a real one: it lives in terraform.tfvars (git-ignored) and in the state."
   type        = string
+  sensitive   = true
   nullable    = false
 
   validation {
@@ -211,6 +212,7 @@ variable "patient_assigning_authority" {
 variable "patient_family_name" {
   description = "Real data only: the patient's family name, PID-5.1 of the cuff simulator's messages. Required with use_synthetic_data = false; REFUSED with synthetic data, where the cuff simulator always sends the seeder's synthetic name (Synthetic / Demo) so the seeder accepts a Patient the cuff path created first. Personal data: it lives in terraform.tfvars (git-ignored), Cloud Run's configuration and the state."
   type        = string
+  sensitive   = true
   default     = null
 
   validation {
@@ -226,6 +228,7 @@ variable "patient_family_name" {
 variable "patient_given_name" {
   description = "Real data only: the patient's given name, PID-5.2. Same rules as patient_family_name."
   type        = string
+  sensitive   = true
   default     = null
 
   validation {
@@ -285,7 +288,7 @@ variable "alert_notification_channels" {
 # ---------------------------------------------------------------------------------------------
 
 variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password, never both. Prefer passing it as TF_VAR_reviewer_password from a password manager over writing it into terraform.tfvars."
+  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password, never both. Prefer giving it to one apply as TF_VAR_reviewer_password (read with `IFS= read -rs`, unset afterwards whether or not the apply succeeded; dev terraform.tfvars.example) over writing it into terraform.tfvars."
   type        = string
   default     = null
   sensitive   = true
@@ -294,6 +297,12 @@ variable "reviewer_password" {
   validation {
     condition     = var.reviewer_password == null ? true : length(var.reviewer_password) >= 16
     error_message = "reviewer_password must be at least 16 characters."
+  }
+  validation {
+    # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod. In
+    # prod a password here would be silently unused; refuse it so nobody thinks it was set.
+    condition     = var.reviewer_password == null || local.allow_reviewer_password_from_tfvars
+    error_message = "This environment does not take the reviewer password from tfvars (prod): unset reviewer_password (and TF_VAR_reviewer_password) and use scripts/secrets/set-reviewer-password."
   }
 }
 

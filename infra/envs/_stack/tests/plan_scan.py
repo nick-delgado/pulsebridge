@@ -315,7 +315,7 @@ def check_patient(s: Scan) -> None:
         f"one assigning authority for v2-to-fhir and the cuff path: {authorities}",
     )
 
-    family, given = ("Synthetic", "Demo") if synthetic else ("Example", "Pat")
+    family, given = ("Synthetic", "Demo") if synthetic else ("Examplefamily", "Examplegiven")
     for name, svc in (("cuff-sim", cuff), ("fhir-proxy", proxy)):
         got = (svc["_env"].get("PATIENT_FAMILY_NAME"), svc["_env"].get("PATIENT_GIVEN_NAME"))
         s.check(got == (family, given), f"{name} patient name {got}, expected {(family, given)}")
@@ -496,6 +496,24 @@ def check_environment(s: Scan) -> None:
     s.check(
         policies == {"PREVENT" if protect else "DELETE"}, f"Healthcare deletion policies {policies}"
     )
+    # prod keeps a week of daily snapshots of the OpenEMR database disk; dev none.
+    snaps = s.of_type("google_compute_resource_policy")
+    attached = s.of_type("google_compute_disk_resource_policy_attachment")
+    if protect:
+        days = [
+            p["values"]["snapshot_schedule_policy"][0]["retention_policy"][0]["max_retention_days"]
+            for p in snaps
+        ]
+        s.check(
+            days == [7] and len(attached) == 1, f"prod: one 7-day snapshot schedule, found {days}"
+        )
+        if attached:
+            s.check(
+                attached[0]["values"]["disk"] == f"{PREFIX}-edge-data",
+                "the schedule is on the data disk",
+            )
+    else:
+        s.check(not snaps and not attached, "dev: no snapshot schedule")
     secrets = {
         r["values"].get("deletion_protection") for r in s.of_type("google_secret_manager_secret")
     }
@@ -512,11 +530,121 @@ def check_environment(s: Scan) -> None:
     s.check(labels == {s.expect["env"]}, f"environment label {labels}")
 
 
+# The Healthcare coordinates every workload must get, as literals: a crossed wire (the audit store
+# where the main store belongs, a hard-coded project) shows up as a wrong value here.
+EXPECTED_ENV = {
+    "GCP_PROJECT_ID": PROJECT,
+    "HEALTHCARE_LOCATION": "us-central1",
+    "HEALTHCARE_DATASET_ID": PREFIX,
+    "FHIR_STORE_ID": f"{PREFIX}-fhir",
+    "AUDIT_FHIR_STORE_ID": f"{PREFIX}-fhir-audit",
+    "HL7V2_STORE_ID": f"{PREFIX}-hl7v2",
+}
+# Which of those each workload must have (D15: cuff-sim has no FHIR_STORE_ID, the health data).
+WORKLOADS = {
+    # name: (identity key, store variables it must have)
+    f"{PREFIX}-v2-to-fhir": ("v2-to-fhir", {"FHIR_STORE_ID", "HL7V2_STORE_ID"}),
+    f"{PREFIX}-health-sync": ("health-sync", {"FHIR_STORE_ID"}),
+    f"{PREFIX}-fhir-proxy": (
+        "fhir-proxy",
+        {"FHIR_STORE_ID", "AUDIT_FHIR_STORE_ID", "HL7V2_STORE_ID"},
+    ),
+    f"{PREFIX}-cuff-sim": ("cuff-sim", {"AUDIT_FHIR_STORE_ID", "HL7V2_STORE_ID"}),
+    f"{PREFIX}-seed": ("seeder", {"FHIR_STORE_ID"}),
+}
+COMMON = {"GCP_PROJECT_ID", "HEALTHCARE_LOCATION", "HEALTHCARE_DATASET_ID"}
+
+
+def check_workload_identity_and_stores(s: Scan) -> None:
+    """Each Cloud Run service and the job runs as ITS OWN account and gets the right stores."""
+    workloads = []
+    for r in s.of_type("google_cloud_run_v2_service"):
+        template = r["values"]["template"][0]
+        workloads.append((r["values"]["name"], template))
+    for r in s.of_type("google_cloud_run_v2_job"):
+        workloads.append((r["values"]["name"], r["values"]["template"][0]["template"][0]))
+    if not workloads:
+        s.fail("no Cloud Run workload found")
+    for name, template in workloads:
+        if name not in WORKLOADS:
+            s.fail(f"unexpected Cloud Run workload {name}")
+            continue
+        key, stores = WORKLOADS[name]
+        s.check(
+            template.get("service_account") == email(key),
+            f"{name} must run as its own account {email(key)}, "
+            f"not {template.get('service_account')}",
+        )
+        env = env_of(template["containers"][0])
+        for var in sorted(COMMON | stores):
+            s.check(
+                env.get(var) == EXPECTED_ENV[var],
+                f"{name}: {var} = {env.get(var)!r}, expected {EXPECTED_ENV[var]!r}",
+            )
+        for var in sorted(set(EXPECTED_ENV) - COMMON - stores):
+            s.check(var not in env, f"{name} must not get {var} (= {env.get(var)!r})")
+
+
+def check_plan_redaction() -> list[str]:
+    """The patient's identifier and names are sensitive root variables, so a human-readable plan
+    (what CI posts on a pull request, T26) must not show them. `terraform test -verbose` prints
+    each run's plan or state the way `terraform plan` does. The alert address is NOT sensitive (a
+    sensitive value cannot decide module ingestion's for_each), so it must appear: that proves the
+    search sees planned values at all."""
+    env = {k: v for k, v in os.environ.items() if k not in CREDENTIAL_VARS}
+    home = tempfile.mkdtemp(prefix="stack-plan-scan-home-")
+    env.update(
+        HOME=home,
+        CLOUDSDK_CONFIG=os.path.join(home, "gcloud"),
+        GCE_METADATA_HOST="127.0.0.1:9",
+        GCE_METADATA_IP="127.0.0.1:9",
+        NO_GCE_CHECK="True",
+        CHECKPOINT_DISABLE="1",
+    )
+    try:
+        result = subprocess.run(
+            [
+                "terraform",
+                f"-chdir={STACK_DIR}",
+                "test",
+                "-no-color",
+                "-verbose",
+                "-filter=tests/stack.tftest.hcl",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    text = result.stdout + result.stderr
+    failures = []
+    if result.returncode != 0:
+        failures.append("redaction: terraform test -verbose failed")
+    for value in ("PAT-0001", "SYN-0001", "Examplefamily", "Examplegiven"):
+        if value in text:
+            failures.append(
+                f"redaction: the sensitive patient value {value!r} is shown in a "
+                "human-readable plan"
+            )
+    if ALERT_EMAIL not in text:
+        failures.append(
+            "redaction: the (non-sensitive) alert address is not in the plan text; "
+            "the search proves nothing"
+        )
+    return failures
+
+
 def main() -> int:
     states = run_terraform()
-    missing = set(SCENARIOS) - set(states)
-    if missing:
-        raise SystemExit(f"FAIL: no state for scenario run(s) {sorted(missing)}")
+    # Every apply run in the test file is a scenario, and every scenario is an apply run: an empty
+    # or stale SCENARIOS table would otherwise check nothing and pass.
+    if not SCENARIOS or set(SCENARIOS) != set(states):
+        raise SystemExit(
+            f"FAIL: SCENARIOS {sorted(SCENARIOS)} must equal the state-producing runs "
+            f"{sorted(states)}"
+        )
     failures: list[str] = []
     for name, expect in SCENARIOS.items():
         scan = Scan(name, states[name], expect)
@@ -528,10 +656,14 @@ def main() -> int:
             check_front_door,
             check_alerts,
             check_environment,
+            check_workload_identity_and_stores,
         ):
             check(scan)
+        if len(scan.by_address) < 50:
+            scan.fail(f"only {len(scan.by_address)} resources in the state; the stack has about 94")
         print(f"{name}: {len(scan.by_address)} resources checked, {len(scan.failures)} failure(s)")
         failures += scan.failures
+    failures += check_plan_redaction()
     if failures:
         for f in failures:
             print("FAIL:", f, file=sys.stderr)

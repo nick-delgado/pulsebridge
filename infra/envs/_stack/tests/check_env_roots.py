@@ -108,6 +108,30 @@ CREDENTIAL_VARS = (
 
 failures: list[str] = []
 
+# Files that must exist under infra/envs (each root has the same set; checked against git's list).
+ROOT_FILES = (
+    "backend.tf",
+    "backend.hcl.example",
+    "checks.tf",
+    "env.tf",
+    "main.tf",
+    "outputs.tf",
+    "providers.tf",
+    "variables.tf",
+    "versions.tf",
+    ".terraform.lock.hcl",
+    "terraform.tfvars.example",
+    "tests/root.tftest.hcl",
+)
+KNOWN_FILES = [ENVS / r / f for r in ROOTS for f in ROOT_FILES] + [
+    ENVS / "README.md",
+    ENVS / ".gitignore",
+    ENVS / "_stack" / "main.tf",
+    ENVS / "_stack" / "variables.tf",
+    ENVS / "_stack" / "outputs.tf",
+    ENVS / "_stack" / "tests" / "stack.tftest.hcl",
+]
+
 
 def fail(message: str) -> None:
     failures.append(message)
@@ -124,7 +148,14 @@ def candidate_files() -> list[Path]:
     result = git("ls-files", "-co", "--exclude-standard", "--", "infra/envs")
     if result.returncode != 0:
         raise SystemExit(f"FAIL: git ls-files failed: {result.stderr.strip()}")
-    return [REPO / line for line in result.stdout.splitlines() if line and (REPO / line).is_file()]
+    files = [REPO / line for line in result.stdout.splitlines() if line and (REPO / line).is_file()]
+    # An empty or partial list would make every scan below pass vacuously.
+    missing = [str(f.relative_to(REPO)) for f in KNOWN_FILES if f not in files]
+    if not files or missing:
+        raise SystemExit(
+            f"FAIL: git lists {len(files)} file(s) under infra/envs; missing {missing}"
+        )
+    return files
 
 
 def root_files(root: str) -> dict[str, Path]:
@@ -223,6 +254,21 @@ def check_no_hardcoded_identity() -> None:
         for m in re.finditer(r'\bbucket\s*=\s*"([^"]*)"', text):
             if m.group(1) != "your-project-id-tfstate":
                 fail(f"{rel}: bucket {m.group(1)!r} is not the placeholder")
+        # A project ID assigned to any project-ish key or local (project, project_id,
+        # healthcare_project_id, PROJECT, ...) must be a placeholder.
+        for m in re.finditer(
+            r'(?im)^\s*\w*project\w*\s*=\s*"([a-z][a-z0-9-]{4,28}[a-z0-9])"', text
+        ):
+            if m.group(1) not in ALLOWED_PROJECTS:
+                fail(f"{rel}: project ID {m.group(1)!r} assigned in code is not a placeholder")
+        if path.suffix in (".tf", ".hcl"):
+            # Secret values never pass through Terraform here: no data source that reads a secret
+            # version, and no secret_data argument (dev's password is write-only, in identity).
+            code = re.sub(r"#.*", "", text)
+            if re.search(r'data\s+"google_secret_manager_secret_version', code) or re.search(
+                r"\bsecret_data\b", code
+            ):
+                fail(f"{rel}: secret versions or secret_data must not appear under infra/envs")
         if path.suffix == ".tf":
             code = re.sub(r"#.*", "", text)
             for word in ("allUsers", "allAuthenticatedUsers", "google_service_account_key"):
@@ -503,6 +549,62 @@ def check_providers() -> None:
         )
 
 
+# ---- 6. ordering, version constraints and sensitivity ------------------------------------------
+
+
+def module_block(text: str, name: str) -> str:
+    m = re.search(r'^module\s+"' + name + r'"\s*\{', text, re.M)
+    if not m:
+        return ""
+    depth, i = 1, m.end()
+    while i < len(text) and depth:
+        depth += {"{": 1, "}": -1}.get(text[i], 0)
+        i += 1
+    return text[m.end() : i - 1]
+
+
+# module -> modules it must depend_on (explicitly): the APIs (project-base) and the secret
+# accessor grants (identity) must exist first (module READMEs, "For T25").
+REQUIRED_DEPENDS_ON = {
+    "healthcare": {"project_base"},
+    "ingestion": {"identity", "project_base"},
+    "phr": {"project_base", "identity"},
+}
+
+
+def check_ordering_and_versions() -> None:
+    stack = re.sub(r"#.*", "", (ENVS / "_stack" / "main.tf").read_text())
+    for module, needed in REQUIRED_DEPENDS_ON.items():
+        body = module_block(stack, module)
+        m = re.search(r"depends_on\s*=\s*\[([^\]]*)\]", body)
+        got = set(re.findall(r"module\.(\w+)", m.group(1))) if m else set()
+        if not body or not needed <= got:
+            fail(
+                f"_stack/main.tf: module {module} must depend_on {sorted(needed)}, "
+                f"found {sorted(got)}"
+            )
+    for root in ROOTS:
+        text = re.sub(r"#.*", "", (ENVS / root / "versions.tf").read_text())
+        if not re.search(r'required_version\s*=\s*">= 1\.11"', text):
+            fail(f'{root}/versions.tf must require Terraform ">= 1.11"')
+        for name in ("google", "google-beta"):
+            m = re.search(name + r"\s*=\s*\{([^}]*)\}", text)
+            body = m.group(1) if m else ""
+            if f'source  = "hashicorp/{name}"' not in body or 'version = "~> 8.11"' not in body:
+                fail(
+                    f'{root}/versions.tf must pin {name} to hashicorp/{name} "~> 8.11" '
+                    "(the modules' constraint)"
+                )
+    # The patient's identifier and names are personal data: sensitive at the root and in the stack,
+    # so plans (posted on pull requests by T26) show "(sensitive value)" (plan_scan.py proves it).
+    for path in (ENVS / "dev" / "variables.tf", ENVS / "_stack" / "variables.tf"):
+        text = path.read_text()
+        for name in ("patient_id", "patient_family_name", "patient_given_name"):
+            m = re.search(r'^variable\s+"' + name + r'"\s*\{(.*?)^\}', text, re.S | re.M)
+            if not m or not re.search(r"^\s*sensitive\s*=\s*true\s*$", m.group(1), re.M):
+                fail(f"{path.relative_to(REPO)}: variable {name} must be sensitive = true")
+
+
 def main() -> int:
     check_roots_differ_only_where_documented()
     check_no_hardcoded_identity()
@@ -511,6 +613,7 @@ def main() -> int:
         check_example(root)
     check_lock_files()
     check_providers()
+    check_ordering_and_versions()
     if not failures:
         for root in ROOTS:
             check_example_plans(root)

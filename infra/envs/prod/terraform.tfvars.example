@@ -34,9 +34,9 @@ alert_email = "you@example.com"
 # your Patient (README, steps 9 and 10).
 ingest_enabled = false
 
-# --- Images, by digest (README, step 6) ---------------------------------------------------------
+# --- Images, by digest (README, step 7) ---------------------------------------------------------
 # Paste the image build's "BEGIN tfvars" block here unchanged (seed_image is ignored with real data).
-# Leave these out for the targeted applies of steps 3 and 4.
+# Leave these out for the targeted applies of steps 3, 4 and 6.
 # cuff_sim_image    = "us-central1-docker.pkg.dev/your-prod-project-id/pulsebridge-services/cuff-sim@sha256:<64 hex>"
 # fhir_proxy_image  = "us-central1-docker.pkg.dev/your-prod-project-id/pulsebridge-services/fhir-proxy@sha256:<64 hex>"
 # health_sync_image = "us-central1-docker.pkg.dev/your-prod-project-id/pulsebridge-services/health-sync@sha256:<64 hex>"

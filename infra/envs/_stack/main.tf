@@ -31,18 +31,6 @@ locals {
     assigning_authority = var.patient_assigning_authority
   }
 
-  # The edge VM's service account email, for module project-base. project-base decides whether
-  # its mirror grant exists with `count = ... && var.edge_vm_service_account_email != null`, and
-  # a service account's email is unknown until the account is created. Passed as it is, the
-  # comparison is unknown on the first plan, and Terraform refuses: "Invalid count argument"
-  # (the mocked plan in tests/stack.tftest.hcl hit exactly that). A string template with a
-  # literal part is known to be non-null even while its value is unknown (Terraform's
-  # "refinements"), so the count is known. Splitting at "@" and joining with a literal "@" gives
-  # back exactly the same email, and still references the account, so the grant and the firewall
-  # rule keep waiting for it. (A template that is only "${x}" is unwrapped to x and would not
-  # help.) A follow-up for module project-base: decide the count with a plain bool instead.
-  edge_vm_email_parts    = split("@", module.identity.service_account_emails["edge-vm"])
-  edge_vm_email_not_null = "${local.edge_vm_email_parts[0]}@${local.edge_vm_email_parts[1]}"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -84,7 +72,10 @@ module "project_base" {
   # Required for the edge VM: the firewall rules target this account (stronger than a tag), and
   # it gets roles/artifactregistry.reader on the Docker Hub mirror, without which the VM cannot
   # pull MariaDB or OpenEMR (project-base and edge-vm READMEs).
-  edge_vm_service_account_email = local.edge_vm_email_not_null
+  edge_vm_service_account_email = module.identity.service_account_emails["edge-vm"]
+  # A plain bool decides whether the mirror grant exists, so its count is known on the first plan
+  # even though the email is not (it is unknown until module identity creates the account).
+  grant_edge_vm_mirror_reader = true
 
   # The VM has no internet route; MariaDB and OpenEMR come through this pull-through cache.
   # edge-vm and openemr need a non-null mirror URL, so this is not a variable.
@@ -122,6 +113,10 @@ module "healthcare" {
 
   # Module identity's map as it is; healthcare uses the keys it knows.
   store_iam_service_accounts = module.identity.service_account_emails
+
+  # The Healthcare and Pub/Sub APIs are enabled by project-base; on a fresh project the dataset
+  # would otherwise race the API enablement.
+  depends_on = [module.project_base]
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -168,8 +163,9 @@ module "ingestion" {
   deletion_protection = var.protect_from_destroy
 
   # health-sync mounts its secrets: the accessor grants (module identity) must exist before it
-  # deploys. Safe: identity depends on nothing.
-  depends_on = [module.identity]
+  # deploys. The Cloud Run, Scheduler and Monitoring APIs come from project-base. Neither module
+  # depends on ingestion, so there is no cycle.
+  depends_on = [module.identity, module.project_base]
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -202,6 +198,10 @@ module "edge_vm" {
   # (edge-vm's default 30 is too short).
   hooks                = module.openemr.edge_vm_hooks
   hook_timeout_minutes = module.openemr.hook_timeout_minutes
+
+  # prod: a daily snapshot of the OpenEMR database, kept 7 days (kept snapshots outlive a destroy
+  # and are billed until deleted; infra/envs/README.md, "What destroy leaves behind").
+  data_disk_snapshot_days = var.protect_from_destroy ? 7 : 0
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -223,8 +223,8 @@ module "openemr" {
     client_private_key = module.identity.secret_resource_ids["openemr-client-private-key"]
   }
 
-  # Spike S1's six SMART v1 scopes unless the root sets others; the narrower v2 set is a
-  # first-boot experiment (openemr README, "Scopes").
+  # null keeps the module's default, spike S1's six SMART v1 scopes (its scopes variable is not
+  # nullable); the narrower v2 set is a first-boot experiment (openemr README, "Scopes").
   scopes = var.openemr_scopes
 }
 
@@ -275,10 +275,8 @@ module "phr" {
     token_url     = module.openemr.token_url
     fhir_base_url = module.openemr.fhir_base_url
     scopes        = module.openemr.scopes
-    # NOT module.openemr.client_secret_id: that output is the secret's full resource path
-    # (projects/<p>/secrets/<id>), while phr's validation requires the short secret ID it mounts.
-    # It is the same secret, named the way phr wants it (reported to the orchestrator).
-    client_secret_id = module.identity.secret_ids["openemr-client-private-key"]
+    # The short secret ID phr mounts (client_secret_id is the full resource path).
+    client_secret_id = module.openemr.client_secret_name
   }
 
   trusted_proxy_hops    = var.trusted_proxy_hops

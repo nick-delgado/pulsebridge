@@ -98,7 +98,7 @@ variable "ingest_enabled" {
 # The images live in project-base's Artifact Registry repository, which the first (targeted)
 # apply creates, so they cannot exist before it: the three images every deployment needs are
 # optional here, and a FULL plan without them stops with the message below. A plan targeted at
-# module.stack.module.project_base or module.stack.module.identity (runbook steps 3 and 4) does
+# module.stack.module.project_base or module.stack.module.identity (runbook steps 3, 4 and 6) does
 # not evaluate these validations, because nothing it plans depends on the images.
 variable "v2_to_fhir_image" {
   description = "v2-to-fhir image by digest (module ingestion validates the form)."
@@ -107,7 +107,7 @@ variable "v2_to_fhir_image" {
 
   validation {
     condition     = var.v2_to_fhir_image != null
-    error_message = "v2_to_fhir_image is not set. Build the images first (infra/envs/README.md, step 6) and paste the build's tfvars block; only the targeted applies of steps 3 and 4 run without images."
+    error_message = "v2_to_fhir_image is not set. Build the images first (infra/envs/README.md, step 7) and paste the build's tfvars block; only the targeted applies of steps 3, 4 and 6 run without images."
   }
 }
 
@@ -118,7 +118,7 @@ variable "fhir_proxy_image" {
 
   validation {
     condition     = var.fhir_proxy_image != null
-    error_message = "fhir_proxy_image is not set. Build the images first (infra/envs/README.md, step 6) and paste the build's tfvars block; only the targeted applies of steps 3 and 4 run without images."
+    error_message = "fhir_proxy_image is not set. Build the images first (infra/envs/README.md, step 7) and paste the build's tfvars block; only the targeted applies of steps 3, 4 and 6 run without images."
   }
 }
 
@@ -129,7 +129,7 @@ variable "cuff_sim_image" {
 
   validation {
     condition     = var.cuff_sim_image != null
-    error_message = "cuff_sim_image is not set. Build the images first (infra/envs/README.md, step 6) and paste the build's tfvars block; only the targeted applies of steps 3 and 4 run without images."
+    error_message = "cuff_sim_image is not set. Build the images first (infra/envs/README.md, step 7) and paste the build's tfvars block; only the targeted applies of steps 3, 4 and 6 run without images."
   }
 }
 
@@ -152,6 +152,7 @@ variable "seed_image" {
 variable "patient_id" {
   description = "The one configured patient identifier (urn:pulsebridge:patient). Fed to ingestion (v2-to-fhir, health-sync or the seeder) and phr (fhir-proxy, cuff-sim), and printed in the setup_env output for the connect script and the seeder."
   type        = string
+  sensitive   = true
   nullable    = false
 }
 
@@ -164,12 +165,14 @@ variable "patient_assigning_authority" {
 variable "patient_family_name" {
   description = "PID-5.1 the cuff simulator sends. Real data only; with synthetic data the stack passes null and module phr uses the seeder's synthetic name."
   type        = string
+  sensitive   = true
   default     = null
 }
 
 variable "patient_given_name" {
   description = "PID-5.2 the cuff simulator sends. Real data only, as patient_family_name."
   type        = string
+  sensitive   = true
   default     = null
 }
 
@@ -251,17 +254,9 @@ variable "enable_cloud_nat" {
 }
 
 variable "openemr_scopes" {
-  description = "OAuth2 scopes for the OpenEMR client. The default is module openemr's own default, spike S1's six SMART v1 scopes (the only set verified end to end). It is repeated here because module openemr's scopes variable is nullable: passing null would set it to null, not to its default. null from the root means this default (nullable = false)."
+  description = "OAuth2 scopes for the OpenEMR client; null keeps module openemr's default (spike S1's six SMART v1 scopes)."
   type        = list(string)
-  nullable    = false
-  default = [
-    "system/Patient.read",
-    "system/Patient.write",
-    "system/Encounter.read",
-    "system/Encounter.write",
-    "system/Observation.read",
-    "system/Observation.write",
-  ]
+  default     = null
 }
 
 # ---------------------------------------------------------------------------------------------

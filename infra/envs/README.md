@@ -44,7 +44,7 @@ meets them, with a column to record the result.
 - **`check` block**: a condition Terraform evaluates on every plan and apply; when it is false
   Terraform prints a **warning** and carries on (a variable `validation` instead stops the run).
 - **`-target`**: plan or apply only the named resources or modules (and what they depend on).
-  Used here twice, deliberately, before the container images exist (steps 3 and 4).
+  Used here twice, deliberately, before the container images exist (steps 3, 4 and 6).
 - **`-replace`**: destroy and re-create one resource on the next apply (used to patch the VM).
 - **Write-only argument / ephemeral variable**: a value Terraform sends to the API but never
   saves in the plan or state (the dev reviewer password).
@@ -89,14 +89,15 @@ fails if any other file differs or if `env.tf` holds anything else.
 | --- | --- | --- | --- |
 | `environment` | `"dev"` | `"prod"` | The `environment` label on every resource, and the outputs. |
 | `use_synthetic_data` (variable default) | `true` | `false` | dev is the quick start: a stranger can run it without a Pixel Watch or a Google Health OAuth app (the seeder fills the store). prod shows the real data. Either can be overridden in tfvars. |
-| `protect_from_destroy` | `false` | `true` | prod holds real health data and is the public demo: the Healthcare dataset and stores get `deletion_policy = "PREVENT"`, the secrets `deletion_protection`, and the Cloud Run services and job `deletion_protection`, so a stray `terraform destroy` fails. dev is destroyed nightly. |
+| `protect_from_destroy` | `false` | `true` | prod holds real health data and is the public demo: the Healthcare dataset and stores get `deletion_policy = "PREVENT"`, the secrets `deletion_protection`, and the Cloud Run services and job `deletion_protection`, so a stray `terraform destroy` fails; and the edge VM's data disk (the OpenEMR database) gets a daily snapshot kept 7 days. dev is destroyed nightly and keeps no snapshots. |
 | `allow_reviewer_password_from_tfvars` | `true` | `false` | The brief's table: dev has a "default credential from tfvars", prod a credential in Secret Manager, rotated. In dev the reviewer password may come from tfvars through module identity's write-only version; prod refuses it (a validation) and uses `scripts/secrets/set-reviewer-password`. |
 | `backend.tf` prefix | `dev` | `prod` | One state per environment. Fixed in the committed file (not author-specific), so a `backend.hcl` copied from the other environment cannot point one root at the other's state. |
 
 Deliberately **not** different:
 
 - **Cost settings.** Both use the e2-micro, `pd-standard` disks inside the free tier, no Cloud
-  NAT, scale-to-zero Cloud Run. There is no cheaper dev setting to offer.
+  NAT, scale-to-zero Cloud Run. There is no cheaper dev setting to offer. The one cost prod adds
+  is the snapshots that come with `protect_from_destroy` (cents a month).
 - **The project.** dev and prod are separate projects (D1), each bootstrapped once, so the
   same resource names do not collide.
 - **The free tier is per billing account, not per project.** Two deployments on one billing
@@ -115,14 +116,14 @@ Deliberately **not** different:
 | `patient_family_name`, `patient_given_name` | real data only: your name (refused with synthetic data) |
 | `time_zone` | your IANA zone, for example `America/New_York` |
 | `alert_email` (or `alert_notification_channels`) | where alerts go; one is required |
-| the five `*_image` variables | the image build's `BEGIN tfvars` block (step 6), pasted unchanged |
+| the five `*_image` variables | the image build's `BEGIN tfvars` block (step 7), pasted unchanged |
 | `ingest_enabled` | `false` for the first apply, `true` for the second (step 10) |
 
 Optional: `deployer_service_account_email` (impersonate the deployer), `region`/`zone` (default
 `us-central1`/`us-central1-a`: inside the e2-micro free tier and a region Firebase Hosting can
 rewrite to; a `check` warns outside the free tier, module phr refuses a region Hosting cannot
 reach), `enable_iap_ssh` (for the first-boot checklist), `enable_cloud_nat` (billed hourly;
-fallback only), `trusted_proxy_hops` (step 12), `openemr_scopes` (step 8), `public_origin`
+fallback only), `trusted_proxy_hops` (step 12), `openemr_scopes` (step 6), `public_origin`
 (T30), `name_prefix` / `identity_name_prefix`, the two ingress fallbacks.
 
 Rules the root enforces before anything is created: a `SYN-` patient ID is **required** with
@@ -138,6 +139,25 @@ seeder) and module phr (cuff-sim, fhir-proxy), and the `setup_env` output hands 
 the connect script. `checks.tf` compares what each module received; `_stack/tests/plan_scan.py`
 compares the planned `PATIENT_ID` and `PATIENT_ASSIGNING_AUTHORITY` of every service.
 
+## What a plan shows
+
+A plan (and the plan CI posts on a pull request, T26) prints every planned value that is not
+marked **sensitive**. `patient_id`, `patient_family_name` and `patient_given_name` are sensitive
+variables in both roots and in `_stack`, so plans show `(sensitive value)` for them and for every
+Cloud Run environment block that carries them (`_stack/tests/plan_scan.py` checks a
+human-readable plan for the synthetic values; `check_env_roots.py` checks the declarations).
+Sensitive values are still **stored in the state in clear**; treat the state bucket as personal
+data.
+
+**Known limit for T26:** `alert_email` is not sensitive and appears in plan output. Module
+ingestion decides with `alert_email != null` how many alert policies and channels exist
+(`for_each`), and Terraform refuses a sensitive value there; marking it sensitive would need a
+module change (a separate bool). A plan posted on a pull request therefore shows the alert
+address, and the notification channel's labels show it in the state. Use an address you do not
+mind appearing in CI output, or a notification channel created outside Terraform
+(`alert_notification_channels`), whose name carries no address. The patient's name, gender and
+birth date that the connect script takes are never in Terraform at all.
+
 ## Outputs
 
 `terraform output` lists them; `terraform output -raw <name>` prints one for a script. None is a
@@ -150,13 +170,13 @@ secret value.
 | `firebase_json` | step 11: written to `web/firebase.json` before the page deploy (T26) |
 | `fhir_proxy_url` | step 12's hop measurement only (never for the page) |
 | `healthcare` | project, location, dataset, FHIR store, audit store, HL7v2 store (short IDs), FHIR base URL, ingest topic and subscriptions (replay commands) |
-| `setup_env` (sensitive) | `export` lines for the connect script: `GCP_PROJECT_ID`, `HEALTHCARE_LOCATION`, `HEALTHCARE_DATASET_ID`, `FHIR_STORE_ID`, `PATIENT_ID`, `PULSEBRIDGE_NAME_PREFIX`. Sensitive only to keep the patient ID out of CI logs. Your name, gender and birth date are never in it |
+| `setup_env` (sensitive) | `export` lines for the connect script: `GCP_PROJECT_ID`, `HEALTHCARE_LOCATION`, `HEALTHCARE_DATASET_ID`, `FHIR_STORE_ID`, `PATIENT_ID`, `PULSEBRIDGE_NAME_PREFIX`. Sensitive because it carries the patient ID (see "What a plan shows"). Your name, gender and birth date are never in it |
 | `secret_name_prefix`, `secret_ids` | secret names (never values) for T27's scripts and the connect script |
 | `seed_job_name`, `region` | step 9's first seeding |
 | `health_sync_service_name`, `v2_to_fhir_service_name` | logs and checks |
 | `ingest_enabled`, `push_enabled`, `scheduler_job_names` | where the ingest switch stands |
 | `alert_policy_names` | step 13 |
-| `edge_vm` | name, zone, internal IP, MLLP port, boot image, data disk, hook metadata keys (step 8, patching) |
+| `edge_vm` | name, zone, internal IP, MLLP port, boot image, data disk, hook metadata keys (step 6, patching) |
 | `openemr` | OpenEMR's internal site, FHIR and token URLs, registered scopes, image |
 | `image_variable_names` | the tfvars names the build prints |
 
@@ -182,7 +202,7 @@ Worked when: `terraform -chdir=infra/bootstrap output` shows `state_bucket_name`
 ```bash
 cd infra/envs/dev                                  # or prod
 cp backend.hcl.example backend.hcl                 # git-ignored; set bucket = <state_bucket_name>
-cp terraform.tfvars.example terraform.tfvars       # git-ignored; fill in (images come in step 6)
+cp terraform.tfvars.example terraform.tfvars       # git-ignored; fill in (images come in step 7)
 terraform init -backend-config=backend.hcl
 ```
 
@@ -195,7 +215,7 @@ unchanged (`git status` shows no change to `.terraform.lock.hcl`).
 terraform apply -target=module.stack.module.project_base
 ```
 
-The images (step 6) are pushed to project-base's Artifact Registry repository, so it must exist
+The images (step 7) are pushed to project-base's Artifact Registry repository, so it must exist
 first. It also creates module identity's service accounts (not its secrets): project-base's
 mirror grant and firewall rule name the edge VM's account, and Terraform pulls in what a
 targeted module depends on. The image variables may stay unset: nothing targeted depends on them.
@@ -227,64 +247,46 @@ needs at least 16 characters. Never write `<prefix>-openemr-client-private-key`:
 and never the three Google Health secrets: the connect script does (step 9).
 
 T27 builds `scripts/secrets/`. Until then, the same rules by hand (no echo, no trailing newline,
-nothing on disk or in history):
+nothing on disk or in history; `IFS=` keeps leading and trailing spaces, `-r` keeps
+backslashes, and the variable is removed whether or not gcloud succeeds):
 
 ```bash
-read -rs value && printf '%s' "$value" | gcloud secrets versions add <prefix>-db-root-password \
-  --data-file=- --project <project> && unset value
+IFS= read -rs value
+printf '%s' "$value" | gcloud secrets versions add <prefix>-db-root-password \
+  --data-file=- --project <project>; rc=$?; unset value; echo "gcloud exit code: $rc"
 ```
 
 Worked when: `gcloud secrets versions list <secret> --project <project>` shows version 1
 `enabled` for each.
 
-### 6. Build the images (owner, until T26 adds a build account)
+### 6. Targeted apply of the edge VM, and its first boot (deployer, with a shell on the VM)
 
 ```bash
-gcloud builds submit --config cloudbuild.yaml --project <project> \
-  --substitutions TAG_NAME=v0.1.0,COMMIT_SHA="$(git rev-parse HEAD)" .
-gcloud builds log <BUILD_ID> --project <project> | sed -n '/BEGIN tfvars/,/END tfvars/p'
+terraform apply -target=module.stack.module.edge_vm
 ```
 
-(services/README.md, "Build in Cloud Build".) Paste the block into `terraform.tfvars` unchanged:
-it names all five images; the one your mode does not use is ignored. The deployer's roles do
-not include Cloud Build, so a person runs this until T26's dedicated build account and trigger
-exist. Note that `gcloud builds submit` creates a source bucket `gs://<project>_cloudbuild` that
-`terraform destroy` does not remove.
+This creates the VM before anything that serves the public, and needs no images. It pulls in
+what the VM depends on: the Healthcare dataset and HL7v2 store (the adapter's flags), the
+secrets it reads, project-base and identity. **Why this order:** fhir-proxy mounts the
+`<prefix>-openemr-client-private-key` secret at version `latest`, and that secret's first version
+is written by the VM itself when it registers fhir-proxy's OAuth client on first boot. Booting
+the VM first means the version exists before the apply that creates fhir-proxy (step 8). The
+alternative, one full apply and "apply again if fhir-proxy stops on that secret", leaves a failed
+apply as the normal path. The first-boot checklist also runs here before any public service
+exists. Whether Cloud Run refuses to deploy a service whose volume secret has no version yet is
+**not verified** (Cloud Run documents no check at instance start-up for volume secrets; the
+deploy-time check is undocumented); this order avoids depending on the answer.
 
-Worked when: the log prints the `BEGIN tfvars` block with five `@sha256:` digests.
-
-### 7. First full apply, ingest off (deployer)
-
-```bash
-terraform apply            # ingest_enabled = false
-terraform output -raw next_steps
-```
-
-Creates everything else: the Healthcare dataset and stores, v2-to-fhir, health-sync or the
-seeder job, fhir-proxy, cuff-sim, the Hosting site, the edge VM, the alerts. **No Scheduler job
-exists and the HL7v2 subscription does not push** (`ingest_enabled = false`), so nothing writes
-to the FHIR store by itself before the setup step (D11).
-
-If it stops at `google_cloud_run_v2_service.health_sync` on a secret error (health-sync mounts
-the Google Health secrets, which have no version yet; whether Cloud Run allows that at deploy is
-undocumented), run step 9's connect script now, then `terraform apply` again (ingestion README,
-"First run").
-
-Worked when: the apply ends without error, `terraform output scheduler_job_names` is `[]` and
-`push_enabled` is `false`.
-
-### 8. The edge VM's first boot (deployer, with a shell on the VM)
-
-The VM boots on its own after step 7; first boot takes about 15 minutes (OpenEMR's 3.6 GB image
-pull is most of it). Work through **edge-vm's checklist first, then openemr's**: each step
-depends on the ones before. To get a shell, set `enable_iap_ssh = true` and apply, and give the
-person `roles/iap.tunnelResourceAccessor`, `roles/compute.osAdminLogin` and
-`roles/iam.serviceAccountUser` on the VM's account (edge-vm README, "Looking at the VM without
-public access"); set it back to `false` afterwards.
+First boot takes about 15 minutes (OpenEMR's 3.6 GB image pull is most of it). Work through
+**edge-vm's checklist first, then openemr's**: each step depends on the ones before. To get a
+shell, set `enable_iap_ssh = true` and run this step's apply again, and give the person
+`roles/iap.tunnelResourceAccessor`, `roles/compute.osAdminLogin` and `roles/iam.serviceAccountUser`
+on the VM's account (edge-vm README, "Looking at the VM without public access"); set it back to
+`false` afterwards.
 
 ```bash
-VM=$(terraform output -json edge_vm | jq -r .instance_name)
-ZONE=$(terraform output -json edge_vm | jq -r .zone)
+VM=<name_prefix>-edge-vm          # pulsebridge-edge-vm with the default name_prefix
+ZONE=<zone>                       # us-central1-a by default
 gcloud compute instances get-serial-port-output "$VM" --zone "$ZONE" --project <project>
 gcloud compute ssh "$VM" --zone "$ZONE" --tunnel-through-iap --project <project>
 # on the VM:
@@ -295,14 +297,59 @@ sudo docker logs openemr
 ```
 
 The ordered checks are items E1 to E19 (edge-vm) and O1 to O21 (openemr) of the
-[master checklist](#master-checklist). If a secret version was missing at boot, the log says
-`ERROR: secret ... 404`; add it and run `sudo google_metadata_script_runner startup` on the VM.
-If the pulls fail (no route to Artifact Registry over Private Google Access), set
-`enable_cloud_nat = true` (billed hourly) and apply.
+[master checklist](#master-checklist), except those that need the full apply: E8's `AA` test
+(the VM's `hl7V2Ingest` grant on the store is created in step 8) and the items that need
+fhir-proxy (O13's token request, O15), which wait for step 12. If a secret version was missing at
+boot, the log says `ERROR: secret ... 404`; add it and run `sudo google_metadata_script_runner
+startup` on the VM. If the pulls fail (no route to Artifact Registry over Private Google Access),
+set `enable_cloud_nat = true` (billed hourly) and apply again.
 
 Worked when: the log shows `pulsebridge-edge: edge VM startup: done, all steps ok`, with `hook
 openemr: ok` and `hook openemr-oauth-client: ok`, and `gcloud secrets versions list
 <prefix>-openemr-client-private-key` shows one version (the VM registered fhir-proxy's client).
+If registration failed and you go on anyway, step 8 may stop at
+`module.stack.module.phr.google_cloud_run_v2_service.fhir_proxy` on that secret: finish this
+step, then run step 8's apply again.
+
+### 7. Build the images (owner, until T26 adds a build account)
+
+```bash
+gcloud builds submit --config cloudbuild.yaml --project <project> \
+  --substitutions TAG_NAME=v0.1.0,COMMIT_SHA="$(git rev-parse HEAD)" .
+gcloud builds log <BUILD_ID> --project <project> | sed -n '/BEGIN tfvars/,/END tfvars/{//!p}'
+```
+
+(services/README.md, "Build in Cloud Build".) The `sed` prints the lines between the markers,
+without them. If `gcloud builds log` prefixes each line with the build step, as in
+`Step #0 - "release": cuff_sim_image = ...`, delete that prefix before pasting (not verified
+whether it does). Paste the block into `terraform.tfvars` unchanged: it names all five images; the
+one your mode does not use is ignored. The deployer's roles do not include Cloud Build, so a
+person runs this until T26's dedicated build account and trigger exist. Note that `gcloud builds
+submit` creates a source bucket `gs://<project>_cloudbuild` that `terraform destroy` does not
+remove.
+
+Worked when: you have five `<name>_image = "...@sha256:<64 hex>"` lines.
+
+### 8. First full apply, ingest off (deployer)
+
+```bash
+terraform apply            # ingest_enabled = false
+terraform output -raw next_steps
+```
+
+Creates everything else: the Healthcare FHIR stores, v2-to-fhir, health-sync or the seeder job,
+fhir-proxy, cuff-sim, the Hosting site, the alerts, the remaining grants. **No Scheduler job
+exists and the HL7v2 subscription does not push** (`ingest_enabled = false`), so nothing writes
+to the FHIR store by itself before the setup step (D11).
+
+If it stops at `google_cloud_run_v2_service.health_sync` on a secret error (real data:
+health-sync mounts the three Google Health secrets, which have no version until the connect
+script runs; whether Cloud Run allows that at deploy is not verified), run step 9's connect
+script now (it needs only the FHIR store and the secrets, which this apply has created), then
+`terraform apply` again (ingestion README, "First run"). Now run E8's `AA` test.
+
+Worked when: the apply ends without error, `terraform output scheduler_job_names` is `[]` and
+`push_enabled` is `false`.
 
 ### 9. The setup step: write the Patient (one of the two, never both)
 
@@ -313,7 +360,7 @@ OAuth app (a Desktop-app client; yourself as a test user): scripts/connect-googl
 ```bash
 terraform output -raw setup_env > ~/pulsebridge-prod.env    # OUTSIDE the repository
 # add PATIENT_FAMILY_NAME, PATIENT_GIVEN_NAME, PATIENT_GENDER, PATIENT_BIRTH_DATE to that file
-source ~/pulsebridge-prod.env && scripts/connect-google-health/connect.sh
+source ~/pulsebridge-prod.env && ../../../scripts/connect-google-health/connect.sh   # from infra/envs/prod
 ```
 
 **Never run the connect script with a `SYN-` patient ID** (the root refuses `SYN-` without
@@ -395,7 +442,8 @@ whenever the COS release notes announce a security fix. Check with `terraform ou
 prod (and dev if not set from tfvars): `scripts/secrets/set-reviewer-password` (T27) adds a new
 version; fhir-proxy reads `latest` within about 30 seconds and every session ends at once (its
 token key derives from the password). dev from tfvars: raise `reviewer_password_wo_version` and
-apply with the new `TF_VAR_reviewer_password`; there may be a moment with no enabled version
+apply with the new `TF_VAR_reviewer_password` (read with `IFS= read -rs`, unset after the apply
+whatever its result; dev's `terraform.tfvars.example`); there may be a moment with no enabled version
 (login answers 503). Never mix the two ways in one environment.
 
 ### Reconnecting Google Health (real data)
@@ -421,10 +469,11 @@ What remains afterwards:
 | The state bucket, deployer and WIF pool | They are bootstrap's | infra/bootstrap/README.md, "Teardown" |
 | `gs://<project>_cloudbuild` | Created by `gcloud builds submit`, not by Terraform | `gcloud storage rm -r gs://<project>_cloudbuild` |
 | Logs in Cloud Logging | Kept for their retention period (30 days by default), free | Nothing |
+| prod only: the data disk's daily snapshots (up to 7) | The schedule keeps them when the disk is deleted (`KEEP_AUTO_SNAPSHOTS`), so an accidental destroy can be undone; they are **billed as snapshot storage until deleted** | `gcloud compute snapshots list --filter="sourceDisk~<name_prefix>-edge-data" --project <project>`, then `gcloud compute snapshots delete <names> --project <project>` |
 
 The secrets go with their versions, the Healthcare dataset with every stored resource and
-message (`deletion_policy = "DELETE"` in dev), the VM with both disks (there is no snapshot: a
-destroyed data disk is gone) and its address, the Artifact Registry repositories with their
+message (`deletion_policy = "DELETE"` in dev), the VM with both disks and its address (in dev
+there is no snapshot: a destroyed data disk is gone), the Artifact Registry repositories with their
 images. Not verified: that a repository holding images deletes without error (D21 in the
 checklist).
 
@@ -443,6 +492,7 @@ here either).
 | Pub/Sub, Secret Manager, log-based metrics, IAM, VPC, firewall | about $0 | about $0 |
 | Alert policies | $0 until 1 September 2027; then $0.35 per metric reference a month: about $1.05 (real data, 3 policies) or $0.70 (synthetic, 2) | the same |
 | Firebase Hosting | $0 under 10 GB stored and 10 GB a month transferred | the same |
+| Data disk snapshots (prod only, 7 daily, incremental) | snapshot storage of a fraction of a GB: cents a month, not confirmed | the same |
 | Cloud NAT (off) | **billed hourly** if turned on: about $4.70 a month plus $0.045 per GiB | |
 
 So **near $0 a month idle** for one deployment on a fresh billing account, plus cents of
@@ -455,16 +505,16 @@ Every "Not verified" / first-boot / first-deploy item of the modules, in the ord
 deployment meets them. Fill in the last column (`YYYY-MM-DD: ok`, or what happened and what was
 changed). Source abbreviations: **B** bootstrap, **PB** project-base, **ID** identity, **HC**
 healthcare, **IN** ingestion, **EV** edge-vm, **OE** openemr, **PHR** phr, **HS** health-sync,
-**SEED** services/seed, **SVC** services/README.md, **CG** connect-google-health, **T25** this
-task.
+**SEED** services/seed, **SVC** services/README.md, **CG** connect-google-health, **CS**
+cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task.
 
-### Before and during the applies (steps 1 to 7)
+### Before and during the applies (steps 1 to 5, 7 and 8)
 
 | # | Check | Source | Verified on / result |
 | --- | --- | --- | --- |
 | A1 | Step 3's targeted apply creates project-base (and identity's service accounts) with no image variables set | T25 | |
 | A2 | Step 4's targeted apply creates the eight empty secrets once Secret Manager is enabled | T25 | |
-| A3 | The full plan on a clean project has no "Invalid count argument" for project-base's mirror grant (the stack passes the edge VM's email as a string template so the count is known; see "Findings") | T25 | |
+| A3 | The full plan on a clean project has no "Invalid count argument" for project-base's mirror grant (its count is now a plain bool; see "Findings") | T25 | |
 | A4 | `health.googleapis.com` is the Google Health API's service name (it enables) | PB | |
 | A5 | Service agents exist once the APIs are enabled; if an IAM binding to one fails, re-running the apply fixes it | HC | |
 | A6 | The Healthcare topic-level publisher binding is accepted (S5 could not show it is needed) | HC | |
@@ -474,8 +524,29 @@ task.
 | A10 | Creating the default Hosting site (`site_id = project_id`) through the API works on a project that has none yet | PHR | |
 | A11 | The deployer can create a push subscription with an OIDC token (`iam.serviceAccounts.actAs` on pubsub-push) | HC | |
 | A12 | dev: the reviewer password from tfvars creates a version; raising `reviewer_password_wo_version` replaces it (and whether there is a moment with no enabled version) | ID | |
+| A13 | Bootstrap on a brand-new project: the first apply may stop on "API has not been used ... or it is disabled"; a re-run continues; `add_firebase` adds Firebase with the owner's ADC (`billing_project` set); `firebase_added = true` | B | |
+| A14 | Workload Identity Federation: a workflow of the configured repository gets deployer tokens; one from another repository is refused; `google.subject` stays under 127 bytes for the branch names used | B | |
+| A15 | IAP TCP forwarding works once `enable_iap_ssh = true` enabled `iap.googleapis.com` (understood to be required) | PB | |
+| A16 | Prices against Google's pricing pages: Cloud NAT, the rejected Serverless VPC Access connector, Artifact Registry storage, Cloud Build minutes, snapshot storage, the e2-micro list price | PB, SVC, EV | |
+| A17 | Cloud Scheduler in a project that first enabled the Scheduler API before 19 March 2019: its service agent may lack `roles/cloudscheduler.serviceAgent` (OIDC jobs fail); new projects are unaffected | ID | |
+| A18 | Step 6's targeted apply creates the VM (and the dataset and HL7v2 store it needs) with no images and nothing of phr or ingestion; the OpenEMR client version exists before step 8 | T25 | |
+| A19 | Step 8 does not stop at fhir-proxy on `openemr-client-private-key` (and, for the record, whether Cloud Run refuses a volume secret with no version at all) | PHR, T25 | |
+| A20 | prod: the deployer (`roles/compute.instanceAdmin.v1`) can create the data disk's snapshot schedule and attach it; the first daily snapshot appears | EV, T25 | |
+| A21 | The HL7v2 store parses with parser V1 as the spikes saw (V2 and V3 were never tried; the setting cannot be changed later) | HC | |
 
-### The VM's first boot (step 8): edge-vm first
+### The image build (step 7)
+
+| # | Check | Source | Verified on / result |
+| --- | --- | --- | --- |
+| C1 | `automapSubstitutions` exposes `PROJECT_ID`, `TAG_NAME` and `COMMIT_SHA` to the step's `script` as well as the `_` substitutions | SVC | |
+| C2 | The step's docker client is already authenticated to `<region>-docker.pkg.dev` for the push and `docker buildx imagetools inspect` | SVC | |
+| C3 | The default `MUST_MATCH` substitution check accepts substitutions only the script uses | SVC | |
+| C4 | `gcloud builds submit` accepts `TAG_NAME` and `COMMIT_SHA` as `--substitutions` | SVC | |
+| C5 | `roles/artifactregistry.reader` is enough to pull through the remote repository and cache new images there (also E6) | SVC, PB | |
+| C6 | Artifact Registry accepts `docker buildx imagetools create --prefer-index=false` (a tag on an existing manifest) on the immutable-tag repository and keeps the digest | SVC | |
+| C7 | A manual `gcloud builds submit` with a user-specified build account needs read access to the source bucket; whether `gcloud builds log` prefixes lines with `Step #N - "...": ` | SVC, T25 | |
+
+### The VM's first boot (step 6): edge-vm first
 
 | # | Check | Source | Verified on / result |
 | --- | --- | --- | --- |
@@ -486,7 +557,7 @@ task.
 | E5 | Artifact Registry and gcr.io over Private Google Access: both pulls succeed with no NAT (else `enable_cloud_nat = true`) | EV, PB | |
 | E6 | `roles/artifactregistry.reader` on the mirror is enough to pull through the remote repository | EV, PB | |
 | E7 | docker-credential-gcr writes under `/var/lib/pulsebridge-edge` and `docker pull` uses it | EV | |
-| E8 | The adapter stays up (`mllp-adapter is up and stayed up`), its port is reachable from cuff-sim through both firewalls, and a test message gets `AA` with only `roles/healthcare.hl7V2Ingest` on the store | EV, ID | |
+| E8 | (after step 8, which creates the store grant) The adapter stays up (`mllp-adapter is up and stayed up`), its port is reachable from cuff-sim through both firewalls, and a test message gets `AA` with only `roles/healthcare.hl7V2Ingest` on the store | EV, ID | |
 | E9 | `--logtostderr`: a second adapter started by hand with it stays up (then consider adding it) | EV | |
 | E10 | The MariaDB secret file appears with mode 600; the `sed` parsing of Secret Manager's real response works | EV | |
 | E11 | MariaDB initialises on the bind mount, becomes `healthy`, `--health-start-interval` is accepted; a configuration change replaces it with "Shutdown complete" | EV | |
@@ -499,7 +570,7 @@ task.
 | E18 | The e2-micro free tier applies (billing report after a month); the e2-micro list price outside it | EV | |
 | E19 | Docker `--log-opt max-size` is compatible with the COS logging agent | EV | |
 
-### The VM's first boot (step 8): then openemr
+### The VM's first boot (step 6): then openemr
 
 | # | Check | Source | Verified on / result |
 | --- | --- | --- | --- |
@@ -524,6 +595,9 @@ task.
 | O19 | OpenEMR's first-time setup accepts the `openemr-admin-password` value | OE | |
 | O20 | The password exposure (process arguments during setup and on every start, `getenv()`, `docker inspect`) is acceptable for this deployment | OE | |
 | O21 | No dangling anonymous volumes after a container replacement (`docker volume ls -qf dangling=true`) | OE | |
+| O22 | (dev) An interrupted first-time setup: reset the VM during setup; both hooks then fail with the recovery message, and nothing is wiped | OE | |
+| O23 | COS's Docker uses the iptables (not nftables) backend and creates `DOCKER-USER`; the edge network's bridge is named `br-<12 characters of the network ID>` | OE | |
+| O24 | What Secret Manager's `versions/latest` resolves to when the newest version is disabled (either way the registration hook re-registers) | OE | |
 
 ### The setup step and ingestion (steps 9, 10 and 13)
 
@@ -542,6 +616,18 @@ task.
 | I11 | The log filters match real entries (`jsonPayload.event`, `http_status`, `outcome`, the `bug` line, the seeder's stderr lines); a failed Scheduler attempt is logged at ERROR | IN | |
 | I12 | The email channel delivers without further confirmation, and a policy fires as intended | IN | |
 | I13 | Replay: `gcloud pubsub subscriptions pull --format=json` returns `message.data` base64-encoded; the `messages.list` label filter works | IN | |
+| I14 | Connect script: the consent flow with a Desktop-app client and a random loopback port returns to `http://127.0.0.1:<port>/?state=...&code=...` | CG | |
+| I15 | Google accepts `access_type=offline` and `prompt=consent` with PKCE for a Desktop client; the token response carries `refresh_token` (and, in Testing, `refresh_token_expires_in`) | CG | |
+| I16 | `access_secret_version` answers `FAILED_PRECONDITION` when the latest version is disabled (treated as absent) | CG | |
+| I17 | The identity call answers with `healthUserId` for the new access token | CG | |
+| I18 | The FHIR store accepts the setup Bundle with the deployer's credentials; its response entry status starts `201` or `200` | CG | |
+| I19 | `connect.sh` runs on the deployer's own macOS or Linux machine (wheels for other platforms are in the lock but were not installed) | CG | |
+| I20 | Whether publishing the OAuth app ("In production") requires verification for the health scope | CG | |
+| I21 | Pub/Sub retries a failing push with backoff (10 s to 600 s) and after 10 failed deliveries moves the notification to the dead-letter topic, where the pull subscription keeps it | HC | |
+| I22 | Cloud Healthcare keeps `meta.security` on conditional writes (informational: the seeder's safety check does not use it) | SEED | |
+| I23 | health-sync: decimals round-trip exactly through the FHIR store; Google's 401/403/429 error bodies; whether a refresh ever returns a new refresh token; whether the token response always carries `scope` | HS | |
+| I24 | v2-to-fhir: the real push body shape, and the status codes `executeBundle` returns for a refused transaction | V2F | |
+| I25 | cuff-sim: the derived MLLP message name matches the stored message (list the store); `hl7V2Ingest` alone allows `messages:ingest` with labels | CS | |
 
 ### The front door (steps 11 and 12)
 
@@ -561,6 +647,8 @@ task.
 | P12 | `roles/firebasehosting.admin` is enough for `firebase deploy --only hosting` with the Cloud Run rewrite; the Firebase CLI accepts WIF credentials in CI (T26) | PHR | |
 | P13 | `ALL_TRAFFIC` egress reaches Google APIs through Private Google Access, and the internal-only services accept the proxy's calls as internal | PHR, IN | |
 | P14 | Network: Cloud Run Direct VPC egress traffic is admitted by the subnet-range firewall rule (tags and service identity cannot be the source); a /24 is plenty | PB | |
+| P15 | fhir-proxy's Cloud Healthcare searches: `gt`/`lt` on `effectivePeriod`, `_sort=date`, `_page_token` reuse, `_summary=count`, `_sort=-_lastUpdated` with `_elements=id,meta`, identifier OR lists, AuditEvent `type`/`subtype`/`date`/`_sort=-date`, Provenance `recorded` and `_include=Provenance:target`; the indexing delay for non-identifier searches | FP | |
+| P16 | fhir-proxy: HL7v2 `messages.list` with a `create_time` filter and `view=RAW_ONLY`; the identity-token audience; a mounted secret file reflects a new `latest` without a restart; `fhirResourceReader` allows every search above | FP | |
 
 ### Teardown (dev)
 
@@ -571,31 +659,25 @@ task.
 | T3 | After destroy the default Hosting site still serves the last page; `firebase hosting:disable` stops it | PHR | |
 | T4 | Nothing billable is left: the billing report shows no charges for the project after a day (AC "destroy leaves nothing billable") | T25 | |
 
-## Findings for the modules (not changed here)
+## Findings for the modules
 
-T25 does not edit modules; these are requests for their owners:
+Found while wiring T25; the first four are fixed in the modules in this task (each module's
+README and tests updated), the last two remain:
 
-1. **project-base: the mirror grant's `count` depends on an unknown value.** `count =
-   var.create_dockerhub_mirror && var.edge_vm_service_account_email != null ? 1 : 0`, and a
-   service account's email is unknown until the account exists, so the first plan of any root
-   that wires `module.identity.service_account_emails["edge-vm"]` fails with "Invalid count
-   argument" (reproduced by `_stack/tests/stack.tftest.hcl` under the mocked provider). The
-   stack works around it with a string template (`local.edge_vm_email_not_null` in
-   `_stack/main.tf`). Fix in project-base: decide with a plain bool (for example
-   `grant_edge_vm_mirror_reader`, default true) or with `create_dockerhub_mirror` alone.
-2. **openemr / phr: `client_secret_id` formats disagree.** module openemr's `client_secret_id`
-   output is the secret's full resource path (`projects/<p>/secrets/<id>`, its input format);
-   module phr's `openemr.client_secret_id` requires the short secret ID. The stack passes
-   `module.identity.secret_ids["openemr-client-private-key"]` (the same secret, short form).
-   Fix: an openemr output with the short ID, or phr accepting either.
-3. **openemr: `scopes` is nullable.** Passing `null` sets it to null rather than its default,
-   so the stack repeats the default list (`_stack/variables.tf`, `openemr_scopes`). Fix:
-   `nullable = false` on openemr's `scopes`.
-4. **edge-vm: no protection for prod's data disk.** The OpenEMR database lives on the data
-   disk, which has no `prevent_destroy` or snapshot schedule; `protect_from_destroy` covers the
-   Healthcare data, secrets and Cloud Run but not the disk. Consider a snapshot schedule or a
-   protection switch for prod.
-5. **Cloud Build has no deployer role.** Step 6 is run by the owner until T26's build account
+1. **project-base: the mirror grant's `count` depended on an unknown value** (`... &&
+   var.edge_vm_service_account_email != null`). A service account's email is unknown until the
+   account exists, so the first plan of a root failed with "Invalid count argument". Fixed: the
+   new bool `grant_edge_vm_mirror_reader` (default true) decides the count, and a precondition
+   requires the email. `tests/unknown_email/` in project-base plans the module with an email
+   that is unknown at plan; `_stack/tests/stack.tftest.hcl` applies the whole stack the same way.
+2. **openemr / phr: `client_secret_id` formats disagreed** (full path versus phr's short ID).
+   Fixed: openemr outputs `client_secret_name` (the short ID); the stack passes it.
+3. **openemr: `scopes` was nullable**, so null overrode its default. Fixed: `nullable = false`.
+4. **edge-vm: no protection for prod's data disk.** Fixed: `data_disk_snapshot_days`; the stack
+   passes 7 in prod (a daily snapshot schedule kept 7 days) and 0 in dev.
+5. **ingestion: `alert_email` cannot be sensitive**, because it decides a `for_each`. It
+   therefore shows in plans ("What a plan shows"). Fix would be a separate bool in ingestion.
+6. **Cloud Build has no deployer role.** Step 7 is run by the owner until T26's build account
    and trigger exist (bootstrap's `deployer_roles` has no Cloud Build role, by design).
 
 ## Tests
@@ -607,8 +689,8 @@ make tf-test       # everything below, with Google credentials removed from the 
 
 | File | Checks |
 | --- | --- |
-| `_stack/tests/stack.tftest.hcl` | the composition under mocked providers: four scenarios (real or synthetic, ingest off or on) and a prod one, applied in the mock; push and Scheduler follow `ingest_enabled`; the right workloads per mode; project-base gets the edge VM's account; the mirror stays on; edge-vm gets openemr's two hooks and 40 minutes; openemr gets the VM's reserved address; one patient for ingestion and phr; the `setup_env` and `next_steps` outputs; prod refuses a tfvars reviewer password; a full plan needs the images, the targeted first applies do not |
-| `_stack/tests/plan_scan.py` | the scenario runs' full state (every resource in every module): no `allUsers`/`allAuthenticatedUsers`, no key, no authoritative IAM, one project-level grant; exactly one public service; Scheduler jobs and push config per `ingest_enabled` (endpoint, OIDC identity, audience); `PATIENT_ID` and the authority equal in every service; the synthetic name; firewall target, ports and the mirror grant on the edge VM's account; the VM's account, address, subnet, no external IP, hooks, hook limit, secret files and adapter flags; cuff-sim's MLLP host and port; fhir-proxy's health-sync, cuff-sim and OpenEMR settings and mounts; the alert channel; PREVENT and deletion protection in prod only |
-| `_stack/tests/check_env_roots.py` | dev and prod differ only in `env.tf`, `backend.tf`, the example and the tests, and `env.tf` holds exactly the documented settings; no author-specific project, number, bucket, email or host in any file under `infra/envs`; `terraform.tfvars` and `backend.hcl` ignored, the examples and lock files not; the examples hold placeholders only, set every required variable, and plan; lock files consistent with the modules and with bootstrap's platforms; provider settings |
+| `_stack/tests/stack.tftest.hcl` | the composition under mocked providers: four scenarios (real or synthetic, ingest off or on) and a prod one, applied in the mock with the service accounts' emails unknown at plan (as on a real first plan, so "Invalid count argument" would show); push and Scheduler follow `ingest_enabled`; the right workloads per mode; project-base gets the edge VM's account; the mirror stays on; edge-vm gets openemr's two hooks and 40 minutes; openemr gets the VM's reserved address; one patient for ingestion and phr; the `setup_env` and `next_steps` outputs; prod refuses a tfvars reviewer password; a full plan needs the images; each targeted step (3, 4, 6) plans without them |
+| `_stack/tests/plan_scan.py` | the scenario runs' full state (every resource in every module), with the scenario table required to equal the state-producing runs: no `allUsers`/`allAuthenticatedUsers`, no key, no authoritative IAM, one project-level grant; exactly one public service; every Cloud Run service and the job run as their own account and get the literal project, location, dataset and store IDs they should (and not the ones they should not: cuff-sim has no `FHIR_STORE_ID`); Scheduler jobs and push config per `ingest_enabled`; `PATIENT_ID` and the authority equal everywhere; the synthetic name; firewall target, ports and the mirror grant; the VM's account, address, subnet, no external IP, hooks, hook limit, secret files and adapter flags; cuff-sim's MLLP host and port; fhir-proxy's settings and mounts; the alert channel; PREVENT, deletion protection and the 7-day snapshot schedule in prod only; and a human-readable plan shows no patient value (the alert address, not sensitive, is the positive control) |
+| `_stack/tests/check_env_roots.py` | dev and prod differ only in `env.tf`, `backend.tf`, the example and the tests, and `env.tf` holds exactly the documented settings; git's file list is non-empty and holds the known files; no author-specific project (in a path or assigned to any `project*` key), number, bucket, email or host in any file under `infra/envs`; no secret-version data source or `secret_data`; `terraform.tfvars` and `backend.hcl` ignored, the examples and lock files not; the examples hold placeholders only, set every required variable, and plan; lock files consistent with the modules and with bootstrap's platforms; both roots' `versions.tf` constraints; provider settings; the `depends_on` edges (healthcare on project-base; ingestion on identity and project-base; phr on project-base and identity); the patient variables declared sensitive |
 | `dev/tests/root.tftest.hcl` | dev's defaults (synthetic, ingest off); the `SYN-` rules both ways; the name rules; the alert destination; zone in region; images by digest; the patient check fires (`override_module`) on a mismatch and on a missing authority |
-| `prod/tests/root.tftest.hcl` | prod's defaults (real data, ingest off); prod refuses a tfvars reviewer password and a `SYN-` patient with real data; synthetic data still possible; the patient check |
+| `prod/tests/root.tftest.hcl` | prod's defaults (real data, ingest off); prod refuses a tfvars reviewer password, with or without a version, and a version alone; a `SYN-` patient with real data is refused; synthetic data still possible; the patient check |

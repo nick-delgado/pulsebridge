@@ -281,8 +281,8 @@ variables {
 
   patient_id                  = "PAT-0001"
   patient_assigning_authority = "EXAMPLE"
-  patient_family_name         = "Example"
-  patient_given_name          = "Pat"
+  patient_family_name         = "Examplefamily"
+  patient_given_name          = "Examplegiven"
   time_zone                   = "America/New_York"
 
   alert_email = "alerts@example.com"
@@ -506,7 +506,10 @@ run "full_plan_without_images_is_refused" {
   expect_failures = [var.v2_to_fhir_image, var.fhir_proxy_image, var.cuff_sim_image]
 }
 
-run "targeted_first_applies_need_no_images" {
+# One run per targeted step of the runbook (infra/envs/README.md): each must plan before any image
+# exists. A step that pulled in a module needing images would fail here on its image validation.
+
+run "step_3_targeted_project_base_needs_no_images" {
   command = plan
 
   variables {
@@ -517,8 +520,40 @@ run "targeted_first_applies_need_no_images" {
     seed_image        = null
   }
 
-  # Runbook steps 3 and 4: the registry and the empty secrets, before any image exists.
   plan_options {
-    target = [module.project_base, module.identity]
+    target = [module.project_base]
+  }
+}
+
+run "step_4_targeted_identity_needs_no_images" {
+  command = plan
+
+  variables {
+    v2_to_fhir_image  = null
+    fhir_proxy_image  = null
+    cuff_sim_image    = null
+    health_sync_image = null
+    seed_image        = null
+  }
+
+  plan_options {
+    target = [module.identity]
+  }
+}
+
+# Step 6 boots the VM (and registers fhir-proxy's OpenEMR client) before fhir-proxy exists.
+run "step_6_targeted_edge_vm_needs_no_images" {
+  command = plan
+
+  variables {
+    v2_to_fhir_image  = null
+    fhir_proxy_image  = null
+    cuff_sim_image    = null
+    health_sync_image = null
+    seed_image        = null
+  }
+
+  plan_options {
+    target = [module.edge_vm]
   }
 }

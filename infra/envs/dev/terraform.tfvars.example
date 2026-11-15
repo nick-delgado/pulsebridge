@@ -34,9 +34,9 @@ alert_email = "you@example.com"
 # finished (README, steps 9 and 10).
 ingest_enabled = false
 
-# --- Images, by digest (README, step 6) ---------------------------------------------------------
+# --- Images, by digest (README, step 7) ---------------------------------------------------------
 # Paste the image build's "BEGIN tfvars" block here unchanged (it lists all five; health_sync_image
-# is ignored with synthetic data). Leave these out for the targeted applies of steps 3 and 4.
+# is ignored with synthetic data). Leave these out for the targeted applies of steps 3, 4 and 6.
 # cuff_sim_image    = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/cuff-sim@sha256:<64 hex>"
 # fhir_proxy_image  = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/fhir-proxy@sha256:<64 hex>"
 # health_sync_image = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/health-sync@sha256:<64 hex>"
@@ -45,8 +45,11 @@ ingest_enabled = false
 
 # --- Reviewer password (dev may set it here; prod refuses) --------------------------------------
 # Either here OR with scripts/secrets/set-reviewer-password, never both. Better than writing it in
-# this file: export TF_VAR_reviewer_password from a password manager for the apply. It is
-# write-only: never in the plan or the state. At least 16 characters.
+# this file: give it to the one apply through the environment, read without echo, and remove it
+# whether or not the apply succeeds:
+#   IFS= read -rs TF_VAR_reviewer_password; export TF_VAR_reviewer_password
+#   terraform apply; unset TF_VAR_reviewer_password
+# It is write-only: never in the plan or the state. At least 16 characters.
 # reviewer_password_wo_version = 1   # raise to send a new password
 
 # --- Optional -------------------------------------------------------------------------------------

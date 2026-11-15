@@ -53,7 +53,7 @@ output "secret_ids" {
 }
 
 output "setup_env" {
-  description = "export lines for the connect script and FHIR checks (no secret values; sensitive only to keep the patient ID out of CI logs). terraform output -raw setup_env."
+  description = "export lines for the connect script and FHIR checks (no secret values; sensitive because it carries the patient ID). terraform output -raw setup_env."
   value       = module.stack.setup_env
   sensitive   = true
 }
