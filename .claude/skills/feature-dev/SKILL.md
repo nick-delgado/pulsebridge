@@ -76,6 +76,9 @@ enable an API or create cloud resources unless your brief explicitly says so.
   `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_SA_KEY_B64`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_CLOUD_PROJECT`
   and `GOOGLE_PROJECT`). A mocked provider is not a guarantee: `mock_provider` has failed to apply
   to child modules, and the real provider then ran with the session's credentials.
+- Remove variables per command with `env -u NAME ... <command>`. Never run a bare `export`,
+  `export -n`, `export -p`, `env`, `set`, `declare -x` or `printenv`: with no arguments they print
+  every variable, including the service account key. This has happened once and forced a rotation.
 
 ## 4. Self-review
 

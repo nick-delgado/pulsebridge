@@ -50,6 +50,9 @@ a test with a matching name is not evidence on its own. Note any behaviour built
    `GOOGLE_APPLICATION_CREDENTIALS`, `GCP_SA_KEY_B64`, `CLOUDSDK_CORE_PROJECT`, `GOOGLE_CLOUD_PROJECT`
    and `GOOGLE_PROJECT`). A mocked provider is not a guarantee: `mock_provider` has failed to apply
    to child modules, and the real provider then ran with the session's credentials.
+   Remove variables per command with `env -u NAME ... <command>`. Never run a bare `export`,
+   `export -n`, `export -p`, `env`, `set`, `declare -x` or `printenv`: with no arguments they print
+   every variable, including the service account key. This has happened once and forced a rotation.
 2. Read each test. Flag tests that cannot fail or prove nothing: assertions on mocks the test
    configured itself, tests with no meaningful assertion, assertions that copy the implementation,
    over-mocking that bypasses the code under test, snapshots of unreviewed output.
