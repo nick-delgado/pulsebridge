@@ -33,6 +33,7 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D14 | Cloud Run to the VM | Direct VPC egress into a dedicated subnet (built in T03). The firewall rule for MLLP and OpenEMR HTTPS lives in `project-base`, sourced from that subnet; `edge-vm` adds no rule and needs no public port. |
 | D4 | Dashboard hosting | Firebase Hosting. It has no hourly charge, unlike a bucket behind a load balancer, and its rewrites can put the page and `fhir-proxy` on one origin. Consequences: T22 adds the Firebase Hosting API to `project-base`'s API list and a hosting role to the deployer's roles (both are variables). |
 | D5 | Dashboard framework | Vite and TypeScript with a small chart library; no heavy framework. |
+| D15 | Audit data in its own FHIR store | Send-attempt AuditEvents are written to a second FHIR store. The cuff simulator can write there and has no access to the store with health data; `fhir-proxy` reads both. Chosen over giving the simulator the editor role on the main store, which would also let it read and delete health data. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
 | D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
@@ -194,13 +195,13 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | in-progress |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | in-progress |
-| T32 | FHIR store write access for the cuff simulator | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | in-progress |
+| T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | in-progress |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
 - AC: CI fails when an example resource is made invalid (demonstrated in the task summary).
-- The examples are the nine files in `libs/pulsebridge_fhir/examples/` (three Bundles: Patient
-  setup, heart-rate ingest, blood-pressure ingest). Expected validator warnings, not errors: the
+- The examples are all the files in `libs/pulsebridge_fhir/examples/` (including three Bundles:
+  Patient setup, heart-rate ingest, blood-pressure ingest; and the send-attempt AuditEvents). Expected validator warnings, not errors: the
   heart-rate minimum and maximum component codes and the local `urn:pulsebridge:*` code systems.
 
 **T09 Synthetic data seeder.** Backs the `use_synthetic_data` flag: generates plausible heart-rate
@@ -306,7 +307,9 @@ HTTPS ingest; returns the ACK.
 - AC: segments end with a carriage return all the way to the wire; nothing converts them to line feeds.
 - AC: inputs outside bounds are rejected; no free text reaches the message.
 - AC: every send attempt, including a rejected or unacknowledged one and a "send malformed"
-  one, is recorded as an `AuditEvent` built with T31 and written to the FHIR store (D12). A
+  one, is recorded as an `AuditEvent` built with T31 and written to the audit FHIR store (D12,
+  D15). The simulator builds that resource itself from validated values and never forwards FHIR
+  supplied by a caller. A
   failure to record is logged and reported in the response, but never hides the send's result.
 - AC: rate-limited; both transports covered by tests against a fake listener.
 - AC: it has no login of its own and relies on Cloud Run's invoker check; the README says so.
@@ -320,7 +323,8 @@ rate limit. It also forwards cuff requests to the cuff simulator (D10).
 - AC: the messages log lists stored HL7v2 messages newest first by send time and filters by the
   outcome labels; a message with no outcome label is reported as "pending". For a stored message
   the commit-level acknowledgment is `AA` by definition.
-- AC: the messages log is built from the send-attempt `AuditEvent`s (D12), newest first, joined
+- AC: the messages log is built from the send-attempt `AuditEvent`s in the audit FHIR store
+  (D12, D15), newest first, joined
   to the stored message and its outcome labels where the send was accepted. Rejected and
   unacknowledged attempts appear with their reason and raw ACK; a stored message with no
   AuditEvent (for example one sent straight to the adapter) is still listed.
@@ -386,11 +390,16 @@ the simulator can send. Pure Python, no GCP calls.
 - AC: a function reads an AuditEvent back into the fields the messages log needs.
 - AC: an example is added to `libs/pulsebridge_fhir/examples/` for the validator (T08).
 
-**T32 FHIR store write access for the cuff simulator.** The simulator writes AuditEvents (D12),
-so its service account needs to create resources in the FHIR store.
-- AC: `cuff-sim` gets the narrowest predefined role that allows it on the FHIR store only, and
-  nothing on any other resource; the module READMEs' tables are updated.
-- AC: `fhir-proxy` remains read-only on the FHIR store; a test asserts both.
+**T32 Audit FHIR store for send attempts.** The simulator writes AuditEvents (D12). So that it
+has no access to the store holding health data, they go to a second, separate FHIR store (D15).
+- AC: the healthcare module creates a second FHIR R4 store for audit data, with the same
+  deletion behaviour as the first and its IDs and paths as outputs.
+- AC: `cuff-sim` can write to the audit store and has no binding at all on the health-data
+  store; `fhir-proxy` is read-only on both stores; no other workload has access to the audit
+  store. Tests assert each of these.
+- AC: a static check fails if the module declares any FHIR or HL7v2 store IAM resource other
+  than the ones driven by the role table, or any authoritative binding or policy.
+- AC: the module READMEs say plainly what each role on each store allows, including reading.
 
 ## Wave 3: dashboard features and infrastructure for services
 
