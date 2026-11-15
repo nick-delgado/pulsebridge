@@ -268,6 +268,22 @@ expect_calls '^swapon ' 1 "reboot turns swap on again"
 expect_calls '^docker start (mariadb|mllp-adapter)$' 2 "reboot starts both stopped containers"
 expect_calls '^docker run ' 0 "reboot creates no new container"
 
+# -- Case: reboot with the data disk gone (detached). The sandbox keeps the old files under the mount
+# point, which a real VM would not (/mnt/disks is emptied on boot): MariaDB must still not start
+# on them. Two guards protect this (main's gate on the disk step and start_mariadb's own mount
+# check); this case fails only if both are broken.
+echo "== reboot without the data disk"
+cp -a "$SB" "$SB.keep"
+: > "$SB/state/calls.log"
+: > "$SB/state/proc_mounts"
+echo exited > "$SB/state/containers/mariadb/status"
+rm "$SB/dev/disk/by-id/google-edge-data"
+run_script
+expect_rc nonzero "reboot without disk"
+expect_calls '^docker (start|run) .*mariadb' 0 "does not start MariaDB on files that are not on the mounted disk"
+rm -rf "$SB"
+mv "$SB.keep" "$SB"
+
 # -- Case: configuration change (a new adapter flag or digest) -----------------------------------------
 echo "== adapter configuration changed"
 : > "$SB/state/calls.log"
