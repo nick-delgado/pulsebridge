@@ -142,9 +142,10 @@ before that limit, with a message saying what it was waiting for.
 2. **Pull** `<mirror>/openemr/openemr:8.5.0-2026-11-12@sha256:f9536d0b...` unless present, each
    attempt under `timeout` (at most 15 minutes), retried until the deadline.
 3. **Seed the sites directory** once: a bind mount, unlike an empty Docker volume, does not receive
-   the image's files, so on first boot the image's `sites/` is copied onto the data disk (into a
-   temporary directory, then moved into place, so an interrupted copy is never mistaken for a
-   seeded one).
+   the image's files, so on first boot the image's `sites/` directory itself is copied onto the
+   data disk (`cp -a`, keeping the image's owner and mode; a directory made by the hook, whose
+   umask is 077, would be unreadable for Apache's unprivileged user), into a temporary directory
+   and then moved into place, so an interrupted copy is never mistaken for a seeded one.
 4. **TLS certificate**: generated once for the VM's address (see "TLS"), kept on the data disk.
 5. **Apache settings**: spike S2's `apache-lowmem.conf` (four workers) written to the state
    directory and mounted read-only as `/etc/apache2/conf.d/zz-lowmem.conf`.
@@ -468,7 +469,7 @@ make tf-test    # runs everything below with Google credentials removed from the
   CI; the ubuntu-24.04 runner has them). Cases:
   - first boot: the exact `docker run` arguments; the passwords arrive in the container with
     trailing newlines stripped but are never arguments; the rule is added once and before OpenEMR
-    is created; the sites seed; the certificate's SAN; every HTTPS call verifies with `--cacert`;
+    is created; the sites seed; the seeded directory keeps the image's mode; the certificate's SAN; every HTTPS call verifies with `--cacert`;
     the registration body (private client, `private_key_jwt`, `client_credentials` only, the six
     scopes, a public-only JWKS whose `kid` is its RFC 7638 thumbprint); one upload; the uploaded
     key belongs to the registered public key, and the document's client ID, URLs and certificate
@@ -488,8 +489,9 @@ make tf-test    # runs everything below with Google credentials removed from the
   - time: OpenEMR never ready, every curl hanging, `docker pull` hanging, the database hanging, the
     wrong certificate served (reported once, no fallback to `--insecure`): each ends within the hook
     limit and no call ran without a time limit;
-  - upload failures (403 not retried, 503 retried to the deadline): no enabled client, the new
-    client deleted, no state file, no key left; the next boot succeeds.
+  - upload failures (403 not retried, 503 retried to the deadline), and the metadata server and
+    Secret Manager hanging during registration: no enabled client, the new client deleted, no
+    state file, no key left, no call without a time limit; the next boot succeeds.
 
 ## Not verified
 
