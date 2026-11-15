@@ -12,6 +12,22 @@
      },
      {
       "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-file",
+      "valueString": "@EXAMPLES@/auditevent-send-accepted-mllp.json"
+     }
+    ],
+    "issue": []
+   }
+  },
+  {
+   "resource": {
+    "resourceType": "OperationOutcome",
+    "extension": [
+     {
+      "url": "http://hl7.org/fhir/tools/StructureDefinition/validator-version",
+      "valueString": "FHIR Validation tool Version 7.0.4 (Git# 26ac5363b325). Built 2026-11-02T14:29:19.518Z (12 days old)"
+     },
+     {
+      "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-file",
       "valueString": "@EXAMPLES@/auditevent-send-accepted.json"
      }
     ],
@@ -197,7 +213,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 261
+        "valueInteger": 266
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -261,7 +277,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 261
+        "valueInteger": 266
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",

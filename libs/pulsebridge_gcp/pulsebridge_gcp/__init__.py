@@ -9,6 +9,7 @@ from pulsebridge_gcp.errors import (
     NotFoundError,
     PermissionDeniedError,
     RetryableError,
+    TimedOutError,
     operation_outcome_summary,
 )
 from pulsebridge_gcp.models import (
@@ -41,6 +42,7 @@ __all__ = [
     "PermissionDeniedError",
     "RequestsTransport",
     "RetryableError",
+    "TimedOutError",
     "Transport",
     "check_labels",
     "default_transport",

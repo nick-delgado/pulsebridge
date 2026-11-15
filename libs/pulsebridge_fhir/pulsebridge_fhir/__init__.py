@@ -13,6 +13,8 @@ written once by the setup step).
 """
 
 from pulsebridge_fhir.audit_event import (
+    MESSAGE_NAME_DERIVED,
+    MESSAGE_NAME_FROM_STORE,
     NotASendAttempt,
     SendAttemptRecord,
     UnreadableSendAttempt,
@@ -69,6 +71,8 @@ from pulsebridge_fhir.resources import (
 )
 
 __all__ = [
+    "MESSAGE_NAME_DERIVED",
+    "MESSAGE_NAME_FROM_STORE",
     "Acknowledged",
     "BloodPressureReading",
     "BuiltResource",

@@ -1,0 +1,31 @@
+# connect-google-health: the deployer's one-time (and weekly, in Testing status) Google Health
+# connect flow (task T11, decision D2). See README.md. Run it with ./connect.sh.
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pulsebridge-connect-google-health"
+version = "0.1.0"
+description = "Authorises a Google Health account for PulseBridge: OAuth client and refresh token into Secret Manager, the Patient record into the FHIR store."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  # The repository's own libraries (libs/), not on PyPI; connect.sh installs them from the
+  # checkout in the same pip command. Unpinned because they are versioned with this repository.
+  "pulsebridge-fhir",
+  "pulsebridge-gcp",
+  # Third-party, exact pins (CLAUDE.md). 2.31.0: released 2026-10-01; 2.32.0 (2026-11-05) was
+  # under two weeks old when this was written.
+  "google-cloud-secret-manager==2.31.0",
+  # The same versions as pulsebridge-gcp and health-sync.
+  "google-auth==2.62.0",
+  "requests==2.34.2",
+]
+
+[project.scripts]
+connect-google-health = "connect_google_health.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["connect_google_health"]

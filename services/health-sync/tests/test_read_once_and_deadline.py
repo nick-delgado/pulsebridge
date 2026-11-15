@@ -93,9 +93,10 @@ def test_nothing_changed_means_no_write_at_all(world):
     assert len(world.google.calls("GET", "/dataPoints")) == 1  # no lookup for nothing to write
 
 
-def test_changed_values_are_written_and_a_changed_final_window_is_counted_as_amended(world):
-    """T06's heart_rate_transaction cannot write ``amended``, so the window is written ``final``
-    with the new values (a silent amendment, README "Amendments") and counted."""
+def test_changed_values_are_written_and_a_changed_final_window_is_written_amended(world):
+    """A window stored ``final`` whose values changed is written ``amended`` (R4: "Subsequent to
+    being Final, the observation has been modified"; T33), not silently ``final`` again. A
+    preliminary window with new values stays preliminary."""
     world.fhir_transport.auto_store = True
     later_1300 = window("2026-01-15T13:00:00Z", 59, 61.5, 64)
     later_1430 = window("2026-01-15T14:30:00Z", 79, 80.5, 85)
@@ -109,9 +110,53 @@ def test_changed_values_are_written_and_a_changed_final_window_is_counted_as_ame
         for o in observations(world.bundles()[1])
     }
     assert statuses == {
-        "2026-01-15T08:00:00-05:00": ("final", 61.5),
+        "2026-01-15T08:00:00-05:00": ("amended", 61.5),
         "2026-01-15T09:30:00-05:00": ("preliminary", 80.5),
     }
+    # An amended window is a complete one.
+    assert (report.windows_final, report.windows_preliminary) == (1, 1)
+
+
+def test_an_amended_window_that_changes_again_is_amended_again_and_unchanged_is_left(world):
+    world.fhir_transport.auto_store = True
+    first = window("2026-01-15T13:00:00Z", 59, 61.5, 64)
+    second = window("2026-01-15T13:00:00Z", 58, 61.0, 64)
+    google(
+        world,
+        rollup_page([W1300]),
+        rollup_page([first]),
+        rollup_page([second]),
+        rollup_page([second]),
+    )
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    reports = [run(world) for _ in range(4)]
+    written = [
+        [(o["status"], o["valueQuantity"]["value"]) for o in observations(b)]
+        for b in world.bundles()
+    ]
+    assert written == [[("final", 61)], [("amended", 61.5)], [("amended", 61.0)]]
+    assert [r.windows_amended for r in reports] == [0, 1, 1, 0]
+    assert reports[3].windows_unchanged == 1  # stored amended, same values: not rewritten
+
+
+def test_a_stored_final_window_that_is_still_filling_again_is_held_then_amended(world):
+    # The cutoff moved back (FINAL_AFTER_MINUTES raised between runs): the window stored final
+    # is inside the "still filling" part again. It is not written back as preliminary (R4 has
+    # no path back from final, and it may have been shared); once complete again it is amended.
+    world.fhir_transport.auto_store = True
+    later_1430 = window("2026-01-15T14:30:00Z", 79, 80.5, 85)
+    google(world, rollup_page([W1430]), rollup_page([later_1430]), rollup_page([later_1430]))
+    world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
+    run(world, world.config(final_after=timedelta(0)))  # everything final
+    held = run(world)  # default 60 min: 14:30 would be preliminary again
+    assert len(world.bundles()) == 1  # nothing written
+    assert (held.windows_held_final, held.windows_amended, held.windows_written) == (1, 0, 0)
+    assert held.as_dict()["windows_held_final"] == 1
+    world.clock.now += timedelta(minutes=60)  # 14:35 is now before the cutoff
+    later = run(world)
+    (obs,) = observations(world.bundles()[1])
+    assert (obs["status"], obs["valueQuantity"]["value"]) == ("amended", 80.5)
+    assert (later.windows_amended, later.windows_held_final) == (1, 0)
 
 
 def test_the_stored_window_search_uses_standard_parameters(world):
@@ -255,7 +300,7 @@ def test_a_slow_fhir_store_does_not_starve_the_writes(world):
     report = run(world, fhir_transport=slow_fhir, google_transport=slow_google)
     assert report.outcome == Outcome.SYNCED
     assert (report.windows_written, report.bundles_written) == (1, 1)
-    assert report.stored_read == "failed:RetryableError"
+    assert report.stored_read == "failed:TimedOutError"
     assert slow_fhir.timeouts == [10, 60]  # the search capped, the Bundle at its full timeout
     assert world.clock.mono - begin == 70  # 5 token + 5 roll-up + 10 search + 5 device + 45
 

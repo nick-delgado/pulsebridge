@@ -38,8 +38,9 @@ services/cuff-sim/
 
 ## API
 
-Only `fhir-proxy` calls this service (D10). The paths and bodies are the dashboard's proposed
-contract (`web/src/api/contract.ts`), so the proxy can forward the body unchanged.
+Only `fhir-proxy` calls this service (D10). The paths and bodies are the dashboard's contract
+(`web/src/api/contract.ts`), which T34 brought in line with this service (`web/README.md`), so the
+proxy can forward the body unchanged.
 
 ### `POST /cuff/readings`
 
@@ -54,8 +55,9 @@ contract (`web/src/api/contract.ts`), so the proxy can forward the body unchange
 | `sendMalformed` | `null`, or the exact name (case-sensitive) of a sample from `GET /cuff/samples` that lists the chosen transport |
 | anything else | refused |
 
-The ranges are T07's, as the brief asks. The dashboard proposes narrower ones (`CUFF_BOUNDS`,
-60–250 / 30–150) and the mapper (T12) accepts systolic 50–300 and diastolic 20–200: a reading
+The ranges are T07's, as the brief asks; the dashboard's contract uses the same limits
+(`CUFF_SERVICE_LIMITS`, `web/README.md`). The mapper (T12) accepts systolic 50–300 and
+diastolic 20–200: a reading
 between the mapper's range and T07's is stored with `AA` and then gets the application-level
 outcome `out-of-range`, which is one of the D7 layers the demo can show.
 
@@ -77,7 +79,7 @@ the caller sent.
 | 500 | a built message failed HL7v2 validation (a bug: inputs and configuration were checked) | `structure` | no; no |
 | 500 | any other bug in the handler, logged by exception type only | `exception` | depends where it failed; no 500 can happen once the send has started (every reply and recording error is a result) |
 
-The 200 result (`CuffSendResult` in the contract, plus `result`, `framing` and
+The 200 result (`CuffSendResult` in the contract, with `result`, `framing` and
 `messageNameSource`):
 
 ```json
@@ -105,10 +107,6 @@ the ACK text) or `{received: false, why, httpStatus, detail, replyPrefixBase64}`
 sample's `missing_end_block` / `missing_final_cr`), `null` over HTTPS. `attemptId` is `null`
 only if the AuditEvent could not even be built.
 
-Differences from the contract, for T14 and T18: the three extra keys above; `attemptId` can be
-`null`; 413 is added; and the field is `sendMalformed` (the contract's spelling), where the work
-plan says `send_malformed`.
-
 ### `GET /cuff/samples`
 
 `[{"name", "label", "class", "transports"}]`: every T07 sample except the `valid` class, with
@@ -128,23 +126,33 @@ the manifest's description as `label`. Bad-framing samples list only `mllp`.
 
 ### A malformed sample
 
-The sample's exact bytes from T07's loader, **not validated**. Over MLLP the sample's own
-framing is kept (`wire_bytes`), so `noack_missing_end_block` really is sent without its end
-bytes. Over HTTPS only samples whose manifest lists `https` are accepted. The control ID is the
+The sample's bytes from T07's loader, **not validated**, with its PID segment rebuilt for the
+configured patient by T07's `Sample.with_patient` (T33): PID-3.1 `PATIENT_ID`, PID-3.4
+`PATIENT_ASSIGNING_AUTHORITY`, PID-5 the configured names, exactly as in a built reading.
+Every other byte, and so the sample's defect, is T07's. Over MLLP the sample's own framing is
+kept (`wire_bytes`), so `noack_missing_end_block` really is sent without its end bytes. Over HTTPS only samples whose manifest lists `https` are accepted. The control ID is the
 sample's own MSH-10 read with hl7apy, or `null` when hl7apy cannot read the sample (no MSH,
 line-feed terminators).
 
 What to expect from samples, because their bytes are fixed:
 
-- **The patient differs between the bytes and the record.** The sample's PID-3 is T07's
-  synthetic `SYN-000123`; the AuditEvent names the configured `PATIENT_ID`, the patient the
-  simulator acts for. With any other `PATIENT_ID`, a parseable sample may end in the mapper's
-  `unknown-patient` instead of its own reason. This stays until T07 offers a way to substitute
-  the patient (`with_patient`); the change here is then one line, marked `FOLLOW-UP` in
-  `CuffSimulator.prepare` (`service.py`).
+- **The bytes name the configured patient, as the AuditEvent does**, for every sample T07 can
+  substitute. So with any `PATIENT_ID` (set the mapper's to the same value), a "parses but
+  cannot be mapped" sample ends in its own reason, not `unknown-patient`:
+  `unmappable_unknown_obx3_code` (`unknown-obx-3-code`), `unmappable_missing_obx14`
+  (`missing-obx-14`), `unmappable_non_numeric_obx5` (`non-numeric-obx-5`) and
+  `invalid_obx14_not_hl7_date` (`invalid-obx-14`) among them. `tests/test_sample_patient.py`
+  runs the bytes `prepare` returns through `v2-to-fhir`'s mapper configured for another patient.
+  T07 leaves seven samples unchanged, so they still carry `SYN-000123`:
+  `invalid_missing_pid3` (its empty PID-3 is the defect; the mapper's reason,
+  `missing-patient-identifier`, does not depend on the patient), `unmappable_msh_only` and
+  `unmappable_bare_msh` (no PID; their reasons come before the patient check), and the four
+  `unparseable_*` samples, which the store rejects with `AE` before any mapper sees them. For
+  those seven the AuditEvent's patient and the bytes still differ.
 - **Sending the same sample twice stores one message.** The store deduplicates on exact bytes
   (spike S5): the second send gets `AA` with the same message name and publishes no second
-  notification, so the mapper runs once. Two AuditEvents are recorded, differing only in their
+  notification, so the mapper runs once. (With the patient substituted, "the same bytes" means the
+  same sample and the same configured patient.) Two AuditEvents are recorded, differing only in their
   send time (and their id, which includes it).
 - **No malformed sample is mappable.** Each is rejected by the store (`AE`), gets no
   acknowledgment, or is stored and then ends with the mapper's application-level outcome
@@ -152,12 +160,13 @@ What to expect from samples, because their bytes are fixed:
 - **Samples share control IDs.** For example `invalid_missing_pid3` and
   `invalid_obx14_not_hl7_date` both carry `SYN-BAD-0001`, and every `unparseable` sample has
   none. A sample's control ID is not a key for anything.
-- **Same-millisecond collision.** T31's AuditEvent id is derived from the sender, the
-  transport, MSH-10 and the send time in milliseconds. Two sends of samples with the same
-  control ID (or none) on the same transport in the same millisecond, for example from two
-  instances, get one id, and the second write replaces the first (T31: "last write wins"; the
-  store's history keeps both versions). Built readings cannot collide: each has a new control
-  ID.
+- **Same-millisecond sends.** T31's AuditEvent id is derived from the sender, the transport,
+  MSH-10, the send time in milliseconds and (T33) the sample name. So two *different* samples
+  with the same control ID (or none), sent on one transport in the same millisecond, for
+  example by two instances, get two ids. Only the *same* sample sent twice in one millisecond
+  shares an id; those are the same bytes to the same store, which keeps one message, and the
+  audit store's history keeps both versions ("last write wins"). Built readings cannot
+  collide: each has a new control ID.
 
 ### MLLP
 
@@ -179,7 +188,7 @@ the VM's IP address (T22).
 | closed with no data (S4: the adapter's API call failed) | `why: connection-closed` |
 | closed after part of a frame, or reset | `why: connection-closed` |
 | nothing before the deadline (S4: bad framing), or bytes trickling | `why: timeout` |
-| a frame that `parse_ack` refuses or cannot read (it can raise more than `AckParseError`), over 4096 bytes, or holding an MLLP control byte | `why: unreadable-reply` (first bytes kept when there are any) |
+| a frame that `parse_ack` refuses (since T33 it raises only `AckParseError`; the service still treats any exception from it as unreadable), over 4096 bytes, or holding an MLLP control byte | `why: unreadable-reply` (first bytes kept when there are any) |
 | connection refused on every address, host not resolvable | `why: connection-closed` |
 | connect or write not done before the deadline | `why: timeout` |
 
@@ -192,9 +201,12 @@ on one message ingested over HTTPS, that the id after `/messages/` is the URL-sa
 SHA-256 of the message bytes. For an accepted (AA) MLLP send the service returns
 `<store>/messages/<urlsafe-b64(sha256(bytes inside the frame))>` with
 `messageNameSource: "derived-sha256-unverified"`. It is **unverified** beyond that one message
-and for the MLLP path; confirm on the first deployment (T25) by listing the store. It is not
-written into the AuditEvent until T31 has a field for a derived name; that is then a one-line
-change, marked `FOLLOW-UP` in `CuffSimulator.send` (`service.py`).
+and for the MLLP path; confirm on the first deployment (T25) by listing the store. The
+AuditEvent records it **marked as derived** (T33): T31's `derived_message_name`, written as the
+detail `derived-message-name` and never as the message entity's `what`, which holds only a name
+the store returned. `parse_send_attempt` gives it back as `derived_message_name` with
+`message_name_source == "derived"`, so the messages log (T14) can join the attempt to its
+stored message by it, confirm it with a `get`, and show it as derived.
 
 ### HTTPS
 
@@ -214,10 +226,11 @@ The ACK bytes over HTTPS have no MLLP frame and no trailing `\r`; `parse_ack` do
 one.
 
 **A failure with no HTTP status** has no dedicated reason in T31's closed set (`api-error`
-requires 400–599). `pulsebridge_gcp`'s `RequestsTransport` raises `RetryableError(status=None)`
-with the original exception chained as `__cause__`, and the service reads it:
+requires 400–599). `pulsebridge_gcp`'s `RequestsTransport` raises `RetryableError(status=None)`,
+and for a connect or read timeout its subclass `TimedOutError` (T33). The service tells them
+apart by class alone (it no longer inspects `__cause__`):
 
-- a `requests.Timeout` (connect or read) is `timeout`. After a read timeout the request was
+- `TimedOutError` is `timeout`. After a read timeout the request was
   sent, so the message **may have been stored**: that is exactly what "no acknowledgment" means.
 - anything else is `connection-closed`: refused or reset, DNS, and a failure to refresh the
   access token. The exchange ended with no reply of any kind, as for a refused MLLP connection.
@@ -234,7 +247,7 @@ service never accepts or forwards FHIR from a caller.
 
 | Attempt | `outcome` | Details on `entity[1]` |
 | --- | --- | --- |
-| AA | `0` | `transport`, `MSH-10`, `MSA-1` AA, `ack-message` (base64), `what` = stored message name (HTTPS only) |
+| AA | `0` | `transport`, `MSH-10`, `MSA-1` AA, `ack-message` (base64); HTTPS: `what` = the stored message name the ingest response returned; MLLP: `derived-message-name` = the name derived from the bytes (no `what`) |
 | AE | `4` | the same, plus `MSA-3` with the store's reason; no message name |
 | no acknowledgment | `8` | `no-ack-reason`, `http-status` for `api-error`, `unreadable-reply-bytes` for `unreadable-reply` |
 | any malformed sample | as above | plus `malformed-sample` = the sample name |
@@ -331,6 +344,12 @@ refused by name before hl7apy can raise an error that prints it. Timeouts are pl
 gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "cuff_sim.app:create_app()"
 ```
 
+- **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
+  `0.0.0.0:$PORT` when `PORT` is set and no `--bind` is given, the same result as the command
+  above without a shell to expand it. The image also sets
+  `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
+  requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
+  this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
 - For T24's container: install `libs/pulsebridge_fhir`, `libs/pulsebridge_hl7v2` and
   `libs/pulsebridge_gcp` before this package. They are declared by name only and are not on
   PyPI. T07's samples are package data of `pulsebridge_hl7v2` and must be installed with it.

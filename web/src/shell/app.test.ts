@@ -78,7 +78,7 @@ describe('app against the mock client', () => {
     expect(el.querySelector('header')).not.toBeNull();
     expect(el.querySelector('main')).not.toBeNull();
     expect(el.querySelector('svg[role="img"]')).not.toBeNull();
-    expect(el.querySelector('.status-strip')?.textContent).toContain('Last sync');
+    expect(el.querySelector('.status-strip')?.textContent).toContain('Newest watch data');
   });
 
   it('a token already in the session skips the login form; logout clears it', async () => {

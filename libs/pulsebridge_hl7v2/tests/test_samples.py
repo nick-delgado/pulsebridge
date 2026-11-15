@@ -224,3 +224,170 @@ def test_a_malformed_manifest_entry_is_refused():
         _sample_from_json(raw)
     with pytest.raises(ValueError, match="exactly its transports"):
         _sample_from_json(dict(raw, transports=["mllp", "https"]))
+
+
+# ---- with_patient (T33) -----------------------------------------------------------------------
+
+from dataclasses import replace  # noqa: E402
+
+from pulsebridge_hl7v2 import Patient  # noqa: E402
+
+OTHER = Patient(
+    identifier="PB-OTHER-0042",
+    assigning_authority="OTHERAUTH",
+    family_name="Example",
+    given_name="Avery",
+)
+# The samples whose PID must not or cannot be replaced, and why (Sample.with_patient docstring).
+UNCHANGED = {
+    "unparseable_no_msh",  # no MSH: no separators
+    "unparseable_lf_terminators",  # hl7apy cannot split the segments
+    "unparseable_crlf_terminators",
+    "unparseable_separator_mismatch",  # hl7apy refuses the header
+    "invalid_missing_pid3",  # the PID is the defect
+    "unmappable_msh_only",  # no PID
+    "unmappable_bare_msh",
+}
+
+
+@pytest.mark.parametrize("sample", ALL, ids=IDS)
+def test_with_patient_changes_only_the_pid_segment(sample):
+    changed = sample.with_patient(OTHER)
+    assert sample.accepts_patient is (sample.name not in UNCHANGED)
+    if sample.name in UNCHANGED:
+        assert changed is sample
+        return
+    index = next(i for i, seg in enumerate(sample.segments) if seg.startswith("PID"))
+    assert changed.segments[index] == "PID|1||PB-OTHER-0042^^^OTHERAUTH^MR||Example^Avery"
+    # Every other segment, the terminators, the framing, the class and the expectations: as is.
+    assert changed == replace(sample, segments=changed.segments)
+    others = [seg for i, seg in enumerate(changed.segments) if i != index]
+    assert others == [seg for i, seg in enumerate(sample.segments) if i != index]
+    # On the wire: the bytes before and after the PID are the original bytes exactly, so a
+    # broken frame stays broken.
+    before, _, after = sample.wire_bytes.partition(sample.segments[index].encode("ascii"))
+    assert changed.wire_bytes == before + changed.segments[index].encode("ascii") + after
+
+
+def test_with_patient_keeps_the_sample_defect_where_a_layer_checks_it():
+    # The layers this package can check give the same answer after substitution.
+    for sample in ALL:
+        changed = sample.with_patient(OTHER)
+        assert _validation(changed) == _validation(sample), sample.name
+        assert _tolerant_parse(changed) == _tolerant_parse(sample), sample.name
+        assert _frame_completes(changed) == _frame_completes(sample), sample.name
+
+
+def _validation(sample) -> str:
+    try:
+        validate_oru_r01(sample.payload)
+    except (HL7ValidationError, HL7ParseError):
+        return "fail"
+    return "pass"
+
+
+def _tolerant_parse(sample) -> str:
+    try:
+        parse_er7(sample.payload)
+    except HL7ParseError:
+        return "error"
+    return "ok"
+
+
+def _frame_completes(sample) -> bool:
+    return bool(MllpDecoder().feed(sample.wire_bytes))
+
+
+def test_with_patient_reads_back_as_the_new_patient_with_hl7apy():
+    message = parse_er7(load("unmappable_missing_obx14").with_patient(OTHER).payload)
+    pid = message.oru_r01_patient_result.oru_r01_patient.pid  # grouped by the ORU_R01 structure
+    assert pid.pid_3.cx_1.to_er7() == "PB-OTHER-0042"
+    assert pid.pid_3.cx_4.to_er7() == "OTHERAUTH"
+    assert pid.pid_5.to_er7() == "Example^Avery"
+
+
+def test_with_patient_escapes_separators_in_patient_values():
+    # A name with HL7 separators in it becomes escape sequences (2.5.1 section 2.7), never new
+    # components or fields: the builder's rule.
+    odd = replace(OTHER, family_name="O|Brien^&", given_name="Ann~Marie")
+    pid = load("unmappable_unknown_obx3_code").with_patient(odd).segments[1]
+    assert pid == "PID|1||PB-OTHER-0042^^^OTHERAUTH^MR||O\\F\\Brien\\S\\\\T\\^Ann\\R\\Marie"
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [replace(OTHER, identifier=""), replace(OTHER, given_name="A\\F\\B"), "PB-OTHER-0042"],
+)
+def test_with_patient_refuses_unusable_patient_values_for_every_sample(bad):
+    for name in ("unmappable_missing_obx14", "invalid_missing_pid3"):
+        with pytest.raises((ValueError, TypeError)):
+            load(name).with_patient(bad)
+
+
+def test_with_patient_leaves_a_pid_written_with_other_separators_alone():
+    # MSH declares "|", the PID uses "#": hl7apy would read one long PID-1, and rewriting it
+    # would repair the defect. No shipped sample is like this, so one is made here.
+    # hl7apy reads this PID's PID-3.1 as "y" and writes the segment back with "|" for the "#".
+    sample = load("unmappable_missing_obx14")
+    pid = "PID#1##SYN-000123|x|y|SYN-1^^^A^MR"
+    odd = replace(sample, segments=(sample.segments[0], pid, *sample.segments[2:]))
+    assert not odd.accepts_patient
+    assert odd.with_patient(OTHER) is odd
+
+
+def test_with_patient_leaves_a_sample_with_two_pid_segments_alone():
+    # Which PID would be "the" patient? Replacing one would leave a mixed message.
+    sample = load("unmappable_missing_obx14")
+    two = replace(sample, segments=(*sample.segments[:2], sample.segments[1], *sample.segments[2:]))
+    assert not two.accepts_patient
+    assert two.with_patient(OTHER) is two
+
+
+def test_with_patient_leaves_a_sample_whose_segments_do_not_line_up_alone():
+    # One manifest entry holding two segments: hl7apy's segment positions are not the
+    # manifest's, so no manifest entry may be replaced.
+    sample = load("unmappable_missing_obx14")
+    joined = replace(sample, segments=("\r".join(sample.segments[:2]),))
+    assert not joined.accepts_patient
+    assert joined.with_patient(OTHER) is joined
+
+
+def test_with_patient_leaves_a_header_hl7apy_crashes_on_alone():
+    # hl7apy 1.3.5 raises IndexError for a five-character MSH-2 with no MSH-12 (see ack.py).
+    sample = load("unmappable_missing_obx14")
+    odd = replace(sample, segments=("MSH|^~\\&#|CUFFSIM", *sample.segments[1:]))
+    assert not odd.accepts_patient
+    assert odd.with_patient(OTHER) is odd
+
+
+def test_with_patient_writes_the_new_pid_with_the_sample_own_separators():
+    # A sample declaring "#" as field and "$" as component separator (MSH-1, MSH-2): the new PID
+    # uses them, and a separator inside a name is escaped with them (\F\, \S\).
+    sample = load("unmappable_missing_obx14")
+    table = str.maketrans({"|": "#", "^": "$"})
+    odd = replace(sample, segments=tuple(seg.translate(table) for seg in sample.segments))
+    assert odd.segments[0].startswith("MSH#$~\\&#")
+    patient = replace(OTHER, family_name="O#Brien", given_name="Ann$Marie")
+    changed = odd.with_patient(patient)
+    assert changed.segments[1] == "PID#1##PB-OTHER-0042$$$OTHERAUTH$MR##O\\F\\Brien$Ann\\S\\Marie"
+    assert changed.segments[2:] == odd.segments[2:]
+
+
+def test_with_patient_keeps_only_pid_1_3_and_5():
+    # Other PID fields (here PID-7 birth date, PID-8 sex) and further PID-3 repetitions are not
+    # carried over: the new PID is the builder's (samples README).
+    sample = load("unmappable_missing_obx14")
+    full = "PID|1||SYN-000123^^^PULSEBRIDGE^MR~OTHER-9^^^X^MR||TESTPATIENT^SYNTHIA||19800412|F"
+    rich = replace(sample, segments=(sample.segments[0], full, *sample.segments[2:]))
+    assert rich.with_patient(OTHER).segments[1] == (
+        "PID|1||PB-OTHER-0042^^^OTHERAUTH^MR||Example^Avery"
+    )
+
+
+def test_with_patient_leaves_a_pid_with_trailing_empty_fields_alone():
+    # hl7apy drops trailing empty fields when it writes the PID back, so the bytes differ.
+    sample = load("unmappable_missing_obx14")
+    pid = "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA|||"
+    trailing = replace(sample, segments=(sample.segments[0], pid, *sample.segments[2:]))
+    assert not trailing.accepts_patient
+    assert trailing.with_patient(OTHER) is trailing

@@ -12,6 +12,87 @@
      },
      {
       "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-file",
+      "valueString": "@EXAMPLES@/auditevent-send-accepted-mllp.json"
+     }
+    ],
+    "issue": [
+     {
+      "extension": [
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
+        "valueInteger": 10
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
+        "valueInteger": 6
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-source",
+        "valueString": "TerminologyEngine"
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id",
+        "valueCode": "Terminology_TX_NoValid_13"
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-context",
+        "valueString": "http://hl7.org/fhir/StructureDefinition/AuditEvent|4.0.1"
+       }
+      ],
+      "severity": "warning",
+      "code": "code-invalid",
+      "details": {
+       "text": "The Coding provided (http://terminology.hl7.org/CodeSystem/v2-0003#R01) was not found in the value set 'Audit Event Sub-Type' (http://hl7.org/fhir/ValueSet/audit-event-sub-type|4.0.1), and a code SHALL come from this value set unless it has no suitable code (note that the validator cannot judge what is suitable).  (error message = The provided code 'http://terminology.hl7.org/CodeSystem/v2-0003#R01 ('ORU/ACK - Unsolicited transmission of an observation message')' was not found in the value set 'http://hl7.org/fhir/ValueSet/audit-event-sub-type|4.0.1')"
+      },
+      "expression": [
+       "AuditEvent.subtype[0]"
+      ]
+     },
+     {
+      "extension": [
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
+        "valueInteger": 1
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
+        "valueInteger": 2
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-source",
+        "valueString": "InstanceValidator"
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id",
+        "valueCode": "http://hl7.org/fhir/StructureDefinition/DomainResource#dom-6"
+       },
+       {
+        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-context",
+        "valueString": "http://hl7.org/fhir/StructureDefinition/AuditEvent|4.0.1"
+       }
+      ],
+      "severity": "warning",
+      "code": "invariant",
+      "details": {
+       "text": "Constraint failed: dom-6: 'A resource should have narrative for robust management' (defined in http://hl7.org/fhir/StructureDefinition/DomainResource) (Best Practice Recommendation)"
+      },
+      "expression": [
+       "AuditEvent"
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "resource": {
+    "resourceType": "OperationOutcome",
+    "extension": [
+     {
+      "url": "http://hl7.org/fhir/tools/StructureDefinition/validator-version",
+      "valueString": "FHIR Validation tool Version 7.0.4 (Git# 26ac5363b325). Built 2026-11-02T14:29:19.518Z (12 days old)"
+     },
+     {
+      "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-file",
       "valueString": "@EXAMPLES@/auditevent-send-accepted.json"
      }
     ],
@@ -472,35 +553,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 70
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
-        "valueInteger": 8
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-source",
-        "valueString": "InstanceValidator"
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id",
-        "valueCode": "All_observations_should_have_a_performer"
-       }
-      ],
-      "severity": "warning",
-      "code": "invalid",
-      "details": {
-       "text": "Best Practice Recommendation: In general, all observations should have a performer"
-      },
-      "expression": [
-       "Bundle.entry[2].resource/*Observation/null*/"
-      ]
-     },
-     {
-      "extension": [
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 160
+        "valueInteger": 165
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -709,7 +762,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 119
+        "valueInteger": 124
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -741,7 +794,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 137
+        "valueInteger": 142
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -773,35 +826,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 61
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
-        "valueInteger": 8
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-source",
-        "valueString": "InstanceValidator"
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id",
-        "valueCode": "All_observations_should_have_a_performer"
-       }
-      ],
-      "severity": "warning",
-      "code": "invalid",
-      "details": {
-       "text": "Best Practice Recommendation: In general, all observations should have a performer"
-      },
-      "expression": [
-       "Bundle.entry[2].resource/*Observation/null*/"
-      ]
-     },
-     {
-      "extension": [
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 194
+        "valueInteger": 199
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -833,7 +858,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 163
+        "valueInteger": 168
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -865,7 +890,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 261
+        "valueInteger": 266
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -897,7 +922,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 319
+        "valueInteger": 329
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -929,7 +954,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 337
+        "valueInteger": 347
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -961,35 +986,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 261
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
-        "valueInteger": 8
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-source",
-        "valueString": "InstanceValidator"
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id",
-        "valueCode": "All_observations_should_have_a_performer"
-       }
-      ],
-      "severity": "warning",
-      "code": "invalid",
-      "details": {
-       "text": "Best Practice Recommendation: In general, all observations should have a performer"
-      },
-      "expression": [
-       "Bundle.entry[4].resource/*Observation/null*/"
-      ]
-     },
-     {
-      "extension": [
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 394
+        "valueInteger": 404
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1021,7 +1018,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 363
+        "valueInteger": 373
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1085,7 +1082,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 261
+        "valueInteger": 266
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1355,34 +1352,6 @@
       "expression": [
        "Observation"
       ]
-     },
-     {
-      "extension": [
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 1
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
-        "valueInteger": 2
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-source",
-        "valueString": "InstanceValidator"
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id",
-        "valueCode": "All_observations_should_have_a_performer"
-       }
-      ],
-      "severity": "warning",
-      "code": "invalid",
-      "details": {
-       "text": "Best Practice Recommendation: In general, all observations should have a performer"
-      },
-      "expression": [
-       "Observation"
-      ]
      }
     ]
    }
@@ -1405,7 +1374,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 69
+        "valueInteger": 74
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1437,7 +1406,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 69
+        "valueInteger": 74
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1529,7 +1498,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 59
+        "valueInteger": 64
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1561,7 +1530,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 69
+        "valueInteger": 74
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1593,7 +1562,7 @@
       "extension": [
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 77
+        "valueInteger": 82
        },
        {
         "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
@@ -1619,34 +1588,6 @@
       },
       "expression": [
        "Observation.component[1].code"
-      ]
-     },
-     {
-      "extension": [
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line",
-        "valueInteger": 1
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col",
-        "valueInteger": 2
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-source",
-        "valueString": "InstanceValidator"
-       },
-       {
-        "url": "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id",
-        "valueCode": "All_observations_should_have_a_performer"
-       }
-      ],
-      "severity": "warning",
-      "code": "invalid",
-      "details": {
-       "text": "Best Practice Recommendation: In general, all observations should have a performer"
-      },
-      "expression": [
-       "Observation"
       ]
      }
     ]

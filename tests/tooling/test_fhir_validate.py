@@ -125,9 +125,9 @@ def test_committed_examples_report_passes_with_only_expected_warnings(tmp_path: 
     _, report = stage(tmp_path, "real-expected-warnings-only.json", examples=EXAMPLES)
     result = run_script("--report-only", report)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "41 warning(s) (41 expected, 0 new)" in result.stdout
+    assert "38 warning(s) (38 expected, 0 new)" in result.stdout
     # Warnings are visible, not hidden: each one is printed with its location and message.
-    assert result.stdout.count("warning, expected (") == 41
+    assert result.stdout.count("warning, expected (") == 38
     assert "http://loinc.org#96935-2" in result.stdout
     # Every entry in the expected list is still needed.
     assert "did not occur" not in result.stdout
@@ -170,7 +170,7 @@ def test_an_error_cannot_be_allow_listed(tmp_path: Path) -> None:
     )
     assert result.returncode == 1, result.stdout + result.stderr
     assert "1 ERROR/FATAL" in result.stdout
-    assert "(42 expected, 0 new)" in result.stdout  # the warning entry did apply; the error not
+    assert "(39 expected, 0 new)" in result.stdout  # the warning entry did apply; the error not
 
 
 def test_severity_key_is_refused_in_the_expected_file(tmp_path: Path) -> None:
@@ -221,7 +221,7 @@ def test_a_new_warning_fails_the_run(tmp_path: Path) -> None:
     assert result.returncode == 1, result.stdout + result.stderr
     assert "WARNING, NEW (not in the expected list)" in result.stdout
     assert "URN reference is not locally contained within the bundle" in result.stdout
-    assert "(41 expected, 1 new)" in result.stdout
+    assert "(38 expected, 1 new)" in result.stdout
     assert "Result: FAIL, 1 new warning(s)" in result.stdout
 
 
@@ -240,7 +240,7 @@ def test_removing_an_expected_entry_makes_its_warnings_new(tmp_path: Path) -> No
     entries = [e for e in repo_expected_entries() if e["id"] != "hr-minimum-component-code"]
     result = run_script("--report-only", report, "--expected", write_expected(tmp_path, entries))
     assert result.returncode == 1
-    assert "(38 expected, 3 new)" in result.stdout
+    assert "(35 expected, 3 new)" in result.stdout
 
 
 def test_an_unused_expected_entry_is_reported_but_does_not_fail(tmp_path: Path) -> None:
@@ -295,7 +295,7 @@ def test_github_annotations_for_errors(tmp_path: Path) -> None:
     )
     assert result.returncode == 1
     assert "::error file=" in result.stdout and "beats/mnute" in result.stdout
-    assert "| 13 | 1 |" in summary.read_text()
+    assert "| 14 | 1 |" in summary.read_text()
 
 
 # --- Checksum of the validator jar ---------------------------------------------------------------
@@ -444,7 +444,7 @@ def test_default_directory_is_the_library_examples() -> None:
     assert result.returncode == 0
     listed = [Path(line).name for line in result.stdout.splitlines()]
     assert listed == sorted(p.name for p in EXAMPLES.glob("*.json"))
-    assert len(listed) == 13
+    assert len(listed) == 14
 
 
 def test_make_target_runs_the_script() -> None:
@@ -547,7 +547,7 @@ def test_look_alike_warnings_are_new(tmp_path: Path, mutate) -> None:
     examples, report = mutated_report(tmp_path, mutate)
     result = run_script("--report-only", report, examples)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert "41 warning(s) (40 expected, 1 new)" in result.stdout
+    assert "38 warning(s) (37 expected, 1 new)" in result.stdout
     assert "Result: FAIL, 1 new warning(s)" in result.stdout
 
 
@@ -587,7 +587,7 @@ def test_a_terminology_only_entry_does_not_apply_offline(tmp_path: Path) -> None
     expected = write_expected(tmp_path, entries)
     result = run_script("--report-only", report, "--offline", "--expected", expected, examples)
     assert result.returncode == 1, result.stdout + result.stderr
-    assert "(31 expected, 4 new)" in result.stdout
+    assert "(28 expected, 4 new)" in result.stdout
     # With "when": "always" (the committed file) the same offline run passes.
     assert run_script("--report-only", report, "--offline", examples).returncode == 0
 

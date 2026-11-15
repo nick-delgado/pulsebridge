@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from pulsebridge_gcp.errors import RetryableError
+from pulsebridge_gcp.errors import RetryableError, TimedOutError
 
 # Query parameters: a mapping, or (name, value) pairs when a name repeats (FHIR search).
 Params = Mapping[str, str] | Sequence[tuple[str, str]] | None
@@ -81,8 +81,12 @@ class RequestsTransport:
             response = self._session.request(  # type: ignore[attr-defined]
                 method, url, params=params, data=body, headers=dict(headers), timeout=timeout
             )
+        except requests.Timeout as exc:
+            # ConnectTimeout or ReadTimeout (requests applies ``timeout`` to each phase). Checked
+            # before RequestException, of which it is a subclass.
+            raise TimedOutError(operation, None, server_message=type(exc).__name__) from exc
         except requests.RequestException as exc:
-            # Connection refused, reset, DNS failure, read timeout: no HTTP status to judge by.
+            # Connection refused, reset, DNS failure: no HTTP status to judge by.
             raise RetryableError(operation, None, server_message=type(exc).__name__) from exc
         except google.auth.exceptions.GoogleAuthError as exc:
             # The access token could not be refreshed (for example the metadata server did not

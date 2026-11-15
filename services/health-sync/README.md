@@ -55,7 +55,7 @@ ignored. The answer is the run report as JSON (counts, UTC range bounds and code
  "ranges_completed": 1, "complete_before": "2026-01-15T14:05:00Z", "pages": 1,
  "windows_fetched": 36, "windows_empty": 0, "windows_invalid": 0,
  "windows_unchanged": 33, "windows_new": 3, "windows_changed": 0, "windows_finalised": 3,
- "windows_amended": 0, "windows_withdrawn_kept": 0, "windows_written": 6, "windows_final": 3, "windows_preliminary": 3,
+ "windows_amended": 0, "windows_withdrawn_kept": 0, "windows_held_final": 0, "windows_written": 6, "windows_final": 3, "windows_preliminary": 3,
  "bundles_written": 1, "stored_read": "ok", "stranded_preliminary": 0,
  "google_statuses": [200], "fhir_status": null, "fhir_issues": [], "token_refreshes": 1,
  "refresh_token_rotated": false, "scope_not_listed": false,
@@ -370,15 +370,31 @@ runs twelve consecutive runs and checks no window is written more than twice.
 ### Amendments
 
 R4 `amended`: "Subsequent to being Final, the observation has been modified". A window already
-stored `final` whose values change (a late sample arrived more than 60 minutes after the window
-ended) should be written `amended`. **T06's `heart_rate_transaction`, which this service must use,
-cannot write `amended`**: it gives each window `final` or `preliminary` from the cutoff. Until it
-can, such a window is written **`final` with the new values: a silent amendment.** The run counts
-them (`windows_amended`), and the store's version history keeps the earlier values. The API change
-proposed for T06 is a keyword on `heart_rate_transaction` (and `heart_rate_resources`):
-`amended: Collection[datetime] = ()`, the UTC start times of windows to write with status
-`amended` instead of `final`. (T06's lower-level `build_heart_rate_observation` already accepts
-`amended`.)
+stored `final` (or `amended`) whose values change (a late sample arrived more than 60 minutes
+after the window ended) is written **`amended`** with the new values (T33). The plan
+(`stored.plan_writes`) collects those windows' keys, and each Bundle passes their start times to
+T06's `heart_rate_transaction(..., amended=...)`. The Observation keeps its key, so the
+conditional update replaces the stored one; the store's version history keeps the earlier
+values. The run counts them (`windows_amended`), and they are also counted in `windows_final`
+(complete windows: `final` or `amended`).
+
+- **Amended again.** A window stored `amended` whose values change again is written `amended`
+  again; with the same values it is left alone (`windows_unchanged`).
+- **Held: a final window that is still filling again.** If the cutoff moves back between runs
+  (**raising `FINAL_AFTER_MINUTES` does this**), a window stored `final` can be inside the
+  "still filling" part of the range. It is never written back as `preliminary`: R4 has no path
+  from `final` back to `preliminary`, and the window may already have been shared with the
+  clinic. T06 also refuses `amended` for a window that is not complete. So the window is **not
+  written**: the stored `final` stays, the run counts it (`windows_held_final`), and once the
+  cutoff passes it again a later run writes it `amended` with the new values.
+- **When the read fails** (`stored_read` not `ok`), nothing is known about what is stored, so
+  every window is written with the status the cutoff gives (`final` or `preliminary`), as
+  before: a window that was `amended` goes back to `final` until its values change again, and
+  after `FINAL_AFTER_MINUTES` was raised a stored `final` window inside the new "still filling"
+  part could be written `preliminary`. Only a successful read can prevent that.
+- **The dashboard** treats `amended` like other non-final statuses: drawn on the solid line,
+  described as "status amended: not shared (only final is)" (`web/src/heart-rate`). So an
+  amended window cannot be shared with the clinic (T15 shares only `final`).
 
 **Longer-term option, not built:** write each window by a deterministic id
 (`PUT Observation/<key>`, update-as-create) instead of a conditional update. It would let the
@@ -478,7 +494,7 @@ One JSON object per line on stdout (stderr for the backfill). Logged: `event` (`
 `stranded-preliminary`, `stranded-count-failed`, `scope-not-listed`,
 `refresh-token-rotated`, `bug`), `outcome` and `reason` codes, the UTC range bounds and cutoff,
 counts (pages, windows fetched, empty, invalid, unchanged, new, changed, finalised, amended,
-withdrawn kept, written, final, preliminary, stranded, Bundles), HTTP statuses, retry attempts and delays,
+withdrawn kept, held final, written, final, preliminary, stranded, Bundles), HTTP statuses, retry attempts and delays,
 response status counts per resource type, durations. Never logged: heart-rate values, tokens,
 the client ID or secret, the patient id, the device name, response bodies, exception messages
 from the mapping (they can quote a value), or Google's free-text error descriptions. A test runs
@@ -491,6 +507,12 @@ synthetic secret, the patient id, the device name or the distinctive heart-rate 
 gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "health_sync.app:create_app()"
 ```
 
+- **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
+  `0.0.0.0:$PORT` when `PORT` is set and no `--bind` is given, the same result as the command
+  above without a shell to expand it. The image also sets
+  `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
+  requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
+  this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
 - Honours `PORT`. `--timeout 0` leaves request deadlines to Cloud Run.
 - Routes: `POST /sync`, `GET /status`.
 - For T24's container: install `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp` before this

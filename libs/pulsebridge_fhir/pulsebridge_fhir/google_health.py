@@ -11,7 +11,7 @@ tested without the API.
 """
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 
@@ -146,6 +146,42 @@ def window_status(window: HeartRateWindow, complete_before: datetime | None) -> 
     return "final" if window.end <= complete_before else "preliminary"
 
 
+def _amended_starts(
+    windows: list[HeartRateWindow],
+    amended: Collection[datetime],
+    complete_before: datetime | None,
+) -> set[datetime]:
+    """Validate ``amended`` against the batch; return the window starts as UTC instants.
+
+    R4 observation-status ``amended``: "Subsequent to being Final, the observation has been
+    modified". So a start named here must be a window of this batch (otherwise the caller meant
+    a different batch, and silently writing ``final`` would hide that), and that window must be
+    complete now (``final`` by ``complete_before``): a window still filling has not been final,
+    and ``amended`` would also claim it is complete.
+    """
+    if isinstance(amended, str | bytes | datetime) or not isinstance(amended, Collection):
+        raise FhirInputError("amended must be a collection of window start times (datetimes)")
+    by_start = {window.start: window for window in windows}
+    starts: set[datetime] = set()
+    for start in amended:
+        if not isinstance(start, datetime) or start.utcoffset() is None:
+            raise FhirInputError(f"amended: {start!r} is not a datetime with a time zone")
+        utc = start.astimezone(UTC)
+        window = by_start.get(utc)
+        if window is None:
+            raise FhirInputError(
+                f"amended: no window in this batch starts at {utc.isoformat()}; "
+                "amended names windows of the batch being written"
+            )
+        if window_status(window, complete_before) != "final":
+            raise FhirInputError(
+                f"amended: the window starting at {utc.isoformat()} is not complete yet "
+                "(it would be preliminary); R4 'amended' means modified after being final"
+            )
+        starts.add(utc)
+    return starts
+
+
 def heart_rate_resources(
     windows: Iterable[HeartRateWindow],
     *,
@@ -155,17 +191,27 @@ def heart_rate_resources(
     tz: tzinfo,
     recorded: datetime,
     complete_before: datetime | None,
+    amended: Collection[datetime] = (),
     assembler: str = "PulseBridge health-sync",
 ) -> list[BuiltResource]:
-    """An Observation and its Provenance for each window, in input order."""
+    """An Observation and its Provenance for each window, in input order.
+
+    Status per window: ``preliminary`` if it ends after ``complete_before``, otherwise ``final``,
+    or ``amended`` if its start is in ``amended`` (see :func:`heart_rate_transaction`).
+    """
+    windows = list(windows)
+    amended_starts = _amended_starts(windows, amended, complete_before)
     out: list[BuiltResource] = []
     for window in windows:
+        status = window_status(window, complete_before)
+        if window.start in amended_starts:
+            status = "amended"  # checked above: the window is complete, so it would be final
         observation = build_heart_rate_observation(
             window,
             patient=patient,
             device=device,
             tz=tz,
-            status=window_status(window, complete_before),
+            status=status,
         )
         out.append(observation)
         out.append(
@@ -189,6 +235,7 @@ def heart_rate_transaction(
     tz: tzinfo,
     recorded: datetime,
     complete_before: datetime | None,
+    amended: Collection[datetime] = (),
     assembler: str = "PulseBridge health-sync",
 ) -> dict:
     """``health-sync`` (T10): Google roll-up JSON items to one ingest Bundle.
@@ -203,6 +250,13 @@ def heart_rate_transaction(
     - ``complete_before``: windows ending after this instant are written ``preliminary``. T10
       passes the start of the overlap it will re-request next run, so those windows are rewritten
       as ``final`` once they are complete. ``None`` writes every window ``final``.
+    - ``amended`` (T33): start times (time-zone aware; compared as UTC instants) of windows to
+      write with status ``amended`` instead of ``final``: windows the store already held as
+      ``final`` whose values have changed since (R4: "Subsequent to being Final, the observation
+      has been modified"). Each must be the start of a window in this batch, and that window
+      must be complete (``final`` by ``complete_before``); anything else raises
+      ``FhirInputError`` rather than being ignored. The Observation's key is unchanged, so the
+      conditional update replaces the stored one.
     """
     built_patient = build_patient(patient)
     built_device = build_device(device, patient=built_patient)
@@ -218,6 +272,7 @@ def heart_rate_transaction(
             tz=tz,
             recorded=recorded,
             complete_before=complete_before,
+            amended=amended,
             assembler=assembler,
         ),
     )

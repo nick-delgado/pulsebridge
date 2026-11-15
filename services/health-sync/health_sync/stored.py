@@ -218,6 +218,10 @@ class Plan:
     finalised: int
     amended: int
     withdrawn_kept: int = 0
+    # Stored final, values changed, but still filling by the cutoff: not written (T33 review).
+    held_final: int = 0
+    # Keys (heart_rate_key) of the windows in ``write`` to be written ``amended`` (T33).
+    amend_keys: frozenset[str] = frozenset()
 
 
 def plan_writes(
@@ -233,13 +237,20 @@ def plan_writes(
     - stored with the same end and values and the status it would get now, or already final
       with the same values: skip (unchanged);
     - stored preliminary, now complete, same values: write as final (finalised);
-    - stored final (or amended), values changed: write (amended; see the README for the status
-      it is written with);
+    - stored final (or amended), values changed, and complete now: write with status
+      ``amended`` (its key goes in ``amend_keys``; R4: "Subsequent to being Final, the
+      observation has been modified");
+    - stored final, values changed, but it would be ``preliminary`` now (the cutoff moved back,
+      for example ``FINAL_AFTER_MINUTES`` was raised): **not written**, the stored ``final`` is
+      kept (held_final). R4 has no path from ``final`` back to ``preliminary``, and the window
+      may already have been shared; T06 refuses ``amended`` for a window that is not complete.
+      Once the cutoff passes it, a later run writes it ``amended``;
     - stored ``entered-in-error`` or ``cancelled``: skip, whatever the values (withdrawn_kept);
     - otherwise (preliminary with new values): write (changed).
     """
     write: list[dict] = []
-    unchanged = new = changed = finalised = amended = withdrawn = 0
+    amend_keys: set[str] = set()
+    unchanged = new = changed = finalised = amended = withdrawn = held = 0
     for item in items:
         key, end, values = key_of(item)
         if stored is None or key not in stored:
@@ -255,11 +266,26 @@ def plan_writes(
         if same and (before.status == wanted or before.is_final):
             unchanged += 1
             continue
+        if before.is_final and wanted != "final":
+            # Changed after final, but still filling now: never write it back as preliminary.
+            held += 1
+            continue
         write.append(item)
         if same:
             finalised += 1
         elif before.is_final:
             amended += 1
+            amend_keys.add(key)
         else:
             changed += 1
-    return Plan(write, unchanged, new, changed, finalised, amended, withdrawn)
+    return Plan(
+        write,
+        unchanged,
+        new,
+        changed,
+        finalised,
+        amended,
+        withdrawn,
+        held_final=held,
+        amend_keys=frozenset(amend_keys),
+    )

@@ -33,7 +33,9 @@ test('login, regions, share button, log strip, no console errors', async ({ page
 
   // Landmarks and regions.
   await expect(page.getByRole('banner')).toBeVisible();
-  await expect(page.getByRole('region', { name: 'System status' })).toContainText('Last sync');
+  await expect(page.getByRole('region', { name: 'System status' })).toContainText(
+    'Newest watch data',
+  );
   await expect(page.getByRole('region', { name: 'Blood pressure' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Heart rate' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Share with clinic' })).toBeVisible();
@@ -55,7 +57,7 @@ test('login, regions, share button, log strip, no console errors', async ({ page
 
   // The messages-log strip starts collapsed, then expands and collapses.
   const toggle = page.getByRole('button', { name: /Messages log/ });
-  const log = page.locator('#messages-log');
+  const log = page.locator('#shell-messages-log');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await expect(log).toBeHidden();
   await toggle.click();

@@ -686,6 +686,21 @@ def test_any_hl7apy_failure_while_parsing_is_unparseable(monkeypatch, failure):
     assert run(load("valid_bp_reading").payload).reason is Reason.UNPARSEABLE_BY_MAPPER
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"MSH|^~\\&\xef\x88\xbf\r",  # non-ASCII fifth encoding character, no MSH-12 (T33)
+        b"MSH|^~\\&#|CUFFSIM|PB|PHR|PB|20261113205329||ORU^R01|X\rPID|1",  # five chars, no MSH-12
+        b"MSH|^~\\ \rPID|1",  # whitespace as an encoding character
+    ],
+)
+def test_headers_that_crashed_hl7apy_are_unparseable_by_mapper(raw):
+    # parse_er7 now raises HL7ParseError for these (it used to let hl7apy's IndexError out); the
+    # mapper's outcome is the same as before: unparseable-by-mapper.
+    result = run(raw)
+    assert (result.outcome, result.reason) == (Outcome.ERROR, Reason.UNPARSEABLE_BY_MAPPER)
+
+
 def test_a_fhir_builder_refusal_becomes_fhir_input_rejected(monkeypatch):
     def refuse(*_args, **_kwargs):
         raise FhirInputError("patient: family has leading or trailing whitespace")

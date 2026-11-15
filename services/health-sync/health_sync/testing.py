@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from pulsebridge_gcp import HealthcareClient, RetryableError
+from pulsebridge_gcp import HealthcareClient, TimedOutError
 from pulsebridge_gcp.testing import FakeTransport, RecordedRequest, json_response
 from pulsebridge_gcp.transport import HttpResponse
 
@@ -228,8 +228,9 @@ def _searchset(entries: Sequence[dict]) -> dict:
 @dataclass
 class SlowTransport:
     """Wraps a transport; every request takes ``latency`` seconds of the test clock. A request
-    whose timeout is shorter waits the timeout and then fails as a timeout would (no response),
-    so tests can check that a run's wall time stays inside its deadline."""
+    whose timeout is shorter waits the timeout and then fails as a timeout would (no response:
+    ``TimedOutError``, as pulsebridge_gcp's RequestsTransport raises for a timeout), so tests can
+    check that a run's wall time stays inside its deadline."""
 
     inner: object
     clock: Clock
@@ -240,7 +241,7 @@ class SlowTransport:
         self.timeouts.append(timeout)
         if self.latency > timeout:
             self.clock.mono += timeout
-            raise RetryableError(f"{method} {url}", None, server_message="Timeout")
+            raise TimedOutError(f"{method} {url}", None, server_message="ReadTimeout")
         self.clock.mono += self.latency
         return self.inner.request(  # type: ignore[attr-defined]
             method, url, params=params, body=body, headers=headers, timeout=timeout

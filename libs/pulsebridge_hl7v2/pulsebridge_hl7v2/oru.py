@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from hl7apy.consts import VALIDATION_LEVEL
-from hl7apy.core import Message
+from hl7apy.core import Message, Segment
 from hl7apy.factories import datatype_factory
 
 from .parsing import SEGMENT_TERMINATOR
@@ -139,6 +139,33 @@ def _value(datatype: str, text: str):
     )
 
 
+def check_patient(patient: Patient) -> None:
+    """Refuse patient values that cannot go into PID as plain text. Raises ``ValueError``."""
+    for name in (
+        "identifier",
+        "assigning_authority",
+        "identifier_type",
+        "family_name",
+        "given_name",
+    ):
+        _check_text(f"patient.{name}", getattr(patient, name))
+
+
+def fill_pid(pid: Segment, patient: Patient) -> None:
+    """Write ``patient`` into an empty hl7apy PID segment (patient identification, 2.5.1 ch. 3).
+
+    Shared by the ORU^R01 builder and :meth:`pulsebridge_hl7v2.samples.Sample.with_patient`, so a
+    sample's substituted PID has exactly the shape of a built reading's. Call
+    :func:`check_patient` first.
+    """
+    pid.pid_1 = "1"  # PID-1 set ID
+    pid.pid_3.cx_1 = _value("ST", patient.identifier)  # PID-3.1 ID number
+    pid.pid_3.cx_4.hd_1 = _value("IS", patient.assigning_authority)  # PID-3.4 authority
+    pid.pid_3.cx_5 = _value("ID", patient.identifier_type)  # PID-3.5 identifier type code
+    pid.pid_5.xpn_1.fn_1 = _value("ST", patient.family_name)  # PID-5.1 family name
+    pid.pid_5.xpn_2 = _value("ST", patient.given_name)  # PID-5.2 given name
+
+
 def _check_reading(reading: BloodPressureReading) -> None:
     for name, value in (
         ("systolic_mmhg", reading.systolic_mmhg),
@@ -177,14 +204,7 @@ def build_bp_oru_r01(
             "'.', '_' or '-'"
         )
     options = options or BuildOptions()
-    for name in (
-        "identifier",
-        "assigning_authority",
-        "identifier_type",
-        "family_name",
-        "given_name",
-    ):
-        _check_text(f"patient.{name}", getattr(patient, name))
+    check_patient(patient)
     for name in (
         "sending_application",
         "sending_facility",
@@ -223,13 +243,7 @@ def build_bp_oru_r01(
 
     # --- PID: patient identification, inside the PATIENT_RESULT / PATIENT groups.
     patient_result = msg.add_group("ORU_R01_PATIENT_RESULT")
-    pid = patient_result.add_group("ORU_R01_PATIENT").pid
-    pid.pid_1 = "1"  # PID-1 set ID
-    pid.pid_3.cx_1 = _value("ST", patient.identifier)  # PID-3.1 ID number
-    pid.pid_3.cx_4.hd_1 = _value("IS", patient.assigning_authority)  # PID-3.4 authority
-    pid.pid_3.cx_5 = _value("ID", patient.identifier_type)  # PID-3.5 identifier type code
-    pid.pid_5.xpn_1.fn_1 = _value("ST", patient.family_name)  # PID-5.1 family name
-    pid.pid_5.xpn_2 = _value("ST", patient.given_name)  # PID-5.2 given name
+    fill_pid(patient_result.add_group("ORU_R01_PATIENT").pid, patient)
 
     # --- OBR: the order/observation the results belong to.
     order = patient_result.add_group("ORU_R01_ORDER_OBSERVATION")

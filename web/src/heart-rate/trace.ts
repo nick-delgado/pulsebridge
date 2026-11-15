@@ -4,9 +4,9 @@
  * Two tabs (brief, "Trace panels"):
  *   - "FHIR as stored": the Observation, its Provenance (who and what produced it) and the Device
  *     (the watch), exactly as the client's trace call returns them, pretty-printed as text.
- *   - "Google Health JSON it came from": the roll-up window. PulseBridge does not keep raw API
- *     responses (web/README.md, open question 2), so the proxy rebuilds the window from the stored
- *     Observation's period, average, minimum and maximum; the panel says so.
+ *   - "Google Health JSON it came from": the roll-up window, labelled from the trace's
+ *     `source.kind`: `reconstructed` (today: PulseBridge keeps no raw API responses, so the proxy
+ *     rebuilds the window from the stored Observation), `original`, or `unknown` (no claim).
  *
  * Every value is shown with `codeBlock` / `el`, which only ever create text nodes, so a hostile
  * string inside a resource (a device name, a display text) is shown as characters, never markup.
@@ -129,15 +129,29 @@ function fillFhir(panel: HTMLElement, trace: HeartRateTrace): void {
   );
 }
 
+/** What the source tab says about where the window came from: the trace's own `source.kind`. */
+const SOURCE_NOTE = {
+  reconstructed:
+    'Reconstructed from the stored reading, not the original response: PulseBridge does not keep raw Google Health API responses. This is the roll-up window (dataPoints:rollUp, five-minute windows) rebuilt from the Observation’s period, average, minimum and maximum, in the shape the API returns.',
+  original:
+    'The original response: the roll-up window (dataPoints:rollUp, five-minute windows) exactly as the Google Health API returned it.',
+  unknown:
+    'The server did not say whether this roll-up window is the original Google Health response or a reconstruction from the stored reading.',
+} as const;
+
+const SOURCE_LABEL = {
+  reconstructed: 'Google Health roll-up window JSON (reconstructed)',
+  original: 'Google Health roll-up window JSON (original)',
+  unknown: 'Google Health roll-up window JSON',
+} as const;
+
 function fillSource(panel: HTMLElement, trace: HeartRateTrace): void {
+  const source = trace.source;
   replaceChildren(
     panel,
-    el('p', {
-      class: 'hr-trace__note',
-      text: 'Reconstructed from the stored reading, not the original response: PulseBridge does not keep raw Google Health API responses. This is the roll-up window (dataPoints:rollUp, five-minute windows) rebuilt from the Observation’s period, average, minimum and maximum, in the shape the API returns.',
-    }),
-    trace.source
-      ? codeBlock(trace.source, 'Google Health roll-up window JSON (reconstructed)')
+    source ? el('p', { class: 'hr-trace__note', text: SOURCE_NOTE[source.kind] }) : null,
+    source
+      ? codeBlock(source.window, SOURCE_LABEL[source.kind])
       : placeholder('The server did not return the source window for this reading.'),
   );
 }

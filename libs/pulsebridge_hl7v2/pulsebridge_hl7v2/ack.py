@@ -22,6 +22,25 @@ Shapes observed from the real HL7v2 store (spikes S4 and S5), all of which this 
   hl7apy refuses with ``UnsupportedVersion``. We then ask hl7apy to read the same segments as
   2.5.1 (``parse_segments`` with an explicit version); MSH and MSA have not changed shape in a way
   that matters for these three fields.
+
+**Only ``AckParseError`` escapes, for any input bytes.** hl7apy 1.3.5 has two header defects that
+raise plain Python errors instead of its own exceptions; both were found by a seeded fuzz test
+(``tests/test_ack.py``) and each is prevented in :mod:`pulsebridge_hl7v2.parsing` (shared with
+``parse_er7`` and the validator), not caught blindly:
+
+- ``hl7apy.parser._split_msh``: when MSH-2 holds five characters (HL7 2.7 added a fifth, the
+  truncation character) it compares MSH-12 with ``"2.7"`` without checking that the header has
+  twelve fields, so a 2.7-style header cut short (``MSH|^~\\&#|PHR|...|ACK|A|``) raises
+  ``IndexError``. ``parsing.message_info`` calls that reader first and turns exactly this
+  ``IndexError`` into ``HL7ParseError``, reported here as ``AckParseError``. The case first
+  reported, ``MSH^~MSH|`` (field separator ``^``, so "MSH-2" is ``~MSH|``), took the same path;
+  it is now refused one step earlier, because ``M`` is not a delimiter character (next point).
+- ``hl7apy.core.Message._get_encoding_chars``: the header reader accepts a space or other
+  whitespace as an encoding character, but when MSH-2 ends the header segment the segment
+  parser strips that trailing whitespace, so MSH-2 has three characters and reading the
+  separators raises ``IndexError`` (``MSH|^~\\<space>``). ``parsing.check_delimiters`` (part of
+  ``check_framing_text``) refuses such a header first, by the rule HL7 2.5.1 section 2.5.4 gives
+  for delimiters (no letters, digits or whitespace).
 """
 
 from __future__ import annotations
@@ -32,9 +51,15 @@ from enum import StrEnum
 from hl7apy import exceptions as hl7apy_exceptions
 from hl7apy.consts import VALIDATION_LEVEL
 from hl7apy.core import Message
-from hl7apy.parser import get_message_info, parse_message, parse_segments
+from hl7apy.parser import parse_message, parse_segments
 
-from .parsing import HL7ParseError, check_framing_text, decode_escapes, decode_payload
+from .parsing import (
+    HL7ParseError,
+    check_framing_text,
+    decode_escapes,
+    decode_payload,
+    message_info,
+)
 
 # Used only when an ACK names a version hl7apy does not know (see module docstring).
 FALLBACK_VERSION = "2.5.1"
@@ -79,10 +104,12 @@ class Ack:
 
 
 def _parse_tolerant(text: str) -> Message:
+    # check_framing_text has already applied the delimiter rule; message_info turns hl7apy's
+    # header crash into HL7ParseError, which parse_ack reports as AckParseError.
+    encoding_chars, _structure, _version = message_info(text)
     try:
         return parse_message(text, validation_level=VALIDATION_LEVEL.TOLERANT, find_groups=False)
     except hl7apy_exceptions.UnsupportedVersion:
-        encoding_chars, _structure, _version = get_message_info(text)
         message = Message(version=FALLBACK_VERSION, validation_level=VALIDATION_LEVEL.TOLERANT)
         message.children = parse_segments(
             text,

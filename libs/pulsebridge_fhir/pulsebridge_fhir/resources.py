@@ -440,6 +440,18 @@ def _check_status(status: str) -> None:
         )
 
 
+def _self_performed(patient: BuiltResource) -> list[dict]:
+    """``Observation.performer``: the Patient, because these readings are self-measured.
+
+    R4: performer is "who was responsible for asserting the observed value as 'true'", and
+    Patient is one of its allowed targets. Nobody else took the reading: the watch and the cuff
+    measured it (they are ``device`` and the Provenance performer agent), and the person wearing
+    them is the one it is about and the one who took it. Without it the validator adds the
+    best-practice warning "all observations should have a performer".
+    """
+    return [patient.reference()]
+
+
 def _observation(key: str, resource: dict) -> BuiltResource:
     return BuiltResource(resource=resource, full_url=urn_uuid(key), key=key)
 
@@ -482,6 +494,7 @@ def build_heart_rate_observation(
             "start": fhir_datetime(window.start, tz),
             "end": fhir_datetime(window.end, tz),
         },
+        "performer": _self_performed(patient),
         "valueQuantity": _quantity(window.bpm_avg, codes.UCUM_PER_MINUTE),
         "method": {
             "text": "Mean of the device's samples over effectivePeriod; "
@@ -528,6 +541,7 @@ def build_blood_pressure_observation(
         "code": {"coding": [dict(codes.BP_PANEL)], "text": "Blood pressure"},
         "subject": patient.reference(),
         "effectiveDateTime": fhir_datetime(reading.effective),
+        "performer": _self_performed(patient),
         "device": device.reference(),
         "component": [
             {
