@@ -53,9 +53,11 @@ resource "google_pubsub_subscription_iam_member" "pubsub_agent_ingest_subscriber
 # ---------------------------------------------------------------------------------------------
 
 locals {
-  # Which narrowest predefined role each account gets on each store. Keys are module
-  # identity's account names. Accounts absent from var.store_iam_service_accounts get nothing,
-  # and keys of that map not listed here (scheduler-invoker, pubsub-push, ...) are ignored.
+  # Which narrowest predefined role each account gets on each store: `fhir` is the main FHIR
+  # store (health data), `fhir_audit` the audit FHIR store (D15), `hl7v2` the HL7v2 store.
+  # Keys are module identity's account names. Accounts absent from
+  # var.store_iam_service_accounts get nothing, and keys of that map not listed here
+  # (scheduler-invoker, pubsub-push, ...) are ignored.
   # hl7V2Consumer is described by Google as "list and read HL7v2 messages, update message
   # labels, and publish new messages": it carries healthcare.hl7V2Messages.update, which
   # messages.patch (labels only) requires. hl7V2Editor would add delete and ingest.
@@ -71,21 +73,21 @@ locals {
       hl7v2 = "roles/healthcare.hl7V2Consumer"      # messages.get + messages.patch (outcome labels, S5)
     }
     "fhir-proxy" = {
-      fhir  = "roles/healthcare.fhirResourceReader" # search and read only
-      hl7v2 = "roles/healthcare.hl7V2Consumer"      # messages.list (label filter) + messages.get
+      fhir       = "roles/healthcare.fhirResourceReader" # search and read only
+      fhir_audit = "roles/healthcare.fhirResourceReader" # messages log: read AuditEvents (D12, D15)
+      hl7v2      = "roles/healthcare.hl7V2Consumer"      # messages.list (label filter) + messages.get
     }
     "edge-vm" = {
       hl7v2 = "roles/healthcare.hl7V2Ingest" # MLLP adapter -> messages:ingest
     }
     "cuff-sim" = {
-      # D12: the simulator records every send attempt as an AuditEvent (PUT AuditEvent/<id>,
-      # an update-as-create). fhirResourceEditor is the narrowest predefined role with
-      # healthcare.fhirResources.create/update. It is NOT limited to AuditEvent: Healthcare
-      # IAM permissions apply to the whole FHIR store, so no role, predefined or custom, is
-      # scoped to one resource type. Accepted because cuff-sim is not publicly invocable
-      # (D10); see the README's IAM section.
-      fhir  = "roles/healthcare.fhirResourceEditor" # write AuditEvent for each send attempt (D12)
-      hl7v2 = "roles/healthcare.hl7V2Ingest"        # HTTPS transport -> messages:ingest
+      # D15: the simulator records each send attempt as an AuditEvent (D12) in the audit store
+      # only, with PUT AuditEvent/<id>. It has no binding on the main FHIR store, which holds
+      # health data. fhirResourceEditor also lets it read, search and delete audit records;
+      # Google's role list shows no predefined FHIR role that writes without reading. See the
+      # README's IAM section.
+      fhir_audit = "roles/healthcare.fhirResourceEditor" # write AuditEvent per send attempt
+      hl7v2      = "roles/healthcare.hl7V2Ingest"        # HTTPS transport -> messages:ingest
     }
   }
 
@@ -101,6 +103,15 @@ locals {
     if contains(keys(var.store_iam_service_accounts), account) && contains(keys(roles), "fhir")
   }
 
+  fhir_audit_store_bindings = {
+    for account, roles in local.store_role_matrix :
+    account => {
+      role   = roles.fhir_audit
+      member = "serviceAccount:${var.store_iam_service_accounts[account]}"
+    }
+    if contains(keys(var.store_iam_service_accounts), account) && contains(keys(roles), "fhir_audit")
+  }
+
   hl7v2_store_bindings = {
     for account, roles in local.store_role_matrix :
     account => {
@@ -111,10 +122,21 @@ locals {
   }
 }
 
+# These three role-table-driven resources (app, audit, and the HL7v2 one below) are the only
+# store IAM this module may declare; tests/check_store_iam.sh fails on any other.
 resource "google_healthcare_fhir_store_iam_member" "app" {
   for_each = local.fhir_store_bindings
 
   fhir_store_id = google_healthcare_fhir_store.this.id
+  role          = each.value.role
+  member        = each.value.member
+}
+
+# Audit store (D15): only cuff-sim (editor) and fhir-proxy (reader).
+resource "google_healthcare_fhir_store_iam_member" "audit" {
+  for_each = local.fhir_audit_store_bindings
+
+  fhir_store_id = google_healthcare_fhir_store.audit.id
   role          = each.value.role
   member        = each.value.member
 }

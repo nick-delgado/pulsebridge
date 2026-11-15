@@ -37,6 +37,21 @@ output "fhir_base_url" {
   value       = "https://healthcare.googleapis.com/v1/${google_healthcare_fhir_store.this.id}/fhir"
 }
 
+output "audit_fhir_store_id" {
+  description = "Full resource path of the audit FHIR R4 store (send-attempt AuditEvents, D15): projects/{p}/locations/{l}/datasets/{d}/fhirStores/{s}."
+  value       = google_healthcare_fhir_store.audit.id
+}
+
+output "audit_fhir_store_name" {
+  description = "Short name of the audit FHIR store."
+  value       = google_healthcare_fhir_store.audit.name
+}
+
+output "audit_fhir_base_url" {
+  description = "FHIR REST base URL of the audit store (append e.g. /AuditEvent/<id>). The cuff simulator writes here (T13); fhir-proxy reads the messages log from here (T14)."
+  value       = "https://healthcare.googleapis.com/v1/${google_healthcare_fhir_store.audit.id}/fhir"
+}
+
 output "hl7v2_store_id" {
   description = "Full resource path of the HL7v2 store: projects/{p}/locations/{l}/datasets/{d}/hl7V2Stores/{s}. Prefix of every stored message name."
   value       = google_healthcare_hl7_v2_store.this.id
