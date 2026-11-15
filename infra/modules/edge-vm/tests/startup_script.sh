@@ -90,6 +90,7 @@ SECRET_ENTRIES=("$MARIADB_SECRET_ENTRY")
 HOOKS=""
 REAL_DATE=$(command -v date)
 REAL_CHMOD=$(command -v chmod)
+REAL_DD=$(command -v dd)
 
 # A fresh sandbox: fake bin directory, a 64 MiB blank fake disk, fake /proc files, and a
 # configuration block like the one Terraform renders, pointing at sandbox paths.
@@ -98,11 +99,11 @@ new_sandbox() {
   SB=$(mktemp -d)
   mkdir -p "$SB/bin" "$SB/state/hooks" "$SB/dev/disk/by-id" "$SB/mnt/disks" "$SB/stateful"
   local c real
-  for c in docker docker-credential-gcr curl blkid wipefs mkfs.ext4 fsck.ext4 resize2fs mount mkswap swapon fallocate sleep timeout date chmod; do
+  for c in docker docker-credential-gcr curl blkid wipefs mkfs.ext4 fsck.ext4 resize2fs mount mkswap swapon fallocate sleep timeout date chmod dd; do
     ln -s "$fake" "$SB/bin/$c"
   done
   # The real tools the script needs, and nothing else: no real mount, mkfs or docker is on PATH.
-  for c in awk base64 bash basename cat cp cut dd env flock grep head ls mkdir mv readlink rm sed sha256sum sort stat touch tr truncate wc; do
+  for c in awk base64 bash basename cat cp cut env flock grep head ls mkdir mv readlink rm sed sha256sum sort stat touch tr truncate wc; do
     real=$(command -v "$c") || {
       echo "test setup: $c not found" >&2
       exit 2
@@ -157,7 +158,7 @@ run_script() {
   cat "$SB/config.sh" "$script" > "$SB/startup.sh"
   RC=0
   env -i PATH="$SB/bin" FAKE_STATE="$SB/state" FAKE_SECRET="$FAKE_SECRET" FAKE_TOKEN="$FAKE_TOKEN" \
-    REAL_DATE="$REAL_DATE" REAL_CHMOD="$REAL_CHMOD" \
+    REAL_DATE="$REAL_DATE" REAL_CHMOD="$REAL_CHMOD" REAL_DD="$REAL_DD" \
     EDGE_PROC_MOUNTS="$SB/state/proc_mounts" EDGE_PROC_SWAPS="$SB/state/proc_swaps" \
     EDGE_POLL_SECONDS=10 EDGE_ADAPTER_CHECK_SECONDS=15 \
     "$@" bash "$SB/startup.sh" > "$SB/out.log" 2>&1 || RC=$?
@@ -425,6 +426,14 @@ mkdir "$SB/dev/disk/by-id/google-edge-data" # exists, but reading it fails like 
 run_script
 expect_rc nonzero "unreadable disk"
 expect_no_format "unreadable disk"
+
+for mode in error short; do
+  echo "== blkid exit 2, disk reports its size but reading it gives: $mode"
+  new_sandbox
+  run_script FAKE_DD_READ="$mode"
+  expect_rc nonzero "read $mode"
+  expect_no_format "read $mode"
+done
 
 echo "== blkid exit 2, reads as zeros but wipefs sees a signature"
 new_sandbox

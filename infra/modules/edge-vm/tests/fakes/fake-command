@@ -21,9 +21,12 @@
 #   FAKE_MARIADB_HEALTH=x     health status MariaDB reports (default healthy)
 #   FAKE_SECRET_MISSING=a,b   Secret Manager answers 404 for these file names ("all" for every one)
 #   FAKE_CHMOD_FAIL=1         chmod fails on the decoded secret's temporary file
+#   FAKE_DD_READ=error|short  reading the data disk with dd fails (I/O error) or returns fewer
+#                             bytes than asked (a short read), while its size still looks right
 #   FAKE_FSCK_RC=n            exit code of fsck.ext4
 #   FAKE_SECRET, FAKE_TOKEN   the secret value and access token the fakes hand out
-#   REAL_DATE, REAL_CHMOD     paths of the real date and chmod
+#   REAL_DATE, REAL_CHMOD,    paths of the real date, chmod and dd
+#   REAL_DD
 
 set -uo pipefail
 
@@ -239,6 +242,22 @@ case "$cmd" in
     fi
     ;;
   sleep) clock_add "${1%.*}" ;;
+  dd)
+    # Only reads of the data disk (if=.../google-edge-data) are affected by FAKE_DD_READ.
+    if [[ " $* " == *" if="*google-edge-data* ]]; then
+      case "${FAKE_DD_READ:-}" in
+        error)
+          echo "dd: error reading: Input/output error" >&2
+          exit 1
+          ;;
+        short)
+          "$REAL_DD" "$@" | head -c 1048576
+          exit 0
+          ;;
+      esac
+    fi
+    exec "$REAL_DD" "$@"
+    ;;
   chmod)
     if [ "${FAKE_CHMOD_FAIL:-0}" = 1 ] && [[ "${*: -1}" == *.decoded.tmp ]]; then
       echo "chmod: changing permissions: Operation not permitted" >&2
