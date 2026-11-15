@@ -358,3 +358,36 @@ def test_with_patient_leaves_a_header_hl7apy_crashes_on_alone():
     odd = replace(sample, segments=("MSH|^~\\&#|CUFFSIM", *sample.segments[1:]))
     assert not odd.accepts_patient
     assert odd.with_patient(OTHER) is odd
+
+
+def test_with_patient_writes_the_new_pid_with_the_sample_own_separators():
+    # A sample declaring "#" as field and "$" as component separator (MSH-1, MSH-2): the new PID
+    # uses them, and a separator inside a name is escaped with them (\F\, \S\).
+    sample = load("unmappable_missing_obx14")
+    table = str.maketrans({"|": "#", "^": "$"})
+    odd = replace(sample, segments=tuple(seg.translate(table) for seg in sample.segments))
+    assert odd.segments[0].startswith("MSH#$~\\&#")
+    patient = replace(OTHER, family_name="O#Brien", given_name="Ann$Marie")
+    changed = odd.with_patient(patient)
+    assert changed.segments[1] == "PID#1##PB-OTHER-0042$$$OTHERAUTH$MR##O\\F\\Brien$Ann\\S\\Marie"
+    assert changed.segments[2:] == odd.segments[2:]
+
+
+def test_with_patient_keeps_only_pid_1_3_and_5():
+    # Other PID fields (here PID-7 birth date, PID-8 sex) and further PID-3 repetitions are not
+    # carried over: the new PID is the builder's (samples README).
+    sample = load("unmappable_missing_obx14")
+    full = "PID|1||SYN-000123^^^PULSEBRIDGE^MR~OTHER-9^^^X^MR||TESTPATIENT^SYNTHIA||19800412|F"
+    rich = replace(sample, segments=(sample.segments[0], full, *sample.segments[2:]))
+    assert rich.with_patient(OTHER).segments[1] == (
+        "PID|1||PB-OTHER-0042^^^OTHERAUTH^MR||Example^Avery"
+    )
+
+
+def test_with_patient_leaves_a_pid_with_trailing_empty_fields_alone():
+    # hl7apy drops trailing empty fields when it writes the PID back, so the bytes differ.
+    sample = load("unmappable_missing_obx14")
+    pid = "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA|||"
+    trailing = replace(sample, segments=(sample.segments[0], pid, *sample.segments[2:]))
+    assert not trailing.accepts_patient
+    assert trailing.with_patient(OTHER) is trailing

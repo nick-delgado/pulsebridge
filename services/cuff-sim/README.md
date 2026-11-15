@@ -38,8 +38,9 @@ services/cuff-sim/
 
 ## API
 
-Only `fhir-proxy` calls this service (D10). The paths and bodies are the dashboard's proposed
-contract (`web/src/api/contract.ts`), so the proxy can forward the body unchanged.
+Only `fhir-proxy` calls this service (D10). The paths and bodies are the dashboard's contract
+(`web/src/api/contract.ts`), which T34 brought in line with this service (`web/README.md`), so the
+proxy can forward the body unchanged.
 
 ### `POST /cuff/readings`
 
@@ -54,8 +55,9 @@ contract (`web/src/api/contract.ts`), so the proxy can forward the body unchange
 | `sendMalformed` | `null`, or the exact name (case-sensitive) of a sample from `GET /cuff/samples` that lists the chosen transport |
 | anything else | refused |
 
-The ranges are T07's, as the brief asks. The dashboard proposes narrower ones (`CUFF_BOUNDS`,
-60–250 / 30–150) and the mapper (T12) accepts systolic 50–300 and diastolic 20–200: a reading
+The ranges are T07's, as the brief asks; the dashboard's contract uses the same limits
+(`CUFF_SERVICE_LIMITS`, `web/README.md`). The mapper (T12) accepts systolic 50–300 and
+diastolic 20–200: a reading
 between the mapper's range and T07's is stored with `AA` and then gets the application-level
 outcome `out-of-range`, which is one of the D7 layers the demo can show.
 
@@ -77,7 +79,7 @@ the caller sent.
 | 500 | a built message failed HL7v2 validation (a bug: inputs and configuration were checked) | `structure` | no; no |
 | 500 | any other bug in the handler, logged by exception type only | `exception` | depends where it failed; no 500 can happen once the send has started (every reply and recording error is a result) |
 
-The 200 result (`CuffSendResult` in the contract, plus `result`, `framing` and
+The 200 result (`CuffSendResult` in the contract, with `result`, `framing` and
 `messageNameSource`):
 
 ```json
@@ -104,10 +106,6 @@ the ACK text) or `{received: false, why, httpStatus, detail, replyPrefixBase64}`
 (AE/AR/CE/CR) or `no-acknowledgment`. `framing` is the MLLP framing used (`standard`, or a
 sample's `missing_end_block` / `missing_final_cr`), `null` over HTTPS. `attemptId` is `null`
 only if the AuditEvent could not even be built.
-
-Differences from the contract, for T14 and T18: the three extra keys above; `attemptId` can be
-`null`; 413 is added; and the field is `sendMalformed` (the contract's spelling), where the work
-plan says `send_malformed`.
 
 ### `GET /cuff/samples`
 
@@ -346,6 +344,12 @@ refused by name before hl7apy can raise an error that prints it. Timeouts are pl
 gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "cuff_sim.app:create_app()"
 ```
 
+- **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
+  `0.0.0.0:$PORT` when `PORT` is set and no `--bind` is given, the same result as the command
+  above without a shell to expand it. The image also sets
+  `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
+  requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
+  this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
 - For T24's container: install `libs/pulsebridge_fhir`, `libs/pulsebridge_hl7v2` and
   `libs/pulsebridge_gcp` before this package. They are declared by name only and are not on
   PyPI. T07's samples are package data of `pulsebridge_hl7v2` and must be installed with it.

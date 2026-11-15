@@ -268,6 +268,7 @@ class RunReport:
     windows_finalised: int = 0
     windows_amended: int = 0
     windows_withdrawn_kept: int = 0
+    windows_held_final: int = 0
     windows_written: int = 0
     windows_final: int = 0
     windows_preliminary: int = 0
@@ -307,6 +308,7 @@ class RunReport:
             "windows_finalised": self.windows_finalised,
             "windows_amended": self.windows_amended,
             "windows_withdrawn_kept": self.windows_withdrawn_kept,
+            "windows_held_final": self.windows_held_final,
             "windows_written": self.windows_written,
             "windows_final": self.windows_final,
             "windows_preliminary": self.windows_preliminary,
@@ -633,6 +635,7 @@ def _apply(report: RunReport, plan: Plan) -> None:
     report.windows_finalised += plan.finalised
     report.windows_amended += plan.amended
     report.windows_withdrawn_kept += plan.withdrawn_kept
+    report.windows_held_final += plan.held_final
 
 
 def _sync_one(run: _Run, piece: TimeRange) -> None:

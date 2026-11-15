@@ -218,8 +218,9 @@ needs (spike S1).
 
 Share only Observations with `status: final`. A `preliminary` window can still change in our
 store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observation, replace
-`subject` **and `performer`** (both name our Patient, T33) with OpenEMR's Patient, add
-`encounter`, and drop `device`, `meta` and `identifier` (OpenEMR discards them). Units are already exactly `/min` and `mm[Hg]`.
+`subject` with OpenEMR's Patient, add `encounter`, and **drop** `performer`, `device`, `meta`
+and `identifier`. OpenEMR discards them (spike S1), and `performer` (T33) names the Patient in
+our store, so dropping it means no internal Patient reference leaves PulseBridge. Units are already exactly `/min` and `mm[Hg]`.
 
 ## Design decisions
 
@@ -359,8 +360,8 @@ observed value as 'true'" and allows a Patient there. These readings are self-me
 person wearing the watch, or putting on the cuff, is the one they are about and the one who took
 them. The devices are recorded where devices belong (`Observation.device`, and the Provenance
 `performer` agent). Without a performer the validator adds a best-practice warning ("all
-observations should have a performer"). A clinic copy must have it replaced, like `subject`
-(see "Share to OpenEMR").
+observations should have a performer"). The copy shared with the clinic drops it (see "Share to
+OpenEMR").
 
 ### No narrative (`text`)
 

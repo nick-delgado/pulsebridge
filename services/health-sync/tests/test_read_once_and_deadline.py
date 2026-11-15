@@ -139,18 +139,24 @@ def test_an_amended_window_that_changes_again_is_amended_again_and_unchanged_is_
     assert reports[3].windows_unchanged == 1  # stored amended, same values: not rewritten
 
 
-def test_a_stored_final_window_that_is_preliminary_again_is_not_written_amended(world):
-    # The cutoff moved back (FINAL_AFTER_MINUTES raised between runs): T06 refuses "amended" for
-    # a window that is not complete, so it is written preliminary with its new values.
+def test_a_stored_final_window_that_is_still_filling_again_is_held_then_amended(world):
+    # The cutoff moved back (FINAL_AFTER_MINUTES raised between runs): the window stored final
+    # is inside the "still filling" part again. It is not written back as preliminary (R4 has
+    # no path back from final, and it may have been shared); once complete again it is amended.
     world.fhir_transport.auto_store = True
     later_1430 = window("2026-01-15T14:30:00Z", 79, 80.5, 85)
-    google(world, rollup_page([W1430]), rollup_page([later_1430]))
+    google(world, rollup_page([W1430]), rollup_page([later_1430]), rollup_page([later_1430]))
     world.fhir_transport.add("POST", FHIR_PATH, fhir_ok())
     run(world, world.config(final_after=timedelta(0)))  # everything final
-    report = run(world)  # default: 14:30 is preliminary again
+    held = run(world)  # default 60 min: 14:30 would be preliminary again
+    assert len(world.bundles()) == 1  # nothing written
+    assert (held.windows_held_final, held.windows_amended, held.windows_written) == (1, 0, 0)
+    assert held.as_dict()["windows_held_final"] == 1
+    world.clock.now += timedelta(minutes=60)  # 14:35 is now before the cutoff
+    later = run(world)
     (obs,) = observations(world.bundles()[1])
-    assert (obs["status"], obs["valueQuantity"]["value"]) == ("preliminary", 80.5)
-    assert (report.windows_amended, report.windows_changed) == (0, 1)
+    assert (obs["status"], obs["valueQuantity"]["value"]) == ("amended", 80.5)
+    assert (later.windows_amended, later.windows_held_final) == (1, 0)
 
 
 def test_the_stored_window_search_uses_standard_parameters(world):
@@ -294,7 +300,7 @@ def test_a_slow_fhir_store_does_not_starve_the_writes(world):
     report = run(world, fhir_transport=slow_fhir, google_transport=slow_google)
     assert report.outcome == Outcome.SYNCED
     assert (report.windows_written, report.bundles_written) == (1, 1)
-    assert report.stored_read == "failed:RetryableError"
+    assert report.stored_read == "failed:TimedOutError"
     assert slow_fhir.timeouts == [10, 60]  # the search capped, the Bundle at its full timeout
     assert world.clock.mono - begin == 70  # 5 token + 5 roll-up + 10 search + 5 device + 45
 

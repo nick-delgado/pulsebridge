@@ -49,6 +49,11 @@ load("unmappable_missing_obx14").with_patient(other).segments[1]
 - **Only PID changes.** Every other segment, the terminators, the MLLP framing, the name, class
   and expected outcomes are kept byte for byte, so the sample's deliberate defect is untouched
   (tests compare every sample's other bytes and its validation, parse and framing outcomes).
+- **The new PID is the builder's, not an edit of the old one.** It holds PID-1 (set ID), PID-3
+  (one repetition: identifier, assigning authority, type `MR`) and PID-5 (family and given
+  name), written with the sample's own separators (MSH-1 and MSH-2). Any other PID field
+  (a birth date in PID-7, sex in PID-8, further PID-3 repetitions) is dropped. No shipped
+  sample has one.
 - **Returned unchanged** (the same object; `sample.accepts_patient` is `False`) when the PID
   cannot or must not be replaced:
 
@@ -60,9 +65,10 @@ load("unmappable_missing_obx14").with_patient(other).segments[1]
 | `invalid_missing_pid3` | PID-3.1 is empty: the missing identifier **is** the defect |
 | `unmappable_msh_only`, `unmappable_bare_msh` | no PID segment |
 
-A sample is also left alone if hl7apy does not read its PID back as the same bytes (a PID
-written with other separators than MSH declares) or it has two PID segments; no shipped sample
-does either. The unparseable samples never reach the mapper (the store answers `AE`), so their
+A sample is also left alone, with `accepts_patient` `False`, if hl7apy does not read its PID
+back as the same bytes: a PID written with other separators than MSH declares, or one ending in
+empty fields (`PID|1||...||NAME|||`), which hl7apy writes back without them. The same goes for
+a sample with two PID segments. No shipped sample is like this. The unparseable samples never reach the mapper (the store answers `AE`), so their
 patient does not matter there.
 
 The other twelve, including the four "send malformed" samples whose intended mapper reason the
