@@ -20,6 +20,7 @@ and the metadata server address points at a closed port.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -39,6 +40,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 DOCKER = os.environ.get("DOCKER", "docker")
+# The CA bundle given to `make images` as the pip_cert build secret, if any.
+PIP_CERT = os.environ.get("IMAGE_PIP_CERT", "")
 PREFIX = os.environ.get("IMAGE_PREFIX", "pulsebridge")
 TAG = os.environ.get("IMAGE_TAG", "local")
 SMOKE_PORT = "9123"  # deliberately not the 8080 default: proves PORT is honoured
@@ -61,13 +64,34 @@ COMMON = {
 }
 
 
+# Run inside the image (`python -c <script> <size> <sha256>`): print every regular file with
+# exactly that size and SHA-256, i.e. a copy of the given file anywhere in the image.
+SAME_FILE_SCAN = """
+import hashlib, os, sys
+
+size, digest = int(sys.argv[1]), sys.argv[2]
+for root, dirs, files in os.walk("/"):
+    if root.startswith(("/proc", "/sys", "/dev")):
+        dirs[:] = []
+        continue
+    for name in files:
+        path = os.path.join(root, name)
+        try:
+            if os.path.isfile(path) and not os.path.islink(path) and os.path.getsize(path) == size:
+                with open(path, "rb") as f:
+                    if hashlib.sha256(f.read()).hexdigest() == digest:
+                        print(path)
+        except OSError:
+            pass
+"""
+
 # Run inside the image (`python -c`): print every path that should not be in a service image.
 # The kernel's pseudo filesystems are skipped.
 STRAY_FILE_SCAN = """
 import os
 
 STRAY_NAMES = {".git", ".env", ".venv", "node_modules", "pip"}
-STRAY_SUFFIXES = (".pem", ".key", ".p12", ".tfstate", ".tfvars", ".tfplan")
+STRAY_SUFFIXES = (".pem", ".key", ".crt", ".p12", ".tfstate", ".tfvars", ".tfplan")
 
 
 def is_credential_json(name):
@@ -339,3 +363,62 @@ def test_every_image_has_a_smoke_case() -> None:
     root = Path(__file__).resolve().parents[2]
     services = sorted(p.parent.name for p in (root / "services").glob("*/Dockerfile"))
     assert sorted(CASES) == services, "add a Case for each new image"
+
+
+def test_code_is_owned_by_root_and_read_only_to_the_app_user(case: Case) -> None:
+    # Runs as the image's own user: nothing under /opt/venv may be owned by anyone but root or
+    # be writable by that user, so the running service cannot change its own code.
+    result = docker(
+        "run",
+        "--rm",
+        "--entrypoint",
+        "find",
+        image(case.service),
+        "/opt/venv",
+        "(",
+        "!",
+        "-user",
+        "0",
+        "-o",
+        "!",
+        "-group",
+        "0",
+        "-o",
+        "-writable",
+        ")",
+        "-print",
+    )
+    assert result.stdout.strip() == "", result.stdout[:2000]
+
+
+@pytest.mark.skipif(not PIP_CERT, reason="IMAGE_PIP_CERT not set: the images used no build secret")
+def test_the_pip_build_secret_is_not_in_the_image(case: Case) -> None:
+    # The CA bundle reaches the build only as a secret mount; no copy of it may be in a layer.
+    data = Path(PIP_CERT).read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    result = docker(
+        "run", "--rm", image(case.service), "python", "-c", SAME_FILE_SCAN, str(len(data)), digest
+    )
+    assert result.stdout.strip() == "", f"copies of {PIP_CERT} in the image: {result.stdout}"
+
+
+def test_effective_gunicorn_settings(case: Case) -> None:
+    # gunicorn's own view of the settings, from the image's CMD and environment: the README's
+    # arguments, PORT's default bind, and the two GUNICORN_CMD_ARGS settings.
+    cmd = json.loads(
+        docker("image", "inspect", "--format", "{{json .Config.Cmd}}", image(case.service)).stdout
+    )
+    result = docker(
+        "run", "--rm", image(case.service), cmd[0], "--print-config", *cmd[1:], check=False
+    )
+    settings = {}
+    for line in result.stdout.splitlines():
+        name, sep, value = line.partition("=")
+        if sep:
+            settings[name.strip()] = value.strip()
+    assert settings.get("bind") == "['0.0.0.0:8080']", result.stdout[-2000:]
+    assert settings.get("workers") == "1"
+    assert settings.get("threads") == "4"
+    assert settings.get("timeout") == "0"
+    assert settings.get("graceful_timeout") == "8", "Cloud Run kills 10 s after SIGTERM"
+    assert settings.get("control_socket_disable") == "True"

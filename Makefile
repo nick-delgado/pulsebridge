@@ -189,7 +189,8 @@ fhir-validate: ## FHIR Validator over the examples (needs Java 17+ and network; 
 #   make images                     build pulsebridge/<service>:local for every service
 #   make images-smoke               start each built image with fake configuration and probe it
 #   make images IMAGE_PIP_CERT=...  behind a TLS-inspecting proxy: a CA bundle for pip, passed as
-#                                   a build secret (never stored in a layer)
+#                                   a build secret (never stored in a layer); pass the same
+#                                   IMAGE_PIP_CERT to images-smoke to check no copy is in an image
 DOCKER ?= docker
 IMAGE_PREFIX ?= pulsebridge
 IMAGE_TAG ?= local
@@ -209,4 +210,5 @@ images: ## Build every service image locally with Docker (not in `check`)
 
 images-smoke: install ## Start each image built by `make images` and check it serves (not in `check`)
 	PULSEBRIDGE_IMAGE_SMOKE=1 IMAGE_PREFIX="$(IMAGE_PREFIX)" IMAGE_TAG="$(IMAGE_TAG)" DOCKER="$(DOCKER)" \
+		IMAGE_PIP_CERT="$(IMAGE_PIP_CERT)" \
 		$(BIN)/pytest tests/tooling/test_image_smoke.py

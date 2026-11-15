@@ -59,14 +59,18 @@ COPY --from=build /opt/venv /opt/venv
 # PYTHONUNBUFFERED: log lines reach Cloud Logging as they are written. PORT: Cloud Run sets it;
 # 8080 is the README's default. gunicorn binds 0.0.0.0:$PORT when PORT is set and --bind is not
 # given, which is the README's `--bind ":${PORT:-8080}"` without needing a shell.
-# GUNICORN_CMD_ARGS turns off gunicorn's control socket (gunicorn 25.1+): a local management
-# interface nothing in a container uses, which would otherwise try to create ~/.gunicorn and log
-# an error on every start.
+# GUNICORN_CMD_ARGS holds two settings the README's command leaves at gunicorn's defaults:
+# - --no-control-socket: gunicorn 25.1+ opens a local management socket nothing in a container
+#   uses; it would try to create ~/.gunicorn and log an error on every start.
+# - --graceful-timeout 8: on SIGTERM gunicorn lets requests finish for this long (default 30 s).
+#   Cloud Run sends SIGKILL 10 s after SIGTERM, so 8 s lets gunicorn exit cleanly first.
+# PORT must be a port number: an empty PORT is not supported (gunicorn stops with "'' is not a
+# valid port number").
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PORT=8080 \
-    GUNICORN_CMD_ARGS=--no-control-socket
+    GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"
 
 USER 10001:10001
 EXPOSE 8080
