@@ -55,7 +55,7 @@ test('login, regions, share button, log strip, no console errors', async ({ page
 
   // The messages-log strip starts collapsed, then expands and collapses.
   const toggle = page.getByRole('button', { name: /Messages log/ });
-  const log = page.locator('#messages-log');
+  const log = page.locator('#shell-messages-log');
   await expect(toggle).toHaveAttribute('aria-expanded', 'false');
   await expect(log).toBeHidden();
   await toggle.click();

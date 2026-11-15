@@ -31,7 +31,7 @@ function client(...responses: Response[]): HttpClient {
     session,
     onUnauthorized: () => undefined,
     origin: ORIGIN,
-    fetch: (() => Promise.resolve(responses.shift() ?? json(200, {}))),
+    fetch: () => Promise.resolve(responses.shift() ?? json(200, {})),
   });
 }
 
