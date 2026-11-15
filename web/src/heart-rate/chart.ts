@@ -6,9 +6,10 @@
  * and the browser test exercises this file for real.
  *
  * What is drawn, bottom to top:
- *   - a band between each window's minimum and maximum (the shaded range), series 3 and 4;
- *   - the line of five-minute averages of `final` windows, solid, series 1;
- *   - the line of provisional (not yet `final`) windows, dashed, with a marker on each, series 2;
+ *   - a band between each window's minimum and maximum (the shaded range, with thin edges),
+ *     series 1 and 2, drawn first so the averages stay on top at 30 days;
+ *   - the line of five-minute averages of windows that are not provisional, solid, series 3;
+ *   - the line of provisional windows, dashed, with a marker on each, series 4;
  *   - our own markers: the keyboard / hover cursor (a vertical line) and the selected point.
  * Null values break every line and the band, so a gap with no data stays a gap.
  *
@@ -142,10 +143,10 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
 
   const data = (m: ChartModel): uPlot.AlignedData => [
     m.series.x,
-    m.series.averageSettled,
-    m.series.averageProvisional,
     m.series.maximum,
     m.series.minimum,
+    m.series.averageSettled,
+    m.series.averageProvisional,
   ];
 
   const pointAt = (u: uPlot, left: number): number | null =>
@@ -215,6 +216,22 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
       series: [
         {},
         {
+          // The band's edges: thin lines in the muted text colour, which has at least 3:1
+          // contrast with the surface (WCAG 1.4.11); the fill between them is only a tint.
+          label: 'Maximum',
+          stroke: color.muted,
+          width: 1,
+          spanGaps: false,
+          points: { show: false },
+        },
+        {
+          label: 'Minimum',
+          stroke: color.muted,
+          width: 1,
+          spanGaps: false,
+          points: { show: false },
+        },
+        {
           label: 'Five-minute average (final)',
           stroke: color.line,
           width: 2,
@@ -235,24 +252,8 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
             fill: color.surface,
           },
         },
-        {
-          // The band's edges: thin lines in the muted text colour, which has at least 3:1
-          // contrast with the surface (WCAG 1.4.11); the fill between them is only a tint.
-          label: 'Maximum',
-          stroke: color.muted,
-          width: 1,
-          spanGaps: false,
-          points: { show: false },
-        },
-        {
-          label: 'Minimum',
-          stroke: color.muted,
-          width: 1,
-          spanGaps: false,
-          points: { show: false },
-        },
       ],
-      bands: [{ series: [3, 4], fill: () => withAlpha(color.line(), BAND_ALPHA) }],
+      bands: [{ series: [1, 2], fill: () => withAlpha(color.line(), BAND_ALPHA) }],
       axes: [
         {
           stroke: color.muted,
