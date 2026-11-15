@@ -1,0 +1,44 @@
+#!/bin/bash
+# shellcheck disable=SC2034 # both hooks share this configuration block and the library; each uses part of it
+# PulseBridge edge VM boot hook "${hook_name}" (Terraform module openemr, task T23).
+#
+# edge-vm stores this script in instance metadata (pulsebridge-hook-${hook_name}) and runs it as root
+# on EVERY boot, after the data disk is mounted and MariaDB is healthy, under `timeout`, with the
+# EDGE_* variables of its README ("The seam with T23") in the environment. Output goes to the
+# startup script's log: `sudo journalctl -u google-startup-scripts.service`, serial port 1, and
+# Cloud Logging when COS's logging agent is on.
+#
+# Part 1: configuration, rendered by Terraform's templatefile() from
+# templates/openemr-config.sh.tftpl. Only non-secret values appear here: an image reference pinned by
+# digest, the VM's internal address, OpenEMR settings and the NAMES of Secret Manager secrets.
+# Passwords and keys are never written into this script: it reads them on the VM from the files
+# edge-vm copies from Secret Manager, and the OAuth2 client's key is generated on the VM.
+
+OPENEMR_HOOK_NAME='${hook_name}'
+OPENEMR_IMAGE='${image}'
+OPENEMR_INTERNAL_IP='${internal_ip}'
+OPENEMR_HTTPS_PORT='${https_port}'
+OPENEMR_SITE_ADDRESS='${site_address}'
+OPENEMR_DB_USER='${db_user}'
+OPENEMR_CLIENT_NAME='${client_name}'
+OPENEMR_CLIENT_SCOPES='${scopes}'
+OPENEMR_CLIENT_KEY_SECRET='${client_key_secret}'
+OPENEMR_BLOCK_METADATA='${block_metadata}'
+OPENEMR_TLS_DAYS='${tls_days}'
+OPENEMR_TLS_CERT_TARGET='${tls_cert_target}'
+OPENEMR_TLS_KEY_TARGET='${tls_key_target}'
+
+# OpenEMR settings (globals table) as name=value, passed as OPENEMR_SETTING_<name> and checked in
+# the database after start.
+OPENEMR_SETTINGS=(
+%{ for s in settings ~}
+  '${s}'
+%{ endfor ~}
+)
+
+# Settings that must stay off (value 0). They are never passed as variables.
+OPENEMR_SETTINGS_KEPT_OFF=(
+%{ for s in settings_kept_off ~}
+  '${s}'
+%{ endfor ~}
+)
