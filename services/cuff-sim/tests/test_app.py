@@ -269,6 +269,19 @@ def test_garbage_reply_is_recorded_with_its_bytes(http, adapter, audit_ok, h):
     assert "ack-message" not in d
 
 
+def test_ack_control_id_is_msa2_not_our_msh10(http, adapter, audit_ok, h, caplog):
+    adapter.reply(h.S4_AA)  # the spike's exact ACK answers the spike's control ID
+    with caplog.at_level(logging.INFO):
+        _response, body = post(http, **READING)
+    assert body["ack"]["controlId"] == "S4-205329-0001"  # MSA-2 as received
+    assert body["controlId"] != "S4-205329-0001"  # our MSH-10
+    assert body["result"] == "accepted"  # a mismatch is logged, not turned into a failure
+    send = next(
+        r.fields for r in caplog.records if getattr(r, "fields", {}).get("event") == "cuff-send"
+    )
+    assert send["ack_matches_control_id"] is False
+
+
 def test_s4_nack_over_mllp_with_reason(http, adapter, audit_ok, h):
     adapter.reply(h.S4_NACK_LF)
     _response, body = post(http, sendMalformed="unparseable_lf_terminators")
