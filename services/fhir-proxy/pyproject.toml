@@ -1,0 +1,36 @@
+# fhir-proxy: the one public service (task T14, decision D10). Reviewer login (D9), a narrow
+# read API over the FHIR stores and the HL7v2 store, the messages log, and cuff forwarding to the
+# cuff simulator with the proxy's own identity. The share to OpenEMR is T15 (fhir_proxy/share/).
+# See README.md.
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pulsebridge-fhir-proxy"
+version = "0.1.0"
+description = "The dashboard's only backend: reviewer login, a narrow FHIR read API, the messages log and cuff forwarding."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  # The repository's own libraries (libs/). They are not on PyPI: install them from libs/ first
+  # (`make install` does; a container build must too). Unpinned because they are versioned with
+  # this repository.
+  "pulsebridge-fhir",
+  "pulsebridge-hl7v2",
+  "pulsebridge-gcp",
+  # Third-party, exact pins (CLAUDE.md). The same framework and server as the other services.
+  "Flask==3.1.3",
+  "gunicorn==26.2.0",
+  # The session token is a JWT (RFC 7519) signed with HS256; PyJWT is the well-known library
+  # docs/spikes/s6.md asks for, so the token check is not our own parser.
+  "PyJWT==2.15.1",
+  # Already required by pulsebridge-gcp; named here because upstream.py uses them directly
+  # (identity tokens for cuff-sim and health-sync, and the forwarding HTTP calls).
+  "google-auth==2.62.0",
+  "requests==2.34.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["fhir_proxy"]

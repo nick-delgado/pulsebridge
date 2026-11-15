@@ -1,0 +1,308 @@
+"""Service configuration, read from environment variables (set by Terraform on Cloud Run, T22).
+
+Everything is checked at start-up, so a bad value fails the deploy instead of every request.
+Nothing here names a deployment: a clone sets its own project, stores, URLs, origin and patient.
+The defaults that exist are operating limits (timeouts, the login limits, the token lifetime).
+
+Error messages name the variable, never its value: some values (the patient identifier, the
+patient's name) are personal data in a real deployment, and the URLs identify the deployment.
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass
+from urllib.parse import urlsplit
+
+
+@dataclass(frozen=True)
+class Variable:
+    description: str
+    default: str | None = None  # None: required
+
+
+# Environment variable -> what it is (the README table for T22 is this list).
+VARIABLES: dict[str, Variable] = {
+    "GCP_PROJECT_ID": Variable("Project that holds the Healthcare dataset"),
+    "HEALTHCARE_LOCATION": Variable("Region of the dataset, e.g. us-central1"),
+    "HEALTHCARE_DATASET_ID": Variable("Healthcare dataset id"),
+    "FHIR_STORE_ID": Variable("FHIR R4 store with the health data (Patient, Observation, ...)"),
+    "AUDIT_FHIR_STORE_ID": Variable("Audit FHIR store with the send-attempt AuditEvents (D15)"),
+    "HL7V2_STORE_ID": Variable("HL7v2 store the cuff messages are stored in"),
+    "PATIENT_ID": Variable("The configured patient's identifier (urn:pulsebridge:patient)"),
+    "REVIEWER_PASSWORD_FILE": Variable(
+        "Path of the mounted reviewer-password secret (version latest), read at request time"
+    ),
+    "ALLOWED_ORIGINS": Variable(
+        "Comma-separated dashboard origins allowed by CORS, e.g. https://app.example.test"
+    ),
+    "CUFF_SIM_URL": Variable("Base URL of the cuff-sim Cloud Run service (https://...)"),
+    "HEALTH_SYNC_URL": Variable(
+        "Base URL of the health-sync Cloud Run service; empty when it is not deployed", ""
+    ),
+    "PATIENT_ASSIGNING_AUTHORITY": Variable(
+        "PID-3.4 as cuff-sim sends it; with the two names, rebuilds a sent sample's bytes", ""
+    ),
+    "PATIENT_FAMILY_NAME": Variable("PID-5.1 as cuff-sim sends it (optional, see above)", ""),
+    "PATIENT_GIVEN_NAME": Variable("PID-5.2 as cuff-sim sends it (optional, see above)", ""),
+    "PATH_PREFIX": Variable(
+        "Path every route is served under, e.g. /api behind the Firebase Hosting rewrite", ""
+    ),
+    "SESSION_TTL_SECONDS": Variable("Lifetime of a session token, 60 to 86400", "28800"),
+    "TOKEN_ISSUER": Variable(
+        "JWT iss and aud of the session token; also salts the signing-key derivation",
+        "pulsebridge-fhir-proxy",
+    ),
+    "PASSWORD_CACHE_SECONDS": Variable(
+        "How long the password file's content is reused, 0 to 300 (rotation delay)", "30"
+    ),
+    "TRUSTED_PROXY_HOPS": Variable(
+        "How many X-Forwarded-For entries, from the right, trusted proxies appended, 0 to 5",
+        "1",
+    ),
+    "LOGIN_FAILURES_PER_ADDRESS": Variable(
+        "Failed logins allowed per client address per window; the next attempt gets 429", "5"
+    ),
+    "LOGIN_FAILURES_TOTAL": Variable(
+        "Failed logins allowed from all addresses per window on one instance", "60"
+    ),
+    "LOGIN_WINDOW_SECONDS": Variable("Length of the login rate-limit window, 10 to 3600", "60"),
+    "FHIR_TIMEOUT_SECONDS": Variable(
+        "Timeout of one Cloud Healthcare API request (FHIR or HL7v2), 1 to 30", "10"
+    ),
+    "CUFF_FORWARD_TIMEOUT_SECONDS": Variable(
+        "Timeout of a forwarded cuff request, 90 to 3000; keep below REQUEST_TIMEOUT_SECONDS",
+        "95",
+    ),
+    "SAMPLES_FORWARD_TIMEOUT_SECONDS": Variable(
+        "Timeout of the forwarded sample list, 1 to 60", "15"
+    ),
+    "HEALTH_SYNC_TIMEOUT_SECONDS": Variable(
+        "Timeout of health-sync's /status, 1 to 60 (health-sync budgets 20 s)", "25"
+    ),
+    "REQUEST_TIMEOUT_SECONDS": Variable(
+        "The proxy's own Cloud Run request timeout (T22 sets the same number), 30 to 3600",
+        "120",
+    ),
+    "STATUS_CACHE_SECONDS": Variable(
+        "How long the store-derived status (counts, newest write) is reused, 0 to 600", "60"
+    ),
+}
+
+MIN_CUFF_FORWARD_SECONDS = 90  # cuff-sim's README: "at least 90 s"
+# The forward must end before Cloud Run cuts the proxy's own request off, with room to answer.
+REQUEST_TIMEOUT_MARGIN_SECONDS = 10
+
+# Resource-name parts as pulsebridge_gcp checks them; repeated here only so the error can name
+# the variable before the client raises its own (which quotes the value).
+_PROJECT_OR_LOCATION = re.compile(r"[a-z0-9-]{1,63}", re.ASCII)
+_SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,256}", re.ASCII)
+# Patient identifier: T06's rule for PatientInput (printable, no control characters), capped.
+_PATIENT_ID = re.compile(r"[\x21-\x7e]{1,64}", re.ASCII)
+_HL7_TEXT = re.compile(r"[\x20-\x5b\x5d-\x7e]{1,80}", re.ASCII)
+_PREFIX = re.compile(r"(/[a-z0-9][a-z0-9-]{0,30}){0,3}", re.ASCII)
+_ISSUER = re.compile(r"[A-Za-z0-9._:-]{1,100}", re.ASCII)
+_HOST_NAME = re.compile(
+    r"(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*",
+    re.ASCII,
+)
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+
+
+class ConfigError(ValueError):
+    """A variable is missing or unusable. The message names variables, never their values."""
+
+
+@dataclass(frozen=True)
+class SamplePatient:
+    """What cuff-sim writes into a sample's PID (T07 ``with_patient``), when configured."""
+
+    assigning_authority: str
+    family_name: str
+    given_name: str
+
+
+@dataclass(frozen=True)
+class ServiceConfig:
+    project_id: str
+    location: str
+    dataset_id: str
+    fhir_store_id: str
+    audit_fhir_store_id: str
+    hl7v2_store_id: str
+    patient_id: str
+    password_file: str
+    allowed_origins: tuple[str, ...]
+    cuff_sim_url: str
+    health_sync_url: str | None = None
+    sample_patient: SamplePatient | None = None
+    path_prefix: str = ""
+    session_ttl_seconds: int = 28800
+    token_issuer: str = "pulsebridge-fhir-proxy"  # noqa: S105 - a name, not a secret
+    password_cache_seconds: float = 30.0
+    trusted_proxy_hops: int = 1
+    login_failures_per_address: int = 5
+    login_failures_total: int = 60
+    login_window_seconds: int = 60
+    fhir_timeout: float = 10.0
+    cuff_forward_timeout: float = 95.0
+    samples_forward_timeout: float = 15.0
+    health_sync_timeout: float = 25.0
+    request_timeout: float = 120.0
+    status_cache_seconds: float = 60.0
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> ServiceConfig:
+        env = os.environ if env is None else env
+        values: dict[str, str] = {}
+        missing = []
+        for name, var in VARIABLES.items():
+            value = (env.get(name) or "").strip()
+            if not value:
+                if var.default is None:
+                    missing.append(name)
+                    continue
+                value = var.default
+            values[name] = value
+        if missing:
+            raise ConfigError(f"missing environment variables: {', '.join(missing)}")
+
+        for name in ("GCP_PROJECT_ID", "HEALTHCARE_LOCATION"):
+            _match(name, values[name], _PROJECT_OR_LOCATION, "lowercase letters, digits and -")
+        for name in ("HEALTHCARE_DATASET_ID", "FHIR_STORE_ID", "AUDIT_FHIR_STORE_ID"):
+            _match(name, values[name], _SEGMENT, "letters, digits, _, . and -")
+        _match("HL7V2_STORE_ID", values["HL7V2_STORE_ID"], _SEGMENT, "letters, digits, _, . and -")
+        if values["AUDIT_FHIR_STORE_ID"] == values["FHIR_STORE_ID"]:
+            # D15: the audit data has its own store. One id for both is a wiring mistake.
+            raise ConfigError("AUDIT_FHIR_STORE_ID must differ from FHIR_STORE_ID")
+        _match("PATIENT_ID", values["PATIENT_ID"], _PATIENT_ID, "1 to 64 printable characters")
+        if not values["REVIEWER_PASSWORD_FILE"].startswith("/"):
+            raise ConfigError("REVIEWER_PASSWORD_FILE must be an absolute path")
+        _match("PATH_PREFIX", values["PATH_PREFIX"], _PREFIX, "empty or like /api")
+        _match("TOKEN_ISSUER", values["TOKEN_ISSUER"], _ISSUER, "1 to 100 of A-Z a-z 0-9 . _ : -")
+
+        sample_names = ("PATIENT_ASSIGNING_AUTHORITY", "PATIENT_FAMILY_NAME", "PATIENT_GIVEN_NAME")
+        given = [n for n in sample_names if values[n]]
+        sample_patient = None
+        if given and len(given) != len(sample_names):
+            raise ConfigError(f"set all or none of {', '.join(sample_names)}")
+        if given:
+            for name in sample_names:
+                _match(name, values[name], _HL7_TEXT, "printable ASCII without a backslash")
+            sample_patient = SamplePatient(*(values[n] for n in sample_names))
+
+        request_timeout = _number("REQUEST_TIMEOUT_SECONDS", values, 30, 3600)
+        forward = _number("CUFF_FORWARD_TIMEOUT_SECONDS", values, MIN_CUFF_FORWARD_SECONDS, 3000)
+        if forward + REQUEST_TIMEOUT_MARGIN_SECONDS > request_timeout:
+            raise ConfigError(
+                "CUFF_FORWARD_TIMEOUT_SECONDS must be at least "
+                f"{REQUEST_TIMEOUT_MARGIN_SECONDS} s below REQUEST_TIMEOUT_SECONDS"
+            )
+        health_sync_url = values["HEALTH_SYNC_URL"] or None
+        return cls(
+            project_id=values["GCP_PROJECT_ID"],
+            location=values["HEALTHCARE_LOCATION"],
+            dataset_id=values["HEALTHCARE_DATASET_ID"],
+            fhir_store_id=values["FHIR_STORE_ID"],
+            audit_fhir_store_id=values["AUDIT_FHIR_STORE_ID"],
+            hl7v2_store_id=values["HL7V2_STORE_ID"],
+            patient_id=values["PATIENT_ID"],
+            password_file=values["REVIEWER_PASSWORD_FILE"],
+            allowed_origins=_origins(values["ALLOWED_ORIGINS"]),
+            cuff_sim_url=_service_url("CUFF_SIM_URL", values["CUFF_SIM_URL"]),
+            health_sync_url=(
+                None
+                if health_sync_url is None
+                else _service_url("HEALTH_SYNC_URL", health_sync_url)
+            ),
+            sample_patient=sample_patient,
+            path_prefix=values["PATH_PREFIX"],
+            session_ttl_seconds=int(_number("SESSION_TTL_SECONDS", values, 60, 86400, whole=True)),
+            token_issuer=values["TOKEN_ISSUER"],
+            password_cache_seconds=_number("PASSWORD_CACHE_SECONDS", values, 0, 300),
+            trusted_proxy_hops=int(_number("TRUSTED_PROXY_HOPS", values, 0, 5, whole=True)),
+            login_failures_per_address=int(
+                _number("LOGIN_FAILURES_PER_ADDRESS", values, 1, 100, whole=True)
+            ),
+            login_failures_total=int(_number("LOGIN_FAILURES_TOTAL", values, 1, 10000, whole=True)),
+            login_window_seconds=int(_number("LOGIN_WINDOW_SECONDS", values, 10, 3600, whole=True)),
+            fhir_timeout=_number("FHIR_TIMEOUT_SECONDS", values, 1, 30),
+            cuff_forward_timeout=forward,
+            samples_forward_timeout=_number("SAMPLES_FORWARD_TIMEOUT_SECONDS", values, 1, 60),
+            health_sync_timeout=_number("HEALTH_SYNC_TIMEOUT_SECONDS", values, 1, 60),
+            request_timeout=request_timeout,
+            status_cache_seconds=_number("STATUS_CACHE_SECONDS", values, 0, 600),
+        )
+
+
+def _match(name: str, text: str, pattern: re.Pattern[str], rule: str) -> None:
+    if not pattern.fullmatch(text):
+        raise ConfigError(f"{name} must be {rule}")
+
+
+def _number(
+    name: str, values: Mapping[str, str], low: float, high: float, *, whole: bool = False
+) -> float:
+    text = values[name]
+    # Plain decimal only: float() would also accept "inf", "nan", "1e9" and "1_0".
+    pattern = r"[0-9]{1,6}" if whole else r"[0-9]{1,6}(\.[0-9]{1,3})?"
+    if not re.fullmatch(pattern, text, re.ASCII) or not low <= float(text) <= high:
+        kind = "a whole number" if whole else "a number"
+        raise ConfigError(f"{name} must be {kind} from {low:g} to {high:g}")
+    return float(text)
+
+
+def _is_loopback(host: str) -> bool:
+    return host in _LOOPBACK_HOSTS
+
+
+def _origin_like(name: str, text: str) -> tuple[str, str, int | None]:
+    """Scheme, host and port of an https URL (or http on loopback, for local development)."""
+    try:
+        parts = urlsplit(text)
+        port = parts.port
+    except ValueError:
+        raise ConfigError(f"{name} must be an https URL") from None
+    host = (parts.hostname or "").lower()
+    netloc_host = f"[{host}]" if ":" in host else host
+    ok_scheme = parts.scheme == "https" or (parts.scheme == "http" and _is_loopback(netloc_host))
+    host_ok = bool(_HOST_NAME.fullmatch(host)) or _is_ip(host)
+    clean = not (parts.username or parts.password or parts.query or parts.fragment)
+    path_ok = parts.path == ""
+    if not (ok_scheme and host_ok and clean and path_ok) or "*" in text:
+        raise ConfigError(f"{name} must be an https URL with no path, query or credentials")
+    return parts.scheme, netloc_host, port
+
+
+def _is_ip(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _service_url(name: str, text: str) -> str:
+    scheme, host, port = _origin_like(name, text.rstrip("/"))
+    return f"{scheme}://{host}" + (f":{port}" if port is not None else "")
+
+
+def _origins(text: str) -> tuple[str, ...]:
+    """Exact origins, as a browser sends them in ``Origin`` (RFC 6454): scheme, host, port."""
+    origins = []
+    for item in (part.strip() for part in text.split(",")):
+        if not item:
+            continue
+        scheme, host, port = _origin_like("ALLOWED_ORIGINS", item)
+        origin = f"{scheme}://{host}" + (f":{port}" if port is not None else "")
+        if origin != item:
+            # The comparison with the Origin header is exact, so the configured form must be
+            # the canonical one (lowercase host, no trailing slash, no default port).
+            raise ConfigError("ALLOWED_ORIGINS entries must be written exactly as an Origin header")
+        origins.append(origin)
+    if not origins:
+        raise ConfigError("ALLOWED_ORIGINS must name at least one origin")
+    return tuple(origins)
