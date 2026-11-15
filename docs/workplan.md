@@ -666,9 +666,9 @@ needed before T18 and T19 start.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (offline part merged; deploy part open) |
-| T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml`, `.tflint.hcl`, and what its ACs need in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/` and `infra/envs/` (not `infra/envs/README.md` steps about secrets, which follow T27) | in-progress (offline part) |
+| T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml` and `ci.yml`'s Terraform job, `.tflint.hcl`, the Makefile's `tf-lint`/`tf-scan`, `infra/envs/ci/`, and what its ACs needed in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/`, `infra/envs/`, plus README corrections from the T28 review | in-progress (offline part merged; first real run open) |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
-| T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | in-progress (offline part merged; the real OpenEMR screenshot needs a deploy; follow T26/T27 names once merged) |
+| T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | in-progress (offline part merged; the real OpenEMR screenshot needs a deploy) |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
 
@@ -709,6 +709,13 @@ every AC that says "reaches a working stack", "destroy", "first boot" or "checkl
   and store IDs, the secret name prefix), and one `patient_id` variable feeds every service
   and both scripts.
 
+**T26 status.** The offline part is merged: four workflows, three CI identities per project
+(read-only planner with a custom role, deployer, Hosting-only page deployer) each tied to its own
+Workload Identity context, a strict Environment pre-check, a value-aware plan digest, opt-in image
+builds. Every deploying job is skipped until the repository variables are set. Nothing has run
+on GitHub or GCP: the first-run checklist is in `infra/envs/README.md` (CI/CD). The next bootstrap
+apply narrows the deployer's trust to `main` by default.
+
 **T26 carried from T25.** Plans show `alert_email` (module `ingestion` uses it in a `for_each`,
 so it cannot be sensitive): give `ingestion` a separate bool so the address can be sensitive, or
 do not post it in pull-request plans. The patient ID and name are sensitive already.
@@ -726,10 +733,6 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
   Registry cleanup policy in `project-base` (tags are immutable, so images otherwise
   accumulate). The first real build confirms the assumptions listed as unverified in
   `services/README.md`.
-
-**T27 follow-up (orchestrator, after T26 merges).** Replace runbook step 5 in
-`infra/envs/README.md` with the script commands, and drop the T27 entries from `PENDING_PATHS`
-in `tests/tooling/test_docs.py`. Never run against real gcloud or bash 3.2 (see its README).
 
 **T27 Secret version scripts.** Add secret versions after apply.
 - AC: values are read from a prompt or stdin and never echoed or written to disk, and are
