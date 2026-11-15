@@ -18,6 +18,18 @@ from dataclasses import dataclass, field
 
 BASE_DELAY_SECONDS = 1.0
 MAX_DELAY_SECONDS = 16.0
+# A request is not started with less than this left: it could not finish usefully.
+MIN_REQUEST_SECONDS = 2.0
+# A new range or Bundle is not started with less than this left (README, "Deadline").
+MIN_STEP_SECONDS = 10.0
+
+
+class DeadlineReached(Exception):  # noqa: N818 - a state, named as the outcome it becomes
+    """The run's time budget is spent. ``where`` names the step that was not started."""
+
+    def __init__(self, where: str) -> None:
+        super().__init__(f"deadline reached before {where}")
+        self.where = where
 
 
 @dataclass
@@ -37,8 +49,27 @@ class Deadline:
         return self.seconds - (self.clock() - self.started)
 
     def allows(self, delay: float) -> bool:
+        """Whether a wait of ``delay`` still leaves room for one more request."""
         remaining = self.remaining()
-        return remaining is None or delay < remaining
+        return remaining is None or delay + MIN_REQUEST_SECONDS <= remaining
+
+    def timeout_for(self, cap: float, where: str) -> float:
+        """The timeout for one request: ``cap``, cut to the time left. Raises
+        :class:`DeadlineReached` instead of starting a request that cannot finish in time, so
+        a run's wall time stays within its deadline (plus one request's overrun at most, since
+        an HTTP read timeout limits each wait for data, not the whole transfer)."""
+        remaining = self.remaining()
+        if remaining is None:
+            return cap
+        if remaining < MIN_REQUEST_SECONDS:
+            raise DeadlineReached(where)
+        return min(cap, remaining)
+
+    def require(self, seconds: float, where: str) -> None:
+        """Do not start a step (a range, a Bundle) with less than ``seconds`` left."""
+        remaining = self.remaining()
+        if remaining is not None and remaining < seconds:
+            raise DeadlineReached(where)
 
 
 @dataclass(frozen=True)

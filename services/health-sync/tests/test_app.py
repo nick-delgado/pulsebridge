@@ -1,6 +1,7 @@
 """The Flask app: ``POST /sync``, ``GET /status``, crash containment, and what is logged."""
 
 import logging
+from pathlib import Path
 
 import pytest
 from health_sync import app as app_module
@@ -10,6 +11,7 @@ from health_sync.testing import (
     ACCESS_TOKEN_2,
     FHIR_PATH,
     PATIENT_ID,
+    fake,
     fhir_ok,
     formatted_logs,
     leaked,
@@ -88,6 +90,8 @@ def test_status_connected(world, http):
     assert response.get_json() == {
         "googleHealth": "connected",
         "reason": None,
+        "notes": [],
+        "strandedPreliminary": 0,
         "checkedAt": "2026-01-15T15:07:30Z",
     }
 
@@ -113,7 +117,7 @@ def test_status_not_configured(world, http):
 def test_status_unknown_when_the_check_cannot_finish(world, http):
     world.google.add("POST", "/token", oauth_error("backend", 503))
     response = http().get(STATUS_PATH)
-    assert response.status_code == 503
+    assert response.status_code == 200  # an answer; only a failing service gives another status
     assert response.get_json()["googleHealth"] == "unknown"
     assert world.token_calls() == 2  # one retry at most
 
@@ -181,3 +185,89 @@ def test_no_log_line_or_answer_carries_a_token_a_secret_or_a_value(world, http, 
         status.get_data(as_text=True),
     ):
         assert leaked(text, *DISTINCT, PATIENT_ID, "Synthetic Watch 1") == []
+
+
+# ---- review round 1 --------------------------------------------------------------------------
+
+
+def test_a_second_sync_while_one_is_running_answers_already_running(world, http):
+    world.google.add("POST", "/token", token_response())
+    client_app = create_app(world.config(), world.deps())
+    lock = client_app.extensions["health_sync_lock"]
+    assert lock.acquire(blocking=False)
+    try:
+        response = client_app.test_client().post(SYNC_PATH)
+    finally:
+        lock.release()
+    assert response.status_code == 200
+    assert response.get_json() == {"outcome": "already-running"}
+    assert world.google.requests == []
+
+
+def test_the_sync_lock_is_released_after_a_run_and_after_a_bug(world, http, monkeypatch):
+    world.google.add("POST", "/token", oauth_error("invalid_grant"))
+    client = http()
+    assert client.post(SYNC_PATH).get_json()["outcome"] == "reconnect-needed"
+    assert client.post(SYNC_PATH).get_json()["outcome"] == "reconnect-needed"
+
+    def broken(*_a, **_k):
+        raise RuntimeError("synthetic")
+
+    monkeypatch.setattr(app_module, "run_sync", broken)
+    assert client.post(SYNC_PATH).status_code == 500
+    monkeypatch.undo()
+    assert client.post(SYNC_PATH).get_json()["outcome"] == "reconnect-needed"
+
+
+def test_unknown_is_cached_for_15_seconds_and_definite_answers_for_longer(world, http):
+    world.google.add("POST", "/token", oauth_error("backend", 503), token_response())
+    client = http(status_cache_seconds=60.0, max_attempts=1)
+    assert client.get(STATUS_PATH).get_json()["googleHealth"] == "unknown"
+    world.clock.mono += 14
+    assert client.get(STATUS_PATH).get_json()["googleHealth"] == "unknown"
+    assert world.token_calls() == 1
+    world.clock.mono += 1
+    assert client.get(STATUS_PATH).get_json()["googleHealth"] == "connected"
+    world.clock.mono += 59
+    client.get(STATUS_PATH)
+    assert world.token_calls() == 2
+
+
+def test_status_notes_a_rotated_refresh_token(world, http, caplog):
+    rotated = json_response(200, token_response().json() | {"refresh_token": fake("rotated", "x")})
+    world.google.add("POST", "/token", rotated)
+    with caplog.at_level(logging.WARNING):
+        body = http().get(STATUS_PATH).get_json()
+    assert (body["googleHealth"], body["notes"]) == ("connected", ["refresh-token-rotated"])
+    assert "refresh-token-rotated" in formatted_logs(caplog.records)
+    assert leaked(formatted_logs(caplog.records) + str(body), fake("rotated", "x")) == []
+
+
+def test_status_notes_that_a_backfill_is_needed(world, http):
+    world.fhir_transport.patient_server_id = "p-7"
+    world.fhir_transport.stranded = 4
+    world.google.add("POST", "/token", token_response())
+    body = http().get(STATUS_PATH).get_json()
+    assert (body["notes"], body["strandedPreliminary"]) == (["backfill-needed"], 4)
+    (count,) = [r for r in world.fhir_transport.requests if r.params.get("_summary") == "count"]
+    assert ("date", "lt2026-01-15T12:05:00Z") in count.param_pairs
+
+
+def test_status_still_answers_when_the_store_cannot_be_counted(world, http):
+    world.fhir_transport.read_failure = json_response(503, {})
+    world.google.add("POST", "/token", token_response())
+    body = http().get(STATUS_PATH).get_json()
+    assert (body["googleHealth"], body["strandedPreliminary"], body["notes"]) == (
+        "connected",
+        None,
+        [],
+    )
+
+
+def test_status_says_secret_unreadable_when_a_file_is_wrong(world, http):
+    Path(world.paths.client_secret).write_text("two words\n")
+    body = http().get(STATUS_PATH).get_json()
+    assert (body["googleHealth"], body["reason"]) == (
+        "not-configured",
+        "secret-unreadable:client-secret",
+    )

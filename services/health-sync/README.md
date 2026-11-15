@@ -1,19 +1,21 @@
 # health-sync
 
 Pulls five-minute heart-rate roll-ups from the Google Health API every 15 minutes, maps them to
-FHIR R4 with T06's `heart_rate_transaction`, and writes them to the FHIR store as transaction
-Bundles. It keeps no database: every run works out what to fetch from the clock.
+FHIR R4 with T06's `heart_rate_transaction`, and writes the windows that are new or changed to
+the FHIR store as transaction Bundles. It keeps no database: every run works out what to fetch
+from the clock, and what to write from one read of the store.
 
 ```
 Cloud Scheduler ──every 15 min, OIDC──> POST /sync ──┐
                                                      │ 1. read 3 secret files (mounted from Secret Manager)
 oauth2.googleapis.com/token <── refresh_token grant ─┤ 2. access token (reused within the run)
 health.googleapis.com  <── dataPoints:rollUp ────────┤ 3. 5-minute windows, last 3 hours, all pages
-health.googleapis.com  <── dataPoints?pageSize=1 ────┤ 4. device name, platform, recording method
-                                                     │ 5. T06 mapping, batches of 100 windows
-FHIR store  <──────────────── executeBundle ─────────┘ 6. Patient/Device create-if-absent, Observation/Provenance upsert
+FHIR store  <── Patient? / Observation? searches ────┤ 4. what is already stored (read once)
+health.googleapis.com  <── dataPoints?pageSize=1 ────┤ 5. device name, platform, recording method
+                                                     │ 6. T06 mapping of the new or changed windows, batches of 100
+FHIR store  <──────────────── executeBundle ─────────┘ 7. Patient/Device create-if-absent, Observation/Provenance upsert
 
-fhir-proxy (T14) ──OIDC──> GET /status ──> token refresh attempt ──> connected | reconnect-needed | not-configured
+fhir-proxy (T14) ──OIDC──> GET /status ──> token refresh attempt ──> connected | reconnect-needed | not-configured | unknown
 ```
 
 ## Layout
@@ -23,12 +25,13 @@ services/health-sync/
   pyproject.toml          dependencies: pulsebridge-fhir, pulsebridge-gcp, Flask, gunicorn, requests
   health_sync/
     google_health.py      the Google Health API client and the OAuth refresh (injectable transport)
-    sync.py               one run: ranges, cutoff, window cleanup, batching, writes, outcomes
+    sync.py               one run: ranges, cutoff, window cleanup, what to write, batching, outcomes
+    stored.py             the FHIR searches: the Patient's id, stored windows, stranded windows
     status.py             the stateless "is the connection working" check
     credentials.py        reads the three mounted secret files
-    retry.py              bounded backoff inside a deadline
+    retry.py              bounded backoff and the run deadline
     config.py             environment variables, validated at start-up
-    app.py                Flask: POST /sync, GET /status; JSON log lines
+    app.py                Flask: POST /sync (one at a time), GET /status; JSON log lines
     backfill.py           the `backfill --days N` command
     logs.py               the JSON log formatter
     testing.py            test helpers (synthetic data only), like pulsebridge_gcp.testing
@@ -50,25 +53,34 @@ ignored. The answer is the run report as JSON (counts, UTC range bounds and code
 {"outcome": "synced", "reason": null,
  "ranges": [{"start": "2026-01-15T12:05:00Z", "end": "2026-01-15T15:05:00Z"}],
  "ranges_completed": 1, "complete_before": "2026-01-15T14:05:00Z", "pages": 1,
- "windows_fetched": 36, "windows_empty": 0, "windows_invalid": 0, "windows_written": 36,
- "windows_final": 24, "windows_preliminary": 12, "bundles_written": 1,
+ "windows_fetched": 36, "windows_empty": 0, "windows_invalid": 0,
+ "windows_unchanged": 33, "windows_new": 3, "windows_changed": 0, "windows_finalised": 3,
+ "windows_amended": 0, "windows_written": 6, "windows_final": 3, "windows_preliminary": 3,
+ "bundles_written": 1, "stored_read": "ok", "stranded_preliminary": 0,
  "google_statuses": [200], "fhir_status": null, "fhir_issues": [], "token_refreshes": 1,
- "refresh_token_rotated": false,
- "entry_statuses": {"Device 200": 1, "Observation 200": 36, "Patient 200": 1, "Provenance 200": 36},
+ "refresh_token_rotated": false, "scope_not_listed": false,
+ "entry_statuses": {"Device 200": 1, "Observation 200": 3, "Observation 201": 3, "Patient 200": 1,
+                    "Provenance 200": 3, "Provenance 201": 3},
  "duration_ms": 1840}
 ```
+
+Only one run at a time per instance: a `POST /sync` that arrives while a run is in progress
+answers at once with `200 {"outcome": "already-running"}` and does nothing.
 
 #### What Scheduler sees
 
 | `outcome` | HTTP | Meaning | What happens next |
 | --- | --- | --- | --- |
-| `synced` | 200 | every range written (zero windows is still `synced`) | next run in 15 minutes |
-| `reconnect-needed` | **200** | the refresh token expired or was revoked (`invalid_grant`), the OAuth client was refused, or the scope is missing | nothing until the deployer reconnects (T11); `/status` reports it |
-| `not-configured` | **200** | a secret file is missing or empty (the connect script has not run) | as above |
+| `synced` | 200 | every range done (zero windows written is still `synced`) | next run in 15 minutes |
+| `reconnect-needed` | **200** | the refresh token expired or was revoked (`invalid_grant`), the OAuth client was refused, or the API answered `MISSING_OAUTH_SCOPE` | nothing until the deployer reconnects (T11); `/status` reports it |
+| `not-configured` | **200** | a secret file is missing or empty (`secrets-missing:…`), or present but unusable (`secret-unreadable:…`) | as above |
+| `already-running` | 200 | another run is in progress on this instance | nothing; that run carries on |
 | `google-unavailable` | 503 | Google answered 429/5xx/408 or nothing, still after the bounded retries | next scheduled run (its range overlaps) |
-| `fhir-unavailable` | 503 | FHIR store 429/5xx/network after retries, a persistent 409, or 401/403/404 (IAM or store) | next scheduled run |
+| `fhir-unavailable` | 503 | FHIR store 429/5xx/network after retries (`fhir-write-failed`), or a persistent 409 (`fhir-conflict`) | next scheduled run |
+| `deadline-reached` | 503 | the run stopped before starting a range or Bundle (`before-range`, `before-bundle`) because too little time was left | next scheduled run picks up the rest |
 | `google-error` | 500 | Google refused the request (another 4xx, a second 401) or answered malformed JSON | needs a person; logs give the status and Google's reason code |
-| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx; its OperationOutcome is logged without free text), or answered 2xx with a body that is not a Bundle (`fhir-malformed-response`) | needs a person |
+| `fhir-misconfigured` | 500 | the FHIR store answered 401/403 (`fhir-permission-denied`: the role is missing, or still propagating after an apply) or 404 (`fhir-store-missing`) | needs a person |
+| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx, `fhir-refused-bundle`; its OperationOutcome is logged without free text), or answered 2xx with a body that is not a Bundle (`fhir-malformed-response`) | needs a person |
 | `mapping-failed` | 500 | T06 refused input that passed the window checks (a bug) | needs a person |
 
 **Why 200 for reconnect-needed.** A retry cannot fix an expired grant, and every retry would hit
@@ -77,31 +89,68 @@ attempt cleanly; the condition is visible in `/status` (and so on the dashboard)
 `WARNING` log line. It is not a crash and not a loop: the run makes exactly one token request and
 stops.
 
-**For T20, the Scheduler job:** `retry_config.retry_count = 0` (the next scheduled run is the
-retry: its range overlaps), `attempt_deadline = "180s"` (Scheduler's default for HTTP targets),
-and the Cloud Run request timeout at least 180 s. A run gives up retrying after
-`RUN_DEADLINE_SECONDS` (150 s), inside that deadline.
+#### Deadline: one run at a time
+
+If a run outlived Cloud Scheduler's attempt deadline, Scheduler could start the next run while
+the first is still writing. Three things prevent that:
+
+1. **Every request's timeout is cut to the time left** before `RUN_DEADLINE_SECONDS` (150 s):
+   Google and OAuth calls get `min(HTTP_TIMEOUT_SECONDS, left)`, each FHIR request
+   `min(FHIR_TIMEOUT_SECONDS, left)`. No request is started with less than 2 s left, and no
+   backoff wait is taken that would leave less. (An HTTP timeout limits each wait for data, not
+   a whole transfer, so a server that trickles bytes could still overrun by one request.)
+2. **No range or Bundle is started with less than 10 s left**; the run then ends as
+   `deadline-reached` (503), and the next run, whose range overlaps, picks up the rest.
+3. **An in-process lock** around `/sync`: a second call answers `already-running`.
+
+**For T20:** Scheduler job `retry_config.retry_count = 0` (the next scheduled run is the retry:
+its range overlaps) and `attempt_deadline = "180s"` (the default for HTTP targets); Cloud Run
+request timeout at least 180 s; and **`max_instance_count = 1`** on the service, so the lock
+covers the whole service (a run is light: one instance is plenty, and it still scales to zero).
+
+#### Alerts (for T20)
+
+A log-based alert on the `sync-run` lines makes a broken sync visible before the dashboard shows
+stale data:
+
+- `jsonPayload.event = "sync-run" AND jsonPayload.http_status >= 500`: something needs a person
+  (permissions, a missing store, a refused Bundle, a bug);
+- `jsonPayload.event = "sync-run" AND jsonPayload.outcome = "reconnect-needed"`: the deployer
+  must reconnect (T11);
+- optionally `jsonPayload.event = "stranded-preliminary"`: run a backfill.
 
 ### `GET /status`
 
 Whether the Google Health connection works **now**, worked out statelessly: it reads the secret
-files and attempts a token refresh, exactly as a run would. The access token is thrown away.
+files and attempts a token refresh, exactly as a run would (the access token is thrown away), and
+counts stranded preliminary windows in the FHIR store.
 
-| `googleHealth` | HTTP | When |
-| --- | --- | --- |
-| `connected` | 200 | the refresh succeeded and the token carries the configured scope |
-| `reconnect-needed` | 200 | `reason`: `refresh-token-invalid` (`invalid_grant`), `oauth-client-rejected` (`invalid_client`, `unauthorized_client`, `deleted_client`) or `scope-not-granted` |
-| `not-configured` | 200 | `reason`: `secrets-missing:<names>`, e.g. `secrets-missing:refresh-token` |
-| `unknown` | 503 | the check could not finish (token endpoint 429/5xx/unreachable, or an unexpected answer); `reason` names it |
+| `googleHealth` | When |
+| --- | --- |
+| `connected` | the refresh succeeded |
+| `reconnect-needed` | `reason`: `refresh-token-invalid` (`invalid_grant`) or `oauth-client-rejected` (`invalid_client`, `unauthorized_client`, `deleted_client`); or `scope-not-granted` when a sync run met `MISSING_OAUTH_SCOPE` |
+| `not-configured` | `reason`: `secrets-missing:<names>` (absent or empty, e.g. no connect yet) or `secret-unreadable:<names>` (present but unusable: a read error, over 4 KiB, not UTF-8, or spaces or control characters) |
+| `unknown` | the check could not finish (token endpoint 429/5xx/unreachable, or an unexpected answer); `reason` names it |
+
+**Every state answers HTTP 200**, so the proxy can tell "the check could not finish" (`unknown`)
+from "health-sync is down" (any other status, or no answer).
 
 ```json
-{"googleHealth": "reconnect-needed", "reason": "refresh-token-invalid", "checkedAt": "2026-01-15T15:07:30Z"}
+{"googleHealth": "connected", "reason": null, "notes": ["backfill-needed"],
+ "strandedPreliminary": 12, "checkedAt": "2026-01-15T15:07:30Z"}
 ```
 
+- `notes`, non-fatal facts for the dashboard: `refresh-token-rotated` (Google returned a new
+  refresh token, which this service cannot store; reconnecting soon keeps the connection) and
+  `backfill-needed` (`strandedPreliminary` windows are still `preliminary` but older than any
+  future run's range, because runs were missed; `health-sync-backfill` finalises them).
+  `strandedPreliminary` is `null` when the store could not be asked.
+- `not-configured` covers both secret cases on purpose: for the dashboard the action is the
+  same (the deployer fixes the secret), and the `reason` says which it is.
 - No secret material is ever in the response.
-- A definite answer is reused for `STATUS_CACHE_SECONDS` (60 s) in memory, so a busy dashboard does
-  not call Google's token endpoint on every page load. A sync run that finds `reconnect-needed`,
-  or that refreshes successfully, updates the cached answer at once.
+- A definite answer is reused for `STATUS_CACHE_SECONDS` (60 s) in memory and `unknown` for 15 s,
+  so a busy dashboard does not call Google's token endpoint on every page load. A sync run that
+  finds `reconnect-needed`, or that refreshes successfully, updates the cached answer at once.
 - **For T20/T22:** `fhir-proxy`'s service account needs `roles/run.invoker` on this service,
   besides `scheduler-invoker`. The identity README's open question "where `health-sync` records
   reconnect needed" is answered by "nowhere": it is recomputed on request, so no extra grant is
@@ -131,7 +180,20 @@ refresh token expiring in 7 days"). Only a reconnect fixes it, so the service re
 
 If a token response ever carries a new `refresh_token`, it is not stored (this service may only
 read the secret; the identity README asks for a write grant only if T10 finds Google rotates
-tokens). The report flags it (`refresh_token_rotated: true`) without the value.
+tokens). It is logged as a `WARNING` (`refresh-token-rotated`, never the value), flagged in the
+run report (`refresh_token_rotated: true`) and shown as a note in `/status`.
+
+**Scope.** The token response's `scope` list is not trusted to fail a run: if the configured
+scope is not in it, a `WARNING` (`scope-not-listed`) is logged and the run goes on. If the scope
+is really missing, the API itself answers `403 MISSING_OAUTH_SCOPE`, which is `reconnect-needed`
+(`scope-not-granted`). An exact-string comparison could otherwise fail on a harmless difference.
+
+**Error codes.** Only known OAuth error codes are echoed into a `reason`: RFC 6749's
+(`invalid_request`, `invalid_client`, `invalid_grant`, `unauthorized_client`,
+`unsupported_grant_type`, `invalid_scope`, `access_denied`, `server_error`,
+`temporarily_unavailable`) and Google's `deleted_client`, `disabled_client`,
+`admin_policy_enforced`, `invalid_rapt`. Any other value is shown as `refused`, so nothing a
+server sends reaches a log unchecked. `error_description` (free text) is never used.
 
 ## Secrets: what T20 must mount
 
@@ -158,9 +220,12 @@ Why files and not environment variables:
   (`roles/secretmanager.secretAccessor` on the three secrets, already granted by the identity
   module).
 - Cloud Run does not check volume secrets at start-up, and neither does this service: a missing
-  or empty file is logged once at start-up (`secrets-missing`, naming the secret, never a value)
-  and the service starts, so `/status` can say `not-configured` instead of the service failing to
-  deploy. The environment variables that hold the paths are required.
+  or unusable file is logged once at start-up (`secrets-missing`, naming the secret and the
+  reason, never a value) and the service starts, so `/status` can say `not-configured` instead of
+  the service failing to deploy. The environment variables that hold the paths are required.
+- Reason codes tell the two cases apart: `secrets-missing:<names>` (no file, or an empty one:
+  nothing stored yet) and `secret-unreadable:<names>` (a file that cannot be read, is over 4 KiB,
+  is not UTF-8, or holds spaces or control characters: something is mounted, but wrong).
 
 ## Configuration
 
@@ -178,14 +243,14 @@ Everything is checked at start-up; an error names the variable, never its value.
 | `GOOGLE_HEALTH_CLIENT_ID_FILE` | yes | | absolute path of the mounted client ID |
 | `GOOGLE_HEALTH_CLIENT_SECRET_FILE` | yes | | absolute path of the mounted client secret |
 | `GOOGLE_HEALTH_REFRESH_TOKEN_FILE` | yes | | absolute path of the mounted refresh token |
-| `GOOGLE_HEALTH_SCOPE` | no | `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly` | the scope the token must carry (same value as T11's) |
+| `GOOGLE_HEALTH_SCOPE` | no | `https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly` | the scope expected in the token (same value as T11's); a mismatch is a warning |
 | `LOOKBACK_MINUTES` | no | `180` | how far back each run re-requests; multiple of 5, at most 14 days |
 | `FINAL_AFTER_MINUTES` | no | `60` | a window is `final` once it ended this long ago |
 | `SYNC_INTERVAL_MINUTES` | no | `15` | the Scheduler interval; `LOOKBACK >= FINAL_AFTER + SYNC_INTERVAL` is enforced |
 | `BATCH_WINDOWS` | no | `100` | windows per Bundle (1 to 1000) |
 | `HTTP_TIMEOUT_SECONDS` | no | `30` | one Google or OAuth request |
-| `FHIR_TIMEOUT_SECONDS` | no | `60` | one `executeBundle` |
-| `RUN_DEADLINE_SECONDS` | no | `150` | a scheduled run stops retrying after this |
+| `FHIR_TIMEOUT_SECONDS` | no | `60` | one FHIR request (a search or an `executeBundle`) |
+| `RUN_DEADLINE_SECONDS` | no | `150` | a scheduled run's time budget: every request's timeout and every wait fits inside it |
 | `MAX_ATTEMPTS` | no | `4` | tries per request for 429/5xx/408/network |
 | `STATUS_CACHE_SECONDS` | no | `60` | `/status` answer reuse; `0` disables |
 | `PORT` | no | 8080 in the command below | listening port (Cloud Run sets it) |
@@ -208,9 +273,9 @@ duplicate data instead of rewriting it.
 
 **Why the overlap is safe.** Every write is keyed (T06): the Observation is a conditional update
 on UUIDv5(patient, LOINC `8867-4`, window start in UTC), the Provenance a `PUT` by an id derived
-from it, the Patient and Device conditional creates. A window seen by three runs is written three
-times to the same Observation; the store's history keeps each version. A test compares the keys
-of two overlapping runs.
+from it, the Patient and Device conditional creates. A window written twice lands on the same
+Observation. A test compares the keys of two overlapping runs. In practice most windows in the
+overlap are not written again at all (next section).
 
 **`preliminary` and `final`.** R4 `preliminary` is "an initial or interim observation: data may
 be incomplete"; `final` is "complete". A window can still gain samples after a run, because the
@@ -226,22 +291,64 @@ range        |12:20 --------------------------------|-----------------------|15:
              the 14:05-14:20 windows are rewritten here as final, with any late samples
 ```
 
-A preliminary window becomes final on the first run at least 60 minutes after it ended; the
-look-back guarantees that run still requests it. Any run from 60 to 175 minutes after a window
-ended finalises it, so about seven consecutive missed runs are tolerated. A longer outage is
-recovered with the backfill. Windows inside the overlap but before the cutoff are rewritten as
-`final` with the latest values, so a late sample is never lost; it only arrives after the label.
+**The rule (intended behaviour).** A window is `final` once it ended at least `FINAL_AFTER` (60
+minutes) ago, and the first run after that writes it `final`. The look-back must cover that
+period plus one run interval (`LOOKBACK >= FINAL_AFTER + SYNC_INTERVAL`, checked at start-up), so
+the run that finalises a window still requests it. The arithmetic, with the defaults: a window
+that ended at time *t* is inside a run's range until *t* + 175 minutes (180 minutes of look-back
+less the window's own 5), and is due for `final` from *t* + 60 minutes. Any run in those 115
+minutes finalises it; at one run every 15 minutes that is seven or eight runs, so about seven
+consecutive missed runs are tolerated. After a longer outage the run report and `/status` show
+`stranded_preliminary` (below), and the backfill finalises those windows. A late sample that
+arrives after a window was written `final` is still picked up while the window is inside the
+range (see "Amendments").
 
-**Deviation from the literal AC wording.** The AC says preliminary windows "become final on the
-next run". With `FINAL_AFTER = LOOKBACK − SYNC_INTERVAL` (165) that is exactly what happens, but
-one missed run would then leave windows `preliminary` for good. The default (60) trades the
-literal "next run" for tolerance of missed runs; both are one variable apart.
+**Range: a fixed look-back.** The range is worked out from the clock alone, so a run never
+depends on what an earlier, perhaps partial, run did. What is already stored is read only to
+avoid rewriting it (next section), never to decide the range.
 
-**Why a fixed look-back and not "read the newest stored Observation".** It needs no read before
-each run, no FHIR search permissions beyond the editor role, and cannot be confused by a partial
-earlier write. The cost is rewriting about 36 windows per run (about 7,000 Observation and
-Provenance writes a day, each a new version in the store's history; see "Cost"). A long outage is
-handled by the backfill, which is the same code with a longer range.
+### Read once, write what changed
+
+Each run makes three FHIR searches (`stored.py`; standard R4 search parameters):
+
+1. `Patient?identifier=urn:pulsebridge:patient|<PATIENT_ID>&_elements=id`: the Patient's id;
+2. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&status=preliminary&date=lt<range start>&_summary=count`:
+   stranded preliminary windows;
+3. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&date=ge<start>&date=lt<end>&_elements=identifier,status,effectivePeriod,valueQuantity,component&_count=1000`,
+   following the `next` links: what is stored for the range.
+
+Then each window of the roll-up is written only if it is new, its values or end changed, or it is
+stored `preliminary` and is now due for `final`. A window stored with the same values and the
+status it would get now (or already final) is skipped. With prompt data, each window is written
+twice: once `preliminary` (when it first appears, under 60 minutes old) and once `final`. A test
+runs twelve consecutive runs and checks no window is written more than twice.
+
+- **If a search fails** (any error), the run logs `stored-read-failed` with the HTTP status and
+  writes every window, as before: reading only saves writes. No Patient yet (`patient-not-found`)
+  means nothing is stored, so everything is new.
+- **Stranded preliminary windows**: the count from search 2 is in the report
+  (`stranded_preliminary`) with a `WARNING` (`stranded-preliminary`) when above zero, and in
+  `/status` as the note `backfill-needed`.
+- The searches run once per run and only when the roll-up returned windows, so a run that ends
+  at the token refresh, or finds no data, does not touch the FHIR store.
+
+### Amendments
+
+R4 `amended`: "Subsequent to being Final, the observation has been modified". A window already
+stored `final` whose values change (a late sample arrived more than 60 minutes after the window
+ended) should be written `amended`. **T06's `heart_rate_transaction`, which this service must use,
+cannot write `amended`**: it gives each window `final` or `preliminary` from the cutoff. Until it
+can, such a window is written **`final` with the new values: a silent amendment.** The run counts
+them (`windows_amended`), and the store's version history keeps the earlier values. The API change
+proposed for T06 is a keyword on `heart_rate_transaction` (and `heart_rate_resources`):
+`amended: Collection[datetime] = ()`, the UTC start times of windows to write with status
+`amended` instead of `final`. (T06's lower-level `build_heart_rate_observation` already accepts
+`amended`.)
+
+**Longer-term option, not built:** write each window by a deterministic id
+(`PUT Observation/<key>`, update-as-create) instead of a conditional update. It would let the
+store answer "unchanged" by itself only if it skipped identical updates, which is unverified, so
+it is noted here only.
 
 ## Batching
 
@@ -274,6 +381,8 @@ across the autumn change would be 337 hours and refused. Example, 30 days from 2
 
 - No overall deadline (per-request retries are still bounded). One access token for the whole
   backfill, refreshed when it nears expiry.
+- The same read-once rule applies: re-running a backfill over stored, unchanged windows writes
+  nothing. The device lookup is made per Bundle (about 8 hours of windows), not per 14-day piece.
 - Logs go to stderr, the report (JSON) to stdout. Exit codes: `0` synced; `3` reconnect needed
   or not configured; `1` another failure (the report says how many ranges completed; re-run);
   `2` bad arguments or configuration. `--days` is 1 to 366.
@@ -285,18 +394,25 @@ across the autumn change would be 337 hours and refused. Example, 30 days from 2
 ## Device and data source
 
 Roll-ups carry no `dataSource` (spike S3), but T06's Provenance and Device want the device name,
-the platform and the recording method. Per range with data, health-sync makes **one cheap raw
-call**, `GET …/heart-rate/dataPoints?filter=<range>&pageSize=1`, and uses the newest point's
-`dataSource.device.displayName`, `platform` and `recordingMethod`, exactly as reported:
+the platform and the recording method. For each Bundle, health-sync makes **one cheap raw call**,
+`GET …/heart-rate/dataPoints?filter=<the Bundle's windows>&pageSize=1`, and uses the newest
+point's `dataSource.device.displayName`, `platform` and `recordingMethod`, exactly as reported:
 
 - A part Google does not report (or reports as `*_UNSPECIFIED` / `UNKNOWN`) becomes `None`, and
   T06 then asserts nothing about it (no custodian agent, no recording-method role).
-- With no `displayName`, the Device is named `Unnamed Google Health device`, which claims nothing
-  about the hardware (T06's Device needs a name). A watch that later reports its name gets its
-  own Device.
+- **When that point has no `displayName`** (or there is no point in the span), a second call with
+  only an upper bound, `physical_time < <span start>`, `pageSize=1`, takes the name from the
+  newest earlier point. The Device then keeps the name earlier runs used instead of switching to
+  an unnamed one for one batch. Platform and recording method still come from the span's point
+  when it has them.
+- Only when the user has no earlier named point at all is the Device named `Unnamed Google Health
+  device`, which claims nothing about the hardware (T06's Device needs a name).
+- **Remaining split:** a user whose first data has no device name gets the unnamed Device for
+  those windows, and the named one once Google reports a name; a real change of watch also gives
+  a second Device. The Device key is patient plus name (T06), so this cannot be merged here.
 - The roll-up reconciles every source; the device of the newest raw point is the one credited
-  for the range. With one watch (the spike's case) that is exact; with several devices it is an
-  approximation, noted here rather than hidden.
+  for the Bundle. With one watch (the spike's case) that is exact; with several devices it is an
+  approximation.
 - The raw point's heart-rate value is read over the wire but never used, stored or logged.
 
 ## For T14: the trace panel's "Google Health JSON it came from"
@@ -319,9 +435,11 @@ FHIR store returns decimals exactly as sent (FHIR `decimal` is meant to preserve
 ## Logging
 
 One JSON object per line on stdout (stderr for the backfill). Logged: `event` (`sync-run`,
-`backfill-run`, `status-check`, `google-retry`, `fhir-retry`, `secrets-missing`, `bug`),
-`outcome` and `reason` codes, the UTC range bounds and cutoff, counts (pages, windows fetched,
-empty, invalid, written, final, preliminary, Bundles), HTTP statuses, retry attempts and delays,
+`backfill-run`, `status-check`, `google-retry`, `fhir-retry`, `secrets-missing`,
+`stored-read-failed`, `stranded-preliminary`, `stranded-count-failed`, `scope-not-listed`,
+`refresh-token-rotated`, `bug`), `outcome` and `reason` codes, the UTC range bounds and cutoff,
+counts (pages, windows fetched, empty, invalid, unchanged, new, changed, finalised, amended,
+written, final, preliminary, stranded, Bundles), HTTP statuses, retry attempts and delays,
 response status counts per resource type, durations. Never logged: heart-rate values, tokens,
 the client ID or secret, the patient id, the device name, response bodies, exception messages
 from the mapping (they can quote a value), or Google's free-text error descriptions. A test runs
@@ -338,15 +456,26 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "health_syn
 - Routes: `POST /sync`, `GET /status`.
 - For T24's container: install `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp` before this
   package (they are not on PyPI). The image also provides the `health-sync-backfill` command.
-- Scale to zero is fine: nothing is kept between requests except the 60-second status cache.
+- Scale to zero is fine: nothing is kept between requests except the status cache and the
+  one-run-at-a-time lock. Set `max_instance_count = 1` (see "Deadline: one run at a time").
 
 ## Cost
 
-Idle cost is zero (Cloud Run scales to zero). Each run makes three Google calls and one FHIR
-transaction of about 74 entries; 96 runs a day is about 7,100 FHIR writes and the same number of
-new resource versions (versioning is on, healthcare module), roughly 7 MB of history a day at
-about 1 KB a version. Lower `LOOKBACK_MINUTES` to reduce it; the trade-off is less tolerance of
-missed runs and late phone syncs.
+Idle cost is zero (Cloud Run scales to zero; `max_instance_count = 1`).
+
+Sizes, measured on the T06 output: one heart-rate Observation is about 1.5 KB and its Provenance
+about 1.5 KB (a 100-window Bundle is 202 entries and about 330 KB of compact JSON). The store
+keeps every version (versioning is on, healthcare module), so each write adds about 1.5 KB of
+history. A day is 288 windows, about 0.9 MB of current data.
+
+| | Writes a day | New versions a day |
+| --- | --- | --- |
+| Before (every run rewrote its 36 windows) | about 6,900 Observation + Provenance writes (each window about 12 times) | about 10 MB |
+| Now (read once, write what changed) | about 1,150 (each window twice: preliminary, then final) plus any changed windows | about 1.7 MB |
+
+Reads added: three searches per run with data (about 290 a day), each returning a few kilobytes
+(`_elements` keeps only the compared fields). Google calls per run: one token refresh, one
+roll-up page, and one data-source call per Bundle written (none when nothing changed).
 
 ## What is confirmed, and where from
 
@@ -366,18 +495,25 @@ missed runs and late phone syncs.
 | `executeBundle` limits (1,000 entries may time out, 4,500 rejected, 50 MB) | Cloud Healthcare "Quotas and limits" |
 | Scheduler `attemptDeadline` default 3 min for HTTP; `retryCount = 0` waits for the next run | Cloud Scheduler REST reference |
 
+**Not verified against the real FHIR store:** that Cloud Healthcare supports `_elements` and
+`_summary=count` on these searches, and that `date` on an `effectivePeriod` matches overlapping
+periods as R4 describes. Each is a standard R4 search parameter; if one is refused, the search
+fails and the run writes everything (logged as `stored-read-failed`), so a wrong assumption costs
+writes, not data.
+
 **Not verified (no call to Google or GCP was made in this task):** the exact JSON of Google's
 `401`/`403`/`429` error bodies (handled whether or not they carry an `ErrorInfo` reason); whether
 Google ever returns a new refresh token on refresh; whether the token response always carries
-`scope` (if absent, the scope check is skipped); whether the API accepts a range ending at the
+`scope` (if absent, the scope warning is skipped); whether the API accepts a range ending at the
 current five-minute boundary with a still-filling window (the range ends before it, so this is
 not relied on); decimal round-tripping in the FHIR store.
 
-## Still to confirm on the first real write (AC, T25)
+## For T25: confirm on the first real write
 
 T06's ingest Bundle assumes the store resolves the in-Bundle `urn:uuid` references to the Patient
 that the setup step already wrote (the conditional create matches and creates nothing). This
-task made no GCP calls, so it is **not yet confirmed**. On the first real sync, check:
+task made no GCP calls, so it is **not yet confirmed**; the check belongs to the first deployment
+(T25). On the first real sync, check:
 
 1. The run report's `entry_statuses` shows `Patient 200` (matched), not `Patient 201` (created a
    second Patient). `201` on the very first run before setup is expected; after setup it is not.
@@ -392,7 +528,8 @@ and the fallback"); that is a change to `libs/pulsebridge_fhir`, not to this ser
 
 `make test` runs `tests/`. No network, no credentials, no GCP: Google and the OAuth endpoint are
 scripted with `pulsebridge_gcp.testing.FakeTransport`, the FHIR store is the real
-`HealthcareClient` over another `FakeTransport`, and the secret files are written to a temporary
+`HealthcareClient` over `FhirFake` (a `FakeTransport` that also answers the searches from an
+in-memory store), and the secret files are written to a temporary
 directory. Every roll-up item is invented in the shape spike S3 recorded, and every credential is
 assembled at run time from obviously synthetic pieces. Each behaviour was break-checked: the
 implementation was deliberately broken and a test seen to fail.

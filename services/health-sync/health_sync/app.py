@@ -28,7 +28,13 @@ from pulsebridge_gcp import HealthcareClient, RequestsTransport, default_transpo
 from health_sync.config import ConfigError, ServiceConfig
 from health_sync.credentials import SecretsMissing, load_credentials
 from health_sync.logs import configure_logging
-from health_sync.status import CONNECTED, RECONNECT_NEEDED, ConnectionStatus, check_connection
+from health_sync.status import (
+    CONNECTED,
+    RECONNECT_NEEDED,
+    UNKNOWN,
+    ConnectionStatus,
+    check_connection,
+)
 from health_sync.sync import (
     Outcome,
     RunReport,
@@ -40,6 +46,9 @@ from health_sync.sync import (
 
 SYNC_PATH = "/sync"
 STATUS_PATH = "/status"
+# How long /status reuses an answer: a definite one for STATUS_CACHE_SECONDS (60 by default),
+# "unknown" for this long, so a failing token endpoint is not asked on every page load either.
+UNKNOWN_CACHE_SECONDS = 15.0
 
 logger = logging.getLogger("health_sync")
 
@@ -77,53 +86,62 @@ def check_startup(config: ServiceConfig) -> None:
     except SecretsMissing as exc:
         logger.warning(
             "google health secrets not available at start-up",
-            extra={"fields": {"event": "secrets-missing", "secrets": exc.names}},
+            extra={
+                "fields": {"event": "secrets-missing", "secrets": exc.names, "reason": exc.reason}
+            },
         )
 
 
 def default_dependencies(config: ServiceConfig) -> SyncDependencies:
     import requests
 
+    # The service's own service account (Application Default Credentials), one authorised
+    # session for the process. A HealthcareClient is cheap to build, so each FHIR request gets
+    # its own with a timeout cut to the time the run has left (sync.py, "Time").
+    fhir_transport = default_transport()
+
+    def fhir(timeout: float) -> HealthcareClient:
+        return HealthcareClient(
+            project=config.project_id,
+            location=config.location,
+            dataset=config.dataset_id,
+            transport=fhir_transport,
+            timeout=timeout,
+        )
+
     return SyncDependencies(
         # A plain session for Google Health and OAuth: the user's access token is added by
         # TokenSource. Never the service account's AuthorizedSession, whose token must not be
         # sent to a non-GCP API.
         google_transport=RequestsTransport(requests.Session()),
-        fhir=HealthcareClient(
-            project=config.project_id,
-            location=config.location,
-            dataset=config.dataset_id,
-            transport=default_transport(),  # the service's own service account (ADC)
-            timeout=config.fhir_timeout,
-        ),
+        fhir=fhir,
     )
 
 
 class StatusCache:
-    """Reuses the last definite status for a short time, so a busy dashboard does not ask
-    Google's token endpoint on every page load. In memory only; it is lost on restart, which is
-    fine because the answer can always be recomputed."""
+    """Reuses the last status for a short time, so a busy dashboard does not ask Google's token
+    endpoint on every page load. In memory only; lost on restart, which is fine because the
+    answer can always be recomputed."""
 
     def __init__(self, seconds: float, clock: Callable[[], float] = time.monotonic) -> None:
         self._seconds = seconds
         self._clock = clock
         self._lock = threading.Lock()
-        self._value: tuple[float, ConnectionStatus] | None = None
+        self._value: tuple[float, float, ConnectionStatus] | None = None
 
     def get(self) -> ConnectionStatus | None:
         with self._lock:
-            if self._value and self._clock() - self._value[0] < self._seconds:
-                return self._value[1]
+            if self._value and self._clock() - self._value[0] < self._value[1]:
+                return self._value[2]
             return None
 
     def put(self, status: ConnectionStatus) -> None:
-        if status.cacheable and self._seconds > 0:
+        ttl = (
+            min(self._seconds, UNKNOWN_CACHE_SECONDS) if status.state == UNKNOWN else self._seconds
+        )
+        if ttl > 0:
             with self._lock:
-                self._value = (self._clock(), status)
-
-    def clear(self) -> None:
-        with self._lock:
-            self._value = None
+                self._value = (self._clock(), ttl, status)
 
 
 def log_report(event: str, report: RunReport) -> None:
@@ -149,10 +167,28 @@ def create_app(config: ServiceConfig | None = None, deps: SyncDependencies | Non
     check_startup(config)
     deps = deps or default_dependencies(config)
     cache = StatusCache(config.status_cache_seconds, deps.monotonic)
+    # One run at a time per instance. Scheduler can start a second run while the first is
+    # still going (a slow run past its attempt deadline, or a manual call); the second one
+    # answers at once instead of writing the same windows in parallel. With Cloud Run's
+    # max_instance_count = 1 (README, T20) this covers the whole service.
+    sync_lock = threading.Lock()
     app = Flask("health_sync")
+    app.extensions["health_sync_lock"] = sync_lock
 
     @app.post(SYNC_PATH)
     def sync() -> tuple[Response, int]:
+        if not sync_lock.acquire(blocking=False):
+            logger.info(
+                "sync skipped: another run is in progress",
+                extra={
+                    "fields": {
+                        "event": "sync-run",
+                        "outcome": "already-running",
+                        "http_status": 200,
+                    }
+                },
+            )
+            return jsonify({"outcome": Outcome.ALREADY_RUNNING.value}), 200
         try:
             whole = sync_range(deps.now(), config.lookback)
             report = run_sync(
@@ -161,13 +197,23 @@ def create_app(config: ServiceConfig | None = None, deps: SyncDependencies | Non
         except Exception as exc:  # noqa: BLE001 - a bug must answer, not crash the worker
             logger.error("sync failed: %s", type(exc).__name__, extra={"fields": {"event": "bug"}})
             return jsonify({"outcome": "bug"}), 500
+        finally:
+            sync_lock.release()
         log_report("sync-run", report)
+        stranded = report.stranded_preliminary
+        notes = (["refresh-token-rotated"] if report.refresh_token_rotated else []) + (
+            ["backfill-needed"] if stranded else []
+        )
         if report.outcome == Outcome.RECONNECT_NEEDED:
-            cache.put(ConnectionStatus(RECONNECT_NEEDED, report.reason, deps.now()))
+            cache.put(
+                ConnectionStatus(
+                    RECONNECT_NEEDED, report.reason, deps.now(), tuple(notes), stranded
+                )
+            )
         elif report.outcome == Outcome.SYNCED and report.token_refreshes:
-            # The token refresh just worked, so the connection is good: say so at once rather
-            # than serving a cached "reconnect-needed" after the user has reconnected.
-            cache.put(ConnectionStatus(CONNECTED, None, deps.now()))
+            # The token refresh just worked: say so at once rather than serving a cached
+            # "reconnect-needed" after the user has reconnected.
+            cache.put(ConnectionStatus(CONNECTED, None, deps.now(), tuple(notes), stranded))
         return jsonify(report.as_dict()), report.http_status
 
     @app.get(STATUS_PATH)
@@ -178,6 +224,8 @@ def create_app(config: ServiceConfig | None = None, deps: SyncDependencies | Non
                 result = check_connection(
                     config,
                     deps.google_transport,
+                    fhir=deps.fhir,
+                    range_start=sync_range(deps.now(), config.lookback).start,
                     now=deps.now,
                     monotonic=deps.monotonic,
                     sleep=deps.sleep,
@@ -198,6 +246,7 @@ def create_app(config: ServiceConfig | None = None, deps: SyncDependencies | Non
                         "event": "status-check",
                         "google_health": result.state,
                         "reason": result.reason,
+                        "notes": list(result.notes),
                     }
                 },
             )

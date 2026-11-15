@@ -14,7 +14,8 @@ Why files, not environment variables, and not the Secret Manager API:
 
 A missing or unreadable file is not a start-up failure (Cloud Run does not check volume secrets
 at start-up either). It is the ``not-configured`` state, which the status route reports so the
-dashboard can say so. Values are never logged, never put in an exception message, and hidden
+dashboard can say so; the reason code says which case it is (``secrets-missing`` or
+``secret-unreadable``). Values are never logged, never put in an exception message, and hidden
 from ``repr``.
 """
 
@@ -31,12 +32,35 @@ MAX_SECRET_BYTES = 4096
 
 
 class SecretsMissing(Exception):
-    """One or more secret files are missing, empty or unreadable. ``names`` lists which
-    (``client-id``, ``client-secret``, ``refresh-token``), never a value or the file content."""
+    """One or more secret files cannot be used. Names only (``client-id``, ``client-secret``,
+    ``refresh-token``), never a value or the file content:
 
-    def __init__(self, names: list[str]) -> None:
-        super().__init__(f"Google Health secrets not available: {', '.join(names)}")
-        self.names = names
+    - ``missing``: the file does not exist or is empty: nothing has been stored yet (the
+      connect script has not run, or the mount is not configured).
+    - ``unreadable``: the file exists but cannot be used: a read error (permissions, a secret
+      version Cloud Run cannot access), more than 4 KiB, not UTF-8, or characters a
+      credential cannot contain (spaces, control characters). Something is mounted, but wrong.
+    """
+
+    def __init__(self, missing: list[str], unreadable: list[str] | None = None) -> None:
+        self.missing = missing
+        self.unreadable = unreadable or []
+        super().__init__(f"Google Health secrets not usable: {self.reason}")
+
+    @property
+    def names(self) -> list[str]:
+        return self.missing + self.unreadable
+
+    @property
+    def reason(self) -> str:
+        """The reason code reported by runs and ``/status``, e.g.
+        ``secrets-missing:refresh-token`` or ``secret-unreadable:client-id``."""
+        parts = []
+        if self.missing:
+            parts.append("secrets-missing:" + ",".join(self.missing))
+        if self.unreadable:
+            parts.append("secret-unreadable:" + ",".join(self.unreadable))
+        return ";".join(parts)
 
 
 @dataclass(frozen=True)
@@ -52,21 +76,30 @@ class OAuthCredentials:
         return (self.client_id, self.client_secret, self.refresh_token)
 
 
-def _read(path: str) -> str | None:
+_MISSING = object()
+_UNREADABLE = object()
+
+
+def _read(path: str) -> str | object:
+    """The secret's text, or ``_MISSING`` / ``_UNREADABLE``."""
     try:
         with open(path, "rb") as handle:
             raw = handle.read(MAX_SECRET_BYTES + 1)
+    except FileNotFoundError:
+        return _MISSING
     except OSError:
-        return None
+        return _UNREADABLE
     if len(raw) > MAX_SECRET_BYTES:
-        return None
+        return _UNREADABLE
     try:
         text = raw.decode("utf-8").strip()  # a trailing newline from `echo` is common
     except UnicodeDecodeError:
-        return None
+        return _UNREADABLE
+    if not text:
+        return _MISSING
     # One token, printable ASCII, no spaces: anything else is not a credential we can send.
-    if not text or any(not ("!" <= ch <= "~") for ch in text):
-        return None
+    if any(not ("!" <= ch <= "~") for ch in text):
+        return _UNREADABLE
     return text
 
 
@@ -77,9 +110,10 @@ def load_credentials(paths: SecretPaths) -> OAuthCredentials:
         "client-secret": _read(paths.client_secret),
         "refresh-token": _read(paths.refresh_token),
     }
-    missing = [name for name, value in values.items() if value is None]
-    if missing:
-        raise SecretsMissing(missing)
+    missing = [name for name, value in values.items() if value is _MISSING]
+    unreadable = [name for name, value in values.items() if value is _UNREADABLE]
+    if missing or unreadable:
+        raise SecretsMissing(missing, unreadable)
     return OAuthCredentials(
         client_id=values["client-id"],  # type: ignore[arg-type]
         client_secret=values["client-secret"],  # type: ignore[arg-type]

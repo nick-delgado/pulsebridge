@@ -1,5 +1,6 @@
 """The Google Health client and the OAuth refresh, over a scripted transport (no network)."""
 
+import logging
 from urllib.parse import parse_qs
 
 import pytest
@@ -16,13 +17,15 @@ from health_sync.google_health import (
     ReconnectNeeded,
     TokenSource,
 )
-from health_sync.retry import Deadline, RetryPolicy
+from health_sync.retry import Deadline, DeadlineReached, RetryPolicy
 from health_sync.testing import (
     ACCESS_TOKEN,
     ACCESS_TOKEN_2,
     CLIENT_ID,
     CLIENT_SECRET,
     REFRESH_TOKEN,
+    fake,
+    formatted_logs,
     google_error,
     leaked,
     list_response,
@@ -78,7 +81,7 @@ def test_one_access_token_is_reused_until_it_is_about_to_expire(world):
         token_response(ACCESS_TOKEN_2),
     )
     world.google.add("POST", ":rollUp", rollup_page([]))
-    tokens, client = make(world)
+    tokens, client = make(world, deadline=None)  # the test jumps an hour ahead
     client.rollup(START, END)
     client.rollup(START, END)
     assert world.token_calls() == 1
@@ -142,13 +145,17 @@ def test_other_token_endpoint_refusals_are_rejections_not_reconnects(world):
     assert caught.value.code == "invalid_request"
 
 
-def test_a_token_without_the_configured_scope_is_reconnect_needed(world):
+def test_a_scope_list_without_ours_is_a_warning_not_a_failure(world, caplog):
+    """An exact-string mismatch in the token response must not stop the run; if the scope is
+    really missing, the API answers 403 MISSING_OAUTH_SCOPE (next test)."""
     other = "https://www.googleapis.com/auth/googlehealth.sleep.readonly"
     world.google.add("POST", "/token", token_response(scope=other))
     tokens, _ = make(world)
-    with pytest.raises(ReconnectNeeded) as caught:
-        tokens.token()
-    assert caught.value.code == "scope-not-granted"
+    with caplog.at_level(logging.WARNING):
+        assert tokens.token() == ACCESS_TOKEN
+    assert tokens.scope_not_listed is True
+    assert [r.fields["event"] for r in caplog.records] == ["scope-not-listed"]
+    assert other not in formatted_logs(caplog.records)
 
 
 def test_missing_oauth_scope_from_the_api_is_reconnect_needed(world):
@@ -364,3 +371,54 @@ def test_error_messages_never_carry_credentials(world):
         tokens.token()
     assert leaked(str(caught.value) + repr(caught.value)) == []
     assert leaked(repr(OAuthCredentials(CLIENT_ID, CLIENT_SECRET, REFRESH_TOKEN))) == []
+
+
+def test_an_unknown_oauth_error_code_is_shown_as_refused(world):
+    leaky = fake("looks", "like", "a", "token", "x9Qz")
+    world.google.add("POST", "/token", oauth_error(leaky))
+    tokens, _ = make(world)
+    with pytest.raises(GoogleHealthRejected) as caught:
+        tokens.token()
+    assert caught.value.code == "refused"
+    assert leaky not in str(caught.value)
+
+
+def test_a_known_oauth_error_code_is_named(world):
+    world.google.add("POST", "/token", oauth_error("invalid_scope"))
+    tokens, _ = make(world)
+    with pytest.raises(GoogleHealthRejected) as caught:
+        tokens.token()
+    assert caught.value.code == "invalid_scope"
+
+
+def test_a_rotated_refresh_token_is_logged_as_a_warning_without_its_value(world, caplog):
+    value = fake("rotated", "grant")
+    world.google.add(
+        "POST", "/token", json_response(200, token_response().json() | {"refresh_token": value})
+    )
+    tokens, _ = make(world)
+    with caplog.at_level(logging.WARNING):
+        tokens.token()
+    logs = formatted_logs(caplog.records)
+    assert "refresh-token-rotated" in logs
+    assert value not in logs
+
+
+def test_no_request_is_started_after_the_deadline(world):
+    world.google.add("POST", "/token", token_response())
+    tokens, _ = make(world, deadline=10.0)
+    world.clock.mono += 9
+    with pytest.raises(DeadlineReached):
+        tokens.token()
+    assert world.google.requests == []
+
+
+def test_no_backoff_wait_is_taken_that_leaves_no_room_for_the_next_request(world):
+    """4.5 s budget: after the first 429 a 1 s wait leaves 3.5 s; after the second, a 2 s wait
+    would leave 1.5 s, less than a request needs (2 s), so the run stops instead of waiting."""
+    world.google.add("POST", "/token", google_error(429))
+    tokens, _ = make(world, max_attempts=10, deadline=4.5)
+    with pytest.raises(GoogleHealthUnavailable):
+        tokens.token()
+    assert world.clock.sleeps == [1.0]
+    assert world.token_calls() == 2

@@ -55,7 +55,6 @@ MAX_PAGES = 50  # a misbehaving page token cannot loop for ever
 # between the check and its use.
 TOKEN_EXPIRY_MARGIN_SECONDS = 60.0
 
-_SAFE_CODE = re.compile(r"[A-Za-z0-9_.-]{1,64}", re.ASCII)
 _ENUM = re.compile(r"[A-Z][A-Z0-9_]{0,63}", re.ASCII)
 
 logger = logging.getLogger("health_sync")
@@ -83,8 +82,9 @@ class ReconnectNeeded(GoogleHealthError):
       revoked. In Testing status Google issues refresh tokens that expire after 7 days.
     - ``oauth-client-rejected``: ``invalid_client``, ``unauthorized_client`` or
       ``deleted_client``: the OAuth client id or secret is wrong, or the client was deleted.
-    - ``scope-not-granted``: the token does not carry the configured scope (the user unticked
-      it on the consent screen), seen in the token response or as ``MISSING_OAUTH_SCOPE``.
+    - ``scope-not-granted``: the API answered 403 ``MISSING_OAUTH_SCOPE`` (the user unticked the
+      scope on the consent screen). The token response's ``scope`` list is only logged, not
+      trusted to fail a run: an exact-string comparison could fail on a harmless difference.
     """
 
 
@@ -125,8 +125,9 @@ class HttpSender:
         attempt = 0
         while True:
             attempt += 1
-            remaining = self.deadline.remaining()
-            timeout = self.timeout if remaining is None else max(1.0, min(self.timeout, remaining))
+            # Cut to the time left; raises DeadlineReached instead of starting a request that
+            # could not finish before the run's deadline.
+            timeout = self.deadline.timeout_for(self.timeout, operation)
             retry_after = None
             try:
                 response = self.transport.request(
@@ -198,8 +199,30 @@ class _AccessToken:
     expires_at: float  # monotonic seconds
 
 
-# OAuth 2.0 error codes (RFC 6749 section 5.2, and Google's list for its token endpoint) that mean
-# the stored authorisation itself is unusable: retrying cannot help, reconnecting can.
+# OAuth 2.0 error codes that may be echoed into a reason: RFC 6749 section 5.2 (token endpoint)
+# and 4.1.2.1 (server_error, temporarily_unavailable), plus the codes Google documents for its
+# token endpoint. Anything else, including a value that looks like a token, is shown as
+# "refused", so nothing a server sends can reach a log line unchecked.
+KNOWN_OAUTH_ERRORS = frozenset(
+    {
+        "invalid_request",
+        "invalid_client",
+        "invalid_grant",
+        "unauthorized_client",
+        "unsupported_grant_type",
+        "invalid_scope",
+        "access_denied",
+        "server_error",
+        "temporarily_unavailable",
+        "deleted_client",
+        "disabled_client",
+        "admin_policy_enforced",
+        "invalid_rapt",
+    }
+)
+
+# The subset that means the stored authorisation itself is unusable: retrying cannot help,
+# reconnecting can.
 _RECONNECT_CODES = {
     "invalid_grant": "refresh-token-invalid",
     "invalid_client": "oauth-client-rejected",
@@ -230,6 +253,7 @@ class TokenSource:
         self._token: _AccessToken | None = None
         self.refreshes = 0
         self.rotated_refresh_token_ignored = False
+        self.scope_not_listed = False
 
     def token(self) -> str:
         if self._token is None or self._clock() >= self._token.expires_at:
@@ -269,7 +293,7 @@ class TokenSource:
             code = _error_body(response).get("error")
             if isinstance(code, str) and code in _RECONNECT_CODES:
                 raise ReconnectNeeded(self.OPERATION, response.status, _RECONNECT_CODES[code])
-            shown = code if isinstance(code, str) and _SAFE_CODE.fullmatch(code) else "refused"
+            shown = code if isinstance(code, str) and code in KNOWN_OAUTH_ERRORS else "refused"
             raise GoogleHealthRejected(self.OPERATION, response.status, shown)
         if not 200 <= response.status < 300:
             raise GoogleHealthRejected(self.OPERATION, response.status, "unexpected-status")
@@ -288,12 +312,22 @@ class TokenSource:
             raise GoogleHealthRejected(self.OPERATION, response.status, "malformed-response")
         granted = body.get("scope")
         if isinstance(granted, str) and self._scope not in granted.split():
-            raise ReconnectNeeded(self.OPERATION, response.status, "scope-not-granted")
+            # Not fatal: the API itself answers 403 MISSING_OAUTH_SCOPE if the scope is really
+            # missing, which is reconnect-needed. Only the fact is logged, never the list.
+            self.scope_not_listed = True
+            logger.warning(
+                "configured scope not listed in the token response",
+                extra={"fields": {"event": "scope-not-listed"}},
+            )
         if "refresh_token" in body:
             # Google normally keeps the refresh token on a refresh (identity README). health-sync
             # can only read the secret, so a rotated one cannot be stored here; it is noted (as a
             # flag, never the value) so the deployer can reconnect before the old one stops.
             self.rotated_refresh_token_ignored = True
+            logger.warning(
+                "token response carried a new refresh token; it was not stored",
+                extra={"fields": {"event": "refresh-token-rotated"}},
+            )
         margin = min(TOKEN_EXPIRY_MARGIN_SECONDS, expires_in / 2)
         return _AccessToken(value=value, expires_at=self._clock() + expires_in - margin)
 
@@ -417,16 +451,15 @@ class GoogleHealthClient:
             request = {**request, "pageToken": token}
         raise GoogleHealthRejected(operation, 200, "too-many-pages")
 
-    def latest_data_source(self, start: datetime, end: datetime) -> DataSourceInfo:
-        """The ``dataSource`` of the newest raw heart-rate point in ``[start, end)`` (the list
-        method returns newest first; ``pageSize=1`` keeps it to one point)."""
+    def latest_data_source(self, start: datetime | None, end: datetime) -> DataSourceInfo:
+        """The ``dataSource`` of the newest raw heart-rate point in ``[start, end)``, or before
+        ``end`` when ``start`` is ``None`` (the list method returns newest first; ``pageSize=1``
+        keeps it to one point)."""
         operation = "GET heart-rate dataPoints"
         field_name = "heart_rate.sample_time.physical_time"
-        params = {
-            "filter": f'{field_name} >= "{google_time(start)}" AND '
-            f'{field_name} < "{google_time(end)}"',
-            "pageSize": "1",
-        }
+        upper = f'{field_name} < "{google_time(end)}"'
+        lower = f'{field_name} >= "{google_time(start)}" AND ' if start is not None else ""
+        params = {"filter": lower + upper, "pageSize": "1"}
         body = self._call(operation, "GET", LIST_URL, params=params)
         points = body.get("dataPoints") or []
         if not isinstance(points, list) or not points or not isinstance(points[0], dict):

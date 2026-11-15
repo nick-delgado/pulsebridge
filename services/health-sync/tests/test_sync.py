@@ -458,13 +458,22 @@ def test_a_refused_bundle_is_not_resent_and_fails_with_500(world):
     assert world.clock.sleeps == []
 
 
-@pytest.mark.parametrize("status", [401, 403, 404])
-def test_iam_or_a_missing_store_is_unavailable_without_retrying_now(world, status):
+@pytest.mark.parametrize(
+    ("status", "reason"),
+    [(401, "fhir-permission-denied"), (403, "fhir-permission-denied"), (404, "fhir-store-missing")],
+)
+def test_iam_or_a_missing_store_is_a_misconfiguration_not_transient(world, status, reason):
     one_window(world)
     world.fhir_transport.add("POST", FHIR_PATH, json_response(status, {}))
     report = run(world)
-    assert (report.outcome, report.fhir_status) == (Outcome.FHIR_UNAVAILABLE, status)
+    assert (report.outcome, report.reason, report.fhir_status) == (
+        Outcome.FHIR_MISCONFIGURED,
+        reason,
+        status,
+    )
+    assert report.http_status == 500  # alerts a person (README, "Alerts")
     assert len(world.bundles()) == 1
+    assert world.clock.sleeps == []
 
 
 def test_a_persistent_conflict_is_unavailable_after_the_retries(world):
@@ -508,6 +517,7 @@ def test_every_outcome_has_an_http_status():
         Outcome.SYNCED,
         Outcome.RECONNECT_NEEDED,
         Outcome.NOT_CONFIGURED,
+        Outcome.ALREADY_RUNNING,
     }
 
 

@@ -2,7 +2,8 @@
 
 - Google Health and the OAuth token endpoint are scripted with ``pulsebridge_gcp.testing``'s
   ``FakeTransport`` (routes by path suffix: ``/token``, ``:rollUp``, ``/dataPoints``).
-- The FHIR store is the real ``HealthcareClient`` over a second ``FakeTransport``, so the
+- The FHIR store is the real ``HealthcareClient`` over :class:`FhirFake` (a ``FakeTransport``
+  that also answers the Patient and Observation searches from an in-memory store), so the
   library's error classification is exercised end to end.
 - Credentials are built at run time from obviously fake pieces (so no literal in this file looks
   like a credential to a secret scanner) and written to files in ``tmp_path``, the way Cloud Run
@@ -12,14 +13,17 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
-from pulsebridge_gcp import HealthcareClient
-from pulsebridge_gcp.testing import FakeTransport, json_response
+from pulsebridge_gcp import HealthcareClient, RetryableError
+from pulsebridge_gcp.testing import FakeTransport, RecordedRequest, json_response
 from pulsebridge_gcp.transport import HttpResponse
 
 from health_sync.config import DEFAULT_SCOPE, SecretPaths, ServiceConfig
@@ -138,12 +142,112 @@ class Clock:
 
 
 @dataclass
+class FhirFake(FakeTransport):
+    """The FHIR store. ``POST`` of a Bundle goes to the scripted routes, as with
+    ``FakeTransport``; the two searches health-sync makes are answered from this state:
+
+    - ``patient_server_id``: the Patient the setup step wrote (``None``: no Patient yet);
+    - ``stored``: Observation resources the store holds, returned by every Observation search;
+    - ``stranded``: the ``total`` of the ``_summary=count`` search;
+    - ``read_failure``: if set, every search answers with it;
+    - ``auto_store``: copy each successfully written Bundle's Observations into ``stored``
+      (replacing by identifier) and give the Patient an id, like a real store would.
+    """
+
+    patient_server_id: str | None = None
+    stored: list[dict] = field(default_factory=list)
+    stranded: int = 0
+    read_failure: HttpResponse | None = None
+    auto_store: bool = False
+    page_size: int | None = None  # page the Observation search, with a ``next`` link
+    observation_failure: HttpResponse | None = None  # only the stored-windows search fails
+
+    def request(self, method, url, *, params, body, headers, timeout):  # noqa: ANN001
+        path = urlsplit(url).path
+        if method == "GET" and path.endswith(("/fhir/Patient", "/fhir/Observation")):
+            pairs = list(params.items()) if isinstance(params, Mapping) else list(params or [])
+            self.requests.append(
+                RecordedRequest(method, url, dict(pairs), pairs, body, dict(headers), timeout)
+            )
+            if self.read_failure is not None:
+                return self.read_failure
+            if path.endswith("/Patient"):
+                ids = [self.patient_server_id] if self.patient_server_id else []
+                entries = [{"resource": {"resourceType": "Patient", "id": i}} for i in ids]
+                return json_response(200, _searchset(entries))
+            if self.observation_failure is not None and "_summary" not in dict(pairs):
+                return self.observation_failure
+            if dict(pairs).get("_summary") == "count":
+                return json_response(
+                    200, {"resourceType": "Bundle", "type": "searchset", "total": self.stranded}
+                )
+            entries = [{"resource": r} for r in self.stored]
+            if self.page_size is None:
+                return json_response(200, _searchset(entries))
+            page = int(urlsplit(url).query.removeprefix("page=") or 1)
+            chunk = entries[(page - 1) * self.page_size : page * self.page_size]
+            body = _searchset(chunk)
+            if page * self.page_size < len(entries):
+                base = url.split("?", 1)[0]
+                body["link"] = [{"relation": "next", "url": f"{base}?page={page + 1}"}]
+            return json_response(200, body)
+        response = super().request(
+            method, url, params=params, body=body, headers=headers, timeout=timeout
+        )
+        if self.auto_store and method == "POST" and 200 <= response.status < 300 and body:
+            self._absorb(json.loads(body.decode("utf-8")))
+        return response
+
+    def _absorb(self, bundle: dict) -> None:
+        if self.patient_server_id is None:
+            self.patient_server_id = "p-1"
+        for entry in bundle.get("entry", []):
+            resource = entry["resource"]
+            if resource["resourceType"] != "Observation":
+                continue
+            key = resource["identifier"][0]["value"]
+            self.stored = [r for r in self.stored if r["identifier"][0]["value"] != key]
+            self.stored.append(resource)
+
+
+def _searchset(entries: Sequence[dict]) -> dict:
+    return {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "total": len(entries),
+        "entry": list(entries),
+    }
+
+
+@dataclass
+class SlowTransport:
+    """Wraps a transport; every request takes ``latency`` seconds of the test clock. A request
+    whose timeout is shorter waits the timeout and then fails as a timeout would (no response),
+    so tests can check that a run's wall time stays inside its deadline."""
+
+    inner: object
+    clock: Clock
+    latency: float
+    timeouts: list[float] = field(default_factory=list)
+
+    def request(self, method, url, *, params, body, headers, timeout):  # noqa: ANN001
+        self.timeouts.append(timeout)
+        if self.latency > timeout:
+            self.clock.mono += timeout
+            raise RetryableError(f"{method} {url}", None, server_message="Timeout")
+        self.clock.mono += self.latency
+        return self.inner.request(  # type: ignore[attr-defined]
+            method, url, params=params, body=body, headers=headers, timeout=timeout
+        )
+
+
+@dataclass
 class World:
     """One test's fakes: Google, the FHIR store, the clock, the secret files, the config."""
 
     tmp: Path
     google: FakeTransport = field(default_factory=FakeTransport)
-    fhir_transport: FakeTransport = field(default_factory=FakeTransport)
+    fhir_transport: FhirFake = field(default_factory=FhirFake)
     clock: Clock = field(default_factory=Clock)
 
     def __post_init__(self) -> None:
@@ -184,16 +288,23 @@ class World:
         values.update(overrides)
         return ServiceConfig(**values)
 
-    def deps(self) -> SyncDependencies:
-        client = HealthcareClient(
-            project="demo-project",
-            location="us-central1",
-            dataset="demo",
-            transport=self.fhir_transport,
-        )
+    def deps(
+        self, *, fhir_transport: object | None = None, google_transport: object | None = None
+    ) -> SyncDependencies:
+        transport = fhir_transport or self.fhir_transport
+
+        def fhir(timeout: float) -> HealthcareClient:
+            return HealthcareClient(
+                project="demo-project",
+                location="us-central1",
+                dataset="demo",
+                transport=transport,
+                timeout=timeout,  # type: ignore[arg-type]
+            )
+
         return SyncDependencies(
-            google_transport=self.google,
-            fhir=client,
+            google_transport=google_transport or self.google,  # type: ignore[arg-type]
+            fhir=fhir,
             now=lambda: self.clock.now,
             monotonic=self.clock.monotonic,
             sleep=self.clock.sleep,

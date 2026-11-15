@@ -110,7 +110,11 @@ def test_check_startup_warns_about_missing_secret_files_by_name_only(world, capl
     with caplog.at_level(logging.WARNING):
         check_startup(world.config())  # starts: /status must be able to say "not-configured"
     (record,) = [r for r in caplog.records if getattr(r, "fields", {}).get("event")]
-    assert record.fields == {"event": "secrets-missing", "secrets": ["client-secret"]}
+    assert record.fields == {
+        "event": "secrets-missing",
+        "secrets": ["client-secret"],
+        "reason": "secrets-missing:client-secret",
+    }
     assert leaked(formatted_logs(caplog.records)) == []
 
 
@@ -133,6 +137,33 @@ def test_an_unusable_file_is_missing_by_name(world, content):
         load_credentials(world.paths)
     assert caught.value.names == ["refresh-token"]
     assert leaked(str(caught.value)) == []
+
+
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        (b"", "secrets-missing:refresh-token"),
+        (b" \n", "secrets-missing:refresh-token"),
+        (b"two words", "secret-unreadable:refresh-token"),
+        (b"\xff\xfe", "secret-unreadable:refresh-token"),
+        (b"a" * (MAX_SECRET_BYTES + 1), "secret-unreadable:refresh-token"),
+    ],
+)
+def test_missing_and_unreadable_are_told_apart(world, content, reason):
+    Path(world.paths.refresh_token).write_bytes(content)
+    with pytest.raises(SecretsMissing) as caught:
+        load_credentials(world.paths)
+    assert caught.value.reason == reason
+
+
+def test_a_path_that_cannot_be_read_is_unreadable(world):
+    world.write_secrets(refresh_token=None)
+    path = Path(world.paths.client_id)
+    path.unlink()
+    path.mkdir()  # reading a directory fails with an OSError other than "not found"
+    with pytest.raises(SecretsMissing) as caught:
+        load_credentials(world.paths)
+    assert caught.value.reason == "secrets-missing:refresh-token;secret-unreadable:client-id"
 
 
 def test_several_missing_files_are_all_named(world):

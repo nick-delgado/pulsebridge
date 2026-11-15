@@ -148,6 +148,8 @@ def test_main_reports_configuration_errors_by_name_only(monkeypatch, capsys):
 
 def test_main_contains_a_bug_and_logs_its_type_only(world, monkeypatch, capsys, caplog):
     monkeypatch.setattr(backfill.ServiceConfig, "from_env", classmethod(lambda cls: world.config()))
+    # Never Application Default Credentials in a test: they are absent in CI.
+    monkeypatch.setattr(backfill, "default_dependencies", lambda config: world.deps())
 
     def broken(*_a, **_k):
         raise KeyError("PB-SYN-0001")

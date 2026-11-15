@@ -39,7 +39,10 @@ REQUIRED = {
 
 # Optional variables -> (default, what they are). Integers unless noted.
 OPTIONAL = {
-    "GOOGLE_HEALTH_SCOPE": (DEFAULT_SCOPE, "OAuth scope the refresh token must carry"),
+    "GOOGLE_HEALTH_SCOPE": (
+        DEFAULT_SCOPE,
+        "OAuth scope expected in the token (a mismatch is a warning)",
+    ),
     "LOOKBACK_MINUTES": ("180", "How far back each sync re-requests (overlap with earlier runs)"),
     "FINAL_AFTER_MINUTES": ("60", "A window is written 'final' once it ended this long ago"),
     "SYNC_INTERVAL_MINUTES": ("15", "How often Cloud Scheduler runs the sync (T20's schedule)"),
