@@ -1,0 +1,293 @@
+# Module `edge-vm` (task T21): the one always-on machine in PulseBridge. An e2-micro running
+# Container-Optimized OS (COS) on the private edge subnet, with
+#   - no external IP and no firewall rule of its own (decisions D13, D14: project-base owns the one
+#     rule that lets Cloud Run's serverless subnet reach MLLP and OpenEMR HTTPS);
+#   - a dedicated service account (never the Compute Engine default account);
+#   - a separate persistent disk for MariaDB and OpenEMR site data, so replacing the VM keeps the
+#     clinic data, while `terraform destroy` still removes it;
+#   - a startup script, run by COS on every boot, that mounts the disk, turns on swap, and starts
+#     Google's MLLP adapter and MariaDB with `docker run` (see README.md, "How the stack starts").
+#
+# Nothing secret is in this file, in the startup script or in metadata: the MariaDB root password is
+# read from Secret Manager by the VM's own account at boot.
+
+locals {
+  region = regex("^(.+)-[a-z]$", var.zone)[0]
+
+  # The subnet ID carries its region: projects/<p>/regions/<region>/subnetworks/<name>.
+  subnet_region = regex("/regions/([^/]+)/", var.edge_subnet_id)[0]
+
+  instance_name = "${var.name_prefix}-edge-vm"
+  disk_name     = "${var.name_prefix}-edge-data"
+  address_name  = "${var.name_prefix}-edge-internal"
+
+  # The disk appears on the VM as /dev/disk/by-id/google-<device_name>. Compute Engine creates that
+  # symlink from the name given here, so the script never has to guess /dev/sdb.
+  data_device_name = "edge-data"
+
+  # Paths on the VM. COS layout (docs: "Disks and file system overview"): / is read-only; /etc,
+  # /mnt/disks and /tmp are tmpfs (emptied on every boot); /var and /home are stateful but
+  # non-executable; /mnt/stateful_partition is the writable stateful partition of the boot disk.
+  data_mount_dir = "/mnt/disks/edge"           # the data disk, mounted on every boot
+  state_dir      = "/var/lib/pulsebridge-edge" # boot-disk state: docker config, hooks
+  swap_file      = "/mnt/stateful_partition/pulsebridge-swapfile"
+
+  # Docker Hub mirror: <location>-docker.pkg.dev/<project>/<repository>.
+  mirror_parts = regex("^([a-z0-9-]+)-docker\\.pkg\\.dev/([^/]+)/([^/]+)$", var.dockerhub_mirror_url)
+  mirror_host  = "${local.mirror_parts[0]}-docker.pkg.dev"
+
+  mariadb_image = "${var.dockerhub_mirror_url}/${var.mariadb_image}"
+
+  # MariaDB server options from spike S2's compose file (the low-memory "safety ceiling"): a 64 MB
+  # InnoDB buffer pool instead of 128 MB, no performance schema, at most 30 connections and small
+  # per-connection buffers. They are passed to the `mariadbd` command exactly as S2 ran them.
+  mariadb_command = [
+    "mariadbd",
+    "--character-set-server=utf8mb4",
+    "--innodb-buffer-pool-size=64M",
+    "--innodb-log-buffer-size=8M",
+    "--performance-schema=OFF",
+    "--max-connections=30",
+    "--table-open-cache=400",
+    "--key-buffer-size=8M",
+    "--tmp-table-size=16M",
+    "--max-heap-table-size=16M",
+    "--thread-cache-size=4",
+  ]
+
+  # The MLLP adapter command, exactly as spike S4 ran it:
+  #   - the image has no entrypoint, so the binary path is the first word;
+  #   - --port is the listen port inside the container; --receiver_ip=0.0.0.0 listens on every
+  #     interface of the container, and Docker's -p decides what the VM exposes;
+  #   - the store is given as four short names (--hl7_v2_store_id=<store>, not a resource path;
+  #     the older --hl7_v2_hl7_v2_store_id and --logtostderr put the container in a crash loop);
+  #   - --log_error_msg=true logs the store's error text for a NACK (no message content);
+  #   - --export_stats=false: the default sends metrics to Cloud Monitoring, which the VM's account
+  #     is not allowed to write;
+  #   - the content-logging flags (--log_ack, --log_nacked_msg, --log_input_msg_in_base64) are left
+  #     at their default, off: message content is patient data.
+  #   - no --credentials: the adapter gets tokens for the VM's account from the metadata server.
+  mllp_adapter_command = [
+    "/usr/mllp_adapter/mllp_adapter",
+    "--port=2575",
+    "--receiver_ip=0.0.0.0",
+    "--hl7_v2_project_id=${var.hl7v2_store_flags.hl7_v2_project_id}",
+    "--hl7_v2_location_id=${var.hl7v2_store_flags.hl7_v2_location_id}",
+    "--hl7_v2_dataset_id=${var.hl7v2_store_flags.hl7_v2_dataset_id}",
+    "--hl7_v2_store_id=${var.hl7v2_store_flags.hl7_v2_store_id}",
+    "--log_error_msg=true",
+    "--export_stats=false",
+  ]
+
+  hook_names = sort(keys(var.hooks))
+
+  # Values written into the startup script's configuration block. All are non-secret; the
+  # precondition on the instance checks none contains a single quote, so single-quoting them in
+  # the template is safe.
+  startup_config = {
+    data_device          = "/dev/disk/by-id/google-${local.data_device_name}"
+    data_mount_dir       = local.data_mount_dir
+    state_dir            = local.state_dir
+    swap_file            = local.swap_file
+    swap_size_mb         = tostring(var.swap_size_mb)
+    mirror_host          = local.mirror_host
+    mirror_url           = var.dockerhub_mirror_url
+    mariadb_image        = local.mariadb_image
+    mllp_adapter_image   = var.mllp_adapter_image
+    mllp_port            = tostring(var.mllp_port)
+    boot_wait_seconds    = tostring(var.boot_wait_minutes * 60)
+    mariadb_command      = local.mariadb_command
+    mllp_adapter_command = local.mllp_adapter_command
+    secret_names         = sort(keys(var.secret_files))
+    secret_files         = var.secret_files
+    hook_names           = local.hook_names
+  }
+
+  startup_config_values = flatten([
+    [for k, v in local.startup_config : v if can(tostring(v))],
+    local.mariadb_command,
+    local.mllp_adapter_command,
+    keys(var.secret_files),
+    values(var.secret_files),
+    local.hook_names,
+  ])
+
+  # The script is two parts joined: a configuration block rendered by templatefile() with the
+  # values above, and the logic, which is a plain bash file (no Terraform interpolation, so it can
+  # be shellchecked and tested on its own; see tests/startup_script.sh).
+  startup_script = join("", [
+    templatefile("${path.module}/templates/startup-config.sh.tftpl", local.startup_config),
+    file("${path.module}/scripts/edge-startup.sh"),
+  ])
+
+  # Instance metadata. Keys only from Google's predefined set plus the hook scripts:
+  #   - enable-oslogin: SSH access, if ever opened, is by IAM (OS Login), not by keys in metadata;
+  #   - block-project-ssh-keys: project-wide SSH keys are not accepted on this VM;
+  #   - google-logging-enabled: COS's logging agent ships logs to Cloud Logging.
+  # No ssh-keys key, and no key holding a password or token (tests/static_checks.sh and the tests
+  # check both).
+  instance_metadata = merge(
+    {
+      "startup-script"         = local.startup_script
+      "enable-oslogin"         = "TRUE"
+      "block-project-ssh-keys" = "TRUE"
+      "google-logging-enabled" = var.enable_cloud_logging ? "true" : "false"
+    },
+    { for name, script in var.hooks : "pulsebridge-hook-${name}" => script }
+  )
+}
+
+# ---------------------------------------------------------------------------------------------
+# Internal address
+# ---------------------------------------------------------------------------------------------
+
+# A reserved internal address, so the VM keeps the same IP when it is replaced. The cuff simulator's
+# MLLP_HOST (T22) and OpenEMR's site address (T23) point at it. Internal addresses, static or
+# ephemeral, are free (VPC pricing: "There is no charge for static or ephemeral internal IP
+# addresses"). It is INTERNAL: nothing here is reachable from the internet.
+resource "google_compute_address" "internal" {
+  project      = var.project_id
+  name         = local.address_name
+  description  = "Internal address of the PulseBridge edge VM (MLLP adapter, OpenEMR)."
+  region       = local.region
+  address_type = "INTERNAL"
+  purpose      = "GCE_ENDPOINT"
+  subnetwork   = var.edge_subnet_id
+  address      = var.internal_ip
+  labels       = var.labels
+}
+
+# ---------------------------------------------------------------------------------------------
+# Data disk
+# ---------------------------------------------------------------------------------------------
+
+# Its own resource, not part of the instance: when the VM is replaced (new image, new machine
+# type), Terraform detaches this disk from the old VM and attaches it to the new one, so the
+# MariaDB database and OpenEMR site files survive. No `prevent_destroy`: `terraform destroy` must
+# leave nothing billable, so it deletes this disk and the clinic data with it (synthetic in dev).
+resource "google_compute_disk" "data" {
+  project     = var.project_id
+  name        = local.disk_name
+  description = "PulseBridge edge VM data: MariaDB data directory and OpenEMR site files."
+  zone        = var.zone
+  type        = var.disk_type
+  size        = var.data_disk_size_gb
+  labels      = var.labels
+}
+
+# ---------------------------------------------------------------------------------------------
+# Image pull permission
+# ---------------------------------------------------------------------------------------------
+
+# Read access to the Docker Hub mirror repository only (not project-wide), so the VM can pull
+# MariaDB (and OpenEMR, T23) through Private Google Access. The repository belongs to
+# project-base; this grant is made here because pulling from it is this module's need, and it has
+# exactly one owner (project-base grants nothing on it). Additive `_iam_member`, so other readers
+# of the repository are left alone. Google's mllp-adapter image on gcr.io is public and needs no
+# grant.
+resource "google_artifact_registry_repository_iam_member" "mirror_reader" {
+  project    = local.mirror_parts[1]
+  location   = local.mirror_parts[0]
+  repository = local.mirror_parts[2]
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${var.service_account_email}"
+}
+
+# ---------------------------------------------------------------------------------------------
+# The VM
+# ---------------------------------------------------------------------------------------------
+
+resource "google_compute_instance" "this" {
+  project      = var.project_id
+  name         = local.instance_name
+  description  = "PulseBridge edge VM: MLLP adapter, MariaDB (and OpenEMR, T23). No external IP."
+  zone         = var.zone
+  machine_type = var.machine_type
+  tags         = [var.network_tag]
+  labels       = var.labels
+
+  # Changing the machine type, service account, scopes or Shielded VM settings needs the VM
+  # stopped. With this on, Terraform stops and restarts it (a reboot: the startup script runs
+  # again); without it such a change fails. Replacement is never needed for them.
+  allow_stopping_for_update = true
+  deletion_protection       = false # `terraform destroy` must be able to remove it
+
+  boot_disk {
+    auto_delete = true # the boot disk holds nothing that must survive (images, swap, docker config)
+
+    initialize_params {
+      image  = var.boot_image
+      size   = var.boot_disk_size_gb
+      type   = var.disk_type
+      labels = var.labels
+    }
+  }
+
+  attached_disk {
+    source      = google_compute_disk.data.self_link
+    device_name = local.data_device_name # -> /dev/disk/by-id/google-edge-data on the VM
+    mode        = "READ_WRITE"
+  }
+
+  network_interface {
+    subnetwork = var.edge_subnet_id
+    network_ip = google_compute_address.internal.address
+    # No access_config block: an access_config is what gives an instance an external IP. Without
+    # one the VM has only its internal address, reaches Google APIs through Private Google Access
+    # on the edge subnet, and cannot be reached from the internet at all.
+  }
+
+  service_account {
+    email = var.service_account_email
+    # Access scopes are an older, coarse limit on what the VM's tokens may call. Secret Manager
+    # requires the cloud-platform scope on Compute Engine (Secret Manager access-control docs), so
+    # no narrower set works; Google's guidance is to set cloud-platform and limit the account with
+    # IAM, which the identity and healthcare modules do (HL7v2 ingest on one store, three secrets,
+    # log writing, and the mirror read granted above).
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+  }
+
+  # Shielded VM: Secure Boot only runs a signed boot chain, the virtual TPM measures it, and
+  # integrity monitoring compares each boot with a known-good baseline. COS images support all
+  # three; none costs anything.
+  shielded_instance_config {
+    enable_secure_boot          = true
+    enable_vtpm                 = true
+    enable_integrity_monitoring = true
+  }
+
+  scheduling {
+    # Unattended recovery: live-migrate during host maintenance and restart after a host failure.
+    on_host_maintenance = "MIGRATE"
+    automatic_restart   = true
+    preemptible         = false # the free tier covers only non-preemptible e2-micro
+  }
+
+  # The startup script goes in metadata["startup-script"], not the `metadata_startup_script`
+  # argument: a change to that argument replaces the VM, while a metadata change is applied in
+  # place and runs on the next boot (or `sudo google_metadata_script_runner startup`).
+  metadata = local.instance_metadata
+
+  lifecycle {
+    # An image family such as cos-stable moves to a new image every few weeks. Ignoring it keeps
+    # a routine plan from replacing the VM; to move to a newer COS on purpose, run
+    # `terraform apply -replace=module.<name>.google_compute_instance.this` (the data disk stays).
+    ignore_changes = [boot_disk[0].initialize_params[0].image]
+
+    precondition {
+      condition     = local.subnet_region == local.region
+      error_message = "zone must be in the edge subnet's region (${local.subnet_region})."
+    }
+
+    precondition {
+      condition     = alltrue([for v in local.startup_config_values : !strcontains(v, "'")])
+      error_message = "Startup-script configuration values must not contain a single quote."
+    }
+
+    precondition {
+      # Instance metadata allows 256 KB per value and 512 KB in total.
+      condition     = length(local.startup_script) < 262144 && sum([for v in values(local.instance_metadata) : length(v)]) < 524288
+      error_message = "The startup script or the hooks exceed the instance metadata size limits (256 KB per value, 512 KB in total)."
+    }
+  }
+}

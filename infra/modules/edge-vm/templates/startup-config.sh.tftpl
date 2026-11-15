@@ -1,0 +1,52 @@
+#!/bin/bash
+# PulseBridge edge VM startup script (Terraform module edge-vm, task T21).
+#
+# Container-Optimized OS runs this as root on EVERY boot (instance metadata key startup-script).
+# Output: `sudo journalctl -u google-startup-scripts.service`, serial port 1, and Cloud Logging
+# when the COS logging agent is on. Re-run by hand: `sudo google_metadata_script_runner startup`.
+#
+# Part 1 of 2: configuration, rendered by Terraform's templatefile() from
+# templates/startup-config.sh.tftpl. Only non-secret values appear here: paths, image references
+# pinned by digest, the HL7v2 store's short names and the NAMES of Secret Manager secrets. No
+# password, key or token is ever written into this script.
+# Part 2 is scripts/edge-startup.sh, appended unchanged.
+
+EDGE_DATA_DEVICE='${data_device}'
+EDGE_DATA_DIR='${data_mount_dir}'
+EDGE_STATE_DIR='${state_dir}'
+EDGE_SWAP_FILE='${swap_file}'
+EDGE_SWAP_SIZE_MB='${swap_size_mb}'
+EDGE_MIRROR_HOST='${mirror_host}'
+EDGE_MIRROR_URL='${mirror_url}'
+EDGE_MARIADB_IMAGE='${mariadb_image}'
+EDGE_MLLP_ADAPTER_IMAGE='${mllp_adapter_image}'
+EDGE_MLLP_PORT='${mllp_port}'
+EDGE_BOOT_WAIT_SECONDS='${boot_wait_seconds}'
+
+# The mariadbd command with spike S2's low-memory settings.
+EDGE_MARIADB_COMMAND=(
+%{ for arg in mariadb_command ~}
+  '${arg}'
+%{ endfor ~}
+)
+
+# The MLLP adapter command with the flags spike S4 recorded.
+EDGE_MLLP_ADAPTER_COMMAND=(
+%{ for arg in mllp_adapter_command ~}
+  '${arg}'
+%{ endfor ~}
+)
+
+# Files to fill from Secret Manager: <file name>=<secret resource name>. Names only, no values.
+EDGE_SECRET_FILES=(
+%{ for name in secret_names ~}
+  '${name}=${secret_files[name]}'
+%{ endfor ~}
+)
+
+# Hook scripts to run after MariaDB is healthy (metadata keys pulsebridge-hook-<name>).
+EDGE_HOOK_NAMES=(
+%{ for name in hook_names ~}
+  '${name}'
+%{ endfor ~}
+)
