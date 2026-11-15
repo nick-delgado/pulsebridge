@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { contentSecurityPolicy } from '../vite.config';
+import { contentSecurityPolicy, validateProxyUrl } from '../vite.config';
 import { proxyBaseUrl } from './config';
 
 describe('proxyBaseUrl', () => {
@@ -32,5 +32,38 @@ describe('Content-Security-Policy', () => {
     expect(csp).toContain("script-src 'self';");
     expect(csp).toContain("form-action 'none'");
     expect(csp).not.toContain('unsafe-inline');
+  });
+});
+
+describe('VITE_FHIR_PROXY_URL validation at build time', () => {
+  it.each([
+    '',
+    '  ',
+    '/api',
+    '/v1/proxy',
+    'https://proxy.example.test',
+    'https://proxy.example.test/api',
+    'http://localhost:8080',
+    'http://127.0.0.1:8080/api',
+  ])('accepts %j', (value) => {
+    expect(() => validateProxyUrl(value)).not.toThrow();
+  });
+
+  it.each([
+    'http://proxy.example.test',
+    '//proxy.example.test/api',
+    'ftp://proxy.example.test',
+    // eslint-disable-next-line no-restricted-syntax -- a hostile value is what this test feeds in
+    'javascript:alert(1)',
+    'proxy.example.test',
+    'https://user:pw@proxy.example.test',
+    'https://proxy.example.test/api?x=1',
+    'http://localhost.example.test',
+  ])('rejects %j with a message saying what is allowed', (value) => {
+    expect(() => validateProxyUrl(value)).toThrow(/VITE_FHIR_PROXY_URL must be/);
+  });
+
+  it('accepts undefined (variable not set)', () => {
+    expect(validateProxyUrl(undefined)).toBe('');
   });
 });
