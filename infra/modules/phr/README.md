@@ -516,13 +516,13 @@ change is one line in each default (owners: project-base and bootstrap):
   ```
   and replace the description's sentence "Add firebasehosting.googleapis.com here if decision D4
   picks Firebase Hosting." (D4 has picked it) and the matching README bullet.
-- `infra/bootstrap/variables.tf`, `deployer_roles` default, replacing the stale
-  `# Dashboard bucket (module phr).` / `"roles/storage.admin",` pair only if nothing else needs
-  storage admin (the state bucket is bootstrap's own), else adding:
+- `infra/bootstrap/variables.tf`, `deployer_roles` default, one entry added:
   ```hcl
   # Firebase Hosting site and page deploys (module phr, D4; T26's deploy step).
   "roles/firebasehosting.admin",
   ```
+  The existing `roles/storage.admin` entry is commented "Dashboard bucket (module phr)"; there
+  is no bucket (D4 chose Hosting), so its owner may drop it if nothing else needs it.
 - Optional, bootstrap: add Firebase to the project once with the owner's credentials
   (`google_firebase_project`, google-beta), so the deployer never needs `roles/firebase.admin`.
   Until then the owner runs `firebase projects:addfirebase` once (above).
