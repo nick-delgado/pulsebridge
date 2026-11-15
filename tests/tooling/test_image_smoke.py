@@ -76,13 +76,14 @@ for root, dirs, files in os.walk("/"):
         continue
     for name in files:
         path = os.path.join(root, name)
+        if os.path.islink(path) or not os.path.isfile(path) or os.path.getsize(path) != size:
+            continue
         try:
-            if os.path.isfile(path) and not os.path.islink(path) and os.path.getsize(path) == size:
-                with open(path, "rb") as f:
-                    if hashlib.sha256(f.read()).hexdigest() == digest:
-                        print(path)
+            with open(path, "rb") as f:
+                if hashlib.sha256(f.read()).hexdigest() == digest:
+                    print(path)
         except OSError:
-            pass
+            print("unreadable: " + path)  # never skipped: it could be the copy
 """
 
 # Run inside the image (`python -c`): print every path that should not be in a service image.
@@ -394,10 +395,21 @@ def test_code_is_owned_by_root_and_read_only_to_the_app_user(case: Case) -> None
 @pytest.mark.skipif(not PIP_CERT, reason="IMAGE_PIP_CERT not set: the images used no build secret")
 def test_the_pip_build_secret_is_not_in_the_image(case: Case) -> None:
     # The CA bundle reaches the build only as a secret mount; no copy of it may be in a layer.
+    # The scan runs as root: a copy made with `cp` from the mount is root-only (mode 0400) and
+    # would be invisible to the image's own user.
     data = Path(PIP_CERT).read_bytes()
     digest = hashlib.sha256(data).hexdigest()
     result = docker(
-        "run", "--rm", image(case.service), "python", "-c", SAME_FILE_SCAN, str(len(data)), digest
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        image(case.service),
+        "python",
+        "-c",
+        SAME_FILE_SCAN,
+        str(len(data)),
+        digest,
     )
     assert result.stdout.strip() == "", f"copies of {PIP_CERT} in the image: {result.stdout}"
 
