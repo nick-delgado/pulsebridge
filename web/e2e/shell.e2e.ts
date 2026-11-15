@@ -119,6 +119,33 @@ test('the figure is line art: no shape in the silhouette is filled', async ({ pa
   expect(new Set(fills)).toEqual(new Set(['none']));
 });
 
+for (const scheme of ['light', 'dark'] as const) {
+  test(`login field boundary has at least 3:1 contrast with its card (${scheme}, WCAG 1.4.11)`, async ({
+    page,
+  }) => {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.goto('/');
+    await expect(page.getByLabel('Password')).toBeVisible();
+    const ratio = await page.evaluate(() => {
+      const rgb = (c: string) => (c.match(/\d+(\.\d+)?/g) ?? []).slice(0, 3).map(Number);
+      const lum = (c: string) => {
+        const [r = 0, g = 0, b = 0] = rgb(c).map((v) => {
+          const x = v / 255;
+          return x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4;
+        });
+        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      };
+      const input = document.querySelector('#login-password');
+      const card = document.querySelector('.login__card');
+      if (!input || !card) return 0;
+      const a = lum(getComputedStyle(input).borderTopColor);
+      const b = lum(getComputedStyle(card).backgroundColor);
+      return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    });
+    expect(ratio).toBeGreaterThanOrEqual(3);
+  });
+}
+
 test('landmark names are distinct and stable', async ({ page }) => {
   await logIn(page);
   await expect(page.getByRole('region', { name: 'Blood-pressure trace' })).toBeVisible();
