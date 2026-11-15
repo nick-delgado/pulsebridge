@@ -195,7 +195,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | in-progress |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | in-progress |
-| T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | in-progress |
+| T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
