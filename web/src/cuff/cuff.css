@@ -385,3 +385,9 @@
 .cuff-countdown {
   overflow-wrap: anywhere;
 }
+
+.cuff-trace__intro {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
