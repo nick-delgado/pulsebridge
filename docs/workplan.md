@@ -185,12 +185,12 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | todo |
+| T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | in-progress |
 | T09 | Synthetic data seeder | T06 | `services/seed/` | todo |
-| T10 | `health-sync` service | T06, S3 | `services/health-sync/` | todo |
+| T10 | `health-sync` service | T06, S3 | `services/health-sync/` | in-progress |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
-| T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | todo |
+| T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | in-progress |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6 | `services/fhir-proxy/` (except `share/`) | todo |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
@@ -421,7 +421,7 @@ has no access to the store holding health data, they go to a second, separate FH
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | todo |
+| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | in-progress |
 | T18 | Dashboard: cuff simulator and left trace panel | T16 | `web/src/cuff/` | todo |
 | T19 | Dashboard: share action and messages log | T16 | `web/src/share/`, `web/src/messages/` | todo |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | todo |
