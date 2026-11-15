@@ -191,7 +191,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | done |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
-| T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | in-progress |
+| T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | done |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/fhir_proxy/share/`, `services/fhir-proxy/tests/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
@@ -343,8 +343,10 @@ rate limit. It also forwards cuff requests to the cuff simulator (D10).
   to the stored message and its outcome labels where the send was accepted. Rejected and
   unacknowledged attempts appear with their reason and raw ACK; a stored message with no
   AuditEvent (for example one sent straight to the adapter) is still listed.
-- AC: forwards cuff requests unchanged (the simulator refuses unknown fields) with a timeout
-  of at least 90 s, and passes through 400, 413, 422, 429 and 500. It joins an accepted MLLP
+- AC: forwards cuff requests unchanged (the simulator refuses unknown fields) and passes
+  through 400, 413, 422, 429 and 500. The forward timeout defaults to 55 s, because Firebase
+  Hosting ends a forwarded request at 60 s; T22 lowers the simulator's timeouts to fit (at
+  least 90 s applies only when Hosting is not in front). It joins an accepted MLLP
   attempt to its stored message by the derived message name in the AuditEvent (T33), confirms
   it with a `get`, and shows it as derived; a control ID is not a key (samples share them).
 - AC: `health-sync`'s `/status` always answers 200; any other status means that service
@@ -467,10 +469,10 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | --- | --- | --- | --- | --- |
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
 | T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | done |
-| T19 | Dashboard: share action and messages log | T16, T34 | `web/src/share/`, `web/src/messages/` | todo |
+| T19 | Dashboard: share action and messages log | T16, T34, T14, T18 | `web/src/share/`, `web/src/messages/`, and, to follow the proxy's contract, `web/src/api/`, `web/README.md` and the minimum needed in `web/src/cuff/` and `web/src/shell/` | in-progress |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | done |
 | T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | done |
-| T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
+| T22 | Module `phr` | T03, T04, T14, T20 | `infra/modules/phr/`, `services/fhir-proxy/Dockerfile` and the proxy's entries in `tests/tooling/` and `.dockerignore` | in-progress |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | in-progress |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
@@ -488,6 +490,11 @@ contract or the shell reports it to the orchestrator instead of editing those fi
 - AC (T18): bounded inputs, transport toggle, "send malformed" checkbox, readings list with ACK
   code, three trace tabs; the trace shows the commit-level acknowledgment and the application-level
   outcome as two separately labelled items.
+- AC (T19): the dashboard's contract, client, parser and mock follow the proxy as built: every
+  item in the "amendments" list of `services/fhir-proxy/README.md` (for example `messageLookup`,
+  `possibleDuplicateOf` on store-only rows, nullable counts, `partial` pages, 400 for a refused
+  search, 422 as a final answer for an unreadable trace, pages followed until `nextCursor` is
+  null). An attempt whose stored message was not found shows no outcome and stops polling.
 - AC (T19): each v2 row in the messages log shows the commit-level acknowledgment and the
   application-level outcome with its reason, with "pending" for a message not yet mapped; reason
   codes are shown as readable text.
@@ -557,6 +564,17 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
   through the VPC (`ALL_TRAFFIC`), so its calls to `health-sync` and the cuff simulator count
   as internal and both stay internal-only (see the ingestion module's README, "For T22"). The
   proxy talks only to Google services and the VM, so this needs no NAT.
+- AC: `fhir-proxy` gets its container image (Dockerfile following "Adding an image" in
+  `services/README.md`, started with `--preload`, one worker and eight threads; it leaves the
+  no-image allow-list and gains a smoke case) and is configured as its README's "For T22"
+  section says: `PUBLIC_BASE_URL`, `PATH_PREFIX`, the allowed origin, per-instance concurrency
+  equal to the thread count, `TRUSTED_PROXY_HOPS` for the one reachable path (the page reaches
+  the proxy only through the hosting rewrite; the value is measured on the first deploy), and
+  invoker rights on both `health-sync` and the cuff simulator.
+- AC: the cuff simulator's timeouts are lowered so its worst case fits under the hosting
+  layer's 60 s limit (`HTTPS_TIMEOUT_SECONDS=6`: 29 s over MLLP, 48 s over HTTPS), and its own
+  request timeout is above the proxy's forward timeout so a send the proxy gave up on is still
+  recorded.
 - AC: images are given by digest in the variables `fhir_proxy_image` and `cuff_sim_image`
   (the names the build prints). The README states the hosting layer's request timeout for
   forwarded requests and whether it is shorter than the cuff simulator's documented worst
