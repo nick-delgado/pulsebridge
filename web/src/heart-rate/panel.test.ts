@@ -57,7 +57,7 @@ function status(state: StatusSummary['watchSync']['state'] = 'connected'): Statu
       notes: [],
       strandedPreliminary: null,
       checkedAt,
-      lastSyncAt: null,
+      lastSyncAt: checkedAt,
     },
     observationCounts: { watch: 0, cuff: 0 },
     fhirStore: { reachable: true, checkedAt, detail: null },
@@ -275,6 +275,18 @@ describe('empty and error states', () => {
     expect(m.slots.panel.textContent).toContain('No heart-rate data in this range.');
     expect(m.slots.panel.querySelector<HTMLElement>('.hr-chart-area')?.hidden).toBe(true);
     expect(m.slots.panel.textContent).not.toContain('Reconnect needed');
+  });
+
+  it('says the watch has not synced yet when the status has no last sync time', async () => {
+    const m = mount();
+    m.setStatus({ ...status(), watchSync: { ...status().watchSync, lastSyncAt: null } });
+    m.button('Show the last 30 days').click();
+    m.searches[1]?.answer.resolve([]);
+    await settle();
+    const text = m.slots.panel.querySelector('.hr-message')?.textContent ?? '';
+    expect(text).toContain('The watch has not synced yet.');
+    const synced = await loaded([]);
+    expect(synced.slots.panel.textContent).not.toContain('not synced yet');
   });
 
   it('says a reconnect is needed when the status strip reports it', async () => {
