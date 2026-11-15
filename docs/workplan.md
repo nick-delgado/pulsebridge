@@ -190,12 +190,13 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | done |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
-| T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | in-progress |
-| T14 | FHIR proxy: read API and reviewer login | T06, S6 | `services/fhir-proxy/` (except `share/`) | todo |
+| T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
+| T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | todo |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
+| T33 | Library follow-ups from wave 3 reviews | T08, T10, T13 | `libs/pulsebridge_fhir/`, `libs/pulsebridge_hl7v2/`, `libs/pulsebridge_gcp/`, one marked line each in `services/cuff-sim/` and `services/health-sync/`, `scripts/fhir-validate-expected-warnings.json` | todo |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
@@ -336,6 +337,12 @@ rate limit. It also forwards cuff requests to the cuff simulator (D10).
   to the stored message and its outcome labels where the send was accepted. Rejected and
   unacknowledged attempts appear with their reason and raw ACK; a stored message with no
   AuditEvent (for example one sent straight to the adapter) is still listed.
+- AC: forwards cuff requests unchanged (the simulator refuses unknown fields) with a timeout
+  of at least 90 s, and passes through 400, 413, 422, 429 and 500. It joins an accepted MLLP
+  attempt to its stored message by the derived message name in the AuditEvent (T33), confirms
+  it with a `get`, and shows it as derived; a control ID is not a key (samples share them).
+- AC: `health-sync`'s `/status` always answers 200; any other status means that service
+  failed. `googleHealth: "unknown"` is a state, not an outage.
 - AC: the routes implement, or deliberately amend, the contract the dashboard shell proposes in
   `web/README.md` and `web/src/api/contract.ts`, and settle its open questions (whether searches
   are pinned to the configured patient; the date-boundary rule for heart-rate windows; where the
@@ -419,18 +426,44 @@ has no access to the store holding health data, they go to a second, separate FH
   than the ones driven by the role table, or any authoritative binding or policy.
 - AC: the module READMEs say plainly what each role on each store allows, including reading.
 
+**T33 Library follow-ups from wave 3 reviews.** Small changes to the shared libraries that the
+reviews of T08, T10 and T13 asked for, each with tests and break-checks.
+- AC (`pulsebridge_hl7v2`): `parse_ack` raises only `AckParseError` for any input bytes (today
+  `MSH^~MSH|` raises `IndexError`); a seeded fuzz test proves it.
+- AC (`pulsebridge_hl7v2`): a sample that has a PID segment can be returned with another patient
+  (`with_patient`), built with `hl7apy` at segment level (no ER7 field splitting, D3); only PID
+  changes and the sample's deliberate defect is untouched. The cuff simulator uses it (the line
+  marked `FOLLOW-UP` in `cuff_sim/service.py`), so the "parses but cannot be mapped" samples reach
+  their intended reason on any deployment.
+- AC (`pulsebridge_fhir`): the send-attempt AuditEvent can carry a message name that was derived
+  rather than returned by the store, marked as derived, and `parse_send_attempt` returns it with
+  that marker. The cuff simulator records it for an accepted MLLP send (the other `FOLLOW-UP`
+  line). The AuditEvent key gains whatever is needed so two samples sent in the same millisecond
+  do not collide.
+- AC (`pulsebridge_fhir`): `heart_rate_transaction` can write named windows as `amended`
+  (R4: modified after being final); `health-sync` uses it when a stored `final` window's values
+  changed.
+- AC (`pulsebridge_fhir`): heart-rate and blood-pressure Observations set `performer` to the
+  Patient; the README documents the `PT` identifier type (used because OpenEMR searches by it),
+  the `R01` AuditEvent subtype and the absence of narrative as deliberate. The examples are
+  regenerated and the validator's expected-warnings file is updated to match (`make
+  fhir-validate` passes).
+- AC (`pulsebridge_gcp`): a request that timed out is distinguishable from other network
+  failures without inspecting `__cause__`.
+
 ## Wave 3: dashboard features and infrastructure for services
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
-| T18 | Dashboard: cuff simulator and left trace panel | T16 | `web/src/cuff/` | todo |
-| T19 | Dashboard: share action and messages log | T16 | `web/src/share/`, `web/src/messages/` | todo |
+| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | todo |
+| T19 | Dashboard: share action and messages log | T16, T34 | `web/src/share/`, `web/src/messages/` | todo |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | todo |
 | T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | todo |
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | todo |
+| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | todo |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
 task fills its own directory through the mount function and slots defined by the shell (T16) and
@@ -497,7 +530,10 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
   variables of `project-base` and bootstrap, not hardcoded.
 - AC: `fhir-proxy` is publicly invocable, mounts the reviewer password secret as a file (so a
   new version takes effect without a redeploy), and is capped at two instances.
-- AC: the cuff simulator is invocable only by the proxy's service account.
+- AC: the cuff simulator is invocable only by the proxy's service account, and is configured
+  as its README says: `MLLP_TIMEOUT_SECONDS`, `MLLP_HOST` as the VM's IP address, one gunicorn
+  worker (the rate limit is per instance), a 90 s request timeout, and the same patient
+  identifier and authority as `v2-to-fhir`.
 - AC: the hosting layer sets a Content-Security-Policy header.
 
 **T23 Module `openemr`.** OpenEMR container on the edge VM, database connection, OAuth2 client
@@ -526,6 +562,22 @@ reports image digests.
 - AC: each image installs the local libraries it needs from `libs/` before the service; they
   are declared by name only and are not on PyPI. `v2-to-fhir` starts with the gunicorn command
   in its README and honours `PORT`.
+
+**T34 Dashboard shell follow-ups.** Changes to shell-owned files that T13 and T17 showed are
+needed before T18 and T19 start.
+- AC: the status strip announces `sync` (`notifyDataChanged('sync')`) when the watch's last sync
+  time changes, so features re-fetch and a provisional window can become final during a session.
+- AC: the bundle check fails if the chart library is in the main chunk.
+- AC: the trace contract says whether the Google Health JSON is `reconstructed` or `original`;
+  the heart-rate trace uses it. The mock has a data set in a fixed IANA zone that crosses a
+  daylight-saving change, with a browser test.
+- AC: the cuff contract matches the service (`services/cuff-sim/README.md`): response fields
+  `result`, `framing` and `messageNameSource`; `messageName` over MLLP is derived and shown as
+  such; `attemptId` may be null; `systolic` and `diastolic` are optional with `sendMalformed`;
+  bounds are the service's (1 to 400 mm[Hg], systolic above diastolic); responses 400, 413, 422,
+  429 and 500 are listed. The mock follows.
+- AC: `web/README.md` lists uPlot under runtime dependencies, explains that the client converts
+  the wire shape into the parsed shape, and requires feature-prefixed element ids.
 
 ## Wave 4: integration, CI/CD and documentation
 
