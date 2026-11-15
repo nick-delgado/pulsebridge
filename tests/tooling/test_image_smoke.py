@@ -121,6 +121,37 @@ for root, dirs, files in os.walk("/"):
 """
 
 
+# Run inside a service image (`python -c <script> <port> <command...>`): start the image's own
+# command as a child and try to connect to 127.0.0.1:<port> every 10 ms, from start until the
+# command exits (or, once the port has opened, stop it). Prints when the port first accepted a
+# connection (seconds, or null) and the command's exit status. Probing inside the container
+# matters: a port published to the host is accepted by Docker's proxy whether or not anything
+# listens in the container.
+LISTEN_PROBE = """
+import json, socket, subprocess, sys, time
+
+port, command = int(sys.argv[1]), sys.argv[2:]
+child = subprocess.Popen(command)
+start = time.monotonic()
+opened = None
+while child.poll() is None and time.monotonic() - start < 25:
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=0.05).close()
+        opened = round(time.monotonic() - start, 3)
+        break
+    except OSError:
+        time.sleep(0.01)
+if child.poll() is None:
+    child.terminate()
+try:
+    status = child.wait(timeout=10)
+except subprocess.TimeoutExpired:
+    child.kill()
+    status = child.wait()
+print("LISTEN-PROBE " + json.dumps({"opened_at": opened, "exit": status}))
+"""
+
+
 @dataclass(frozen=True)
 class JobCase:
     """A Cloud Run job image: its arguments come from the job, so each run passes its own."""
@@ -504,6 +535,7 @@ def test_effective_gunicorn_settings(case: Case) -> None:
     assert settings.get("timeout") == "0"
     assert settings.get("graceful_timeout") == "8", "Cloud Run kills 10 s after SIGTERM"
     assert settings.get("control_socket_disable") == "True"
+    assert settings.get("preload_app") == "True", "the app loads before the port opens"
 
 
 # --- job images -------------------------------------------------------------------------------
@@ -622,3 +654,48 @@ def test_job_bad_configuration_exits_2_and_says_why(job: JobCase) -> None:
     assert result.returncode == 2, result.stdout + result.stderr
     assert job.bad_message in result.stderr
     assert job.bad_env["PATIENT_ID"] not in result.stderr  # the variable is named, not its value
+
+
+# --- start-up failures never listen (service images) ----------------------------------------
+
+
+def listen_probe(case: Case, adc_dir: Path, env: dict[str, str]) -> dict:
+    cmd = json.loads(
+        docker("image", "inspect", "--format", "{{json .Config.Cmd}}", image(case.service)).stdout
+    )
+    result = docker(
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--env",
+        f"PORT={SMOKE_PORT}",
+        *run_args(adc_dir, env),
+        "--entrypoint",
+        "python",
+        image(case.service),
+        "-c",
+        LISTEN_PROBE,
+        SMOKE_PORT,
+        *cmd,
+        check=False,
+        timeout=60,
+    )
+    marker = [line for line in result.stdout.splitlines() if line.startswith("LISTEN-PROBE ")]
+    assert marker, result.stdout[-2000:] + result.stderr[-2000:]
+    return {**json.loads(marker[-1].removeprefix("LISTEN-PROBE ")), "output": result.stderr}
+
+
+def test_good_configuration_opens_the_port(case: Case, adc_dir: Path) -> None:
+    # The probe itself is checked: with good configuration it sees the port open.
+    probe = listen_probe(case, adc_dir, case.env)
+    assert probe["opened_at"] is not None, probe["output"][-2000:]
+
+
+def test_bad_configuration_exits_without_ever_listening(case: Case, adc_dir: Path) -> None:
+    # Cloud Run's default startup probe is a TCP connect to PORT. If gunicorn opened the port
+    # before the app failed to load, the probe could pass and a broken revision would serve.
+    probe = listen_probe(case, adc_dir, {**case.env, **case.bad_env})
+    assert probe["opened_at"] is None, f"the port opened at {probe['opened_at']} s"
+    assert probe["exit"] != 0, probe
+    assert case.bad_message in probe["output"]

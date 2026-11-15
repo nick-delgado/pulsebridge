@@ -401,6 +401,10 @@ def test_starts_with_the_readme_gunicorn_command(web_service: Path) -> None:
     assert cmd == expected, f"CMD {cmd} is not the README's command {readme}"
     assert "--bind" not in cmd and not any(a.startswith(("-b", "--bind=")) for a in cmd)
     assert cmd[cmd.index("--workers") + 1] == "1"
+    # --preload: the app factory (and its configuration check) runs in gunicorn's master
+    # before the listening socket is created, so a bad configuration exits before the port
+    # opens and Cloud Run's startup probe fails (services/README.md, "Start-up failures").
+    assert "--preload" in cmd, "service images start gunicorn with --preload"
 
     env = env_of(instructions)
     assert env.get("PORT") == "8080", "PORT must default to the README's 8080"

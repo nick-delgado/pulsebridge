@@ -69,7 +69,8 @@ Every `services/<name>/Dockerfile` follows the same pattern (`v2-to-fhir`'s is t
   root and read-only to that user, so the service cannot rewrite itself.
 - **Starts with the README's gunicorn command**, in exec form (`CMD ["gunicorn", ...]`): gunicorn
   is PID 1 and gets Cloud Run's SIGTERM directly, with no shell in between. The arguments are the
-  ones in the service README's "Running" section: one worker, four threads, `--timeout 0`. There
+  ones in the service README's "Running" section: one worker, four threads, `--timeout 0`,
+  `--preload` (see "Start-up failures" below). There
   is one exception, `--bind ":${PORT:-8080}"`, which needs a shell to expand. Instead the image
   sets `PORT=8080`, and when `PORT` is set and no `--bind` is given, gunicorn binds
   `0.0.0.0:$PORT`. The result is the same: Cloud Run's `PORT` is honoured and 8080 is the default.
@@ -90,6 +91,45 @@ Every `services/<name>/Dockerfile` follows the same pattern (`v2-to-fhir`'s is t
 - **No secrets.** The image holds no keys, tokens or `.env` files. On Cloud Run, credentials are
   the service account's own (Application Default Credentials), and secrets are mounted from
   Secret Manager at run time (`health-sync`'s Google Health files).
+
+### Start-up failures: `--preload`
+
+Each service checks its configuration in its app factory (`create_app()`) and refuses to start
+with a bad one (a malformed store id, a fixed-offset time zone, an audit store equal to the
+HL7v2 store). Without `--preload`, gunicorn's master opens the listening socket first and only
+then forks the worker that calls the factory (gunicorn 26.2.0 `arbiter.py`: `Arbiter.start()`
+calls `sock.create_sockets()` before `manage_workers()`). The port is then open for a moment
+while the worker crashes, and Cloud Run's default startup probe, a TCP connect to `PORT`, can
+pass.
+
+With `--preload` (gunicorn setting `preload_app`, "Load application code before the worker
+processes are forked"), `Arbiter.setup()` calls the factory in the master, before `start()`
+creates the socket. An exception there is not caught by gunicorn: the master exits with status
+1 and the port never opens.
+
+What this guarantees: a start-up configuration error means the container exits without ever
+accepting a connection on `PORT`. The revision fails its startup probe and the deploy fails,
+instead of a broken revision taking traffic. `make images-smoke` checks this inside each
+container for each service's documented bad configuration
+(`test_bad_configuration_exits_without_ever_listening`), and checks that good configuration
+still opens the port.
+
+What it does not cover: errors that appear only on the first request (a missing IAM role, a
+store that does not exist), because the factory makes no request. Not verified until a real
+deploy: that Cloud Run marks the revision failed and keeps the previous one serving, and how
+long it waits before it does.
+
+**Fork safety.** With one worker, the objects `create_app()` builds in the master are copied
+into the worker by the fork. They are: the logging handler, the configuration, the
+`HealthcareClient` and its `AuthorizedSession` (no connection is open and no token is fetched
+until the first request), health-sync's plain `requests.Session`, its status cache and two
+`threading.Lock`s, and cuff-sim's token bucket and its lock. The locks are unlocked, because no
+thread runs in the master. No app starts a thread or opens a socket at import or in its
+factory. One exception, on Cloud Run only: finding Application Default Credentials asks the
+metadata server (`google.auth.default()`) through a session that google-auth creates and drops.
+At worst the worker inherits that idle connection, which neither process uses again. This is
+not verified on Cloud Run. The master never serves requests, so nothing is used by two
+processes.
 
 ### Job images (`seed`)
 
@@ -163,11 +203,14 @@ that no request uses, with `PORT=9123`. For each image it checks four things:
 - it listens on that port and answers its own route without calling Google:
   `POST /pubsub/hl7v2` with an empty envelope gets 400, `GET /status` reports `not-configured`,
   and `GET /cuff/samples` lists the samples;
-- it refuses to start with bad configuration and says why;
+- it refuses to start with bad configuration and says why, and the port never opens: a probe
+  inside the container connects to `PORT` every 10 ms from start to exit (a port published to
+  the host would be accepted by Docker's proxy either way);
 - it runs as UID 10001, and nothing under `/opt/venv` is owned by anyone but root or writable by
   that user;
 - gunicorn's effective settings (`gunicorn --print-config` with the image's CMD) are the
-  README's, with `bind = 0.0.0.0:8080`, `graceful_timeout = 8` and the control socket off;
+  README's, with `bind = 0.0.0.0:8080`, `graceful_timeout = 8`, the control socket off and
+  `preload_app = True`;
 - it holds no stray files (`.git`, tests, key and certificate files, pip);
 - with `make images-smoke IMAGE_PIP_CERT=<the same file>`, no file in the image has that CA
   bundle's SHA-256, which proves the build secret was not copied into a layer.

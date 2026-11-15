@@ -514,7 +514,7 @@ synthetic secret, the patient id, the device name or the distinctive heart-rate 
 ## Running
 
 ```bash
-gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "health_sync.app:create_app()"
+gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 --preload "health_sync.app:create_app()"
 ```
 
 - **The container image omits `--bind`** (T24): it sets `PORT=8080`, and gunicorn binds
@@ -523,6 +523,15 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "health_syn
   `GUNICORN_CMD_ARGS="--no-control-socket --graceful-timeout 8"` (no management socket; finish
   requests within 8 s of SIGTERM, before Cloud Run's SIGKILL at 10 s). Otherwise its `CMD` is
   this command, argument for argument (`tests/tooling/test_container_images.py` checks it).
+- **`--preload`** loads the app (`create_app()`, which reads and checks the configuration) in
+  gunicorn's master before it opens the port and forks the worker. A configuration error then
+  stops gunicorn (exit 1) before anything listens, so Cloud Run's startup probe fails and the
+  deploy fails; without it the port opened first and the probe could pass while the worker
+  crashed. What `create_app()` builds before the fork is safe to fork with one worker: the
+  logging handler, the configuration, the secret files' check (files read and closed), the
+  FHIR `AuthorizedSession` and the plain `requests.Session` for Google (no connection open, no
+  token fetched until the first request), the status cache and the two `threading.Lock`s
+  (unlocked: no thread runs in the master). No thread is started.
 - Honours `PORT`. `--timeout 0` leaves request deadlines to Cloud Run.
 - Routes: `POST /sync`, `GET /status`.
 - For T24's container: install `libs/pulsebridge_fhir` and `libs/pulsebridge_gcp` before this
