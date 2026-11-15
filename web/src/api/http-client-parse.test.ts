@@ -374,6 +374,22 @@ describe('cuff send: refusals are typed', () => {
     expect([e.reason, e.message]).toEqual(['no-answer', 'The server answered HTTP 504.']);
   });
 
+  it('an issue with a field but no text names the field', async () => {
+    const body = {
+      resourceType: 'OperationOutcome',
+      issue: [
+        { severity: 'error', code: 'invalid', expression: ['systolic'] },
+        {
+          severity: 'error',
+          code: 'invalid',
+          diagnostics: 'is required',
+          expression: ['diastolic'],
+        },
+      ],
+    };
+    expect((await refuse(fhir(422, body))).message).toBe('systolic; diastolic: is required');
+  });
+
   it('an issue without an expression is its diagnostics alone', async () => {
     const body = {
       resourceType: 'OperationOutcome',
