@@ -14,7 +14,10 @@ import { REASON_SENTENCES, reasonText } from './reasons';
 function repoFile(path: string): string {
   // A path string: jsdom replaces the global URL class, which Node's fs does not accept; Vite
   // serves files outside its root under `/@fs/<absolute path>`.
-  const absolute = decodeURIComponent(new URL(`../../../${path}`, import.meta.url).pathname);
+  // The base goes through a variable: Vite rewrites `new URL(<template>, import.meta.url)` into
+  // an asset glob of the parent directories, which it then refuses to serve.
+  const base = import.meta.url;
+  const absolute = decodeURIComponent(new URL(`../../../${path}`, base).pathname);
   return readFileSync(absolute.replace(/^\/@fs\//, '/'), 'utf8');
 }
 
