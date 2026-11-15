@@ -218,8 +218,8 @@ needs (spike S1).
 
 Share only Observations with `status: final`. A `preliminary` window can still change in our
 store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observation, replace
-`subject` with OpenEMR's Patient, add `encounter`, and drop `device`, `meta` and `identifier`
-(OpenEMR discards them). Units are already exactly `/min` and `mm[Hg]`.
+`subject` **and `performer`** (both name our Patient, T33) with OpenEMR's Patient, add
+`encounter`, and drop `device`, `meta` and `identifier` (OpenEMR discards them). Units are already exactly `/min` and `mm[Hg]`.
 
 ## Design decisions
 
@@ -250,7 +250,13 @@ store, and the copy in OpenEMR would not be updated. Before `POST`ing an Observa
 - Systems are URNs owned by this software (`urn:pulsebridge:…`, all in `codes.py`): the same in
   every clone, so nothing identifies the author.
 - `Patient.identifier[0]`: `use: official`, `type` v2-0203 `PT` (Patient external identifier).
-  The matching key, and what T15 searches OpenEMR by.
+  The matching key, and what T15 searches OpenEMR by. **`PT` is deliberate, and the validator
+  warns about it** (expected): R4 binds `Identifier.type` *extensibly* to the `IdentifierType`
+  value set, a short subset of v2-0203 that lacks `PT`. An extensible binding means "use a code
+  from this set if one fits; otherwise another code is allowed". The near candidate in the set,
+  `MR` (medical record number), would claim a hospital record number, which this is not, and
+  OpenEMR (spike S1) looks a patient up by its `PT`-typed identifier, so the share (T15) depends
+  on it.
 - `Patient.identifier[1]`: Google's `healthUserId`, `use: secondary`, written by setup only.
 - `Observation.identifier`: `use: official`, the deterministic key.
 - `Device.identifier`: derived (UUIDv5 of patient and display name), because Google sends only a
@@ -345,6 +351,25 @@ CodeableConcept must mean the same thing), and `Observation.method` (a good fit,
 acceptance criterion places the recording method in Provenance, and `method` already says the
 value is a mean).
 
+### Performer: the patient (T33)
+
+`Observation.performer` is the Patient, the same reference as `subject`, on both heart-rate and
+blood-pressure Observations. R4 defines performer as "who was responsible for asserting the
+observed value as 'true'" and allows a Patient there. These readings are self-measured: the
+person wearing the watch, or putting on the cuff, is the one they are about and the one who took
+them. The devices are recorded where devices belong (`Observation.device`, and the Provenance
+`performer` agent). Without a performer the validator adds a best-practice warning ("all
+observations should have a performer"). A clinic copy must have it replaced, like `subject`
+(see "Share to OpenEMR").
+
+### No narrative (`text`)
+
+None of the resources this library builds has a `Resource.text` narrative (the human-readable
+XHTML summary). R4 makes `text` optional, and the invariant the validator reports, `dom-6`
+("A resource should have narrative for robust management"), is a guideline (a "should"), not a
+rule. The dashboard renders the data itself, and a generated narrative would be a second copy
+of every value to keep in step. Expect one `dom-6` warning per resource.
+
 ### Category
 
 `category` carries `http://terminology.hl7.org/CodeSystem/observation-category#vital-signs`: the
@@ -373,6 +398,7 @@ Checked against the R4 (4.0.1) StructureDefinitions `vitalsigns`, `heartrate` an
 | `component.value[x]` bound **required** to ucum-vitals-common | followed (`/min`, `mm[Hg]`) |
 | `component.code` bound **extensible** to observation-vitalsignresult | **deliberate divergence** for the heart-rate min/max components: that 13-code value set has no min/max codes, which is when an extensible binding allows another code. Expect a validator warning. |
 | `urn:pulsebridge:*` code systems | local, undefined; the validator may report it cannot check them. |
+| `performer` 0..* (best practice: present) | followed since T33: the Patient (self-measured) |
 
 ## AuditEvent for a cuff send attempt (T31)
 
@@ -426,6 +452,13 @@ interactions only, and this is an HL7v2 send.
 
 Not used: `entity.lifecycle` (R4's DICOM lifecycle code system is marked "not currently used",
 and the element is optional) and `purposeOfEvent`.
+
+**The `R01` subtype is deliberate, and the validator warns about it** (expected). R4 binds
+`AuditEvent.subtype` *extensibly* to `audit-event-sub-type`, which holds the DICOM audit event
+codes (application start and stop, login, security alerts and similar) and the FHIR REST
+interactions (`read`, `create`, ...). None of them names an HL7v2 message send, which is when an
+extensible binding allows another code; HL7 table 0003 (event type) names exactly the
+transaction attempted. `parse_send_attempt` and the listing search rely on it.
 
 `entity[1].detail` is a list of name/value pairs. In R4 `detail.type` is a plain string, so no
 code system is involved. HL7v2 field names are used where the value is an HL7v2 field, as IHE's
