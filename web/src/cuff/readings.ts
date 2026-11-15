@@ -24,7 +24,7 @@ import type {
 } from '../api/contract';
 import { ApiError, CuffSendError } from '../api/errors';
 import { transportName } from './form';
-import { reasonText } from './reasons';
+import { reasonText } from '../api/reasons';
 
 /** How far the panel got in learning the application-level outcome. */
 export type OutcomeLookup =

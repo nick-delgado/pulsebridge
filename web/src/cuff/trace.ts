@@ -30,7 +30,7 @@ import {
   NO_ACK_REASON,
   type Reading,
 } from './readings';
-import { reasonText } from './reasons';
+import { reasonText } from '../api/reasons';
 
 export const TRACE_TABS = {
   hl7v2: { id: 'hl7v2', label: 'HL7v2 as sent' },

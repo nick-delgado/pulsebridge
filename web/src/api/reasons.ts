@@ -1,5 +1,6 @@
 /**
- * The application-level outcome reasons (D7) as readable text.
+ * The application-level outcome reasons (D7) as readable text: the ONE copy the page has, shared
+ * by the cuff trace (T18) and the messages log (T19).
  *
  * v2-to-fhir (T12) labels every stored HL7v2 message with `application_outcome` and a `reason`
  * code. The codes are label values (lower case, digits and `-`), not sentences, so the page looks
@@ -11,7 +12,7 @@
  * ninth field of the MSH (message header) segment, OBX-14 the fourteenth of an OBX (observation)
  * segment.
  */
-import { MAPPER_PLAUSIBLE_RANGE } from '../api/contract';
+import { MAPPER_PLAUSIBLE_RANGE } from './contract';
 
 const { systolic: S, diastolic: D } = MAPPER_PLAUSIBLE_RANGE;
 
