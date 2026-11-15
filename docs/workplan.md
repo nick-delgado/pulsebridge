@@ -463,7 +463,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
-| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | in-progress |
+| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
 task fills its own directory through the mount function and slots defined by the shell (T16) and
