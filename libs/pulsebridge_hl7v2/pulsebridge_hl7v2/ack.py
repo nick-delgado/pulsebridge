@@ -35,8 +35,9 @@ raise plain Python errors instead of its own exceptions; both were found by a se
   separator ``^``, so "MSH-2" is ``~MSH|``), took the same path; it is now refused one step
   earlier, because ``M`` is not a delimiter character (next point).
 - ``hl7apy.core.Message._get_encoding_chars``: the header reader accepts a space or other
-  whitespace as an encoding character, but the field parser then strips it, so MSH-2 has three
-  characters and reading the separators raises ``IndexError``. :func:`_check_delimiters` refuses
+  whitespace as an encoding character, but when MSH-2 ends the header segment the segment
+  parser strips that trailing whitespace, so MSH-2 has three characters and reading the
+  separators raises ``IndexError`` (``MSH|^~\\<space>``). :func:`_check_delimiters` refuses
   such a header first, by the rule HL7 2.5.1 section 2.5.4 gives for delimiters (no letters,
   digits or whitespace).
 """

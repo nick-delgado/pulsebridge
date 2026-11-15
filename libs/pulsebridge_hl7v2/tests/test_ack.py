@@ -219,6 +219,8 @@ _FUZZ_SEEDS = (
     S5_DUPLICATE_NACK,
     b"MSH|^~\\&#|R|F|S|F|20261113205330||ACK|A14|P|2.7\rMSA|CA|SYN-14\r",
     b"MSH#^~\\&#PHR#PB#C#PB#20261113205330##ACK#A3#P#9.9\rMSA#AR#SYN-7#x \\F\\ y\r",
+    # A header that ends right after MSH-2: hl7apy strips trailing whitespace from it.
+    b"MSH|^~\\&\rMSA|AA|SYN-15\r",
 )
 # Bytes a mutation inserts: HL7 delimiters, segment names, digits, whitespace, MLLP control bytes,
 # invalid UTF-8.
@@ -228,9 +230,12 @@ _FUZZ_ALPHABET = b"|^~\\&#\r\n MSAHCK0123456789.\t\x0b\x1c\x00\x80\xff"
 def _mutate(rng, data: bytes) -> bytes:
     out = bytearray(data)
     for _ in range(rng.randint(1, 6)):
-        op = rng.randrange(5)
+        op = rng.randrange(6)
         pos = rng.randrange(len(out) + 1)
-        if op == 0 and out:
+        if op == 5 and len(out) > 8:
+            # Aim at the header's delimiters (MSH-1, MSH-2), where hl7apy's crashes were.
+            out[rng.randrange(3, 9)] = rng.choice(_FUZZ_ALPHABET)
+        elif op == 0 and out:
             del out[min(pos, len(out) - 1)]
         elif op == 1:
             out.insert(pos, rng.choice(_FUZZ_ALPHABET))
