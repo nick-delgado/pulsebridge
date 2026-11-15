@@ -22,6 +22,7 @@ EDGE_MARIADB_IMAGE='${mariadb_image}'
 EDGE_MLLP_ADAPTER_IMAGE='${mllp_adapter_image}'
 EDGE_MLLP_PORT='${mllp_port}'
 EDGE_BOOT_WAIT_SECONDS='${boot_wait_seconds}'
+EDGE_HOOK_TIMEOUT_SECONDS='${hook_timeout_seconds}'
 
 # The mariadbd command with spike S2's low-memory settings.
 EDGE_MARIADB_COMMAND=(
@@ -30,7 +31,7 @@ EDGE_MARIADB_COMMAND=(
 %{ endfor ~}
 )
 
-# The MLLP adapter command with the flags spike S4 recorded.
+# The MLLP adapter command: spike S4's flags, error-message logging off by default.
 EDGE_MLLP_ADAPTER_COMMAND=(
 %{ for arg in mllp_adapter_command ~}
   '${arg}'

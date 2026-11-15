@@ -139,20 +139,8 @@ run "dedicated_service_account_with_cloud_platform_scope_only" {
     error_message = "Scopes must be exactly cloud-platform (required by Secret Manager); IAM narrows the account."
   }
 
-  assert {
-    condition     = google_artifact_registry_repository_iam_member.mirror_reader.role == "roles/artifactregistry.reader"
-    error_message = "The VM account must get the Artifact Registry reader role, nothing broader."
-  }
-
-  assert {
-    condition = (
-      google_artifact_registry_repository_iam_member.mirror_reader.repository == "pulsebridge-dockerhub" &&
-      google_artifact_registry_repository_iam_member.mirror_reader.location == "us-central1" &&
-      google_artifact_registry_repository_iam_member.mirror_reader.project == "example-project-123" &&
-      google_artifact_registry_repository_iam_member.mirror_reader.member == "serviceAccount:pulsebridge-edge-vm@example-project-123.iam.gserviceaccount.com"
-    )
-    error_message = "The reader grant must be on the Docker Hub mirror repository only, for the VM's account."
-  }
+  # The mirror read grant moved to project-base, which owns the repository: this module creates
+  # no IAM resource at all (tests/static_checks.sh also checks that).
 }
 
 run "shielded_vm" {
@@ -240,8 +228,15 @@ run "metadata_has_no_ssh_keys_or_secrets" {
   }
 
   assert {
-    condition     = toset(keys(google_compute_instance.this.metadata)) == toset(["startup-script", "enable-oslogin", "block-project-ssh-keys", "google-logging-enabled"])
-    error_message = "With no hooks, metadata must hold exactly the four expected keys."
+    condition     = toset(keys(google_compute_instance.this.metadata)) == toset(["startup-script", "enable-oslogin", "block-project-ssh-keys", "google-logging-enabled", "cos-update-strategy"])
+    error_message = "With no hooks, metadata must hold exactly the five expected keys."
+  }
+
+  assert {
+    # Set explicitly: COS in-place updates are not supported with Secure Boot, and the default
+    # changed at milestone 117; patching is by replacing the VM.
+    condition     = google_compute_instance.this.metadata["cos-update-strategy"] == "update_disabled"
+    error_message = "cos-update-strategy must be set explicitly to update_disabled."
   }
 
   assert {
@@ -262,7 +257,7 @@ run "metadata_has_no_ssh_keys_or_secrets" {
 
 # --- The MLLP adapter --------------------------------------------------------------------------------
 
-run "adapter_command_is_exactly_the_s4_flags" {
+run "adapter_command_is_s4_flags_with_error_logging_off" {
   command = plan
 
   assert {
@@ -274,7 +269,7 @@ run "adapter_command_is_exactly_the_s4_flags" {
       "--hl7_v2_location_id=us-central1",
       "--hl7_v2_dataset_id=example-dataset",
       "--hl7_v2_store_id=example-hl7v2-store",
-      "--log_error_msg=true",
+      "--log_error_msg=false",
       "--export_stats=false",
     ]
     error_message = "The adapter command must be the binary path and exactly the flags spike S4 recorded."
@@ -282,7 +277,7 @@ run "adapter_command_is_exactly_the_s4_flags" {
 
   assert {
     # The rendered script passes the same list, one quoted word per line, in this order.
-    condition     = strcontains(google_compute_instance.this.metadata["startup-script"], "EDGE_MLLP_ADAPTER_COMMAND=(\n  '/usr/mllp_adapter/mllp_adapter'\n  '--port=2575'\n  '--receiver_ip=0.0.0.0'\n  '--hl7_v2_project_id=example-project-123'\n  '--hl7_v2_location_id=us-central1'\n  '--hl7_v2_dataset_id=example-dataset'\n  '--hl7_v2_store_id=example-hl7v2-store'\n  '--log_error_msg=true'\n  '--export_stats=false'\n)")
+    condition     = strcontains(google_compute_instance.this.metadata["startup-script"], "EDGE_MLLP_ADAPTER_COMMAND=(\n  '/usr/mllp_adapter/mllp_adapter'\n  '--port=2575'\n  '--receiver_ip=0.0.0.0'\n  '--hl7_v2_project_id=example-project-123'\n  '--hl7_v2_location_id=us-central1'\n  '--hl7_v2_dataset_id=example-dataset'\n  '--hl7_v2_store_id=example-hl7v2-store'\n  '--log_error_msg=false'\n  '--export_stats=false'\n)")
     error_message = "The startup script must carry the adapter command exactly."
   }
 
@@ -361,6 +356,57 @@ run "hooks_are_metadata_keys_listed_in_the_script" {
   assert {
     condition     = strcontains(google_compute_instance.this.metadata["startup-script"], "'openemr-db-password=projects/example-project-123/secrets/pulsebridge-openemr-db-password'")
     error_message = "Extra secret_files entries must reach the script."
+  }
+}
+
+run "adapter_error_message_logging_is_opt_in" {
+  command = plan
+
+  variables {
+    mllp_adapter_log_error_messages = true
+  }
+
+  assert {
+    condition     = contains(output.mllp_adapter_command, "--log_error_msg=true") && !contains(output.mllp_adapter_command, "--log_error_msg=false")
+    error_message = "mllp_adapter_log_error_messages = true must pass --log_error_msg=true."
+  }
+}
+
+run "boot_image_output_and_patching" {
+  command = plan
+
+  variables {
+    boot_image = "projects/cos-cloud/global/images/family/cos-125-lts"
+  }
+
+  assert {
+    condition     = output.boot_image == "projects/cos-cloud/global/images/family/cos-125-lts"
+    error_message = "boot_image must report the image the VM is created from."
+  }
+}
+
+run "metadata_size_limit_counts_bytes" {
+  command = plan
+
+  variables {
+    # 1,000 x 100 three-byte characters (the euro sign): 100,000 characters but 300,000 bytes, over the 256 KB
+    # per-value limit only when bytes (not characters) are counted.
+    hooks = { "big" = join("", [for i in range(1000) : "€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€"]) }
+  }
+
+  expect_failures = [google_compute_instance.this]
+}
+
+run "metadata_under_the_limit_plans" {
+  command = plan
+
+  variables {
+    hooks = { "small" = join("", [for i in range(500) : "€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€€"]) }
+  }
+
+  assert {
+    condition     = length(google_compute_instance.this.metadata["pulsebridge-hook-small"]) == 50000
+    error_message = "A hook under the limit must plan."
   }
 }
 

@@ -144,7 +144,7 @@ variable "swap_size_mb" {
 }
 
 variable "dockerhub_mirror_url" {
-  description = "Registry path of the Docker Hub pull-through cache from project-base (output `dockerhub_mirror_url`, <location>-docker.pkg.dev/<project>/<repository>). MariaDB (and OpenEMR, T23) are pulled from here; this module grants the VM's account read access on that one repository."
+  description = "Registry path of the Docker Hub pull-through cache from project-base (output `dockerhub_mirror_url`, <location>-docker.pkg.dev/<project>/<repository>). MariaDB (and OpenEMR, T23) are pulled from here. Read access for the VM's account is granted by project-base, which owns the repository (set its `edge_vm_service_account_email`)."
   type        = string
 
   validation {
@@ -203,6 +203,12 @@ variable "hl7v2_store_flags" {
     ])
     error_message = "hl7v2_store_flags.hl7_v2_dataset_id and hl7_v2_store_id must be short names (letters, digits, _ . -), not paths such as projects/.../hl7V2Stores/<name>."
   }
+}
+
+variable "mllp_adapter_log_error_messages" {
+  description = "Pass --log_error_msg=true to the MLLP adapter, so it logs the store's error text for each NACK. Off by default: upstream's flag help says \"These error logs will contain sensitive data\", and the logs reach Cloud Logging. Spike S4 ran with it on. Off loses only the NACK reason in the adapter's own log; the cuff simulator still receives the NACK and records its MSA-3 reason in the AuditEvent."
+  type        = bool
+  default     = false
 }
 
 variable "mllp_port" {
@@ -267,13 +273,24 @@ variable "enable_cloud_logging" {
 }
 
 variable "boot_wait_minutes" {
-  description = "How long the startup script keeps retrying things that are slow on first boot (image pulls, a secret version not yet added, MariaDB becoming healthy) before it logs an error and gives up for this boot. Spike S2: budget about 15 minutes from apply to a usable stack."
+  description = "One shared deadline, counted from the start of the startup script, for everything it waits on that can be slow on first boot: image pulls, secret versions not yet added, MariaDB becoming healthy. When it passes, the script logs an error and gives up for this boot. Every network call also has its own timeout, so the deadline is overshot by at most about a minute. Hooks have their own limit (hook_timeout_minutes)."
   type        = number
   default     = 15
 
   validation {
     condition     = var.boot_wait_minutes >= 1 && var.boot_wait_minutes <= 60 && floor(var.boot_wait_minutes) == var.boot_wait_minutes
     error_message = "boot_wait_minutes must be a whole number from 1 to 60."
+  }
+}
+
+variable "hook_timeout_minutes" {
+  description = "Longest one hook (T23) may run on one boot before it is stopped and logged as failed. OpenEMR's first boot takes about 15 minutes (spike S2), so the default leaves room. Hooks run one after another, so the worst case for all hooks is this times their number."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.hook_timeout_minutes >= 1 && var.hook_timeout_minutes <= 120 && floor(var.hook_timeout_minutes) == var.hook_timeout_minutes
+    error_message = "hook_timeout_minutes must be a whole number from 1 to 120."
   }
 }
 

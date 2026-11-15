@@ -1,33 +1,55 @@
 #!/usr/bin/env bash
 # Stand-in for the system commands the edge VM startup script calls, for tests/startup_script.sh.
 # The test links this one file under each command's name (docker, curl, mount, blkid, mkfs.ext4,
-# ...) in a sandbox bin directory and runs the script with PATH set to that directory only, so no
-# real disk, mount, swap, container or network call can happen.
+# timeout, date, sleep, ...) in a sandbox bin directory and runs the script with PATH set to that
+# directory only, so no real disk, mount, swap, container or network call can happen.
 #
-# Every call is appended to "$FAKE_STATE/calls.log" as "<command> <args>". State that a real
-# machine would keep (the disk's filesystem, mounts, swap, containers, images) lives in files
-# under $FAKE_STATE, so a second run of the script sees what the first one did.
+# Every call (except `date`) is appended to "$FAKE_STATE/calls.log" as "<command> <args>". State
+# that a real machine would keep (the disk's filesystem, mounts, swap, containers, images) lives in
+# files under $FAKE_STATE, so a second run of the script sees what the first one did.
+#
+# Time is faked: `sleep N` and every simulated timeout advance a clock file, and `date +%s` reads
+# it. So deadline-driven loops finish instantly, and the test can check how much (fake) time a run
+# would have taken.
 #
 # Behaviour switches (environment variables set by a test case):
-#   FAKE_PULL_FAIL=1        docker pull fails
-#   FAKE_ADAPTER_CRASH=1    the mllp-adapter container keeps restarting
-#   FAKE_MARIADB_HEALTH=x   health status MariaDB reports (default healthy)
-#   FAKE_SECRET_MISSING=1   Secret Manager answers 404 (no version yet)
-#   FAKE_FSCK_RC=n          exit code of fsck.ext4
-#   FAKE_SECRET, FAKE_TOKEN the secret value and access token the fakes hand out
+#   FAKE_PULL_FAIL=1          docker pull fails
+#   FAKE_HANG="docker pull"   that command hangs: under `timeout` it times out (clock advances by
+#                             the limit); called WITHOUT `timeout` it is logged as HANG and fails
+#   FAKE_CURL_HANG=1          every curl call hangs until its --max-time (logged as HANG if none)
+#   FAKE_ADAPTER_CRASH=1      the mllp-adapter container keeps restarting
+#   FAKE_MARIADB_HEALTH=x     health status MariaDB reports (default healthy)
+#   FAKE_SECRET_MISSING=a,b   Secret Manager answers 404 for these file names ("all" for every one)
+#   FAKE_CHMOD_FAIL=1         chmod fails on the decoded secret's temporary file
+#   FAKE_FSCK_RC=n            exit code of fsck.ext4
+#   FAKE_SECRET, FAKE_TOKEN   the secret value and access token the fakes hand out
+#   REAL_DATE, REAL_CHMOD     paths of the real date and chmod
 
 set -uo pipefail
 
 : "${FAKE_STATE:?FAKE_STATE must point at the sandbox state directory}"
 cmd=$(basename "$0")
-{
-  printf '%s' "$cmd"
-  printf ' %s' "$@"
-  printf '\n'
-} >> "$FAKE_STATE/calls.log"
+if [ "$cmd" != date ]; then
+  {
+    printf '%s' "$cmd"
+    printf ' %s' "$@"
+    printf '\n'
+  } >> "$FAKE_STATE/calls.log"
+fi
 
 containers="$FAKE_STATE/containers"
 mkdir -p "$containers" "$FAKE_STATE/images" "$FAKE_STATE/networks"
+
+clock_add() {
+  local now
+  now=$(cat "$FAKE_STATE/clock" 2> /dev/null || echo 0)
+  echo $((now + $1)) > "$FAKE_STATE/clock"
+}
+
+hang() {
+  echo "HANG: $* (no timeout around it)" >> "$FAKE_STATE/calls.log"
+  exit 99
+}
 
 fake_docker() {
   local sub=${1:-}
@@ -46,10 +68,11 @@ fake_docker() {
       [ -e "$FAKE_STATE/images/$(printf '%s' "$2" | sha256sum | cut -c1-32)" ]
       ;;
     pull)
-      [ "${FAKE_PULL_FAIL:-0}" = 1 ] && {
+      if [ "${FAKE_HANG:-}" = "docker pull" ]; then hang docker pull "$@"; fi
+      if [ "${FAKE_PULL_FAIL:-0}" = 1 ]; then
         echo "Error response from daemon: fake pull failure" >&2
         return 1
-      }
+      fi
       touch "$FAKE_STATE/images/$(printf '%s' "${*: -1}" | sha256sum | cut -c1-32)"
       ;;
     container)
@@ -105,8 +128,26 @@ fake_docker() {
       echo running > "$containers/$1/status"
       echo "$1"
       ;;
+    stop)
+      local name=${*: -1}
+      [ -d "$containers/$name" ] || return 1
+      echo exited > "$containers/$name/status"
+      echo "$name"
+      ;;
     rm)
-      rm -rf "${containers:?}/${*: -1}"
+      local name=${*: -1} force=0
+      [ "$1" = --force ] && force=1
+      [ -d "$containers/$name" ] || return 1
+      # Like Docker: a running (or restarting) container is removed only with --force.
+      case "$(cat "$containers/$name/status")" in
+        running | restarting)
+          if [ "$force" = 0 ]; then
+            echo "Error response from daemon: cannot remove container \"/$name\": container is running: stop the container before removing or force remove" >&2
+            return 1
+          fi
+          ;;
+      esac
+      rm -rf "${containers:?}/$name"
       ;;
     logs)
       echo "flag provided but not defined: -fake_bad_flag"
@@ -117,11 +158,13 @@ fake_docker() {
 }
 
 fake_curl() {
-  local output="" writeout="" url="" header_stdin=0 auth=""
+  local output="" writeout="" url="" header_stdin=0 auth="" max_time=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --output) output=$2; shift 2 ;;
       --write-out) writeout=$2; shift 2 ;;
+      --max-time) max_time=$2; shift 2 ;;
+      --connect-timeout) shift 2 ;;
       --header)
         [ "$2" = "@-" ] && header_stdin=1
         shift 2
@@ -132,6 +175,12 @@ fake_curl() {
   done
   if [ "$header_stdin" = 1 ]; then
     IFS= read -r auth || true
+  fi
+  if [ "${FAKE_CURL_HANG:-0}" = 1 ]; then
+    [ -n "$max_time" ] || hang curl "$url"
+    clock_add "$max_time"
+    [ -n "$writeout" ] && printf '000'
+    return 28 # curl: operation timed out
   fi
 
   case "$url" in
@@ -144,11 +193,13 @@ fake_curl() {
       cp "$FAKE_STATE/hooks/$hook" "$output"
       ;;
     */versions/latest:access)
-      local code
+      local code secret_name
+      secret_name=${url%/versions/latest:access}
+      secret_name=${secret_name##*/secrets/}
       if [ "$auth" != "Authorization: Bearer $FAKE_TOKEN" ]; then
         code=401
         printf '{"error":{"code":401}}' > "$output"
-      elif [ "${FAKE_SECRET_MISSING:-0}" = 1 ]; then
+      elif [ "${FAKE_SECRET_MISSING:-}" = all ] || [[ ",${FAKE_SECRET_MISSING:-}," == *",${secret_name#pulsebridge-},"* ]]; then
         code=404
         printf '{"error":{"code":404,"status":"NOT_FOUND"}}' > "$output"
       else
@@ -170,8 +221,35 @@ case "$cmd" in
     printf '{"credHelpers":{"%s":"gcr"}}\n' "${2#--registries=}" > "$DOCKER_CONFIG/config.json"
     ;;
   curl) fake_curl "$@" ;;
+  timeout)
+    # timeout <seconds> <command...>: a command named in FAKE_HANG times out after <seconds>.
+    limit=$1
+    shift
+    if [ -n "${FAKE_HANG:-}" ] && [[ "$*" == "$FAKE_HANG"* ]]; then
+      clock_add "$limit"
+      exit 124
+    fi
+    exec "$@"
+    ;;
+  date)
+    if [ "${1:-}" = "+%s" ]; then
+      echo $((1700000000 + $(cat "$FAKE_STATE/clock" 2> /dev/null || echo 0)))
+    else
+      exec "$REAL_DATE" "$@"
+    fi
+    ;;
+  sleep) clock_add "${1%.*}" ;;
+  chmod)
+    if [ "${FAKE_CHMOD_FAIL:-0}" = 1 ] && [[ "${*: -1}" == *.decoded.tmp ]]; then
+      echo "chmod: changing permissions: Operation not permitted" >&2
+      exit 1
+    fi
+    exec "$REAL_CHMOD" "$@"
+    ;;
   blkid)
-    # blkid -p -o value -s TYPE <dev>: exit 2 when no filesystem is found.
+    # blkid -p -o value -s TYPE <dev>. Like util-linux, exit 2 ("nothing found") is returned for
+    # a blank device, an unreadable one and unrecognised contents alike; only a filesystem this
+    # fake "made" (state file fstype) is recognised. ERR models exit 4 (usage error).
     fs=$(cat "$FAKE_STATE/fstype" 2> /dev/null || true)
     case "$fs" in
       "") exit 2 ;;
@@ -179,7 +257,14 @@ case "$cmd" in
       *) echo "$fs" ;;
     esac
     ;;
-  mkfs.ext4) echo ext4 > "$FAKE_STATE/fstype" ;;
+  wipefs)
+    # wipefs --no-act <dev>: lists signatures it finds; nothing for a blank device.
+    if [ -f "$FAKE_STATE/wipefs_signature" ]; then cat "$FAKE_STATE/wipefs_signature"; fi
+    ;;
+  mkfs.ext4)
+    echo ext4 > "$FAKE_STATE/fstype"
+    printf 'fake-ext4-superblock' | dd of="${*: -1}" bs=1 seek=1024 conv=notrunc status=none
+    ;;
   fsck.ext4) exit "${FAKE_FSCK_RC:-0}" ;;
   resize2fs) exit 0 ;;
   mount)
@@ -196,7 +281,6 @@ case "$cmd" in
     size=$2
     truncate -s "$((${size%M} * 1024 * 1024))" "$3"
     ;;
-  sleep) exit 0 ;;
   *)
     echo "fake-command: no fake for $cmd" >&2
     exit 127

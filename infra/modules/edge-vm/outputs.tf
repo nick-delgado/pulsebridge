@@ -94,8 +94,13 @@ output "mariadb_image" {
   value       = local.mariadb_image
 }
 
+output "boot_image" {
+  description = "Boot image the VM was created from, as recorded by the provider. Because the image is in ignore_changes, this stays the creation-time image until the VM is replaced (README, \"Patching the VM\")."
+  value       = google_compute_instance.this.boot_disk[0].initialize_params[0].image
+}
+
 output "mllp_adapter_command" {
-  description = "The exact command the MLLP adapter container runs (binary path plus the flags recorded in spike S4)."
+  description = "The exact command the MLLP adapter container runs: the binary path plus spike S4's flags, with error-message logging off by default."
   value       = local.mllp_adapter_command
 }
 

@@ -32,9 +32,9 @@ locals {
   state_dir      = "/var/lib/pulsebridge-edge" # boot-disk state: docker config, hooks
   swap_file      = "/mnt/stateful_partition/pulsebridge-swapfile"
 
-  # Docker Hub mirror: <location>-docker.pkg.dev/<project>/<repository>.
-  mirror_parts = regex("^([a-z0-9-]+)-docker\\.pkg\\.dev/([^/]+)/([^/]+)$", var.dockerhub_mirror_url)
-  mirror_host  = "${local.mirror_parts[0]}-docker.pkg.dev"
+  # Docker Hub mirror <location>-docker.pkg.dev/<project>/<repository>: the credential helper is
+  # registered for its host. Read access to it is granted by project-base, which owns it.
+  mirror_host = split("/", var.dockerhub_mirror_url)[0]
 
   mariadb_image = "${var.dockerhub_mirror_url}/${var.mariadb_image}"
 
@@ -55,13 +55,14 @@ locals {
     "--thread-cache-size=4",
   ]
 
-  # The MLLP adapter command, exactly as spike S4 ran it:
+  # The MLLP adapter command: spike S4's flags, with error-message logging off by default:
   #   - the image has no entrypoint, so the binary path is the first word;
   #   - --port is the listen port inside the container; --receiver_ip=0.0.0.0 listens on every
   #     interface of the container, and Docker's -p decides what the VM exposes;
   #   - the store is given as four short names (--hl7_v2_store_id=<store>, not a resource path;
-  #     the older --hl7_v2_hl7_v2_store_id and --logtostderr put the container in a crash loop);
-  #   - --log_error_msg=true logs the store's error text for a NACK (no message content);
+  #     S4's first attempt, with --hl7_v2_hl7_v2_store_id and --logtostderr, crash-looped);
+  #   - --log_error_msg: S4 ran with true. Upstream's help says "These error logs will contain
+  #     sensitive data", so it follows var.mllp_adapter_log_error_messages (default false);
   #   - --export_stats=false: the default sends metrics to Cloud Monitoring, which the VM's account
   #     is not allowed to write;
   #   - the content-logging flags (--log_ack, --log_nacked_msg, --log_input_msg_in_base64) are left
@@ -75,7 +76,7 @@ locals {
     "--hl7_v2_location_id=${var.hl7v2_store_flags.hl7_v2_location_id}",
     "--hl7_v2_dataset_id=${var.hl7v2_store_flags.hl7_v2_dataset_id}",
     "--hl7_v2_store_id=${var.hl7v2_store_flags.hl7_v2_store_id}",
-    "--log_error_msg=true",
+    "--log_error_msg=${var.mllp_adapter_log_error_messages}",
     "--export_stats=false",
   ]
 
@@ -96,6 +97,7 @@ locals {
     mllp_adapter_image   = var.mllp_adapter_image
     mllp_port            = tostring(var.mllp_port)
     boot_wait_seconds    = tostring(var.boot_wait_minutes * 60)
+    hook_timeout_seconds = tostring(var.hook_timeout_minutes * 60)
     mariadb_command      = local.mariadb_command
     mllp_adapter_command = local.mllp_adapter_command
     secret_names         = sort(keys(var.secret_files))
@@ -123,7 +125,11 @@ locals {
   # Instance metadata. Keys only from Google's predefined set plus the hook scripts:
   #   - enable-oslogin: SSH access, if ever opened, is by IAM (OS Login), not by keys in metadata;
   #   - block-project-ssh-keys: project-wide SSH keys are not accepted on this VM;
-  #   - google-logging-enabled: COS's logging agent ships logs to Cloud Logging.
+  #   - google-logging-enabled: COS's logging agent ships logs to Cloud Logging;
+  #   - cos-update-strategy: set explicitly to update_disabled. COS's in-place updates "are not
+  #     supported on Container-Optimized OS VMs with UEFI Secure Boot enabled" and are off by
+  #     default from milestone 117 anyway; patching is done by replacing the VM (README,
+  #     "Patching the VM"), so the behaviour should not depend on a milestone's default.
   # No ssh-keys key, and no key holding a password or token (tests/static_checks.sh and the tests
   # check both).
   instance_metadata = merge(
@@ -132,9 +138,14 @@ locals {
       "enable-oslogin"         = "TRUE"
       "block-project-ssh-keys" = "TRUE"
       "google-logging-enabled" = var.enable_cloud_logging ? "true" : "false"
+      "cos-update-strategy"    = "update_disabled"
     },
     { for name, script in var.hooks : "pulsebridge-hook-${name}" => script }
   )
+
+  # Metadata limits are in bytes; length() counts characters. base64 encodes the UTF-8 bytes, so
+  # 3/4 of the base64 length is an upper bound on each value's size in bytes.
+  metadata_value_bytes = { for k, v in local.instance_metadata : k => floor(length(base64encode(v)) * 3 / 4) }
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -173,24 +184,6 @@ resource "google_compute_disk" "data" {
   type        = var.disk_type
   size        = var.data_disk_size_gb
   labels      = var.labels
-}
-
-# ---------------------------------------------------------------------------------------------
-# Image pull permission
-# ---------------------------------------------------------------------------------------------
-
-# Read access to the Docker Hub mirror repository only (not project-wide), so the VM can pull
-# MariaDB (and OpenEMR, T23) through Private Google Access. The repository belongs to
-# project-base; this grant is made here because pulling from it is this module's need, and it has
-# exactly one owner (project-base grants nothing on it). Additive `_iam_member`, so other readers
-# of the repository are left alone. Google's mllp-adapter image on gcr.io is public and needs no
-# grant.
-resource "google_artifact_registry_repository_iam_member" "mirror_reader" {
-  project    = local.mirror_parts[1]
-  location   = local.mirror_parts[0]
-  repository = local.mirror_parts[2]
-  role       = "roles/artifactregistry.reader"
-  member     = "serviceAccount:${var.service_account_email}"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -270,8 +263,10 @@ resource "google_compute_instance" "this" {
 
   lifecycle {
     # An image family such as cos-stable moves to a new image every few weeks. Ignoring it keeps
-    # a routine plan from replacing the VM; to move to a newer COS on purpose, run
-    # `terraform apply -replace=module.<name>.google_compute_instance.this` (the data disk stays).
+    # an unrelated apply from replacing the VM. The cost: the VM stays on the image it was created
+    # from, and a change to var.boot_image takes effect only when the VM is replaced on purpose:
+    # `terraform apply -replace=module.<name>.google_compute_instance.this` (README, "Patching the
+    # VM"; the data disk and the reserved address survive).
     ignore_changes = [boot_disk[0].initialize_params[0].image]
 
     precondition {
@@ -280,14 +275,17 @@ resource "google_compute_instance" "this" {
     }
 
     precondition {
+      # Defence in depth: every input that reaches the configuration block is already limited by
+      # a validation to characters without quotes, so this cannot fail today. It stays in case a
+      # validation is loosened later, because a quote would break out of the script's quoting.
       condition     = alltrue([for v in local.startup_config_values : !strcontains(v, "'")])
       error_message = "Startup-script configuration values must not contain a single quote."
     }
 
     precondition {
-      # Instance metadata allows 256 KB per value and 512 KB in total.
-      condition     = length(local.startup_script) < 262144 && sum([for v in values(local.instance_metadata) : length(v)]) < 524288
-      error_message = "The startup script or the hooks exceed the instance metadata size limits (256 KB per value, 512 KB in total)."
+      # Instance metadata allows 256 KB per value and 512 KB in total (bytes).
+      condition     = alltrue([for b in values(local.metadata_value_bytes) : b <= 262144]) && sum(values(local.metadata_value_bytes)) <= 524288
+      error_message = "The startup script or a hook exceeds the instance metadata size limits (256 KB per value, 512 KB in total)."
     }
   }
 }

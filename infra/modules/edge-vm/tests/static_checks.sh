@@ -11,6 +11,7 @@
 #   - a project ID is hardcoded (a literal projects/<id>/ other than the public cos-cloud images,
 #     or a literal `project = "..."`);
 #   - the startup script turns on tracing (`set -x`), which would print secrets;
+#   - any IAM resource is declared (grants live in the module that owns the resource);
 #   - any `module` block is declared, so none of the above can hide in a child module.
 #
 # Usage: infra/modules/edge-vm/tests/static_checks.sh   (from anywhere; needs bash, grep, awk)
@@ -100,7 +101,12 @@ if [[ -n "$hits" ]]; then bad "literal project argument:"; echo "$hits"; else ok
 hits="$(code_lines "${scripts[@]}" | grep -E 'set[[:space:]]+-[a-zA-Z]*x|xtrace|BASH_XTRACEFD' || true)"
 if [[ -n "$hits" ]]; then bad "the startup script enables tracing:"; echo "$hits"; else ok "no tracing in the startup script"; fi
 
-# 9. No child modules.
+# 9. No IAM resources: every grant the VM's account has is made by the module that owns the
+#    resource (identity, healthcare, project-base for the Docker Hub mirror).
+hits="$(code_lines "${tf_files[@]}" | grep -E 'resource[[:space:]]+"google_[a-z0-9_]*_iam_(member|binding|policy)"' || true)"
+if [[ -n "$hits" ]]; then bad "IAM resource declared (grants belong to the module that owns the resource):"; echo "$hits"; else ok "no IAM resources"; fi
+
+# 10. No child modules.
 hits="$(grep -nH -E '^[[:space:]]*module[[:space:]]+"' "${tf_files[@]}" || true)"
 if [[ -n "$hits" ]]; then bad "module call found (resources could hide in it):"; echo "$hits"; else ok "no module calls"; fi
 
