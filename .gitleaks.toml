@@ -1,0 +1,20 @@
+# gitleaks configuration: the default rules, plus one narrow exception.
+#
+# Used by both the pre-commit hook and `make secret-scan` (gitleaks reads .gitleaks.toml from the
+# repository being scanned).
+
+[extend]
+useDefault = true
+
+# Tests pin idempotency keys as literal UUIDs, for example `assert watch.key == "<uuid>"`. The
+# default generic-api-key rule reads `key == "<long hex string>"` as a credential. These values
+# are deterministic UUIDs derived from synthetic identifiers, not secrets.
+#
+# The exception applies only when BOTH conditions hold: the file is a test file, and the matched
+# text is a canonical UUID. Anything else in a test file is still reported.
+[[allowlists]]
+description = "Literal UUIDs (pinned idempotency keys) in test files"
+condition = "AND"
+regexTarget = "match"
+paths = ['''(^|/)tests/.*\.py$''']
+regexes = ['''[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}''']
