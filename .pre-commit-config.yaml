@@ -43,6 +43,16 @@ repos:
       - id: ruff-format
         types_or: [python, pyi]
 
+  # Shell scripts that handle secret values (T27). Limited to scripts/secrets/ for now; the other
+  # scripts have their own checks (the edge-vm and openemr module tests run shellcheck when it is
+  # installed). shellcheck-py ships a pinned shellcheck binary, so nothing needs installing.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        args: [-x, -S, style]
+        files: ^scripts/secrets/.*\.sh$
+
   # GitHub Actions workflow linter: catches YAML and expression mistakes before CI runs.
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
