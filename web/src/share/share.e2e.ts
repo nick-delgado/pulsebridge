@@ -51,6 +51,8 @@ test('keyboard only: confirm says what is sent and left out, then the trace and 
   const errors = await watchErrors(page);
   await logIn(page);
   await selectMappedReading(page);
+  // A closed confirm takes no space (its CSS display must not beat the hidden attribute).
+  await expect(page.locator('#share-confirm')).toBeHidden();
   await shareButton(page).focus();
   await page.keyboard.press('Enter');
   const confirm = page.getByRole('group', { name: 'Send this reading to the clinic?' });
