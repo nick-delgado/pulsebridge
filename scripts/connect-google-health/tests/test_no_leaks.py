@@ -186,3 +186,31 @@ def test_a_credentials_error_gets_the_gcloud_hint():
     err = harness.err.getvalue()
     assert "gcloud auth application-default login" in err
     assert CLIENT_SECRET not in err and "Reauthentication" not in err
+
+
+def test_an_unexpected_error_after_the_token_is_stored_is_partial_not_a_failure():
+    harness = Harness()
+    deps = harness.deps()
+
+    def broken_client(project, target):
+        raise RuntimeError(f"DefaultCredentialsError-like {HEALTH_USER_ID} {REFRESH_TOKEN}")
+
+    deps.healthcare_client = broken_client
+    assert cli.main_with_config(config(), deps) == cli.EXIT_PATIENT_FAILED
+    err = harness.err.getvalue()
+    assert "Unexpected error: RuntimeError" in err
+    assert "The refresh token above IS stored" in err
+    assert leaked(harness.output()) == []
+    assert harness.store.values("pb-google-health-refresh-token") == [REFRESH_TOKEN]
+
+
+def test_an_unexpected_error_while_disabling_is_only_a_warning():
+    class Breaks(FakeSecretStore):
+        def disable_versions_before(self, secret, version):
+            raise RuntimeError(f"boom {REFRESH_TOKEN}")
+
+    store = Breaks.with_client()
+    harness = Harness(store=store)
+    assert cli.main_with_config(config(disable_previous=True), harness.deps()) == cli.EXIT_OK
+    assert "Warning: Unexpected error: RuntimeError" in harness.out.getvalue()
+    assert leaked(harness.output()) == []

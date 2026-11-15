@@ -493,6 +493,8 @@ def run(config: Config, deps: Dependencies) -> int:
             _say(deps, f"  Disabled {count} older version(s) of {name} (none destroyed).")
         except SecretStoreError as exc:
             _say(deps, f"  Warning: {exc} The new version is stored and in use.")
+        except Exception as exc:  # noqa: BLE001 - the token is stored; never undo that
+            _say(deps, f"  Warning: {_unexpected(exc)} The new version is stored and in use.")
     for line in describe_expiry(tokens, deps.now()):
         _say(deps, line)
 
@@ -506,9 +508,10 @@ def run(config: Config, deps: Dependencies) -> int:
         outcome = write_patient(
             deps.healthcare_client(config.project, config.fhir), config.fhir.fhir_store, bundle
         )
-    except SetupError as exc:
+    except Exception as exc:  # noqa: BLE001 - SetupError or anything else: "partial"
+        reason = str(exc) if isinstance(exc, SetupError) else _unexpected(exc)
         raise Abort(
-            f"{exc} The refresh token above IS stored and health-sync can use it; only the "
+            f"{reason} The refresh token above IS stored and health-sync can use it; only the "
             "Patient record was not written. Run the script again (safe: the Patient write is a "
             "conditional update and a new refresh-token version is simply added), or check the "
             "FHIR configuration and your roles/healthcare.fhirResourceEditor on the store.",
