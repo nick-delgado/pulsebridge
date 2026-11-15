@@ -28,7 +28,8 @@ client.patch_labels(name, {"application_outcome": "accepted", "reason": "mapped"
 | --- | --- | --- |
 | `execute_bundle(fhir_store, bundle)` | `POST …/fhirStores/<s>/fhir` (`application/fhir+json`) | response Bundle (dict) |
 | `read_resource(fhir_store, type, id)` | `GET …/fhir/<type>/<id>` | resource (dict) |
-| `search(fhir_store, type, params)` | `GET …/fhir/<type>?<params>` | one `searchset` page (dict) |
+| `search(fhir_store, type, params)` | `GET …/fhir/<type>?<params>`; `params` a mapping, or `(name, value)` pairs for repeats such as `[("date", "ge2026-11-01"), ("date", "lt2026-11-08")]` | one `searchset` page (dict) |
+| `capabilities(fhir_store)` | `GET …/fhir/metadata` | the store's CapabilityStatement (dict) |
 | `next_page(fhir_store, bundle)` | the Bundle's `link[relation=next]` | next page, or `None` |
 | `put_resource(fhir_store, type, id, resource)` | `PUT …/fhir/<type>/<id>` | stored resource (dict) |
 | `get_message(name, view="RAW_ONLY")` | `GET <name>?view=…` | `Hl7v2Message` |
@@ -38,6 +39,10 @@ client.patch_labels(name, {"application_outcome": "accepted", "reason": "mapped"
 | `ingest(store, data, labels=None)` | `POST …/hl7V2Stores/<s>/messages:ingest` | `IngestResult(hl7_ack, message)` |
 | `is_message_in_store(name, store)` | none | whether `name` is a message of that store |
 
+- **Several FHIR stores, one client.** Every FHIR method takes the store id, so one client
+  serves every store in its dataset: for example the health-data store and the separate audit
+  store for send-attempt AuditEvents (decision D15), `client.put_resource("audit", "AuditEvent",
+  id, event)` and `client.search("audit", "AuditEvent", {...})` (tested).
 - `Hl7v2Message`: `name`, `data` (the exact bytes, base64-decoded; `None` in views without it),
   `message_type` (MSH-9.1), `send_facility` (MSH-4), `send_time` (MSH-7), `create_time`,
   `patient_ids` (each PID-3 as `PatientId(value, type)`), `labels`, `raw`.
@@ -61,6 +66,11 @@ client.patch_labels(name, {"application_outcome": "accepted", "reason": "mapped"
 | `ClientError` | other 4xx | refused as sent; do not resend unchanged. Carries `operation_outcome` (FHIR) or `hl7_nack` (HL7v2 ingest NACK, decoded bytes) |
 | `RetryableError` | 408, 429, 5xx, no response at all, token refresh failure | retry later |
 | `MalformedResponseError` | 2xx with a body that is not what the API documents | bug or contract change |
+
+**For callers mapping results to "no acknowledgment, with the HTTP status" (T13's HTTPS
+ingest):** 401, 403 and 404 raise `PermissionDeniedError` / `NotFoundError`, not `ClientError`,
+so they carry no `hl7_nack`; handle them (and `RetryableError`) alongside a `ClientError` whose
+`hl7_nack` is `None`. Only a `ClientError`/`ConflictError` with `hl7_nack` set is a NACK.
 
 All are `HealthcareApiError` with `operation` and `status`. `str(error)` names only the
 operation and status: the server's own text can quote the request, which here is health data,

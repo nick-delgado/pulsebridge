@@ -17,7 +17,7 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from pulsebridge_gcp.errors import (
@@ -36,7 +36,7 @@ from pulsebridge_gcp.models import (
     check_labels,
     decode_base64_field,
 )
-from pulsebridge_gcp.transport import HttpResponse, Transport
+from pulsebridge_gcp.transport import HttpResponse, Params, Transport
 
 DEFAULT_BASE_URL = "https://healthcare.googleapis.com/v1"
 # One request must finish well inside the caller's own deadline. v2-to-fhir makes three calls
@@ -46,7 +46,10 @@ DEFAULT_TIMEOUT_SECONDS = 15.0
 # messages.get / messages.list views (spike S5, "Stored message shape").
 MESSAGE_VIEWS = ("BASIC", "RAW_ONLY", "PARSED_ONLY", "FULL", "SCHEMATIZED_ONLY")
 
-# Resource-name parts. Google allows letters, digits, "_", "-" and "." in dataset and store ids.
+# Resource-name parts, the same as in MESSAGE_NAME below, so a client that starts with a
+# configuration also recognises the message names of its own store. Project ids and locations
+# are lowercase letters, digits and "-"; dataset and store ids may also hold "_" and ".".
+_PROJECT_OR_LOCATION = re.compile(r"[a-z0-9-]{1,63}", re.ASCII)
 _SEGMENT = re.compile(r"[A-Za-z0-9_.-]{1,256}", re.ASCII)
 # A stored message's id is the URL-safe base64 of a SHA-256 (spike S5): letters, digits, -, _, =.
 MESSAGE_NAME = re.compile(
@@ -137,8 +140,8 @@ class HealthcareClient:
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.dataset_name = (
-            f"projects/{_check(_SEGMENT, 'project', project)}"
-            f"/locations/{_check(_SEGMENT, 'location', location)}"
+            f"projects/{_check(_PROJECT_OR_LOCATION, 'project', project)}"
+            f"/locations/{_check(_PROJECT_OR_LOCATION, 'location', location)}"
             f"/datasets/{_check(_SEGMENT, 'dataset', dataset)}"
         )
         self._transport = transport
@@ -171,7 +174,7 @@ class HealthcareClient:
         method: str,
         url: str,
         *,
-        params: Mapping[str, str] | None = None,
+        params: Params = None,
         body: object = None,
         content_type: str = JSON,
     ) -> object:
@@ -220,11 +223,34 @@ class HealthcareClient:
         )
         return self._object("GET", url)
 
-    def search(self, fhir_store: str, resource_type: str, params: Mapping[str, str]) -> dict:
-        """GET ``<type>?<params>``: one page of results as a ``searchset`` Bundle."""
+    def search(
+        self,
+        fhir_store: str,
+        resource_type: str,
+        params: Mapping[str, str] | Sequence[tuple[str, str]],
+    ) -> dict:
+        """GET ``<type>?<params>``: one page of results as a ``searchset`` Bundle.
+
+        ``params`` is a mapping, or a sequence of ``(name, value)`` pairs when a parameter
+        repeats: FHIR combines repeats with AND, e.g. ``[("date", "ge2026-11-01"),
+        ("date", "lt2026-11-08")]`` for one week.
+        """
         resource_type = _check(_FHIR_TYPE, "resource type", resource_type)
         url = f"{self.fhir_base_url(fhir_store)}/{resource_type}"
-        return self._object("GET", url, params=dict(params))
+        pairs = list(params.items()) if isinstance(params, Mapping) else list(params)
+        for pair in pairs:
+            if not (
+                isinstance(pair, tuple)
+                and len(pair) == 2
+                and all(isinstance(part, str) for part in pair)
+            ):
+                raise ValueError("search parameters must be (name, value) pairs of strings")
+        return self._object("GET", url, params=pairs)
+
+    def capabilities(self, fhir_store: str) -> dict:
+        """GET ``metadata``: the store's CapabilityStatement (what it supports: resource
+        types, search parameters, interactions)."""
+        return self._object("GET", f"{self.fhir_base_url(fhir_store)}/metadata")
 
     def next_page(self, fhir_store: str, bundle: dict) -> dict | None:
         """The page after ``bundle`` (its ``link`` with ``relation: next``), or ``None``.

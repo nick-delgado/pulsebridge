@@ -15,11 +15,14 @@ that makes three calls in a row.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from pulsebridge_gcp.errors import RetryableError
+
+# Query parameters: a mapping, or (name, value) pairs when a name repeats (FHIR search).
+Params = Mapping[str, str] | Sequence[tuple[str, str]] | None
 
 # The only OAuth scope the Cloud Healthcare API needs; IAM roles decide what is allowed.
 CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
@@ -46,7 +49,7 @@ class Transport(Protocol):
         method: str,
         url: str,
         *,
-        params: Mapping[str, str] | None,
+        params: Params,
         body: bytes | None,
         headers: Mapping[str, str],
         timeout: float,
@@ -64,7 +67,7 @@ class RequestsTransport:
         method: str,
         url: str,
         *,
-        params: Mapping[str, str] | None,
+        params: Params,
         body: bytes | None,
         headers: Mapping[str, str],
         timeout: float,

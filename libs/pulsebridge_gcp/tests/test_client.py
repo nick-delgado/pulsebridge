@@ -414,3 +414,70 @@ def test_request_body_is_compact_utf8_json(client, transport):
     assert transport.requests[0].body == json.dumps(
         {"resourceType": "Bundle", "x": "é"}, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
+
+
+# ---- additions for later tasks -----------------------------------------------------------------
+
+
+def test_search_accepts_repeated_parameters_in_order(client, transport):
+    # FHIR combines a repeated parameter with AND: one week of readings.
+    transport.add("GET", "/fhir/Observation", json_response(200, {"resourceType": "Bundle"}))
+    client.search(
+        "fhir",
+        "Observation",
+        [("date", "ge2026-11-01"), ("date", "lt2026-11-08"), ("_count", "100")],
+    )
+    assert transport.requests[0].param_pairs == [
+        ("date", "ge2026-11-01"),
+        ("date", "lt2026-11-08"),
+        ("_count", "100"),
+    ]
+
+
+@pytest.mark.parametrize("params", [[("date",)], [("date", 1)], ["date=ge2026"]])
+def test_search_refuses_malformed_parameter_pairs(client, transport, params):
+    with pytest.raises(ValueError):
+        client.search("fhir", "Observation", params)
+    assert transport.requests == []
+
+
+def test_capabilities_reads_the_store_metadata(client, transport):
+    statement = {"resourceType": "CapabilityStatement", "fhirVersion": "4.0.1"}
+    transport.add("GET", "/fhir/metadata", json_response(200, statement))
+    assert client.capabilities("fhir") == statement
+    assert transport.requests[0].url == f"{FHIR}/metadata"
+
+
+def test_one_client_addresses_a_second_fhir_store_in_the_same_dataset(client, transport):
+    # Decision D15: send-attempt AuditEvents live in a separate audit FHIR store.
+    audit = f"{BASE}/{DATASET}/fhirStores/audit/fhir"
+    transport.add("PUT", "/fhirStores/audit/fhir/AuditEvent/a-1", json_response(200, {}))
+    transport.add("GET", "/fhirStores/audit/fhir/AuditEvent", json_response(200, {}))
+    client.put_resource("audit", "AuditEvent", "a-1", {"resourceType": "AuditEvent", "id": "a-1"})
+    client.search("audit", "AuditEvent", {"_sort": "-recorded"})
+    put, search = transport.requests
+    assert put.url == f"{audit}/AuditEvent/a-1"
+    assert search.url == f"{audit}/AuditEvent"
+    assert search.params == {"_sort": "-recorded"}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        f"{DATASET}/hl7V2Stores/main2/messages/x",  # a store whose name merely starts with ours
+        f"{DATASET}/hl7V2Stores/main/messagesX/x",
+        f"{STORE}/messages/..%2F..%2Fx",  # encoded traversal
+        f"{STORE}/messages/%2e%2e",
+        f"{STORE}",
+    ],
+)
+def test_is_message_in_store_refuses_lookalikes(client, name):
+    assert not client.is_message_in_store(name, "main")
+
+
+@pytest.mark.parametrize(
+    ("project", "location"), [("Demo-Project", "us-central1"), ("demo", "us central1")]
+)
+def test_project_and_location_must_be_lowercase_names(transport, project, location):
+    with pytest.raises(ValueError):
+        HealthcareClient(project=project, location=location, dataset="demo", transport=transport)

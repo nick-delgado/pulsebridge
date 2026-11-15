@@ -15,7 +15,7 @@ A request no route matches fails the test with an AssertionError naming it.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -34,7 +34,8 @@ def json_response(status: int, body: object) -> HttpResponse:
 class RecordedRequest:
     method: str
     url: str
-    params: dict[str, str]
+    params: dict[str, str]  # last value wins when a name repeats; see param_pairs
+    param_pairs: list[tuple[str, str]]  # every parameter, in order
     body: bytes | None
     headers: dict[str, str]
     timeout: float
@@ -73,12 +74,13 @@ class FakeTransport:
         method: str,
         url: str,
         *,
-        params: Mapping[str, str] | None,
+        params: Mapping[str, str] | Sequence[tuple[str, str]] | None,
         body: bytes | None,
         headers: Mapping[str, str],
         timeout: float,
     ) -> HttpResponse:
-        recorded = RecordedRequest(method, url, dict(params or {}), body, dict(headers), timeout)
+        pairs = list(params.items()) if isinstance(params, Mapping) else list(params or [])
+        recorded = RecordedRequest(method, url, dict(pairs), pairs, body, dict(headers), timeout)
         self.requests.append(recorded)
         for route in self._routes:
             if route.method == method and recorded.path.endswith(route.suffix):
