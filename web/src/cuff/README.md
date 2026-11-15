@@ -10,7 +10,6 @@ list, and the left trace panel. It talks only to `submitCuffReading`, `getCuffAt
 | `panel.ts`    | the form, the readings list, polling, selection and data-change handling (the flow)    |
 | `form.ts`     | pure: input rules at cuff-sim's limits, the exact request body, samples by class       |
 | `readings.ts` | pure: one row per send, the words for both acknowledgment levels, shareability, errors |
-| `reasons.ts`  | the mapper's reason codes as sentences (a copy of v2-to-fhir's `reasons.py`)           |
 | `trace.ts`    | the three trace tabs, rendered as text only                                            |
 | `cuff.css`    | `.cuff-…` styles, tokens only                                                          |
 
@@ -23,6 +22,9 @@ list, and the left trace panel. It talks only to `submitCuffReading`, `getCuffAt
 - **Two acknowledgment levels (D7)**, always two separately labelled items, in the list and in
   the trace: "Commit-level acknowledgment (from the store)" (the ACK in the send result) and
   "Application-level outcome (from the mapper)" (`pending` until the stored message is labelled).
+  The store answers in HL7's original acknowledgment mode, so the ACK tab explains that the two
+  names come from the enhanced mode (`ACK_MODE_NOTE`), and the list says it in short. Reason codes
+  become sentences through the shared `src/api/reasons.ts`.
 - **A malformed send** carries only `transport` and `sendMalformed`; the pressure inputs are
   disabled. Samples are listed by class with the layer that catches each class; a sample not
   offered over the chosen transport is disabled (and unchosen, with a reason, when you switch).
@@ -41,6 +43,9 @@ list, and the left trace panel. It talks only to `submitCuffReading`, `getCuffAt
   data change the selected reading is first marked "being checked again" (not shareable), then
   re-checked through its trace; a 404 clears the selection. A poll answer that settles the
   selected row re-sets the selection.
+- **Quiet polling.** A trace re-render patches only the parts whose content changed, so a poll
+  tick that changes nothing touches no DOM (focus and scroll inside a code block survive) and
+  the live summary is written only when its text changes.
 - **Late answers.** Every request has its own `AbortController` chained to the dashboard's
   signal and is checked before rendering. A trace answer that still says `pending` never moves a
   settled row back (`withTrace`).
@@ -49,16 +54,14 @@ list, and the left trace panel. It talks only to `submitCuffReading`, `getCuffAt
 
 ## For T19 and T14
 
+See "What T14, T18 and T19 must know" in `web/README.md`. In short:
+
 - The selection a cuff row sets: `{source: 'cuff', attemptId, observationId, summary,
 unshareableReason}`. `observationId` is null until the mapper has accepted the message.
   `unshareableReason` is set for pending, rejected, no acknowledgment, mapper error, an
-  Observation that is not `final`, and while a re-check runs. **T19:** the share hint today checks
-  `observationId === null` before `unshareableReason`, so for a cuff reading it says "no
-  Observation was stored" instead of the more precise reason (for example the mapper's error).
-- The panel announces `'cuff-send'` after every send that returned a result, and after a 504
-  (it may have been sent). It re-checks its selection on `'sync'` and `'share'`.
-- The panel shows a trace only for rows sent in this session. A cuff selection set by another
-  feature (for example a messages-log row) is not traced here: the trace panel stays empty.
-- `reasons.ts` duplicates v2-to-fhir's sentences; T19 needs the same text for the log. A shared
-  copy belongs in the shell (`src/api/` or `src/ui/`), or the proxy could send the sentence
-  (T14).
+  Observation that is not `final` or not found, and while a check runs.
+- A cuff selection set by another feature for an attempt in this panel's list loads its trace
+  and is re-set from the row; an attempt not sent in this session has no row and no trace here.
+- The panel announces `'cuff-send'` after every send that returned a result, and after a failure
+  that may have sent one (504, a lost connection, an unreadable 200). It re-checks its selection
+  on `'sync'` and `'share'`.
