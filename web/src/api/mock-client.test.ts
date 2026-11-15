@@ -94,6 +94,8 @@ describe('MockClient', () => {
       expect(obs?.valueQuantity?.system).toBe('http://unitsofmeasure.org');
       expect(obs?.component?.map((c) => c.code)).toEqual(reference.component?.map((c) => c.code));
       expect(obs?.device?.reference).toMatch(/^Device\//);
+      // T06 (T33): self-measured, the performer is the subject Patient.
+      expect(obs?.performer).toEqual([obs?.subject]);
     });
 
     it('are five-minute roll-ups (D8): about 288 a day, with min <= mean <= max', async () => {
@@ -175,6 +177,7 @@ describe('MockClient', () => {
           .sort(),
       ).toEqual(shape(reference).sort());
       expect(bp?.code).toEqual(reference.code);
+      expect(bp?.performer).toEqual([bp?.subject]);
       expect(bp?.component?.map((c) => [c.code, c.valueQuantity?.code])).toEqual(
         reference.component?.map((c) => [c.code, 'mm[Hg]']),
       );
@@ -373,13 +376,15 @@ describe('MockClient', () => {
       expect(second.outcome).toBe('already-shared');
     });
 
-    it('sends the Observation to OpenEMR without device, meta, identifier or id (T06)', async () => {
+    it('sends the Observation to OpenEMR without device, performer, meta, identifier or id (T06)', async () => {
       const range = { start: new Date(NOW - DAY), end: new Date(NOW) };
       const [obs] = await client.searchObservations({ code: LOINC.heartRate, range });
       const result = await client.share({ observations: [`Observation/${obs?.id ?? ''}`] });
       const sent = result.steps.find((st) => st.step === 'observation-create')?.request
         .body as Record<string, unknown>;
-      for (const element of ['device', 'meta', 'identifier', 'id']) {
+      expect(obs).toHaveProperty('performer');
+      // performer names our Patient; OpenEMR does not keep it (spike S1), so it is dropped.
+      for (const element of ['device', 'performer', 'meta', 'identifier', 'id']) {
         expect(sent, element).not.toHaveProperty(element);
       }
       expect(sent).toHaveProperty('subject');

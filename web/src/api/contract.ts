@@ -395,8 +395,19 @@ export interface SendAttemptEntry {
   commitAck: CommitAck;
   /** Null when the message was never stored (rejected or no acknowledgment). */
   application: ApplicationOutcome | null;
-  /** HL7v2 store message name (HTTPS accept only, or found by the proxy). */
+  /**
+   * HL7v2 store message name **returned by the store** (T31's `message_name`: an accepted HTTPS
+   * send, from the ingest response). Never a derived name; null otherwise.
+   */
   messageName: string | null;
+  /**
+   * The name cuff-sim **derived** for an accepted MLLP send (T31's `derived_message_name`, the
+   * AuditEvent's `derived-message-name` detail; T33): `<store>/messages/<urlsafe-base64(sha256(
+   * the bytes actually sent))>`. Unconfirmed: the proxy joins the attempt to its stored message
+   * by it, confirms it with a `get`, and the page shows it labelled as derived, never as
+   * `messageName`. Null when the store returned a name, or nothing was stored.
+   */
+  derivedMessageName: string | null;
   /** The resulting Observation as a reference, `Observation/<id>`, once mapped. */
   observation: string | null;
   /** `store-only`: a stored message with no AuditEvent, for example sent straight to the adapter. */

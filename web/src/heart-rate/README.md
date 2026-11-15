@@ -107,8 +107,10 @@ The selection is kept honest as data changes:
 The trace panel (`trace.ts`, the shell's `createTabs`) shows:
 
 - **FHIR as stored**: the Observation, Provenance and Device from `getHeartRateTrace`;
-- **Google Health JSON it came from**: the roll-up window from the trace's `source`, labelled as
-  reconstructed from the stored reading, because PulseBridge keeps no raw API responses.
+- **Google Health JSON it came from**: the roll-up window from the trace's `source`, labelled by
+  `source.kind`: `reconstructed` (rebuilt from the stored reading; what the proxy sends today,
+  because PulseBridge keeps no raw API responses), `original` (the response as the API returned
+  it), or `unknown` (the server made no claim, and the panel says so).
 
 ## Accessibility
 

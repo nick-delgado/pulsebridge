@@ -2,8 +2,10 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import type { SendAttemptEntry } from './contract';
 import type { AuditEvent } from './fhir';
 import { MockClient } from './mock-client';
+import { derivedMessageName, MOCK_HL7V2_STORE } from './mock-data';
 import { Session } from './session';
 // T31's generated examples, copied from libs/pulsebridge_fhir/examples/ (see t31-examples/README.md).
+import acceptedMllp from './t31-examples/auditevent-send-accepted-mllp.json';
 import accepted from './t31-examples/auditevent-send-accepted.json';
 import noAck from './t31-examples/auditevent-send-no-ack.json';
 import rejected from './t31-examples/auditevent-send-rejected.json';
@@ -40,6 +42,7 @@ function detailOf(event: AuditEvent | Record<string, unknown>, type: string) {
 
 describe("mock send-attempt AuditEvents against T31's examples", () => {
   const events = new Map<string, { event: AuditEvent; entry: SendAttemptEntry }>();
+  let traceFor: (id: string) => ReturnType<MockClient['getCuffAttemptTrace']>;
 
   beforeAll(async () => {
     sessionStorage.clear();
@@ -51,6 +54,7 @@ describe("mock send-attempt AuditEvents against T31's examples", () => {
       latencyMs: 0,
     });
     await client.login('x');
+    traceFor = (id) => client.getCuffAttemptTrace(id);
     const { entries } = await client.listMessages({ kind: 'cuff-send' });
     const pick = (name: string, test: (e: SendAttemptEntry) => boolean) => {
       const entry = (entries as SendAttemptEntry[]).find(test);
@@ -59,6 +63,13 @@ describe("mock send-attempt AuditEvents against T31's examples", () => {
     };
     const scenarios: [string, SendAttemptEntry][] = [
       ['accepted', pick('accepted', (e) => e.result === 'accepted' && e.messageName !== null)],
+      [
+        'accepted-mllp',
+        pick(
+          'accepted-mllp',
+          (e) => e.result === 'accepted' && e.transport === 'mllp' && e.sample === null,
+        ),
+      ],
       ['rejected', pick('rejected', (e) => e.sample === 'unparseable_no_msh')],
       ['no-ack', pick('no-ack', (e) => e.sample === 'noack_missing_end_block')],
       [
@@ -75,6 +86,7 @@ describe("mock send-attempt AuditEvents against T31's examples", () => {
 
   const cases: [string, Record<string, unknown>][] = [
     ['accepted', accepted],
+    ['accepted-mllp', acceptedMllp],
     ['rejected', rejected],
     ['no-ack', noAck],
     ['unreadable', unreadable],
@@ -119,5 +131,30 @@ describe("mock send-attempt AuditEvents against T31's examples", () => {
       'urn:pulsebridge:source-record:hl7v2-message',
     );
     expect(events.get('rejected')?.event.entity?.[1]?.what).toBeUndefined();
+  });
+
+  it('records an accepted MLLP send with the derived name as a detail, never as entity.what', async () => {
+    const found = events.get('accepted-mllp');
+    if (!found) throw new Error('accepted-mllp');
+    const { event, entry } = found;
+    expect(event.entity?.[1]?.what).toBeUndefined();
+    // The log row keeps the two kinds apart: no store-returned name, a derived one.
+    expect(entry.messageName).toBeNull();
+    expect(entry.derivedMessageName).not.toBeNull();
+    expect(detailOf(event, 'derived-message-name')?.valueString).toBe(entry.derivedMessageName);
+    // The name is over the bytes the trace says were sent.
+    const sessionTrace = await traceFor(entry.id);
+    expect(entry.derivedMessageName).toBe(
+      await derivedMessageName(MOCK_HL7V2_STORE, sessionTrace.messageSent ?? ''),
+    );
+  });
+
+  it('never writes a derived-message-name detail for a store-returned name or a failure', () => {
+    for (const name of ['accepted', 'rejected', 'no-ack', 'unreadable']) {
+      const found = events.get(name);
+      if (!found) throw new Error(name);
+      expect(detailOf(found.event, 'derived-message-name'), name).toBeUndefined();
+      expect(found.entry.derivedMessageName, name).toBeNull();
+    }
   });
 });

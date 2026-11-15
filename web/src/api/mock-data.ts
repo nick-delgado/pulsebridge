@@ -228,6 +228,8 @@ export function heartRateObservation(
     subject: { reference: MOCK_PATIENT_REF },
     // T06 writes the window in the user's zone, so the offset is part of the data.
     effectivePeriod: { start: formatInZone(startMs, timeZone), end: formatInZone(endMs, timeZone) },
+    // T06 (T33): self-measured, so the performer is the Patient, as in `subject`.
+    performer: [{ reference: MOCK_PATIENT_REF }],
     valueQuantity: perMinute(window.heartRate.beatsPerMinuteAvg),
     method: {
       text: "Mean of the device's samples over effectivePeriod; components give the minimum and maximum",
@@ -305,6 +307,7 @@ export function bloodPressureObservation(
     ),
     subject: { reference: MOCK_PATIENT_REF },
     effectiveDateTime: effective,
+    performer: [{ reference: MOCK_PATIENT_REF }],
     device: { reference: MOCK_CUFF_REF },
     component: [
       {
@@ -493,9 +496,11 @@ export function mockAck(
 // ---------------------------------------------------------------------------------------------
 // Send-attempt AuditEvents (D12), in T31's final model.
 //
-// Built from T31's four generated examples (copied into ./t31-examples/ from
+// Built from four of T31's five generated examples (copied into ./t31-examples/ from
 // libs/pulsebridge_fhir/examples/auditevent-send-*.json) as templates; only values change.
-// mock-audit.test.ts compares the result with those files element by element.
+// mock-audit.test.ts compares the result with those files element by element. An accepted MLLP
+// send is the accepted template without `what` and with the `derived-message-name` detail, which
+// is exactly auditevent-send-accepted-mllp.json (the test compares the mock with it too).
 
 /** Placeholder HL7v2 store name for mock mode (the real one is configuration). */
 export const MOCK_HL7V2_STORE =
@@ -521,10 +526,11 @@ export function outcomeCode(result: SendAttemptEntry['result']): SendAttemptEntr
   return result === 'accepted' ? '0' : result === 'rejected' ? '4' : '8';
 }
 
+// T31's fixed wording (libs/pulsebridge_fhir/pulsebridge_fhir/audit_event.py, _NO_ACK_TEXT).
 const NO_ACK_WORDS: Record<string, string> = {
   timeout: 'the read timed out',
-  'connection-closed': 'the connection was closed without a reply',
-  'api-error': 'the ingest API answered with an error',
+  'connection-closed': 'the connection was closed with no reply',
+  'api-error': 'the API returned an error with no HL7 reply',
   'unreadable-reply': 'the reply could not be read as an HL7v2 ACK',
 };
 
@@ -559,6 +565,9 @@ export function mockSendAuditEvent(entry: SendAttemptEntry): AuditEvent {
     event.outcomeDesc = `Rejected by the receiver (MSA-1 ${ack.code})${ack.reason ? `: ${ack.reason}` : ''}`;
   } else if (!ack.received) {
     event.outcomeDesc = `No acknowledgment received: ${NO_ACK_WORDS[ack.why] ?? ack.why}`;
+    if (ack.why === 'api-error' && ack.httpStatus !== null) {
+      event.outcomeDesc += ` (HTTP ${String(ack.httpStatus)})`;
+    }
   }
 
   const destination = event.agent[1]?.who?.identifier;
@@ -568,6 +577,7 @@ export function mockSendAuditEvent(entry: SendAttemptEntry): AuditEvent {
 
   const message = event.entity?.[1];
   if (message) {
+    // `what` only for a name the store returned; a derived one is a detail (T33, below).
     if (entry.messageName) {
       message.what = {
         identifier: {
@@ -594,9 +604,12 @@ export function mockSendAuditEvent(entry: SendAttemptEntry): AuditEvent {
         detail.push({ type: 'http-status', valueString: String(ack.httpStatus) });
       }
     }
-    if (entry.sample) detail.push({ type: 'malformed-sample', valueString: entry.sample });
     if (!ack.received && ack.replyPrefixBase64) {
       detail.push({ type: 'unreadable-reply-bytes', valueBase64Binary: ack.replyPrefixBase64 });
+    }
+    if (entry.sample) detail.push({ type: 'malformed-sample', valueString: entry.sample });
+    if (entry.derivedMessageName) {
+      detail.push({ type: 'derived-message-name', valueString: entry.derivedMessageName });
     }
     message.detail = detail;
   }

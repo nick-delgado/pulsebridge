@@ -110,6 +110,11 @@ interface MockAttempt {
   seq: number;
   /** False when the AuditEvent was not recorded: the attempt is then not in the log. */
   audited: boolean;
+  /**
+   * An accepted MLLP send: cuff-sim's derived message name, still being hashed (SHA-256 is async
+   * in the browser). `#settleDerivedNames` writes it into `entry.derivedMessageName`.
+   */
+  derivedName: Promise<string> | null;
 }
 
 export class MockClient implements PulseBridgeApi {
@@ -281,17 +286,17 @@ export class MockClient implements PulseBridgeApi {
     });
     this.#resolve();
 
+    await this.#settleDerivedNames();
     const entry = attempt.entry;
-    const accepted = entry.result === 'accepted';
     // Over HTTPS the ingest response names the stored message; over MLLP the ACK does not, and
     // cuff-sim DERIVES the name for an accepted send (spike S5; unverified).
     let messageName: string | null = null;
     let messageNameSource: CuffSendResult['messageNameSource'] = null;
-    if (accepted && transport === 'https') {
+    if (entry.messageName !== null) {
       messageName = entry.messageName;
       messageNameSource = 'ingest-response';
-    } else if (accepted) {
-      messageName = await derivedMessageName(MOCK_HL7V2_STORE, attempt.messageSent);
+    } else if (entry.derivedMessageName !== null) {
+      messageName = entry.derivedMessageName;
       messageNameSource = 'derived-sha256-unverified';
     }
     const failure = this.options.auditFailure;
@@ -327,6 +332,7 @@ export class MockClient implements PulseBridgeApi {
   ): Promise<CuffAttemptTrace> {
     await this.#authorised(options.signal);
     this.#resolve();
+    await this.#settleDerivedNames();
     const attempt = this.#attempts.find((a) => a.audited && a.entry.id === attemptId);
     if (!attempt) throw notFound(`AuditEvent/${attemptId}`);
     const observation = this.#observationFor(attempt);
@@ -353,6 +359,7 @@ export class MockClient implements PulseBridgeApi {
   ): Promise<MessagesLogPage> {
     await this.#authorised(options.signal);
     this.#resolve();
+    await this.#settleDerivedNames();
     const all: MessagesLogEntry[] = [
       // An attempt whose AuditEvent was not recorded is not in the audit store, so not listed.
       // (The proxy may show its stored message as a `store-only` row; the mock does not.)
@@ -732,6 +739,8 @@ export class MockClient implements PulseBridgeApi {
           stored && input.transport === 'https'
             ? `${MOCK_HL7V2_STORE}/messages/${hash32(`${String(input.at)}-${String(n)}`).toString(16)}`
             : null,
+        // Over MLLP cuff-sim derives the name (T33); filled in by #settleDerivedNames.
+        derivedMessageName: null,
         observation: null,
         source: 'audit-event',
       },
@@ -744,9 +753,24 @@ export class MockClient implements PulseBridgeApi {
       resolveAt: input.resolveAt,
       seq: n,
       audited: input.audited ?? true,
+      derivedName: null,
     };
+    if (stored && input.transport === 'mllp') {
+      // cuff-sim hashes the bytes it actually sent. In the mock the configured patient is T07's
+      // SYN-000123, so with_patient leaves every sample's bytes as the manifest has them.
+      attempt.derivedName = derivedMessageName(MOCK_HL7V2_STORE, attempt.messageSent);
+    }
     this.#attempts.push(attempt);
     return attempt;
+  }
+
+  /** Write every finished derived-name hash into its entry (see `MockAttempt.derivedName`). */
+  async #settleDerivedNames(): Promise<void> {
+    for (const attempt of this.#attempts) {
+      if (attempt.derivedName && attempt.entry.derivedMessageName === null) {
+        attempt.entry.derivedMessageName = await attempt.derivedName;
+      }
+    }
   }
 
   /** The starting log: one attempt per outcome the messages log must be able to show. */
@@ -919,13 +943,15 @@ function cuffRefusal(
 
 /**
  * An Observation as the share sends it to OpenEMR, following T06: no server `id` or `meta`, no
- * `identifier` (our conditional-update key means nothing to the clinic) and no `device` reference
- * (the Device lives in our store, not in OpenEMR). `subject` and `encounter` are set by the caller.
+ * `identifier` (our conditional-update key means nothing to the clinic), no `device` reference
+ * (the Device lives in our store, not in OpenEMR) and no `performer` (it names our Patient;
+ * OpenEMR does not keep it, spike S1). `subject` and `encounter` are set by the caller.
  */
 function observationForSharing(obs: Observation): Observation {
   const copy = withoutServerFields(obs);
   delete copy.identifier;
   delete copy.device;
+  delete copy.performer;
   return copy;
 }
 

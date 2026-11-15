@@ -90,6 +90,8 @@ export interface Observation extends Resource {
   encounter?: Reference;
   effectiveDateTime?: string;
   effectivePeriod?: Period;
+  /** T06 (T33): the Patient, the same reference as `subject` (the readings are self-measured). */
+  performer?: Reference[];
   valueQuantity?: Quantity;
   method?: CodeableConcept;
   device?: Reference;
