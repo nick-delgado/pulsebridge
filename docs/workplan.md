@@ -667,7 +667,7 @@ needed before T18 and T19 start.
 | --- | --- | --- | --- | --- |
 | T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (offline part merged; deploy part open) |
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml`, `.tflint.hcl`, and what its ACs need in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/` and `infra/envs/` (not `infra/envs/README.md` steps about secrets, which follow T27) | in-progress (offline part) |
-| T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths` if needed | in-progress |
+| T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | in-progress (offline part merged; the real OpenEMR screenshot needs a deploy; follow T26/T27 names once merged) |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
@@ -726,6 +726,10 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
   Registry cleanup policy in `project-base` (tags are immutable, so images otherwise
   accumulate). The first real build confirms the assumptions listed as unverified in
   `services/README.md`.
+
+**T27 follow-up (orchestrator, after T26 merges).** Replace runbook step 5 in
+`infra/envs/README.md` with the script commands, and drop the T27 entries from `PENDING_PATHS`
+in `tests/tooling/test_docs.py`. Never run against real gcloud or bash 3.2 (see its README).
 
 **T27 Secret version scripts.** Add secret versions after apply.
 - AC: values are read from a prompt or stdin and never echoed or written to disk, and are
