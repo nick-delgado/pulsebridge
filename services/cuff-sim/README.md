@@ -190,7 +190,7 @@ the VM's IP address (T22).
 | closed with no data (S4: the adapter's API call failed) | `why: connection-closed` |
 | closed after part of a frame, or reset | `why: connection-closed` |
 | nothing before the deadline (S4: bad framing), or bytes trickling | `why: timeout` |
-| a frame that `parse_ack` refuses or cannot read (it can raise more than `AckParseError`), over 4096 bytes, or holding an MLLP control byte | `why: unreadable-reply` (first bytes kept when there are any) |
+| a frame that `parse_ack` refuses (since T33 it raises only `AckParseError`; the service still treats any exception from it as unreadable), over 4096 bytes, or holding an MLLP control byte | `why: unreadable-reply` (first bytes kept when there are any) |
 | connection refused on every address, host not resolvable | `why: connection-closed` |
 | connect or write not done before the deadline | `why: timeout` |
 
@@ -228,10 +228,11 @@ The ACK bytes over HTTPS have no MLLP frame and no trailing `\r`; `parse_ack` do
 one.
 
 **A failure with no HTTP status** has no dedicated reason in T31's closed set (`api-error`
-requires 400–599). `pulsebridge_gcp`'s `RequestsTransport` raises `RetryableError(status=None)`
-with the original exception chained as `__cause__`, and the service reads it:
+requires 400–599). `pulsebridge_gcp`'s `RequestsTransport` raises `RetryableError(status=None)`,
+and for a connect or read timeout its subclass `TimedOutError` (T33). The service tells them
+apart by class alone (it no longer inspects `__cause__`):
 
-- a `requests.Timeout` (connect or read) is `timeout`. After a read timeout the request was
+- `TimedOutError` is `timeout`. After a read timeout the request was
   sent, so the message **may have been stored**: that is exactly what "no acknowledgment" means.
 - anything else is `connection-closed`: refused or reset, DNS, and a failure to refresh the
   access token. The exchange ended with no reply of any kind, as for a refused MLLP connection.

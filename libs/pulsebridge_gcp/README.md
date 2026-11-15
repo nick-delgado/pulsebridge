@@ -65,6 +65,7 @@ client.patch_labels(name, {"application_outcome": "accepted", "reason": "mapped"
 | `ConflictError` (a `ClientError`) | 409 | FHIR: concurrent update, retry. HL7v2 ingest: duplicate, with `hl7_nack` |
 | `ClientError` | other 4xx | refused as sent; do not resend unchanged. Carries `operation_outcome` (FHIR) or `hl7_nack` (HL7v2 ingest NACK, decoded bytes) |
 | `RetryableError` | 408, 429, 5xx, no response at all, token refresh failure | retry later |
+| `TimedOutError` (a `RetryableError`, `status` `None`) | no response within the timeout (connect or read), T33 | retry later; after a read timeout the request may have been processed. Tell it from other network failures with `isinstance`, not by reading `__cause__` |
 | `MalformedResponseError` | 2xx with a body that is not what the API documents | bug or contract change |
 
 **For callers mapping results to "no acknowledgment, with the HTTP status" (T13's HTTPS
