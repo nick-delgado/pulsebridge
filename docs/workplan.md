@@ -192,7 +192,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | done |
-| T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/fhir_proxy/share/`, `services/fhir-proxy/tests/share/` | todo |
+| T15 | FHIR proxy: share to OpenEMR | T14, T19, T23, S1 | `services/fhir-proxy/fhir_proxy/share/`, `services/fhir-proxy/tests/share/`, `fhir_proxy/extensions.py` (trace redaction and `request.query`), the proxy's configuration and README for the OpenEMR settings, and the `openemr` wiring in `infra/modules/phr/` if variable names change | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
@@ -380,6 +380,24 @@ Bundle endpoint and ignores conditional create.
 - AC: uses a registered client with the client credentials grant, authenticated by a signed
   assertion (`private_key_jwt`) with `system/*` scopes; no admin API key and no user login.
 - AC: sharing the same reading twice does not create a duplicate patient (search, then create).
+- AC: implements the share route as the dashboard defines it (`web/README.md`, "For T15"):
+  the request carries the Observation id only; refusals before OpenEMR is called answer an
+  OperationOutcome (400, 404, 422, 503); failures after it was called, including the request
+  budget running out, answer 502 or 504 with `{operationOutcome, steps}`, the one documented
+  exception to "every error is an OperationOutcome". Shares are serialised per instance.
+- AC: trace steps use `extensions.trace_step`, with its redaction corrected (owned here: it
+  lives in `fhir_proxy/extensions.py`): OAuth parameter names are hidden only in the token
+  step's bodies; in FHIR bodies only names that are never FHIR elements are hidden, so
+  elements named `code` or `token` are shown unchanged (test: an Observation step keeps
+  `code.coding[0].code` = `8867-4` and `valueQuantity.code` = `/min`; a token step hides
+  `client_assertion` and `access_token`). Search parameters go in `request.query`; the url
+  stays path-only.
+- AC: the Encounter is reused per patient and UTC calendar day of the reading
+  (`effectiveDateTime` or `effectivePeriod.start`), found with `Encounter?patient=&date=`. A
+  repeat share of a blood-pressure reading and of a heart-rate reading (`effectivePeriod` with
+  components) is checked against a live OpenEMR at T25: it must give `already-shared` with no
+  second Patient, Encounter or Observation. Spike S1 verified this for blood pressure only; if
+  a heart-rate repeat is not refused, that is reported and the page's wording changes.
 - AC: reads the OpenEMR client document the `openemr` module stores (its README, "For T15"):
   RS384 assertion with the document's key ID, the scopes the document lists, TLS trusting only
   the document's certificate with host checking on, one re-read on `invalid_client`. The
