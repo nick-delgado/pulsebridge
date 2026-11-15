@@ -177,3 +177,85 @@ def test_ack_preceded_by_whitespace_is_refused():
     # hl7apy strips leading whitespace itself; our pre-check insists the bytes start with MSH.
     with pytest.raises(AckParseError, match="does not start with an MSH segment"):
         parse_ack(b"  MSH|^~\\&|R|F|S|F|20261113205330||ACK|A13|P|2.5.1\rMSA|AA|1\r")
+
+
+# ---- Only AckParseError escapes (T33) -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("payload", "fragment"),
+    [
+        # The case reported by the T13 review: field separator "^", so "MSH-2" is "~MSH|".
+        (b"MSH^~MSH|", "five distinct delimiter characters"),
+        # hl7apy accepts a space as the subcomponent separator, then strips it from MSH-2.
+        (b"MSH|^~\\ ", "five distinct delimiter characters"),
+        (b"MSH|^~\\ |R|F|S|F|20261113205330||ACK|A|P|2.5.1\rMSA|AA|1", "five distinct"),
+        (b"MSH", "five distinct delimiter characters"),
+        (b"MSH|^~", "five distinct delimiter characters"),
+        (b"MSH|^~|&|R", "five distinct delimiter characters"),  # "|" twice
+        (b"MSH|^~\\\xc3\xa9|R", "five distinct delimiter characters"),  # non-ASCII
+        # A five-character MSH-2 (2.7's truncation character) in a header with no MSH-12.
+        (b"MSH|^~\\&#|PHR|PB|C|PB|20261113205329||ACK|A|", "no MSH-12"),
+        (b"MSH|^~\\&#", "no MSH-12"),
+    ],
+)
+def test_headers_that_crash_hl7apy_are_refused_with_a_reason(payload, fragment):
+    with pytest.raises(AckParseError, match=fragment):
+        parse_ack(payload)
+
+
+def test_a_2_7_ack_with_a_truncation_character_still_parses():
+    # The five-character MSH-2 is legal from 2.7 on, when MSH-12 says so.
+    ack = parse_ack(b"MSH|^~\\&#|R|F|S|F|20261113205330||ACK|A14|P|2.7\rMSA|CA|SYN-14\r")
+    assert (ack.code, ack.acknowledged_control_id, ack.version) == (AckCode.CA, "SYN-14", "2.7")
+
+
+# Seeds for the fuzz test: real ACK shapes (S4, S5) and the variants the parser supports.
+_FUZZ_SEEDS = (
+    unframe(S4_AA_FRAMED),
+    unframe(S4_NACK_B1_FRAMED),
+    unframe(S4_NACK_A6_FRAMED),
+    S5_AA_HTTPS,
+    S5_DUPLICATE_NACK,
+    b"MSH|^~\\&#|R|F|S|F|20261113205330||ACK|A14|P|2.7\rMSA|CA|SYN-14\r",
+    b"MSH#^~\\&#PHR#PB#C#PB#20261113205330##ACK#A3#P#9.9\rMSA#AR#SYN-7#x \\F\\ y\r",
+)
+# Bytes a mutation inserts: HL7 delimiters, segment names, digits, whitespace, MLLP control bytes,
+# invalid UTF-8.
+_FUZZ_ALPHABET = b"|^~\\&#\r\n MSAHCK0123456789.\t\x0b\x1c\x00\x80\xff"
+
+
+def _mutate(rng, data: bytes) -> bytes:
+    out = bytearray(data)
+    for _ in range(rng.randint(1, 6)):
+        op = rng.randrange(5)
+        pos = rng.randrange(len(out) + 1)
+        if op == 0 and out:
+            del out[min(pos, len(out) - 1)]
+        elif op == 1:
+            out.insert(pos, rng.choice(_FUZZ_ALPHABET))
+        elif op == 2 and out:
+            out[min(pos, len(out) - 1)] = rng.choice(_FUZZ_ALPHABET)
+        elif op == 3:
+            del out[pos:]  # truncate: most crashes were short headers
+        else:
+            out[pos:pos] = bytes(rng.choice(_FUZZ_ALPHABET) for _ in range(rng.randint(1, 4)))
+    return bytes(out)
+
+
+def test_fuzzed_acks_raise_only_ack_parse_error():
+    """Seeded, so every run checks the same 4,000 inputs. Before T33, about 8% of them raised
+    IndexError from inside hl7apy (both kinds the module docstring describes)."""
+    import random
+
+    rng = random.Random(20261115)
+    escaped = []
+    for _ in range(4000):
+        data = _mutate(rng, rng.choice(_FUZZ_SEEDS))
+        try:
+            parse_ack(data)
+        except AckParseError:
+            pass
+        except Exception as exc:  # noqa: BLE001 - this is what the test looks for
+            escaped.append((type(exc).__name__, data[:40]))
+    assert escaped == []
