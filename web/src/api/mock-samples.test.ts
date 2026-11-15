@@ -8,6 +8,7 @@ interface SourceSample {
   class: string;
   description: string;
   transports: string[];
+  mllp_framing: string;
   segments: string[];
   segment_terminator: string;
   terminate_last_segment: boolean;
@@ -38,6 +39,7 @@ describe('mock malformed samples against T07 samples.json', () => {
       expect(classes, mock.name).toContain(mock.class);
       expect(mock.class, mock.name).toBe(s.class);
       expect(mock.transports, mock.name).toEqual(s.transports);
+      expect(mock.mllpFraming, mock.name).toBe(s.mllp_framing);
       expect(mock.label, mock.name).toBe(s.description);
       expect(mock.er7, mock.name).toBe(
         s.segments.join(s.segment_terminator) +

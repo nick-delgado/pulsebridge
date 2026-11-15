@@ -9,8 +9,8 @@
 import { svg, uniqueId } from '../ui/dom';
 
 export function silhouette(): SVGSVGElement {
-  const titleId = uniqueId('figure-title');
-  const descId = uniqueId('figure-desc');
+  const titleId = uniqueId('shell-figure-title');
+  const descId = uniqueId('shell-figure-desc');
   const title = svg('title', { id: titleId });
   title.textContent = 'Line drawing of a person wearing a blood-pressure cuff and a watch';
   const desc = svg('desc', { id: descId });

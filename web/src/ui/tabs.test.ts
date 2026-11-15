@@ -16,6 +16,15 @@ const key = (el: HTMLElement, k: string) =>
   el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
 
 describe('tabs', () => {
+  it('gives every tab and panel a unique `ui-` id (README, "Element ids")', () => {
+    const a = setup().tabs.root;
+    const b = createTabs('Other', [{ id: 'fhir', label: 'FHIR' }]).root;
+    const ids = [...a.querySelectorAll('[id]'), ...b.querySelectorAll('[id]')].map((e) => e.id);
+    expect(ids).toHaveLength(8);
+    expect(ids.every((id) => id.startsWith('ui-'))).toBe(true);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it('shows the first panel and links each tab to its panel', () => {
     const { tabs, buttons } = setup();
     expect(tabs.selected()).toBe('fhir');

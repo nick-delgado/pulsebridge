@@ -9,6 +9,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-BAD-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-BAD-0001|P|2.5.1\rPID|1||||TESTPATIENT^SYNTHIA\rOBR|1||SYN-BAD-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -27,6 +28,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-BAD-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-BAD-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-BAD-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||2026-11-13 20:53\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -45,6 +47,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": null,
       "er7": "PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-UNP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -63,6 +66,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-UNP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-UNP-0001|P|2.5.1\nPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\nOBR|1||SYN-UNP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\nOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\nOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\n",
       "expected": {
@@ -81,6 +85,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-UNP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-UNP-0001|P|2.5.1\r\nPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\r\nOBR|1||SYN-UNP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\r\nOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r\nOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r\n",
       "expected": {
@@ -99,6 +104,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": null,
       "er7": "MSH|^~\\&#CUFFSIM#PULSEBRIDGE#PHR#PULSEBRIDGE#20261113205329+0000##ORU^R01^ORU_R01#SYN-UNP-0001#P#2.5.1\rPID#1##SYN-000123^^^PULSEBRIDGE^MR##TESTPATIENT^SYNTHIA\rOBR#1##SYN-UNP-0001^CUFFSIM#85354-9^Blood pressure panel with all children optional^LN###20261113205329+0000\rOBX#1#NM#8480-6^Systolic blood pressure^LN##120#mm[Hg]^mm[Hg]^UCUM#####F###20261113205329+0000\rOBX#2#NM#8462-4^Diastolic blood pressure^LN##80#mm[Hg]^mm[Hg]^UCUM#####F###20261113205329+0000\r",
       "expected": {
@@ -116,6 +122,7 @@
       "transports": [
         "mllp"
       ],
+      "mllpFraming": "missing_end_block",
       "controlId": "SYN-NOACK-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-NOACK-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-NOACK-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -133,6 +140,7 @@
       "transports": [
         "mllp"
       ],
+      "mllpFraming": "missing_final_cr",
       "controlId": "SYN-NOACK-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-NOACK-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-NOACK-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -151,6 +159,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|99999-9^Unknown observation^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -169,6 +178,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F\r",
       "expected": {
@@ -187,6 +197,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||HIGH|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -205,6 +216,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|2.5.1\r",
       "expected": {
@@ -223,6 +235,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000|||SYN-MAP-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -241,6 +254,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": null,
       "er7": "MSH|^~\\&\r",
       "expected": {
@@ -259,6 +273,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|9.9\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -277,6 +292,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ADT^A01^ADT_A01|SYN-MAP-0001|P|2.5.1\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {
@@ -295,6 +311,7 @@
         "mllp",
         "https"
       ],
+      "mllpFraming": "standard",
       "controlId": "SYN-MAP-0001",
       "er7": "MSH|^~\\&|CUFFSIM|PULSEBRIDGE|PHR|PULSEBRIDGE|20261113205329+0000||ORU^R01^ORU_R01|SYN-MAP-0001|P|\rPID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA\rOBR|1||SYN-MAP-0001^CUFFSIM|85354-9^Blood pressure panel with all children optional^LN|||20261113205329+0000\rOBX|1|NM|8480-6^Systolic blood pressure^LN||120|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\rOBX|2|NM|8462-4^Diastolic blood pressure^LN||80|mm[Hg]^mm[Hg]^UCUM|||||F|||20261113205329+0000\r",
       "expected": {

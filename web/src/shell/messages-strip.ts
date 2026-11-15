@@ -19,7 +19,7 @@ export function messagesStrip(signal: AbortSignal): MessagesStrip {
     attrs: { 'data-slot': 'messages-summary' },
   });
   const log = el('div', {
-    id: 'messages-log',
+    id: 'shell-messages-log',
     class: 'messages-strip__body',
     attrs: { 'data-slot': 'messages-log' },
   });
@@ -31,7 +31,7 @@ export function messagesStrip(signal: AbortSignal): MessagesStrip {
     'button',
     {
       class: 'messages-strip__toggle',
-      attrs: { type: 'button', 'aria-controls': 'messages-log', 'aria-expanded': 'false' },
+      attrs: { type: 'button', 'aria-controls': 'shell-messages-log', 'aria-expanded': 'false' },
       on: {
         click: () => {
           setExpanded(!isExpanded());
@@ -47,7 +47,7 @@ export function messagesStrip(signal: AbortSignal): MessagesStrip {
     'section',
     // A fixed name: labelling by the heading would fold the changing summary text into it.
     { class: 'messages-strip', attrs: { 'aria-label': 'Messages log' } },
-    el('h2', { id: 'messages-heading', class: 'messages-strip__heading' }, toggle),
+    el('h2', { id: 'shell-messages-heading', class: 'messages-strip__heading' }, toggle),
     log,
   );
 

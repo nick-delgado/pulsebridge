@@ -25,7 +25,11 @@ export interface FeatureContext<Slot extends string> {
    * addEventListener, subscribe() and fetch-like calls so nothing outlives the dashboard.
    */
   signal: AbortSignal;
-  /** Asks the header to reload the status strip. Rarely needed: it already listens to changes. */
+  /**
+   * Asks the header to reload the status strip. Rarely needed: it reloads on every data change
+   * and every 5 minutes while the tab is visible, and announces 'sync' itself when the watch's
+   * last sync time changes.
+   */
   refreshStatus(): void;
   /**
    * Tell the other features that server data changed, after a call of yours that changed it

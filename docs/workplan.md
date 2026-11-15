@@ -462,8 +462,8 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | todo |
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
-| T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | in-progress |
-| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | in-progress |
+| T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
+| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
 task fills its own directory through the mount function and slots defined by the shell (T16) and
@@ -486,7 +486,8 @@ contract or the shell reports it to the orchestrator instead of editing those fi
 
 **T20 Module `ingestion`.** Cloud Run services `health-sync` and `v2-to-fhir`, Scheduler job,
 OIDC invoker bindings.
-- AC: services scale to zero and are not publicly invocable; images are referenced by digest.
+- AC: services scale to zero and are not publicly invocable; images are referenced by digest
+  in the variables `v2_to_fhir_image` and `health_sync_image` (the names the build prints).
 - AC: `v2-to-fhir` gets the environment variables listed in its README, and Pub/Sub pushes to
   its `/pubsub/hl7v2` route; a bad store ID stops the service starting, so it fails the deploy.
 - AC: `health-sync` is configured as its README's "For T20" section says: the three Google
@@ -535,6 +536,11 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
   worker (the rate limit is per instance), a 90 s request timeout, and the same patient
   identifier and authority as `v2-to-fhir`.
 - AC: the hosting layer sets a Content-Security-Policy header.
+- AC: images are given by digest in the variables `fhir_proxy_image` and `cuff_sim_image`
+  (the names the build prints). The README states the hosting layer's request timeout for
+  forwarded requests and whether it is shorter than the cuff simulator's documented worst
+  case (80 to 90 s); if it is, the proxy's own timeout is set below it so the page gets a
+  clear answer.
 
 **T23 Module `openemr`.** OpenEMR container on the edge VM, database connection, OAuth2 client
 registration script.
@@ -601,6 +607,13 @@ needed before T18 and T19 start.
 **T26 Terraform CI/CD.** `fmt -check`, `validate`, `tflint`, `trivy config`, plan posted on pull
 requests, apply to dev on merge, manual gate for prod, nightly destroy test for dev (see D1).
 - AC: authenticates with Workload Identity Federation only; no key in GitHub secrets.
+- AC: owns what T24 left open for image builds: a dedicated build service account (in the
+  `identity` module: writer on the services repository only, reader on the Docker Hub mirror
+  only, log writer; no access to secrets, health data, Cloud Run or IAM), a Cloud Build
+  trigger on release tags that runs `cloudbuild.yaml` as that account, and an Artifact
+  Registry cleanup policy in `project-base` (tags are immutable, so images otherwise
+  accumulate). The first real build confirms the assumptions listed as unverified in
+  `services/README.md`.
 
 **T27 Secret version scripts.** Add secret versions after apply.
 - AC: values are read from a prompt or stdin and never echoed or written to disk.

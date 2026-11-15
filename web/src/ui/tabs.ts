@@ -22,7 +22,8 @@ export interface Tabs {
 
 export function createTabs(label: string, specs: TabSpec[], signal?: AbortSignal): Tabs {
   if (specs.length === 0) throw new Error('createTabs needs at least one tab');
-  const prefix = uniqueId('tabs');
+  // `ui-`: ids made by the shell's helpers, unique by construction (README, element ids).
+  const prefix = uniqueId('ui-tabs');
   const list = el('div', { class: 'tabs__list', attrs: { role: 'tablist', 'aria-label': label } });
   const root = el('div', { class: 'tabs' }, list);
   const buttons = new Map<string, HTMLButtonElement>();

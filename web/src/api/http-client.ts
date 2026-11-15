@@ -21,9 +21,14 @@ import type {
   ShareRequest,
   ShareResult,
   StatusSummary,
-  GoogleHealthRollUpWindow,
 } from './contract';
-import { ApiError, LoginError, UnauthorizedError } from './errors';
+import {
+  ApiError,
+  CuffSendError,
+  LoginError,
+  retryAfterSeconds,
+  UnauthorizedError,
+} from './errors';
 import {
   bundleResources,
   isOperationOutcome,
@@ -37,6 +42,7 @@ import {
   type Provenance,
   type Resource,
 } from './fhir';
+import { parseCuffSendResult, parseHeartRateSource, parseStatus } from './parse';
 import type { Session } from './session';
 
 export interface HttpClientOptions {
@@ -98,11 +104,10 @@ export class HttpClient implements PulseBridgeApi {
     }
     if (response.status === 401) throw new LoginError('wrong-password', 'Wrong password.');
     if (response.status === 429) {
-      const retry = Number.parseInt(response.headers.get('Retry-After') ?? '', 10);
       throw new LoginError(
         'rate-limited',
         'Too many attempts. Wait a minute and try again.',
-        Number.isFinite(retry) ? retry : null,
+        retryAfterSeconds(response.headers.get('Retry-After')),
       );
     }
     if (response.status === 503) {
@@ -131,8 +136,9 @@ export class HttpClient implements PulseBridgeApi {
 
   // -- reads ------------------------------------------------------------------------------------
 
-  getStatus(options: CallOptions = {}): Promise<StatusSummary> {
-    return this.#json<StatusSummary>('status', JSON_TYPE, options.signal);
+  async getStatus(options: CallOptions = {}): Promise<StatusSummary> {
+    // health-sync's part (watchSync) is checked: an unknown state reads as `unknown`.
+    return parseStatus(await this.#json<unknown>('status', JSON_TYPE, options.signal));
   }
 
   async searchObservations(
@@ -172,7 +178,9 @@ export class HttpClient implements PulseBridgeApi {
     observationId: string,
     options: CallOptions = {},
   ): Promise<HeartRateTrace> {
-    const body = await this.#json<{ resources: Bundle; source: GoogleHealthRollUpWindow | null }>(
+    // Wire shape: {"resources": Bundle, "source": {"kind", "window"} | null}. Parsed shape:
+    // the Bundle's resources by type, and `source` checked (parse.ts).
+    const body = await this.#json<{ resources: Bundle; source: unknown }>(
       `trace/heart-rate/${encodeURIComponent(observationId)}`,
       JSON_TYPE,
       options.signal,
@@ -184,7 +192,7 @@ export class HttpClient implements PulseBridgeApi {
       observation,
       provenance: first<Provenance>(resources, 'Provenance'),
       device: first<Device>(resources, 'Device'),
-      source: body.source,
+      source: parseHeartRateSource(body.source),
     };
   }
 
@@ -196,12 +204,18 @@ export class HttpClient implements PulseBridgeApi {
     request: CuffReadingRequest,
     options: CallOptions = {},
   ): Promise<CuffSendResult> {
-    const response = await this.#send('cuff/readings', {
-      method: 'POST',
-      body: request,
-      signal: options.signal,
-    });
-    return (await response.json()) as CuffSendResult;
+    let response: Response;
+    try {
+      response = await this.#send('cuff/readings', {
+        method: 'POST',
+        body: request,
+        signal: options.signal,
+      });
+    } catch (error) {
+      // cuff-sim's documented refusals (400, 413, 422, 429, 500) and a 504 become typed errors.
+      throw error instanceof ApiError ? CuffSendError.from(error) : error;
+    }
+    return parseCuffSendResult(await response.json());
   }
 
   async getCuffAttemptTrace(
@@ -348,6 +362,10 @@ async function toApiError(response: Response): Promise<ApiError> {
     // Not JSON.
   }
   const text = outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`;
-  const retry = Number.parseInt(response.headers.get('Retry-After') ?? '', 10);
-  return new ApiError(response.status, text, outcome, Number.isFinite(retry) ? retry : null);
+  return new ApiError(
+    response.status,
+    text,
+    outcome,
+    retryAfterSeconds(response.headers.get('Retry-After')),
+  );
 }

@@ -1,0 +1,181 @@
+# Cloud Build: builds every service image (services/*/Dockerfile), pushes it to Artifact Registry
+# and prints the digests to paste into terraform.tfvars. See services/README.md
+# ("Container images") for the trigger, the build service account and the cost.
+#
+# Meant to run on a git tag (a release), from a Cloud Build trigger such as
+#   tag pattern ^v[0-9]+\.[0-9]+\.[0-9]+$ , config file cloudbuild.yaml
+# The trigger is a Terraform resource that is not part of this task (see the README).
+# A manual run of the same build, from the repository root:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions TAG_NAME=v0.1.0,COMMIT_SHA="$(git rev-parse HEAD)" .
+#
+# Nothing here names a deployment. The project is Cloud Build's own PROJECT_ID; the region and
+# repository names are the substitutions below, whose defaults are the `project-base` module's
+# defaults. Override them on the trigger or with --substitutions.
+#
+# No secrets: the build reads none and the images contain none. Pushing uses the build service
+# account's own credentials, which Cloud Build provides to the docker client.
+
+substitutions:
+  # Region of the Artifact Registry repositories (project-base `region`).
+  _REGION: us-central1
+  # Docker repository for the service images (project-base `docker_repository_id`).
+  _REPOSITORY: pulsebridge-services
+  # Docker Hub pull-through cache that the base image is pulled through
+  # (project-base `dockerhub_mirror_repository_id`). Set it to an empty string when the module
+  # runs with create_dockerhub_mirror = false: the base image then comes straight from Docker Hub.
+  _DOCKERHUB_MIRROR: pulsebridge-dockerhub
+
+options:
+  # The `script` below reads every substitution as an environment variable (no $$ escaping).
+  automapSubstitutions: true
+  # Logs go to Cloud Logging only, which a user-specified build service account requires (there
+  # is no logs bucket to grant it access to).
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # One step, one script, in phases: check everything, build every image, push them all, then
+  # report. The Docker builder image is pinned by digest (tag 29 = Docker 29), so the build does
+  # not change under us; bump it the same way as the base image (services/README.md).
+  #
+  # Why this order: the services repository has immutable tags, so a pushed tag can never be
+  # replaced. Building all images before pushing any means a build failure (a typo, a PyPI
+  # outage) pushes nothing and the same tag can simply be built again. A failure during the pushes
+  # can still leave some images pushed; a re-run of the same tag then reuses those images
+  # (they are found by the commit tag) instead of rebuilding them, and finishes the rest.
+  - id: build-push-report
+    name: gcr.io/cloud-builders/docker:29@sha256:4faf2620ae4f5710ef66c2a7b2fcaa58589df6fe413ed6c19b675925346bb000
+    script: |
+      #!/usr/bin/env bash
+      set -euo pipefail
+
+      # --- 1. inputs ----------------------------------------------------------------------------
+      # TAG_NAME is set by a tag trigger.
+      if [[ ! "${TAG_NAME:-}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+        echo "TAG_NAME must be a valid image tag; run this build from a tag trigger" >&2
+        exit 1
+      fi
+      if [[ ! "${COMMIT_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "COMMIT_SHA must be a full 40-character commit SHA" >&2
+        exit 1
+      fi
+      for name in PROJECT_ID _REGION _REPOSITORY; do
+        if [[ -z "${!name:-}" ]]; then
+          echo "substitution ${name} is empty" >&2
+          exit 1
+        fi
+      done
+
+      registry="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPOSITORY}"
+      # The Dockerfiles pin the base image by digest; only the registry it is pulled from changes.
+      if [[ -n "${_DOCKERHUB_MIRROR:-}" ]]; then
+        base_registry="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_DOCKERHUB_MIRROR}"
+      else
+        base_registry="docker.io"
+      fi
+
+      # Every service with a Dockerfile. The directory name becomes the image name and, with
+      # "-" as "_", the tfvars variable name, so it must be valid as both.
+      shopt -s nullglob
+      dockerfiles=(services/*/Dockerfile)
+      if (( ${#dockerfiles[@]} == 0 )); then
+        echo "no services/*/Dockerfile found" >&2
+        exit 1
+      fi
+      services=()
+      for dockerfile in "${dockerfiles[@]}"; do
+        service="$(basename "$(dirname "${dockerfile}")")"
+        if [[ ! "${service}" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+          echo "service directory '${service}' must be lower-case words joined by '-'" >&2
+          exit 1
+        fi
+        services+=("${service}")
+      done
+
+      # The digest a tag points at, or nothing if the tag does not exist. (A lookup that fails
+      # for another reason also reads as "does not exist"; the push that follows is then refused
+      # by the immutable tag, so the build fails rather than replacing anything.)
+      digest_of() {
+        docker buildx imagetools inspect "$1" --format '{{.Manifest.Digest}}' 2>/dev/null || true
+      }
+
+      # --- 2. plan: which images already exist from an earlier run of this commit ---------------
+      declare -A existing=()
+      to_build=()
+      for service in "${services[@]}"; do
+        image="${registry}/${service}"
+        commit_digest="$(digest_of "${image}:${COMMIT_SHA}")"
+        tag_digest="$(digest_of "${image}:${TAG_NAME}")"
+        if [[ -n "${commit_digest}" ]]; then
+          if [[ -n "${tag_digest}" && "${tag_digest}" != "${commit_digest}" ]]; then
+            echo "${image}: :${TAG_NAME} and :${COMMIT_SHA} name different images" >&2
+            exit 1
+          fi
+          existing["${service}"]="${commit_digest}"
+          echo "=== ${service}: ${image}:${COMMIT_SHA} already exists (${commit_digest}); reusing it"
+        elif [[ -n "${tag_digest}" ]]; then
+          # The commit tag is always pushed first, so this tag came from somewhere else.
+          echo "${image}:${TAG_NAME} exists but ${image}:${COMMIT_SHA} does not;" \
+            "the tag was not made by this build for this commit" >&2
+          exit 1
+        else
+          to_build+=("${service}")
+        fi
+      done
+
+      # --- 3. build every image that does not exist yet (nothing is pushed in this phase) ------
+      for service in "${to_build[@]}"; do
+        image="${registry}/${service}"
+        echo "=== ${service}: building ${image}:${COMMIT_SHA}"
+        # Context is the repository root (the Dockerfiles copy from libs/). Cloud Run runs
+        # linux/amd64. No provenance attestation: the pushed digest is then a plain image
+        # manifest, the simplest thing for Cloud Run and Terraform to reference.
+        docker build \
+          --file "services/${service}/Dockerfile" \
+          --platform linux/amd64 \
+          --provenance=false \
+          --build-arg "PYTHON_REGISTRY=${base_registry}" \
+          --label "org.opencontainers.image.revision=${COMMIT_SHA}" \
+          --label "org.opencontainers.image.version=${TAG_NAME}" \
+          --tag "${image}:${COMMIT_SHA}" \
+          --tag "${image}:${TAG_NAME}" \
+          .
+      done
+
+      # --- 4. push: the commit tag first, then the release tag ----------------------------------
+      for service in "${services[@]}"; do
+        image="${registry}/${service}"
+        if [[ -n "${existing[${service}]:-}" ]]; then
+          if [[ -z "$(digest_of "${image}:${TAG_NAME}")" ]]; then
+            # Add the release tag to the existing image, in the registry, without a rebuild:
+            # a carbon copy of the manifest keeps its digest.
+            docker buildx imagetools create --prefer-index=false \
+              --tag "${image}:${TAG_NAME}" "${image}@${existing[${service}]}"
+          fi
+        else
+          docker push "${image}:${COMMIT_SHA}"
+          docker push "${image}:${TAG_NAME}"
+        fi
+      done
+
+      # --- 5. report: the digests as the registry stores them (what Cloud Run pulls) ------------
+      tfvars=()
+      for service in "${services[@]}"; do
+        image="${registry}/${service}"
+        digest="$(digest_of "${image}:${TAG_NAME}")"
+        if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+          echo "could not read the digest of ${image}:${TAG_NAME}" >&2
+          exit 1
+        fi
+        if [[ "$(digest_of "${image}:${COMMIT_SHA}")" != "${digest}" ]]; then
+          echo "${image}: :${TAG_NAME} and :${COMMIT_SHA} name different images" >&2
+          exit 1
+        fi
+        echo "=== ${service}: ${image}@${digest}"
+        tfvars+=("${service//-/_}_image = \"${image}@${digest}\"")
+      done
+
+      # The lines to paste into infra/envs/<env>/terraform.tfvars.
+      echo "----- BEGIN tfvars (${TAG_NAME}, ${COMMIT_SHA}) -----"
+      printf '%s\n' "${tfvars[@]}"
+      echo "----- END tfvars -----"

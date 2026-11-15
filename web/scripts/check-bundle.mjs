@@ -8,9 +8,12 @@
 // 3. An HTTP build contains none of the mock client or its synthetic data. Vite drops the mock
 //    branch because the mode is a build-time constant; this proves it did.
 // 4. No build points at a developer machine (localhost, 127.0.0.1).
-import { readFileSync, readdirSync } from 'node:fs';
+// 5. The chart library (uPlot) is not in the main entry chunk nor imported statically by it,
+//    so the login form never waits for it (bundle-rules.mjs, from Vite's build manifest).
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { loadEnv } from 'vite';
+import { chartChunkProblems } from './bundle-rules.mjs';
 
 const [dir, mode] = process.argv.slice(2);
 if (!dir || (mode !== 'http' && mode !== 'mock')) {
@@ -21,6 +24,7 @@ if (!dir || (mode !== 'http' && mode !== 'mock')) {
 // Strings that only exist in src/api/mock-client.ts and src/api/mock-data.ts.
 const MOCK_MARKERS = ['mock-session-', 'SYN-000123', 'Synthetic watch (mock mode)'];
 
+// The manifest is listed by readdirSync too, but it is JSON, not a script.
 const files = readdirSync(dir, { recursive: true }).map(String);
 const read = (f) => readFileSync(join(dir, f), 'utf8');
 const scripts = files.filter((f) => f.endsWith('.js'));
@@ -68,6 +72,13 @@ for (const marker of MOCK_MARKERS) {
 }
 for (const host of ['localhost', '127.0.0.1']) {
   if (bundle.includes(host) || html.includes(host)) problems.push(`build references ${host}`);
+}
+
+const manifestPath = join(dir, '.vite', 'manifest.json');
+if (!existsSync(manifestPath)) {
+  problems.push('no .vite/manifest.json: vite.config.ts must set build.manifest');
+} else {
+  problems.push(...chartChunkProblems(JSON.parse(readFileSync(manifestPath, 'utf8')), read));
 }
 
 if (problems.length > 0) {
