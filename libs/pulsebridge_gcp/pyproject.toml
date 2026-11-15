@@ -1,0 +1,20 @@
+# pulsebridge_gcp: thin client for the Cloud Healthcare REST API (task T12). See README.md.
+
+[build-system]
+# hatchling's editable install writes nothing into the source tree (same choice as pulsebridge_fhir).
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pulsebridge-gcp"
+version = "0.1.0"
+description = "Thin Cloud Healthcare API client for PulseBridge: FHIR executeBundle/read/search/PUT, HL7v2 message get/list/label patch/ingest."
+readme = "README.md"
+requires-python = ">=3.13"
+# Exact pins (CLAUDE.md): an upgrade is a deliberate change that re-runs the tests.
+# - google-auth: Application Default Credentials and AuthorizedSession (token refresh).
+# - requests: the HTTP client AuthorizedSession is built on.
+dependencies = ["google-auth==2.62.0", "requests==2.34.2"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pulsebridge_gcp"]
