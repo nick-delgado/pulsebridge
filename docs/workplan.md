@@ -188,7 +188,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | done |
 | T09 | Synthetic data seeder | T06 | `services/seed/` | in-progress |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | done |
-| T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | in-progress |
+| T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | done |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | todo |
@@ -239,7 +239,10 @@ Bundle.
 **T11 Google Health connect flow.** CLI script that lets the deployer authorise their own account
 (see D2).
 - AC: reads the OAuth client ID and client secret from Secret Manager; if they are absent it
-  prompts for them without echo and stores them. None is committed or printed.
+  prompts for them without echo and stores them. The client secret is never committed,
+  printed or logged. The client ID is not committed or logged, and is printed only inside
+  Google's authorization address in `--paste` mode, where the user must open it by hand (a
+  client ID is public under RFC 6749 section 2.2).
 - AC: runs the OAuth authorization-code flow with PKCE and a `state` check, requesting offline
   access and a consent prompt (without them Google returns no refresh token), and stores the
   refresh token as a new Secret Manager version; prints only a success message.
@@ -251,7 +254,10 @@ Bundle.
   Google Health user ID from the identity call and demographics from configuration, and uses the
   device name exactly as Google reports it or writes no Device.
 - AC: `health-sync` needs exactly these three secrets and nothing else from the deployer.
-- AC: documented in `docs/setup.md` terms a new user can follow.
+- AC: its README is written in terms a new user can follow; carrying it into
+  `docs/setup.md` is T28's.
+- Nothing in T11 was run against Google or GCP. The assumptions to confirm on the first real
+  run are listed in its README.
 
 **T12 `v2-to-fhir` service.** Also creates `libs/pulsebridge_gcp/`, a thin shared client for the
 Cloud Healthcare API (FHIR `executeBundle` and resource reads and writes; HL7v2 message get,
@@ -602,7 +608,12 @@ needed before T18 and T19 start.
 - AC: `terraform destroy` leaves nothing billable.
 - AC: setup (writing the Patient, D11) runs before the ingest services are enabled: the Scheduler
   job and the push subscription are switched on only after it, so two services cannot both
-  create the Patient at first contact.
+  create the Patient at first contact. The connect script (T11) and the first seeding (T09)
+  are steps run outside `terraform apply`, so this needs an "ingest enabled" variable that
+  defaults to off, or a documented second apply.
+- AC: outputs give everything the connect script and the seeder need (FHIR location, dataset
+  and store IDs, the secret name prefix), and one `patient_id` variable feeds every service
+  and both scripts.
 
 **T26 Terraform CI/CD.** `fmt -check`, `validate`, `tflint`, `trivy config`, plan posted on pull
 requests, apply to dev on merge, manual gate for prod, nightly destroy test for dev (see D1).
@@ -617,6 +628,9 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
 
 **T27 Secret version scripts.** Add secret versions after apply.
 - AC: values are read from a prompt or stdin and never echoed or written to disk.
+- AC: the three Google Health secrets are written by the connect script (T11), not here. If a
+  script uses the Python Secret Manager client it switches off Google SDK payload logging
+  first (reuse `quiet_sdk_logging` from T11), and no script uses `gcloud --log-http`.
 - AC: includes `set-reviewer-password`, which enforces a 16-character minimum and can generate
   a random password.
 
@@ -624,6 +638,10 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
 bootstrap, register a Google Health OAuth app, connect an account, deploy, destroy. README: pitch,
 GIF, architecture, standards map, deploy, what this is not.
 - AC: no step relies on the author's accounts; every command uses a placeholder or a variable.
+- AC: carries over the connect script's README: a Desktop-app OAuth client, adding yourself
+  as a test user, the roles the deployer needs, keeping demographics out of shell history,
+  what to do when the refresh token expires, and that secrets must be named as the identity
+  module names them.
 - AC: the README shows a screenshot or GIF of a shared reading in the real OpenEMR chart,
   taken with synthetic data, since reviewers cannot open OpenEMR themselves (D13).
 - AC: the guide explains the OAuth app's Testing status (test users only, refresh token expires
