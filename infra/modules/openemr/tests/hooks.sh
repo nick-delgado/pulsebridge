@@ -707,6 +707,16 @@ expect_rc 0 "$RC" "interrupted seed, next boot"
 if [ -s "$SB/mnt/disks/edge/openemr/default/config.php" ]; then pass "interrupted seed, next boot: seeded completely"; else fail "interrupted seed, next boot: not seeded"; fi
 if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "interrupted seed, next boot: the temporary directory is gone"; else fail "interrupted seed, next boot: the temporary directory is left"; fi
 
+echo "== a populated sites directory is never seeded over"
+new_sandbox
+mkdir -p "$SB/mnt/disks/edge/openemr/default"
+echo "clinic site files" > "$SB/mnt/disks/edge/openemr/default/existing.php"
+run_hook openemr
+expect_calls '^timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh' 0 "populated sites: no seed container is run"
+expect_eq "$(cat "$SB/mnt/disks/edge/openemr/default/existing.php")" "clinic site files" "populated sites: the existing files are untouched"
+expect_log 'has files; not seeding' "populated sites: says it is not seeding"
+if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "populated sites: no staging directory is made"; else fail "populated sites: a staging directory was made"; fi
+
 echo "== first-time setup interrupted (configured, but no ACL and no setup marker)"
 new_sandbox
 boot FAKE_SETUP_INTERRUPTED=1
