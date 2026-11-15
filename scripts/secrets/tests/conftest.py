@@ -26,12 +26,6 @@ from pathlib import Path
 
 import pytest
 
-HERE = Path(__file__).resolve().parent
-SCRIPTS = HERE.parent
-REPO = SCRIPTS.parent.parent
-SET_SECRET = SCRIPTS / "set-secret.sh"
-SET_REVIEWER = SCRIPTS / "set-reviewer-password.sh"
-
 STUB = """#!{python}
 import json, os, sys
 state = os.environ["STUB_STATE"]
