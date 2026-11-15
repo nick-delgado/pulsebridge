@@ -42,7 +42,7 @@ output "serverless_subnet_id" {
 }
 
 output "serverless_subnet_name" {
-  description = "Name of the serverless subnet. Cloud Run's `vpc_access.network_interfaces.subnetwork` takes this; set `vpc_access.egress = \"PRIVATE_RANGES_ONLY\"`."
+  description = "Name of the serverless subnet. Cloud Run's `vpc_access.network_interfaces.subnetwork` takes this; set `vpc_access.egress = \"PRIVATE_RANGES_ONLY\"`, except for fhir-proxy, which uses \"ALL_TRAFFIC\": its calls to internal-only Cloud Run services (health-sync, cuff-sim) count as internal only when routed through the VPC (the subnet has Private Google Access; no NAT is needed)."
   value       = google_compute_subnetwork.serverless.name
 }
 

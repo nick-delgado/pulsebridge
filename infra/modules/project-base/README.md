@@ -26,6 +26,8 @@ one `google_project_service` through `for_each`. Notes on what is and is not in 
 - `sts.googleapis.com` (Security Token Service, used by Workload Identity Federation) is not in
   the list: the bootstrap root (T02) enables it, because CI needs it before any env root runs.
 - Add `firebasehosting.googleapis.com` if decision D4 picks Firebase Hosting.
+- `monitoring.googleapis.com` is in the list for module ingestion: its alert policies, and
+  charting its log-based metrics, need the Monitoring API. Enabling it costs nothing.
 - APIs stay enabled on destroy (`disable_on_destroy = false`), see "Idle cost".
 
 ## Usage
@@ -53,7 +55,11 @@ Consumers:
   (MLLP and the FHIR calls from `fhir-proxy`). Whether the VM gets one anyway, for the OpenEMR
   chart link reviewers open or for image pulls, is decided in T21/T23.
 - `phr` (T22): for the cuff simulator and `fhir-proxy`, set Direct VPC egress with
-  `network_name`, `serverless_subnet_name` and `egress = "PRIVATE_RANGES_ONLY"`.
+  `network_name`, `serverless_subnet_name` and `egress = "PRIVATE_RANGES_ONLY"`, except
+  `fhir-proxy`, which uses `egress = "ALL_TRAFFIC"`: its calls to internal-only Cloud Run services
+  (`health-sync` `/status`, the cuff simulator) count as internal only when routed through the VPC,
+  and this subnet has Private Google Access, so no NAT is needed (module ingestion's README,
+  "Ingress").
 - `ingestion` (T20): needs nothing from the network; `health-sync` and `v2-to-fhir` call only
   Google APIs.
 - Container builds (T24): the services repository sets `immutable_tags = true`, so a tag can be
@@ -196,7 +202,7 @@ No modules.
 | <a name="input_edge_vm_service_account_email"></a> [edge\_vm\_service\_account\_email](#input\_edge\_vm\_service\_account\_email) | Optional email of the edge VM's service account (created by the identity module). When set, firewall rules target that service account instead of the edge network tag, which is stronger: anyone allowed to edit an instance can add a tag, but attaching a service account needs IAM permission on it. Leave null to target the network tag. | `string` | `null` | no |
 | <a name="input_enable_cloud_nat"></a> [enable\_cloud\_nat](#input\_enable\_cloud\_nat) | Create a Cloud Router and Cloud NAT gateway so the edge VM can reach the public internet (apt, Docker Hub) without an external IP. Off by default because it is billed by the hour: about $0.0014 per VM per hour using the gateway, plus $0.005 per hour per NAT IP address, plus $0.045 per GiB processed (about $4.70 a month for one VM and one IP before data: 730 h x ($0.0014 + $0.005)). | `bool` | `false` | no |
 | <a name="input_enable_iap_ssh"></a> [enable\_iap\_ssh](#input\_enable\_iap\_ssh) | Allow SSH (TCP 22) to the edge VM from Identity-Aware Proxy's TCP forwarding range only (35.235.240.0/20), for `gcloud compute ssh --tunnel-through-iap`. Off by default: nothing else in the design needs SSH. When true, the module also enables iap.googleapis.com, which IAP TCP forwarding is understood to require (not confirmed against Google's documentation). | `bool` | `false` | no |
-| <a name="input_enabled_apis"></a> [enabled\_apis](#input\_enabled\_apis) | Google APIs (service names) to enable in the project. The default covers every component in<br/>the brief. Identity Platform (identitytoolkit.googleapis.com) is deliberately absent and is<br/>rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Add<br/>firebasehosting.googleapis.com here if decision D4 picks Firebase Hosting. | `set(string)` | <pre>[<br/>  "artifactregistry.googleapis.com",<br/>  "cloudbuild.googleapis.com",<br/>  "cloudresourcemanager.googleapis.com",<br/>  "cloudscheduler.googleapis.com",<br/>  "compute.googleapis.com",<br/>  "health.googleapis.com",<br/>  "healthcare.googleapis.com",<br/>  "iam.googleapis.com",<br/>  "iamcredentials.googleapis.com",<br/>  "logging.googleapis.com",<br/>  "pubsub.googleapis.com",<br/>  "run.googleapis.com",<br/>  "secretmanager.googleapis.com",<br/>  "serviceusage.googleapis.com",<br/>  "storage.googleapis.com"<br/>]</pre> | no |
+| <a name="input_enabled_apis"></a> [enabled\_apis](#input\_enabled\_apis) | Google APIs (service names) to enable in the project. The default covers every component in<br/>the brief. Identity Platform (identitytoolkit.googleapis.com) is deliberately absent and is<br/>rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Add<br/>firebasehosting.googleapis.com here if decision D4 picks Firebase Hosting. | `set(string)` | <pre>[<br/>  "artifactregistry.googleapis.com",<br/>  "cloudbuild.googleapis.com",<br/>  "cloudresourcemanager.googleapis.com",<br/>  "cloudscheduler.googleapis.com",<br/>  "compute.googleapis.com",<br/>  "health.googleapis.com",<br/>  "healthcare.googleapis.com",<br/>  "iam.googleapis.com",<br/>  "iamcredentials.googleapis.com",<br/>  "logging.googleapis.com",<br/>  "monitoring.googleapis.com",<br/>  "pubsub.googleapis.com",<br/>  "run.googleapis.com",<br/>  "secretmanager.googleapis.com",<br/>  "serviceusage.googleapis.com",<br/>  "storage.googleapis.com"<br/>]</pre> | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the resources that support them (Artifact Registry repositories). | `map(string)` | `{}` | no |
 | <a name="input_mllp_port"></a> [mllp\_port](#input\_mllp\_port) | TCP port the MLLP adapter on the edge VM listens on. 2575 is the port registered with IANA for HL7 over MLLP. | `number` | `2575` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for the names of every resource this module creates, so two deployments in one project do not collide. | `string` | `"pulsebridge"` | no |
@@ -226,5 +232,5 @@ No modules.
 | <a name="output_openemr_https_port"></a> [openemr\_https\_port](#output\_openemr\_https\_port) | TCP port opened from the serverless subnet to the edge VM for OpenEMR HTTPS. |
 | <a name="output_serverless_subnet_cidr"></a> [serverless\_subnet\_cidr](#output\_serverless\_subnet\_cidr) | IPv4 range of the serverless subnet: the only source allowed to reach the edge VM's MLLP and HTTPS ports. |
 | <a name="output_serverless_subnet_id"></a> [serverless\_subnet\_id](#output\_serverless\_subnet\_id) | ID of the subnet Cloud Run services join with Direct VPC egress (T22: cuff simulator and fhir-proxy). |
-| <a name="output_serverless_subnet_name"></a> [serverless\_subnet\_name](#output\_serverless\_subnet\_name) | Name of the serverless subnet. Cloud Run's `vpc_access.network_interfaces.subnetwork` takes this; set `vpc_access.egress = "PRIVATE_RANGES_ONLY"`. |
+| <a name="output_serverless_subnet_name"></a> [serverless\_subnet\_name](#output\_serverless\_subnet\_name) | Name of the serverless subnet. Cloud Run's `vpc_access.network_interfaces.subnetwork` takes this; set `vpc_access.egress = "PRIVATE_RANGES_ONLY"`, except for fhir-proxy, which uses "ALL\_TRAFFIC": its calls to internal-only Cloud Run services (health-sync, cuff-sim) count as internal only when routed through the VPC (the subnet has Private Google Access; no NAT is needed). |
 <!-- END_TF_DOCS -->

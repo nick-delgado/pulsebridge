@@ -468,7 +468,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
 | T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | in-progress |
 | T19 | Dashboard: share action and messages log | T16, T34 | `web/src/share/`, `web/src/messages/` | todo |
-| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | in-progress |
+| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | done |
 | T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | in-progress |
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
@@ -553,6 +553,10 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
   seeder's synthetic name (family `Synthetic`, given `Demo`), or the seeder refuses the
   Patient the cuff path creates.
 - AC: the hosting layer sets a Content-Security-Policy header.
+- AC: `fhir-proxy` uses Direct VPC egress on the serverless subnet with all traffic routed
+  through the VPC (`ALL_TRAFFIC`), so its calls to `health-sync` and the cuff simulator count
+  as internal and both stay internal-only (see the ingestion module's README, "For T22"). The
+  proxy talks only to Google services and the VM, so this needs no NAT.
 - AC: images are given by digest in the variables `fhir_proxy_image` and `cuff_sim_image`
   (the names the build prints). The README states the hosting layer's request timeout for
   forwarded requests and whether it is shorter than the cuff simulator's documented worst
@@ -633,6 +637,10 @@ needed before T18 and T19 start.
 - AC: `use_synthetic_data` and a real Google Health connection are exclusive: a `SYN-` patient
   ID is required with synthetic data and refused without it, and the setup guide says never
   to run the connect script against a synthetic patient ID.
+- AC: wires the ingestion module as its README's "For T25" section says (push endpoint and
+  `ingest_enabled` into the healthcare module, the seeder account only with synthetic data,
+  the same project for healthcare) and sets an alert email or channel, so a failed sync and
+  "reconnect needed" reach someone.
 - AC: outputs give everything the connect script and the seeder need (FHIR location, dataset
   and store IDs, the secret name prefix), and one `patient_id` variable feeds every service
   and both scripts.
