@@ -21,8 +21,15 @@
  * uses textContent) is turned off; the panel writes its own readout with the DOM helpers. It
  * positions its elements through CSSOM (`element.style.left = …`), which `style-src 'self'`
  * allows, and needs no eval. Its stylesheet is bundled with ours, from 'self'.
+ *
+ * Loading: uPlot is imported dynamically the first time there is data to draw, so it is a separate
+ * script (from 'self') that the login form never waits for, and so importing this module does not
+ * run uPlot's start-up code (which reads `matchMedia`) in environments without it, such as the
+ * shell's jsdom tests. Where the browser lacks what the chart needs, the area says so in text and
+ * everything else (summary, statistics, keyboard selection, trace) keeps working.
  */
-import uPlot from 'uplot';
+// Types only here: the library itself is loaded on first use (see `loadUplot`).
+import type uPlot from 'uplot';
 import 'uplot/dist/uPlot.min.css';
 import { nearestPoint, type ChartSeries, type HeartRatePoint } from './data';
 import { timeTicks, type OffsetSegment } from './time';
@@ -74,7 +81,26 @@ const HEIGHT_NARROW = 200;
 /** Leave about this much room per x label. */
 const PX_PER_TICK = 64;
 
+/** The uPlot constructor, imported once on first use. */
+let uplotModule: Promise<typeof uPlot> | null = null;
+function loadUplot(): Promise<typeof uPlot> {
+  uplotModule ??= import('uplot').then((m) => m.default);
+  return uplotModule;
+}
+
+/** What the chart needs from the browser beyond canvas: resize and colour-scheme events. */
+function chartSupported(): boolean {
+  return typeof ResizeObserver === 'function' && typeof matchMedia === 'function';
+}
+
+const UNSUPPORTED =
+  'The chart cannot be drawn in this browser. The summary, the statistics and the keyboard cursor below still give every reading.';
+
 export const createUplotChart: ChartFactory = (container, callbacks, signal) => {
+  if (!chartSupported()) {
+    container.textContent = UNSUPPORTED;
+    return { update: () => undefined, mark: () => undefined, destroy: () => undefined };
+  }
   let plot: uPlot | null = null;
   let model: ChartModel | null = null;
   let active: number | null = null;
@@ -146,7 +172,7 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
     mark(selected, 'selected');
   };
 
-  const create = (m: ChartModel) => {
+  const create = (UPlot: typeof uPlot, m: ChartModel) => {
     const { width, height } = size();
     const opts: uPlot.Options = {
       width,
@@ -258,7 +284,7 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
         ],
       },
     };
-    const u = new uPlot(opts, data(m), container);
+    const u = new UPlot(opts, data(m), container);
     // A click or tap picks the nearest window. (uPlot's own click handling is for zooming,
     // which is turned off.)
     u.over.addEventListener(
@@ -291,8 +317,22 @@ export const createUplotChart: ChartFactory = (container, callbacks, signal) => 
   const handle: ChartHandle = {
     update(next) {
       model = next;
-      if (!plot) plot = create(next);
-      else plot.setData(data(next));
+      if (plot) {
+        plot.setData(data(next));
+        return;
+      }
+      loadUplot().then(
+        (UPlot) => {
+          // Created once, from the newest model, unless the dashboard went away meanwhile.
+          if (plot || signal.aborted || !model) return;
+          plot = create(UPlot, model);
+          plot.redraw(false, false);
+        },
+        (error: unknown) => {
+          console.error('Loading the chart library failed', error);
+          container.textContent = UNSUPPORTED;
+        },
+      );
     },
     mark(nextActive, nextSelected) {
       active = nextActive;
