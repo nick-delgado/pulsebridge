@@ -34,16 +34,21 @@ Adds a version to the secret <prefix>-<short-name>. The value is read from a hid
 (typed twice) when standard input is a terminal, else from standard input (one trailing
 newline is removed). It is never taken from an argument.
 
-Short names this script writes (read by the edge VM into password files):
+Short names this script writes (read by the edge VM into password files). Values: 16 to 128
+letters, digits and !#$%&()*+,-./:;<>?@[]^_{|}~, not starting with "-" (OpenEMR's setup
+mangles spaces, =, quotes, backslashes and backticks). --generate is recommended.
+
   db-root-password        MariaDB root password
   openemr-db-password     OpenEMR's own database user
   openemr-admin-password  OpenEMR's "admin" login
 
 Options:
-  --project <id>     project ID (default: $CLOUDSDK_CORE_PROJECT)
-  --prefix <prefix>  secret name prefix (default: $SECRET_NAME_PREFIX);
-                     `terraform output -raw secret_name_prefix` in infra/envs/<env>
+  --project <id>     project ID (default: $CLOUDSDK_CORE_PROJECT, then $GCP_PROJECT_ID)
+  --prefix <prefix>  secret name prefix (default: $SECRET_NAME_PREFIX, then
+                     $PULSEBRIDGE_NAME_PREFIX); from the repository root:
+                     terraform -chdir=infra/envs/<env> output -raw secret_name_prefix
   --generate         store a random 32-character value (letters and digits); it is not shown
+                     (for openemr-admin-password, see the README on reading it back)
   --replace          add a version even though an enabled one exists (see README: the edge VM
                      does not pick it up by itself)
   -h, --help         this text
@@ -67,20 +72,20 @@ while [ "$#" -gt 0 ]; do
     ;;
   --project)
     [ "$#" -ge 2 ] || sv_die "$SV_EXIT_USAGE" "--project needs a value."
-    sv_project="$2"
+    sv_set_project "$2"
     shift 2
     ;;
   --project=*)
-    sv_project="${1#--project=}"
+    sv_set_project "${1#--project=}"
     shift
     ;;
   --prefix)
     [ "$#" -ge 2 ] || sv_die "$SV_EXIT_USAGE" "--prefix needs a value."
-    sv_prefix="$2"
+    sv_set_prefix "$2"
     shift 2
     ;;
   --prefix=*)
-    sv_prefix="${1#--prefix=}"
+    sv_set_prefix "${1#--prefix=}"
     shift
     ;;
   --generate)
@@ -95,7 +100,7 @@ while [ "$#" -gt 0 ]; do
     sv_die "$SV_EXIT_USAGE" "'${1%%=*}' is refused: gcloud's HTTP log and debug output would contain the value. This script runs gcloud with HTTP logging off and verbosity 'warning'."
     ;;
   -*)
-    sv_die "$SV_EXIT_USAGE" "unknown option '${1%%=*}'. See --help."
+    sv_die "$SV_EXIT_USAGE" "unknown option $(sv_shown "${1%%=*}"). See --help."
     ;;
   *)
     if [ -n "$short_name" ]; then
@@ -126,12 +131,12 @@ reviewer-password)
   sv_die "$SV_EXIT_USAGE" "use scripts/secrets/set-reviewer-password.sh for '$short_name': it applies fhir-proxy's password rules and can generate and show one."
   ;;
 "$sv_prefix"-*)
-  sv_die "$SV_EXIT_USAGE" "pass the short name without the prefix, for example '${short_name#"$sv_prefix"-}' (the script adds '$sv_prefix-')."
+  sv_die "$SV_EXIT_USAGE" "pass the short name without the prefix, for example $(sv_shown "${short_name#"$sv_prefix"-}") (the script adds '$sv_prefix-')."
   ;;
 esac
 case " $allowed_names " in
 *" $short_name "*) ;;
-*) sv_die "$SV_EXIT_USAGE" "unknown short name '$short_name'. This script writes: $allowed_names." ;;
+*) sv_die "$SV_EXIT_USAGE" "unknown short name $(sv_shown "$short_name"). This script writes: $allowed_names." ;;
 esac
 
 secret="$sv_prefix-$short_name"
@@ -151,7 +156,7 @@ if [ "$generate" -eq 1 ]; then
 else
   sv_read_value "the value for $secret"
 fi
-sv_check_value "$SV_MIN_LENGTH" "$SV_MAX_LENGTH"
+sv_check_value "$SV_MIN_LENGTH" "$SV_MAX_LENGTH" edge-vm
 sv_add_version "$secret"
 
 sv_err "stored a new version of '$secret' in project '$sv_project'."
@@ -168,3 +173,10 @@ Who picks it up: the edge VM, which reads version "latest" of this secret once, 
 - VM already running with an older value: the new version is NOT used until the file is replaced
   on the VM, and the database must be changed first (README, "Rotation").
 EOF
+if [ "$short_name" = "openemr-admin-password" ] && [ "$generate" -eq 1 ]; then
+  cat >&2 <<'EOF'
+The generated OpenEMR admin password was not shown. It is the only "admin" login to OpenEMR. To
+read it later, as root on the VM: /mnt/disks/edge/secrets/openemr-admin-password (README,
+"Reading a generated admin password back").
+EOF
+fi

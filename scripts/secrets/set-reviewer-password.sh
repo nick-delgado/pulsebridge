@@ -35,13 +35,14 @@ Adds a version to the secret <prefix>-reviewer-password, which fhir-proxy checks
 The password is read from a hidden prompt (typed twice) when standard input is a terminal,
 else from standard input (one trailing newline is removed). It is never taken from an argument.
 
-Rules: 16 to 128 characters, printable ASCII (letters, digits, punctuation, space); leading and
-trailing spaces are kept as part of the password.
+Rules: 16 to 128 characters, printable ASCII (letters, digits, punctuation, space), not only
+spaces; leading and trailing spaces are kept as part of the password.
 
 Options:
-  --project <id>     project ID (default: $CLOUDSDK_CORE_PROJECT)
-  --prefix <prefix>  secret name prefix (default: $SECRET_NAME_PREFIX);
-                     `terraform output -raw secret_name_prefix` in infra/envs/<env>
+  --project <id>     project ID (default: $CLOUDSDK_CORE_PROJECT, then $GCP_PROJECT_ID)
+  --prefix <prefix>  secret name prefix (default: $SECRET_NAME_PREFIX, then
+                     $PULSEBRIDGE_NAME_PREFIX); from the repository root:
+                     terraform -chdir=infra/envs/<env> output -raw secret_name_prefix
   --generate         store a random 24-character password (letters and digits) and print it
                      once on standard output, after it is stored. Refused when standard output
                      is not a terminal, unless --show is given too.
@@ -63,20 +64,20 @@ while [ "$#" -gt 0 ]; do
     ;;
   --project)
     [ "$#" -ge 2 ] || sv_die "$SV_EXIT_USAGE" "--project needs a value."
-    sv_project="$2"
+    sv_set_project "$2"
     shift 2
     ;;
   --project=*)
-    sv_project="${1#--project=}"
+    sv_set_project "${1#--project=}"
     shift
     ;;
   --prefix)
     [ "$#" -ge 2 ] || sv_die "$SV_EXIT_USAGE" "--prefix needs a value."
-    sv_prefix="$2"
+    sv_set_prefix "$2"
     shift 2
     ;;
   --prefix=*)
-    sv_prefix="${1#--prefix=}"
+    sv_set_prefix "${1#--prefix=}"
     shift
     ;;
   --generate)
@@ -91,7 +92,7 @@ while [ "$#" -gt 0 ]; do
     sv_die "$SV_EXIT_USAGE" "'${1%%=*}' is refused: gcloud's HTTP log and debug output would contain the password. This script runs gcloud with HTTP logging off and verbosity 'warning'."
     ;;
   -*)
-    sv_die "$SV_EXIT_USAGE" "unknown option '${1%%=*}'. See --help."
+    sv_die "$SV_EXIT_USAGE" "unknown option $(sv_shown "${1%%=*}"). See --help."
     ;;
   *)
     # Never echo it: it may be the password, typed as an argument by mistake.
@@ -122,7 +123,7 @@ else
 fi
 # fhir-proxy itself accepts 1 to 1024 characters (services/fhir-proxy: password.py, app.py);
 # the 16-character minimum is the project's rule (D9, s6), enforced here.
-sv_check_value "$SV_MIN_LENGTH" "$SV_MAX_LENGTH"
+sv_check_value "$SV_MIN_LENGTH" "$SV_MAX_LENGTH" reviewer
 sv_add_version "$secret"
 
 if [ "$generate" -eq 1 ]; then

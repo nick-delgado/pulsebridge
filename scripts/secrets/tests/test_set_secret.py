@@ -14,15 +14,22 @@ REPO = SCRIPTS.parent.parent
 IDENTITY_MAIN = REPO / "infra" / "modules" / "identity" / "main.tf"
 
 ALLOWED = ["db-root-password", "openemr-db-password", "openemr-admin-password"]
+# Every punctuation character set-secret.sh accepts (README, "Value rules").
+ALLOWED_PUNCTUATION = "!#$%&()*+,-./:;<>?@[]^_{|}~"
+
+
+@pytest.fixture
+def fake(fake_edge):
+    """In this module every fake value is one set-secret.sh accepts."""
+    return fake_edge
 
 
 # ---- What is stored ----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("terminator", [b"", b"\n"], ids=["no-newline", "one-trailing-newline"])
-def test_stores_exact_bytes_without_newline_and_keeps_spaces(sandbox, fake, no_leak, terminator):
+def test_stores_exact_bytes_without_newline(sandbox, fake, no_leak, terminator):
     value = fake(40)
-    assert value.startswith(" ") and value.endswith(" ")
     r = sandbox.run(SCRIPT, "db-root-password", stdin=value.encode() + terminator)
     assert r.rc == 0, r.err
     assert r.stored == [value.encode()]
@@ -78,7 +85,6 @@ def test_value_in_no_exec_argv_or_environment(sandbox, fake, strace, tmp_path):
     trace = log.read_text()
     assert "execve(" in trace and "gcloud" in trace  # the trace did see the calls
     assert value not in trace
-    assert value.strip() not in trace
 
 
 # ---- Names -------------------------------------------------------------------------------------
@@ -128,10 +134,10 @@ def test_allowed_names_are_exactly_the_hand_set_secrets_of_module_identity(sandb
 
 def test_value_given_as_argument_is_refused_and_not_repeated(sandbox, fake):
     value = fake(30)
-    r = sandbox.run(SCRIPT, "db-root-password", value.strip(), stdin=b"")
+    r = sandbox.run(SCRIPT, "db-root-password", value, stdin=b"")
     assert r.rc == 2
     assert "never taken from an argument" in r.err
-    assert value.strip() not in r.err
+    assert value not in r.err
     assert r.calls == []
 
 
@@ -362,7 +368,7 @@ def test_prompt_hides_input_and_stores_exact_bytes(sandbox, fake, no_leak):
     r, shown = sandbox.run_pty(SCRIPT, "db-root-password", answers=[value, value])
     assert r.rc == 0, shown
     assert b"(input hidden)" in shown and b"again" in shown
-    assert value.strip().encode() not in shown, "the typed value was echoed"
+    assert value.encode() not in shown, "the typed value was echoed"
     assert r.stored == [value.encode()]
     no_leak(sandbox, r, value)
 
@@ -373,7 +379,7 @@ def test_prompt_mismatch_refused(sandbox, fake):
     assert r.rc == 2
     assert b"the two entries differ" in shown
     assert r.add_calls() == []
-    assert a.strip().encode() not in shown and b.strip().encode() not in shown
+    assert a.encode() not in shown and b.encode() not in shown
 
 
 def test_help_exits_zero_and_calls_nothing(sandbox):
@@ -392,3 +398,158 @@ def test_runs_when_invoked_directly(sandbox, fake):
         timeout=60,
     )
     assert proc.returncode == 0, proc.stderr
+
+
+# ---- Edge-VM character rules (review F1) -------------------------------------------------------
+
+REFUSED_CHARACTERS = [
+    (" ", "a space"),
+    ("=", "an equals sign (=)"),
+    ("'", "a single quote (')"),
+    ('"', 'a double quote (")'),
+    ("\\", "a backslash (\\)"),
+    ("`", "a backtick (`)"),
+]
+
+
+@pytest.mark.parametrize("name", ALLOWED)
+@pytest.mark.parametrize(
+    ("char", "message"),
+    REFUSED_CHARACTERS,
+    ids=["space", "equals", "squote", "dquote", "backslash", "backtick"],
+)
+def test_characters_openemr_mangles_are_refused(sandbox, fake, name, char, message):
+    value = fake(20) + char + "tail"
+    r = sandbox.run(SCRIPT, name, stdin=value.encode())
+    assert r.rc == 2, r.err
+    assert f"the value contains {message}" in r.err
+    assert "Allowed: letters, digits and" in r.err and "--generate" in r.err
+    assert r.add_calls() == []
+    assert value.encode() not in r.stderr
+
+
+@pytest.mark.parametrize("name", ALLOWED)
+def test_leading_hyphen_refused(sandbox, fake, name):
+    r = sandbox.run(SCRIPT, name, stdin=("-" + fake(20)).encode())
+    assert r.rc == 2 and "starts with a hyphen" in r.err and r.add_calls() == []
+
+
+@pytest.mark.parametrize("name", ALLOWED)
+def test_every_allowed_punctuation_character_is_stored(sandbox, name):
+    value = "Ab1" + ALLOWED_PUNCTUATION + "z9"
+    r = sandbox.run(SCRIPT, name, stdin=value.encode())
+    assert r.rc == 0, r.err
+    assert r.stored == [value.encode()]
+
+
+def test_backslash_in_piped_input_is_seen(sandbox, fake):
+    """Without `read -r` the backslash would vanish and the value would be stored altered."""
+    r = sandbox.run(SCRIPT, "db-root-password", stdin=(fake(20) + "\\q").encode())
+    assert r.rc == 2 and "backslash" in r.err and r.add_calls() == []
+
+
+def test_backslash_typed_at_the_prompt_is_seen(sandbox, fake):
+    value = fake(20) + "\\q"
+    r, shown = sandbox.run_pty(SCRIPT, "db-root-password", answers=[value, value])
+    assert r.rc == 2, shown
+    assert b"backslash" in shown and r.add_calls() == []
+
+
+# ---- Arguments are shown only when they look like names (review F2) ----------------------------
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("Hunter2!Secret#Value",),
+        ("--project=Hunter2!Secret#Value", "db-root-password"),
+        ("--prefix=Hunter2!Secret#Value", "db-root-password"),
+        ("-XHunter2!Secret#Value", "db-root-password"),
+        ("--prefix=pbt", "pbt-Hunter2!Secret#Value"),
+    ],
+    ids=["short-name", "project", "prefix", "option", "prefixed-name"],
+)
+def test_value_like_arguments_are_not_repeated(sandbox, args):
+    r = sandbox.run(SCRIPT, *args)
+    assert r.rc == 2, r.err
+    assert "Hunter2" not in r.err and "Hunter2" not in r.stdout.decode()
+    assert "not shown" in r.err
+    assert r.calls == []
+
+
+def test_name_like_arguments_are_repeated(sandbox):
+    r = sandbox.run(SCRIPT, "db-password")
+    assert r.rc == 2 and "unknown short name 'db-password'" in r.err
+
+
+# ---- describe and versions list do not read the value (review F3) ------------------------------
+
+
+def test_prechecks_get_no_standard_input_and_are_quiet(sandbox, fake):
+    value = fake(30)
+    r = sandbox.run(SCRIPT, "db-root-password", stdin=value.encode())
+    assert r.rc == 0, r.err
+    assert r.precheck_stdin == [b"", b""]  # describe, versions list
+    assert r.stored == [value.encode()]
+    for call in r.calls:
+        assert "--quiet" in call["argv"], call["argv"][:3]
+
+
+# ---- Where the project and prefix come from (review F5, F6) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env", "project", "prefix"),
+    [
+        (
+            {"CLOUDSDK_CORE_PROJECT": None, "GCP_PROJECT_ID": "setup-env-proj"},
+            "setup-env-proj",
+            "pbt",
+        ),
+        ({"GCP_PROJECT_ID": "setup-env-proj"}, "test-project-1", "pbt"),
+        ({"SECRET_NAME_PREFIX": None, "PULSEBRIDGE_NAME_PREFIX": "pbx"}, "test-project-1", "pbx"),
+        ({"PULSEBRIDGE_NAME_PREFIX": "pbx"}, "test-project-1", "pbt"),
+    ],
+    ids=[
+        "gcp-project-id-fallback",
+        "cloudsdk-wins",
+        "pulsebridge-prefix-fallback",
+        "secret-prefix-wins",
+    ],
+)
+def test_project_and_prefix_fallbacks(sandbox, fake, env, project, prefix):
+    r = sandbox.run(SCRIPT, "db-root-password", stdin=fake(20).encode(), env=sandbox.env(**env))
+    assert r.rc == 0, r.err
+    add = r.add_calls()[0]["argv"]
+    assert add[3] == f"{prefix}-db-root-password" and f"--project={project}" in add
+
+
+@pytest.mark.parametrize(
+    "args",
+    [("--project=",), ("--prefix=",), ("--project", ""), ("--prefix", "")],
+    ids=["project=", "prefix=", "project-empty-word", "prefix-empty-word"],
+)
+def test_explicitly_empty_project_or_prefix_refused(sandbox, fake, args):
+    r = sandbox.run(SCRIPT, *args, "db-root-password", stdin=fake(20).encode())
+    assert r.rc == 2 and "empty value" in r.err and r.calls == []
+
+
+# ---- Generated admin password (review F7) ------------------------------------------------------
+
+
+def test_generated_admin_password_says_how_to_read_it_back(sandbox):
+    r = sandbox.run(SCRIPT, "--generate", "openemr-admin-password")
+    assert r.rc == 0, r.err
+    assert "/mnt/disks/edge/secrets/openemr-admin-password" in r.err
+    other = sandbox.run(SCRIPT, "--generate", "openemr-db-password")
+    assert "admin password was not shown" not in other.err
+
+
+# ---- Terminal end of input (review F8) ---------------------------------------------------------
+
+
+def test_ctrl_d_at_the_first_prompt_stores_nothing(sandbox):
+    r, shown = sandbox.run_pty(SCRIPT, "db-root-password", answers=["\x04", "\x04"])
+    assert r.rc == 2, shown
+    assert b"no input (end of input before Enter)" in shown
+    assert r.add_calls() == []

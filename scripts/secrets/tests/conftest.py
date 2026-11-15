@@ -36,10 +36,21 @@ def setting(name, default):
     path = os.path.join(state, name)
     return open(path).read() if os.path.exists(path) else default
 words = [a for a in argv if not a.startswith("-")]
+def capture_precheck_stdin():
+    # describe and versions list must not read standard input (in pipe mode it carries the
+    # value): record whatever they would get. A terminal is never read (it would block).
+    if os.isatty(0):
+        return
+    data = sys.stdin.buffer.read()
+    n = len([f for f in os.listdir(state) if f.startswith("precheck-stdin-")])
+    with open(os.path.join(state, "precheck-stdin-%d.bin" % n), "wb") as out:
+        out.write(data)
 if words[:2] == ["secrets", "describe"]:
+    capture_precheck_stdin()
     sys.stderr.write(setting("describe_stderr", ""))
     sys.exit(int(setting("describe_rc", "0")))
 if words[:3] == ["secrets", "versions", "list"]:
+    capture_precheck_stdin()
     sys.stdout.write(setting("versions", ""))
     sys.stderr.write(setting("list_stderr", ""))
     sys.exit(int(setting("list_rc", "0")))
@@ -65,9 +76,17 @@ TOOLS = ("bash", "env", "dirname", "tr", "head", "cat")
 
 
 def fake_value(length: int = 40) -> str:
-    """A fake secret: printable ASCII with a leading and a trailing space, exactly `length` long."""
+    """A fake reviewer password: printable ASCII with a leading and a trailing space, exactly
+    `length` long."""
     core = "fake-" + secrets.token_hex(length)
     return " " + core[: length - 2] + " "
+
+
+def fake_edge_value(length: int = 40) -> str:
+    """A fake edge-VM password: only characters set-secret.sh accepts (letters, digits and
+    !#$%&()*+,-./:;<>?@[]^_{|}~, no leading hyphen), with some punctuation, exactly `length`."""
+    core = "Fk" + secrets.token_hex(length)
+    return core[: length - 6] + "#%:@;~"
 
 
 @dataclass
@@ -77,6 +96,8 @@ class Result:
     stderr: bytes
     calls: list[dict] = field(default_factory=list)
     stored: list[bytes] = field(default_factory=list)
+    # What gcloud describe and versions list read on standard input, one entry per call.
+    precheck_stdin: list[bytes] = field(default_factory=list)
 
     @property
     def err(self) -> str:
@@ -135,7 +156,11 @@ class Sandbox:
             p.read_bytes()
             for p in sorted(self.state.glob("stdin-*.bin"), key=lambda p: int(p.stem[6:]))
         ]
-        return Result(rc, stdout, stderr, calls, stored)
+        precheck = [
+            p.read_bytes()
+            for p in sorted(self.state.glob("precheck-stdin-*.bin"), key=lambda p: int(p.stem[15:]))
+        ]
+        return Result(rc, stdout, stderr, calls, stored, precheck)
 
     def run(
         self,
@@ -189,7 +214,9 @@ class Sandbox:
                 # read -s (the prompt is printed just before read runs; give it a moment).
                 if pending and shown.rstrip().endswith(b":"):
                     time.sleep(0.3)
-                    os.write(master, pending.pop(0).encode() + b"\n")
+                    answer = pending.pop(0)
+                    # "\x04" alone is Ctrl-D: end of input at the start of a line, no Enter.
+                    os.write(master, b"\x04" if answer == "\x04" else answer.encode() + b"\n")
             elif proc.poll() is not None:
                 break
         proc.wait(timeout=30)
@@ -207,6 +234,12 @@ def sandbox(tmp_path: Path) -> Sandbox:
 def fake():
     """fake(length) -> a fresh fake secret value."""
     return fake_value
+
+
+@pytest.fixture
+def fake_edge():
+    """fake_edge(length) -> a fresh fake value set-secret.sh accepts."""
+    return fake_edge_value
 
 
 @pytest.fixture

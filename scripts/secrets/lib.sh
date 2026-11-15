@@ -15,10 +15,11 @@
 SV_EXIT_FAILED=1 # gcloud failed, or a precondition (gcloud missing, secret missing)
 SV_EXIT_USAGE=2  # a usage error or a refused value; nothing was written
 
-# Character rules for every value (see README, "Value rules"). Printable ASCII is letters, digits,
-# punctuation and the space (0x20 to 0x7E): every program on the path (gcloud, the edge VM's shell
-# scripts, OpenEMR's PHP setup, a browser form, fhir-proxy) handles it the same way, and a
-# password can be typed on any keyboard.
+# Character rules (README, "Value rules"). Every value is printable ASCII (0x20 to 0x7E: letters,
+# digits, punctuation, space): no newline or control character can reach a password file, and a
+# password can be typed on any keyboard. The programs that read the values do NOT all treat
+# punctuation the same way, so the three edge-VM passwords have a narrower rule; see
+# sv_check_value.
 # shellcheck disable=SC2034 # used by the scripts that source this file
 SV_MIN_LENGTH=16
 # shellcheck disable=SC2034 # used by the scripts that source this file
@@ -51,6 +52,17 @@ sv_die() { # sv_die <exit code> <message>
   exit "$code"
 }
 
+# Show an argument in a message only if it looks like a name (an option, a short name, a project
+# or prefix). Anything else may be a value typed in the wrong place, so it is not repeated.
+sv_shown() { # sv_shown <argument>
+  local name_re='^[a-z0-9-]{1,40}$'
+  if [[ "$1" =~ $name_re ]]; then
+    builtin printf "'%s'" "$1"
+  else
+    builtin printf '%s' "(an argument that is not shown, because it does not look like a name)"
+  fi
+}
+
 sv_clear() {
   sv_value=''
   sv_confirm=''
@@ -70,35 +82,53 @@ sv_gcloud() {
     gcloud "$@" --verbosity=warning
 }
 
-# --project wins over CLOUDSDK_CORE_PROJECT (the environment form of gcloud's core/project).
-# --prefix wins over SECRET_NAME_PREFIX. The prefix is the env root's output secret_name_prefix
-# (module identity's name_prefix), so the secret ID is "<prefix>-<short name>".
+# Where the project and the prefix come from, first match wins:
+#   project: --project, CLOUDSDK_CORE_PROJECT (gcloud's core/project), GCP_PROJECT_ID
+#   prefix:  --prefix, SECRET_NAME_PREFIX, PULSEBRIDGE_NAME_PREFIX
+# GCP_PROJECT_ID and PULSEBRIDGE_NAME_PREFIX are what the env root's `setup_env` output exports for
+# the connect script, so sourcing it is enough. The prefix is the env root's output
+# secret_name_prefix (module identity's name_prefix): the secret ID is "<prefix>-<short name>".
+# An option given with an empty value (--project=) is refused, never replaced by the environment.
 sv_project=''
 sv_prefix=''
+sv_project_given=0
+sv_prefix_given=0
+
+sv_set_project() { # sv_set_project <value>, from --project
+  [ -n "$1" ] || sv_die "$SV_EXIT_USAGE" "--project was given an empty value."
+  sv_project="$1"
+  sv_project_given=1
+}
+
+sv_set_prefix() { # sv_set_prefix <value>, from --prefix
+  [ -n "$1" ] || sv_die "$SV_EXIT_USAGE" "--prefix was given an empty value."
+  sv_prefix="$1"
+  sv_prefix_given=1
+}
 
 sv_resolve_target() {
+  if [ "$sv_project_given" -ne 1 ]; then
+    sv_project="${CLOUDSDK_CORE_PROJECT:-${GCP_PROJECT_ID:-}}"
+  fi
+  if [ "$sv_prefix_given" -ne 1 ]; then
+    sv_prefix="${SECRET_NAME_PREFIX:-${PULSEBRIDGE_NAME_PREFIX:-}}"
+  fi
   if [ -z "$sv_project" ]; then
-    sv_project="${CLOUDSDK_CORE_PROJECT:-}"
+    sv_die "$SV_EXIT_USAGE" "no project: pass --project <project-id>, or set CLOUDSDK_CORE_PROJECT (or GCP_PROJECT_ID, which the env root's setup_env output sets)."
   fi
   if [ -z "$sv_prefix" ]; then
-    sv_prefix="${SECRET_NAME_PREFIX:-}"
-  fi
-  if [ -z "$sv_project" ]; then
-    sv_die "$SV_EXIT_USAGE" "no project: pass --project <project-id> or set CLOUDSDK_CORE_PROJECT."
-  fi
-  if [ -z "$sv_prefix" ]; then
-    sv_die "$SV_EXIT_USAGE" "no secret name prefix: pass --prefix <prefix> or set SECRET_NAME_PREFIX (the value of \`terraform output -raw secret_name_prefix\` in infra/envs/<env>)."
+    sv_die "$SV_EXIT_USAGE" "no secret name prefix: pass --prefix <prefix>, or set SECRET_NAME_PREFIX (or PULSEBRIDGE_NAME_PREFIX, which setup_env sets); it is \`terraform -chdir=infra/envs/<env> output -raw secret_name_prefix\`."
   fi
   # A project ID: 6 to 30 lowercase letters, digits and hyphens, starting with a letter
   # (optionally "domain:" in front, for the old domain-scoped projects).
   local project_re='^([a-z][a-z0-9.-]*:)?[a-z][a-z0-9-]{4,28}[a-z0-9]$'
   if ! [[ "$sv_project" =~ $project_re ]]; then
-    sv_die "$SV_EXIT_USAGE" "'$sv_project' is not a valid project ID."
+    sv_die "$SV_EXIT_USAGE" "$(sv_shown "$sv_project") is not a valid project ID."
   fi
   # The same rule as identity_name_prefix in infra/envs/*/variables.tf.
   local prefix_re='^[a-z]([a-z0-9-]{0,10}[a-z0-9])?$'
   if ! [[ "$sv_prefix" =~ $prefix_re ]]; then
-    sv_die "$SV_EXIT_USAGE" "'$sv_prefix' is not a valid secret name prefix (1-12 lowercase letters, digits and hyphens; see \`terraform output -raw secret_name_prefix\`)."
+    sv_die "$SV_EXIT_USAGE" "$(sv_shown "$sv_prefix") is not a valid secret name prefix (1-12 lowercase letters, digits and hyphens; see \`terraform output -raw secret_name_prefix\`)."
   fi
 }
 
@@ -109,7 +139,9 @@ sv_require_secret() { # sv_require_secret <secret id>
   if ! command -v gcloud >/dev/null 2>&1; then
     sv_die "$SV_EXIT_FAILED" "gcloud is not on PATH. Install the Google Cloud CLI and run \`gcloud auth login\`."
   fi
-  out="$(sv_gcloud secrets describe "$secret" --project="$sv_project" --format='value(name)' 2>&1)" || rc=$?
+  # </dev/null: in pipe mode standard input carries the value, which gcloud must not read here.
+  out="$(sv_gcloud secrets describe "$secret" --project="$sv_project" --format='value(name)' \
+    --quiet </dev/null 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     sv_err "gcloud could not find the secret '$secret' in project '$sv_project' (exit code $rc). gcloud said:"
     builtin printf '%s\n' "$out" >&2
@@ -122,7 +154,8 @@ sv_require_secret() { # sv_require_secret <secret id>
 sv_enabled_version() { # sv_enabled_version <secret id>
   local secret="$1" out rc=0
   out="$(sv_gcloud secrets versions list "$secret" --project="$sv_project" \
-    --filter='state:ENABLED' --sort-by='~createTime' --limit=1 --format='value(name)' 2>&1)" || rc=$?
+    --filter='state:ENABLED' --sort-by='~createTime' --limit=1 --format='value(name)' \
+    --quiet </dev/null 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     sv_err "gcloud could not list the versions of '$secret' (exit code $rc). gcloud said:"
     builtin printf '%s\n' "$out" >&2
@@ -131,7 +164,8 @@ sv_enabled_version() { # sv_enabled_version <secret id>
   builtin printf '%s' "$out"
 }
 
-# Generate a random value into sv_value. The source is the kernel's random device, filtered to
+# Generate a random value into sv_value. The only random source is `tr -dc` over /dev/urandom
+# (a test pins this line). The source is the kernel's random device, filtered to
 # the alphabet: `tr -dc` drops every byte outside it, which is rejection sampling, so each of the
 # 62 symbols is equally likely (taking the bytes modulo 62 would favour some). Not $RANDOM, which
 # is a 15-bit pseudo-random generator seeded from the clock and process ID. The value travels
@@ -185,8 +219,28 @@ sv_read_value() { # sv_read_value <what, for the prompt>
 }
 
 # Refuse a value that breaks the rules. Messages say which rule, never the value.
-sv_check_value() { # sv_check_value <min length> <max length>
-  local min="$1" max="$2"
+#
+# Profile "reviewer": any printable ASCII, but not only spaces. fhir-proxy compares the file's
+# content (minus a trailing newline) with what the browser sends; nothing on that path interprets
+# punctuation.
+#
+# Profile "edge-vm" (db-root-password, openemr-db-password, openemr-admin-password): letters,
+# digits and !#$%&()*+,-./:;<>?@[]^_{|}~ only, not starting with "-". Why, per reader:
+# - OpenEMR's image builds one string "server=... rootpass=<root> ... pass=<db> ... iuserpass=<admin>",
+#   splits it on whitespace (`read -r -a`) and auto_configure.php keeps only the part after the
+#   first "=" of each piece (`explode("=")[1]`). A space splits a password, an "=" cuts it short:
+#   the database would get a different password from the one in the file.
+# - OpenEMR's installer writes `$pass = '<db password>';` into sites/default/sqlconf.php without
+#   escaping: a single quote ends the PHP string and a backslash can escape the closing quote.
+# - MariaDB's entrypoint passes the root password through `echo`, which treats a value that is
+#   only "-" plus the letters n, e, E as an option; a leading "-" is refused to rule that out.
+# - Double quote and backtick break nothing found, but are refused too: one more script that
+#   interpolates the value inside double quotes or a command substitution would.
+# Every other reader (the edge VM's startup script and hooks, MariaDB's own SQL escaping, the
+# installer's mysqli_real_escape_string, bash `read -a`, which does not expand globs) keeps the
+# remaining punctuation as it is. --generate (letters and digits) avoids the question.
+sv_check_value() { # sv_check_value <min length> <max length> <profile: reviewer|edge-vm>
+  local min="$1" max="$2" profile="$3"
   if [ -z "$sv_value" ]; then
     sv_die "$SV_EXIT_USAGE" "the value is empty; nothing was written."
   fi
@@ -195,6 +249,27 @@ sv_check_value() { # sv_check_value <min length> <max length>
   *$'\r'*) sv_die "$SV_EXIT_USAGE" "the value contains a carriage return (a file saved with Windows line endings?); nothing was written." ;;
   *[[:cntrl:]]*) sv_die "$SV_EXIT_USAGE" "the value contains a control character (for example a tab); nothing was written." ;;
   *[![:print:]]*) sv_die "$SV_EXIT_USAGE" "the value contains a character outside printable ASCII (letters, digits, punctuation, space); nothing was written." ;;
+  esac
+  case "$profile" in
+  reviewer)
+    case "$sv_value" in
+    *[!\ ]*) ;;
+    *) sv_die "$SV_EXIT_USAGE" "the value is only spaces; nothing was written." ;;
+    esac
+    ;;
+  edge-vm)
+    local rule="OpenEMR's first-time setup or its sqlconf.php would change or break it (scripts/secrets/README.md, \"Value rules\"). Allowed: letters, digits and !#\$%&()*+,-./:;<>?@[]^_{|}~. Or use --generate. Nothing was written."
+    case "$sv_value" in
+    *" "*) sv_die "$SV_EXIT_USAGE" "the value contains a space: $rule" ;;
+    *=*) sv_die "$SV_EXIT_USAGE" "the value contains an equals sign (=): $rule" ;;
+    *\'*) sv_die "$SV_EXIT_USAGE" "the value contains a single quote ('): $rule" ;;
+    *\"*) sv_die "$SV_EXIT_USAGE" "the value contains a double quote (\"): $rule" ;;
+    *\\*) sv_die "$SV_EXIT_USAGE" "the value contains a backslash (\\): $rule" ;;
+    *\`*) sv_die "$SV_EXIT_USAGE" "the value contains a backtick (\`): $rule" ;;
+    -*) sv_die "$SV_EXIT_USAGE" "the value starts with a hyphen (-): $rule" ;;
+    esac
+    ;;
+  *) sv_die "$SV_EXIT_FAILED" "internal error: unknown value profile." ;;
   esac
   # LC_ALL=C (set by the scripts) makes ${#sv_value} count bytes; with printable ASCII only,
   # bytes and characters are the same.

@@ -105,3 +105,28 @@ def test_pre_commit_runs_shellcheck_on_these_scripts():
     assert "shellcheck-py/shellcheck-py" in config
     block = config[config.index("shellcheck-py/shellcheck-py") :]
     assert "scripts/secrets/" in block.split("- repo:")[0]
+
+
+def test_generation_uses_only_tr_over_dev_urandom():
+    """The one place a value is generated reads /dev/urandom through `tr -dc` and nothing else:
+    no $RANDOM, no other device, no date or PID, no openssl, shuf or od fallback."""
+    lib = (SCRIPTS / "lib.sh").read_text()
+    body = lib[lib.index("sv_generate() {") :]
+    body = body[: body.index("\n}\n")]
+    sources = [n for n, line in code_lines_of(body) if "sv_value=" in line]
+    assert len(sources) == 1, sources
+    line = next(line for _, line in code_lines_of(body) if "sv_value=" in line)
+    assert line.strip() == (
+        'sv_value="$(LC_ALL=C tr -dc "$SV_GENERATE_ALPHABET" </dev/urandom 2>/dev/null'
+        ' | head -c "$length")" || true'
+    )
+    for path in FILES:
+        text = path.read_text()
+        for word in ("/dev/random", "openssl", "shuf ", "od -", "$$", "date +", "SRANDOM"):
+            assert word not in text, f"{path.name}: {word}"
+
+
+def code_lines_of(text: str):
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.lstrip().startswith("#"):
+            yield n, line
