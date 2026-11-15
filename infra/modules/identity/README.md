@@ -55,9 +55,10 @@ on exactly that resource, for the account `module.identity.service_account_email
 | `health-sync` | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T05) | Writes the heart-rate transaction Bundle with conditional updates. |
 | `v2-to-fhir` | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T05) | Writes Observation, Patient, Device, Provenance by conditional update. |
 | `v2-to-fhir` | `roles/healthcare.hl7V2Consumer` | the HL7v2 store | `healthcare` (T05) | Reads the ingested message and writes the `application_outcome` labels on it (T12, D7). **Unconfirmed:** that Consumer includes updating message labels comes only from search-result summaries of Google's roles page; confirm on first apply, else T05 moves to `hl7V2Editor`. |
+| `cuff-sim` | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T32) | D12: writes one `AuditEvent` per send attempt (`PUT AuditEvent/<id>`) because it holds the raw ACK and is not public, so `fhir-proxy` can stay read-only. Narrowest predefined role with create and update, but store-wide: it can write **any** resource type, not only AuditEvent. Accepted because `cuff-sim` is not publicly invocable (D10); a separate audit FHIR store is the real tightening (see the healthcare README). |
 | `cuff-sim` | `roles/healthcare.hl7V2Ingest` | the HL7v2 store | `healthcare` (T05) | Only for the HTTPS-ingest transport (T13); the default MLLP transport needs no IAM, only the firewall rule in `edge-vm`. |
 | `fhir-proxy` | `roles/secretmanager.secretAccessor` | secrets `reviewer-password`, `openemr-client-private-key` (each) | **this module** | D9 login check; S1 `private_key_jwt` assertion for OpenEMR (T14, T15). |
-| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | the FHIR store | `healthcare` (T05) | Read API, trace lookups, share source data. Read only. |
+| `fhir-proxy` | `roles/healthcare.fhirResourceReader` | the FHIR store | `healthcare` (T05) | Read API, trace lookups, share source data, and the messages log's AuditEvents (D12). Read only: the public service never writes to the FHIR store, tested in the healthcare module. |
 | `fhir-proxy` | `roles/healthcare.hl7V2Consumer` | the HL7v2 store | `healthcare` (T05) | Trace panel and messages log: original v2 message and its outcome labels. |
 | `fhir-proxy` | `roles/run.invoker` | Cloud Run service `cuff-sim` | `phr` (T22) | D10: the proxy forwards cuff requests with its own identity. |
 | `edge-vm` | `roles/secretmanager.secretAccessor` | secrets `db-root-password`, `openemr-db-password`, `openemr-admin-password` (each) | **this module** | The startup script writes them into the compose `.env` (S2). |
@@ -99,8 +100,9 @@ These are open in other tasks. Each may add a row to the table above; none is gr
 - **Where `health-sync` records "reconnect needed"** for the proxy's status strip (T10, T14): if
   it is a label, a FHIR resource or an object in a bucket, `health-sync` needs write and
   `fhir-proxy` read access to that one place.
-- **Where the messages log's send attempts and the FHIR transaction list are stored** (T14, T19):
-  the writer (`cuff-sim` or `fhir-proxy`) and the reader (`fhir-proxy`) need access to it.
+- **Where the FHIR transaction list is stored** (T14, T19): its writer and reader
+  (`fhir-proxy`) need access to it. The messages log's send attempts are settled by D12: they
+  are AuditEvents in the FHIR store, written by `cuff-sim` and read by `fhir-proxy` (rows above).
 - **Cloud Build's build identity** (T24): without a dedicated service account, builds run as the
   Compute Engine default account, which has project Editor in older projects. T24 should create
   a build account with only Artifact Registry write and log writing.

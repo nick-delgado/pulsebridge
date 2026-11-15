@@ -12,6 +12,7 @@ cuff-sim ──HTTPS messages:ingest─────┴─> HL7v2 store ──not
                      dead-letter pull subscription                        v
                                                                       v2-to-fhir ──> FHIR R4 store
 health-sync ─────────────────────────────────────────────────────────────────────> FHIR R4 store
+cuff-sim ──PUT AuditEvent/<id> (one per send attempt, D12)───────────────────────> FHIR R4 store
 ```
 
 - A **dataset** is a regional container in the Healthcare API. It holds stores and decides where
@@ -142,7 +143,36 @@ with the retry policy above that costs a few delivery attempts, not messages.
 | `fhir-proxy` | `roles/healthcare.fhirResourceReader` | FHIR store | Search and read for the dashboard and share |
 | `fhir-proxy` | `roles/healthcare.hl7V2Consumer` | HL7v2 store | `messages.list` filtered by label, `messages.get` for the trace. Consumer also lets it patch labels and create messages, which the proxy does not need; no narrower predefined role covers list + get, so a custom role would be the next step. |
 | `edge-vm` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | MLLP adapter `messages:ingest` (S4) |
+| `cuff-sim` | `roles/healthcare.fhirResourceEditor` | FHIR store | Writing one `AuditEvent` per send attempt with `PUT AuditEvent/<id>` (D12, T13/T31). Lets it write **any** resource type, not only AuditEvent; see below. |
 | `cuff-sim` | `roles/healthcare.hl7V2Ingest` | HL7v2 store | HTTPS ingest transport |
+
+**The cuff simulator's FHIR write access, plainly.** Decision D12 records every cuff send
+attempt (accepted, rejected or unacknowledged) as a FHIR `AuditEvent`. The simulator writes it
+because it holds the raw ACK and is not public; `fhir-proxy`, the only public service (D10),
+stays read-only. The write is `PUT AuditEvent/<id>` with an ID derived from the attempt (FHIR
+"update as create": the same attempt written twice gives one resource), which needs
+`healthcare.fhirResources.create` and `.update`. The narrowest predefined role with both is
+`roles/healthcare.fhirResourceEditor` (it also reads, searches and deletes);
+`roles/healthcare.fhirStoreAdmin` would add store configuration and IAM.
+
+The honest limit: **this role lets `cuff-sim` create, change or delete any resource type in the
+store**, Observations and Patient included, not only AuditEvent. Healthcare IAM permissions
+apply to a whole FHIR store (from Google's IAM documentation, not tested here); there is no predefined role per resource type, and a custom role
+would not help, because it can only list the same store-wide permissions (it could drop
+`delete`, nothing more). This is accepted for now because:
+
+- `cuff-sim` is not publicly invocable (D10): only `fhir-proxy` can call it, behind the
+  reviewer login, so an outsider cannot reach the write path directly;
+- the simulator is to build the AuditEvent itself from validated inputs and never forward
+  caller-supplied FHIR (T13 must keep it that way; a reviewer should check it there).
+
+Tighter alternatives, if needed later: a custom role without `fhirResources.delete` (small
+gain); or a separate FHIR store for audit data in this dataset, with `cuff-sim` as editor there
+and nothing on the clinical store (`fhir-proxy` would then need reader on both). The second is
+the real fix; it is not done now to keep one store for the demo.
+
+`tests/iam.tftest.hcl` checks that `cuff-sim` alone gets exactly these two bindings, and that
+`fhir-proxy` holds only `fhirResourceReader` on the FHIR store and never a writer or admin role.
 
 None of these least-privilege roles has been exercised against the API yet: spikes S4 and S5 used
 broadly privileged accounts. Confirm each on the first apply (T25/T29).
@@ -252,7 +282,7 @@ tests/check_ordering.sh         # from this directory, or pass the module path a
 | <a name="input_push_service_account_email"></a> [push\_service\_account\_email](#input\_push\_service\_account\_email) | Service account Pub/Sub signs the push request's OIDC token as: module identity's "pubsub-push" account. It needs roles/run.invoker on v2-to-fhir (module ingestion), and the Pub/Sub service agent needs roles/iam.serviceAccountTokenCreator on it, which module identity grants. Required when push\_enabled is true. | `string` | `null` | no |
 | <a name="input_retry_maximum_backoff"></a> [retry\_maximum\_backoff](#input\_retry\_maximum\_backoff) | Longest wait between redeliveries of one notification (a duration such as "600s"). | `string` | `"600s"` | no |
 | <a name="input_retry_minimum_backoff"></a> [retry\_minimum\_backoff](#input\_retry\_minimum\_backoff) | Shortest wait before Pub/Sub redelivers a notification v2-to-fhir did not acknowledge (a duration such as "10s"). Waits grow exponentially up to retry\_maximum\_backoff. | `string` | `"10s"` | no |
-| <a name="input_store_iam_service_accounts"></a> [store\_iam\_service\_accounts](#input\_store\_iam\_service\_accounts) | Module identity's map of account name to service account email, passed as it is<br/>(store\_iam\_service\_accounts = module.identity.service\_account\_emails). Keys this module<br/>knows get store-level roles (see the README table); every key is optional, and keys it does<br/>not know (for example scheduler-invoker, pubsub-push) are ignored:<br/>  health-sync -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  seeder      -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  v2-to-fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)<br/>  fhir-proxy  -> FHIR store: roles/healthcare.fhirResourceReader;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)<br/>  edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)<br/>  cuff-sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)<br/>Bindings are chosen by key name only, so Terraform knows at plan time which exist even<br/>while the emails are still unknown (first apply, accounts not yet created). | `map(string)` | `{}` | no |
+| <a name="input_store_iam_service_accounts"></a> [store\_iam\_service\_accounts](#input\_store\_iam\_service\_accounts) | Module identity's map of account name to service account email, passed as it is<br/>(store\_iam\_service\_accounts = module.identity.service\_account\_emails). Keys this module<br/>knows get store-level roles (see the README table); every key is optional, and keys it does<br/>not know (for example scheduler-invoker, pubsub-push) are ignored:<br/>  health-sync -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  seeder      -> FHIR store: roles/healthcare.fhirResourceEditor<br/>  v2-to-fhir  -> FHIR store: roles/healthcare.fhirResourceEditor;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (get message, patch its labels)<br/>  fhir-proxy  -> FHIR store: roles/healthcare.fhirResourceReader;<br/>                 HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)<br/>  edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)<br/>  cuff-sim    -> FHIR store: roles/healthcare.fhirResourceEditor (AuditEvent per send, D12);<br/>                 HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)<br/>Bindings are chosen by key name only, so Terraform knows at plan time which exist even<br/>while the emails are still unknown (first apply, accounts not yet created). | `map(string)` | `{}` | no |
 | <a name="input_time_zone"></a> [time\_zone](#input\_time\_zone) | IANA time zone of the Healthcare dataset. The API uses it to read HL7v2 times that carry no UTC offset (for example an OBX-14 without '+hhmm'). UTC is the safe default; the cuff simulator sends explicit offsets anyway. | `string` | `"UTC"` | no |
 
 ## Outputs
