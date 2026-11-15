@@ -15,6 +15,12 @@
 #    the whole member list of a role (or the whole policy), so in adopt mode they would silently
 #    remove existing members from a real project. Bootstrap uses additive *_iam_member only.
 # 5. The state bucket keeps `prevent_destroy = true`.
+# 6. (T26) The page deployer and the planner get no role except their own: every reference to
+#    either account's identity (member or email) is counted, so a grant added through ANY
+#    resource type (a project, bucket, secret or repository binding) fails here. The page
+#    deployer: one project grant (roles/firebasehosting.admin). The planner: its custom role and
+#    object viewer on the state bucket. The bindings in wif.tf use the accounts' `name`, which is
+#    what lets them be impersonated, not a grant to them.
 #
 # Usage: infra/bootstrap/tests/static_checks.sh   (from anywhere; needs only bash, grep and awk)
 
@@ -77,6 +83,33 @@ if [[ -n "$bucket_block" ]] && grep -qE '^[[:space:]]*prevent_destroy[[:space:]]
   report "" "state bucket has lifecycle { prevent_destroy = true }"
 else
   report "(google_storage_bucket.tfstate has no prevent_destroy = true)" "state bucket has lifecycle { prevent_destroy = true }"
+fi
+
+# Identity references: `<account>.member` or `<account>.email`, outside outputs.tf.
+count_refs() {
+  local pattern="$1" n=0 f
+  for f in "${files[@]}"; do
+    [[ "$(basename "$f")" == "outputs.tf" ]] && continue
+    n=$((n + $(grep -cE "$pattern" "$f" || true)))
+  done
+  echo "$n"
+}
+page_refs="$(count_refs 'google_service_account\.page_deployer(\[0\])?\.(member|email)')"
+if [[ "$page_refs" == "1" ]] && grep -qE '^[[:space:]]*role[[:space:]]+=[[:space:]]*"roles/firebasehosting\.admin"' "$here/ci_identities.tf"; then
+  report "" "the page deployer has exactly one grant, roles/firebasehosting.admin"
+else
+  report "(page deployer identity referenced ${page_refs} times; expected 1, its Hosting grant)" "the page deployer has exactly one grant, roles/firebasehosting.admin"
+fi
+planner_refs="$(count_refs 'google_service_account\.planner(\[0\])?\.(member|email)')"
+planner_block="$(awk '/^resource "google_project_iam_member" "planner"/{on=1} on{print} on&&/^}/{exit}' "$here"/*.tf)"
+bucket_grant="$(awk '/^resource "google_storage_bucket_iam_member" "planner_state"/{on=1} on{print} on&&/^}/{exit}' "$here"/*.tf)"
+if [[ "$planner_refs" == "2" ]] \
+  && grep -qE '^[[:space:]]*role[[:space:]]+=[[:space:]]*google_project_iam_custom_role\.planner\[0\]\.name' <<<"$planner_block" \
+  && grep -qE 'bucket[[:space:]]+=[[:space:]]*google_storage_bucket\.tfstate\.name' <<<"$bucket_grant" \
+  && grep -qE 'role[[:space:]]+=[[:space:]]*"roles/storage\.objectViewer"' <<<"$bucket_grant"; then
+  report "" "the planner has only its custom role and object viewer on the state bucket"
+else
+  report "(planner identity referenced ${planner_refs} times, or its grants changed)" "the planner has only its custom role and object viewer on the state bucket"
 fi
 
 exit "$fail"

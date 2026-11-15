@@ -307,24 +307,30 @@ Runbook: [step 1](../infra/envs/README.md#1-bootstrap-the-project-once-per-proje
 | You, running bootstrap | Owner on the project (adopt), or `roles/billing.user` on the billing account (create) | creating the project, the bucket, the deployer, WIF and Firebase |
 | The `terraform-deployer` service account | the list in [Deployer roles](../infra/bootstrap/README.md#deployer-roles) (Service Usage, Compute network/security/instance admin, Artifact Registry, IAM service accounts and project IAM, Secret Manager, Healthcare dataset/FHIR/HL7v2 admin, Pub/Sub, Cloud Run, Scheduler, logging and monitoring writers, Firebase Hosting) and object admin on the state bucket | every environment apply, and CI |
 | You, running the env roots by hand | either the same roles yourself, or `roles/iam.serviceAccountTokenCreator` on the deployer and `deployer_service_account_email` set in tfvars (Terraform then **impersonates** the deployer) | steps 2 to 13 |
-| You, running the image build | the project Owner, until T26 adds a build account (the deployer has no Cloud Build role by design) | step 7 |
+| You, running the image build | with the trigger: nobody (Cloud Build runs as the opt-in build account; you approve the build as the Owner). By hand: the project Owner | step 7 |
 | You, running the connect script (real data) | `roles/secretmanager.secretAccessor` on the client ID and client secret secrets, `roles/secretmanager.secretVersionAdder` on all three Google Health secrets, `roles/healthcare.fhirResourceEditor` on the main FHIR store (or a project role that includes them, such as Owner) | step 9 |
 | You, looking at the VM | `roles/iap.tunnelResourceAccessor`, `roles/compute.osAdminLogin`, and `roles/iam.serviceAccountUser` on the VM's service account | the first-boot checks |
 
 Be aware: the deployer holds `roles/resourcemanager.projectIamAdmin`, so anyone who can become it
-can grant themselves anything. The real boundary is who can become the deployer: you, and the
-one GitHub repository WIF trusts. Bootstrap's README spells this out
+can grant themselves anything. The real boundary is who can become the deployer: you, and, in the
+one GitHub repository WIF trusts, only jobs on `main` (dev) or in the protected `prod` Environment
+(prod). Bootstrap's README spells this out
 ([What the role list does and does not limit](../infra/bootstrap/README.md#deployer-roles)).
 
-### CI with GitHub Actions (added by T26)
+### CI with GitHub Actions
 
-Plan-on-pull-request and apply-on-merge are being added by task T26 as
-`.github/workflows/terraform-*.yml`. They authenticate with Workload Identity Federation only: no
-key is stored in GitHub. The two values they need, bootstrap's `workload_identity_provider` and
-`deployer_service_account_email` outputs, are identifiers, not secrets, so they go in GitHub
-**repository variables**. The variable names and the workflow setup are documented in the
-runbook ([`infra/envs/README.md`](../infra/envs/README.md)) once T26 merges; until then, deploy
-by hand with the steps below.
+`.github/workflows/terraform-*.yml` run checks and a dev plan on every pull request, apply dev on
+every merge to main, and apply prod after an approval in a protected GitHub Environment. They
+authenticate with Workload Identity Federation only: no key is stored in GitHub. A read-only
+**planner** makes the plans, the **deployer** applies, and a **page deployer** that can only touch
+Firebase Hosting deploys the page. The values they need are identifiers, not secrets, so they go
+in GitHub **repository variables**, five per environment: `DEV_GCP_WORKLOAD_IDENTITY_PROVIDER`,
+`DEV_TF_STATE_BUCKET`, `DEV_GCP_DEPLOYER_SA`, `DEV_GCP_PLANNER_SA`, `DEV_GCP_PAGE_DEPLOYER_SA`,
+and the same with `PROD_`; optionally `DEV_NIGHTLY_DESTROY` and `PROD_WITHOUT_DEV`. Every job
+skips until its variables are set, and CI takes over an environment only after you have done its
+first full apply by hand (steps 3.1 to 3.7 below). The order of the setup matters (the GitHub
+Environments before prod's bootstrap): follow
+[CI/CD](../infra/envs/README.md#cicd-t26) in the runbook.
 
 ## Step 2: register a Google Health OAuth app (real data only)
 
@@ -427,9 +433,9 @@ gcloud iam service-accounts add-iam-policy-binding <deployer_service_account_ema
 
 This is an IAM change on a real project: it lets your account act as the deployer.
 
-**About the alert address:** `alert_email` is not a sensitive variable, so it appears in plan
-output, including plans CI posts on pull requests. Use an address you do not mind showing there
-([What a plan shows](../infra/envs/README.md#what-a-plan-shows)).
+**About the alert address:** `alert_email` is a sensitive variable, so plans, including the ones
+CI posts on pull requests, show `(sensitive value)` instead of the address. It is still stored in
+the state ([What a plan shows](../infra/envs/README.md#what-a-plan-shows)).
 
 **Worked when:** init says `Successfully configured the backend "gcs"` and `git status` shows no
 change to `.terraform.lock.hcl`. Runbook:
@@ -494,8 +500,7 @@ plan or in Terraform state. You now add one **version** to each of `db-root-pass
 into password files), and the reviewer password needs **at least 16 characters** (24 or more is
 better).
 
-With the scripts **added by T27** (being reviewed; follow `scripts/secrets/README.md` once it
-merges, since the details below may still change), values come from a hidden prompt (typed
+With the scripts in `scripts/secrets/` (their README has the details), values come from a hidden prompt (typed
 twice), from standard input when it is not a terminal, or are generated; they are never echoed,
 never passed as an argument and never written to disk. Values must be 16 to 128 printable ASCII
 characters. The project comes from `CLOUDSDK_CORE_PROJECT` (or `--project`) and the prefix from
@@ -519,10 +524,8 @@ scripts/secrets/set-reviewer-password.sh --generate             # prints the new
 - `openemr-admin-password` is OpenEMR's `admin` login, which you only need to look at OpenEMR's
   own screens through IAP; if you generate it, nobody can read it except through Secret Manager.
 
-Until T27 merges, the runbook's [step 5](../infra/envs/README.md#5-secret-versions-deployer-t27s-scripts)
-has a safe by-hand command (`IFS= read -rs`, then `printf '%s'` piped to `gcloud secrets versions
-add --data-file=-`, then `unset`). Never type a secret on a command line, where it would stay in
-your shell history.
+The runbook's [step 5](../infra/envs/README.md#5-secret-versions-deployer-scriptssecrets) has the
+exact commands. Never type a secret on a command line, where it would stay in your shell history.
 
 **Worked when:** `gcloud secrets versions list <prefix>-db-root-password --project <project-id>`
 shows version 1 `enabled`, and the same for each secret you set. *Not yet verified on a real
@@ -578,11 +581,12 @@ list --project <project-id> --limit=1` shows it too. If `gcloud builds log` pref
 with `Step #0 - "...": `, delete that prefix (not verified whether it does).
 
 `gcloud builds submit` also creates a bucket `gs://<project-id>_cloudbuild` that `terraform
-destroy` does not remove. The deployer has no Cloud Build role, so the project owner runs this
-until T26 adds a dedicated build account.
+destroy` does not remove. Instead of building by hand you can let a Cloud Build **trigger** build
+on every release tag, as an opt-in build account that can only push images (the runbook's step
+7, "With the trigger").
 
 **Worked when:** you have five `<name>_image = "...@sha256:..."` lines. Runbook:
-[step 7](../infra/envs/README.md#7-build-the-images-owner-until-t26-adds-a-build-account) and
+[step 7](../infra/envs/README.md#7-build-the-images-the-build-trigger-or-the-owner-by-hand) and
 [`services/README.md`](../services/README.md#build-in-cloud-build). *Not yet verified on a real
 project* (C1 to C7).
 
@@ -695,7 +699,7 @@ Run this from the **repository root** (not `infra/envs/dev`):
 ```bash
 terraform -chdir=infra/envs/dev output -raw firebase_json > web/firebase.json   # git-ignored
 (cd web && npm ci && npm run build)          # VITE_FHIR_PROXY_URL unset: the page calls /api
-(cd web && npx --yes firebase-tools@<pinned version> deploy --only hosting \
+(cd web && npx --yes firebase-tools@15.34.2 deploy --only hosting \
     --project "<project-id>" --non-interactive)
 ```
 
@@ -703,8 +707,9 @@ terraform -chdir=infra/envs/dev output -raw firebase_json > web/firebase.json   
 page is built with Vite and uploaded with the Firebase CLI. `firebase.json` comes from
 Terraform's output and carries the **rewrite** that sends `/api/**` to `fhir-proxy` on the same
 address as the page, plus the security headers. Run this after **every** apply: a Terraform
-change to the rewrite or headers reaches the site only with a deploy. T26 automates it and pins
-the `firebase-tools` version; until then use a fixed recent version of your choice.
+change to the rewrite or headers reaches the site only with a deploy. Once CI manages the
+environment it does this after every apply, with the same `firebase-tools` version locked in
+`infra/envs/ci/deploy-tools/package-lock.json`.
 
 **Worked when:** `terraform output -raw dashboard_url` (`https://<site>.web.app`) shows the login
 page. Runbook: [step 11](../infra/envs/README.md#11-deploy-the-page-deployer-after-every-apply).
@@ -732,7 +737,7 @@ oldest failure is a minute old.
 
 Set the password one of two ways, **never both** in one environment:
 
-- **Recommended, prod and dev:** `scripts/secrets/set-reviewer-password.sh` (added by T27; 3.4
+- **Recommended, prod and dev:** `scripts/secrets/set-reviewer-password.sh` (3.4
   above), with `reviewer_password_wo_version` left at its default `0`. Until a version exists the
   login page answers "Reviewer login is not configured" (HTTP 503).
 - **dev only, through Terraform** (more work, see the note below): set `reviewer_password_wo_version = 1` in `terraform.tfvars`
@@ -822,7 +827,7 @@ Rotating ends every session at once, because the session tokens are signed with 
 from the password.
 
 - **prod (and dev without a tfvars password):** run `scripts/secrets/set-reviewer-password.sh`
-  (added by T27) again. `fhir-proxy` reads the newest version within about 30 seconds.
+  again. `fhir-proxy` reads the newest version within about 30 seconds.
 - **dev with a tfvars password:** raise `reviewer_password_wo_version` by one and apply with the
   new `TF_VAR_reviewer_password` (read and unset as in [Step 4](#step-4-log-in-as-a-reviewer)).
   There may be a moment with no enabled version, when login answers 503. As in Step 4, every
@@ -879,7 +884,7 @@ protected so a stray destroy cannot delete real health data. To really remove it
 
 | Left behind | Billed? | What to do |
 | --- | --- | --- |
-| The default Firebase Hosting site **and its last page**, still public at `https://<project-id>.web.app` (every `/api` call fails) | no | `npx --yes firebase-tools@<pinned version> hosting:disable --project <project-id>` (from `web/`) if no page should stay online |
+| The default Firebase Hosting site **and its last page**, still public at `https://<project-id>.web.app` (every `/api` call fails) | no | `npx --yes firebase-tools@15.34.2 hosting:disable --project <project-id>` (from `web/`) if no page should stay online |
 | Firebase on the project | no | nothing; it cannot be removed |
 | The serverless subnet and the VPC, on the first try: Google needs **one to two hours** after the Cloud Run services are deleted | no | run `terraform destroy` again after one to two hours |
 | The enabled APIs | no | nothing |

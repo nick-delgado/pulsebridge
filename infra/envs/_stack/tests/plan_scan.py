@@ -585,12 +585,22 @@ def check_workload_identity_and_stores(s: Scan) -> None:
             s.check(var not in env, f"{name} must not get {var} (= {env.get(var)!r})")
 
 
+# The positive controls: planned values of the email notification channel itself. Its display
+# name is not sensitive and must appear (the search sees the channel's planned values at all),
+# and its address label must appear as redacted (the address is sensitive, T26).
+PLAN_TEXT_POSITIVE_CONTROLS = (
+    'display_name        = "PulseBridge pulsebridge alerts"',
+    '"email_address" = (sensitive value)',
+)
+
+
 def check_plan_redaction() -> list[str]:
-    """The patient's identifier and names are sensitive root variables, so a human-readable plan
-    (what CI posts on a pull request, T26) must not show them. `terraform test -verbose` prints
-    each run's plan or state the way `terraform plan` does. The alert address is NOT sensitive (a
-    sensitive value cannot decide module ingestion's for_each), so it must appear: that proves the
-    search sees planned values at all."""
+    """The patient's identifier and names and the alert address are sensitive root variables, so a
+    human-readable plan (what CI posts on a pull request, T26) must not show them. `terraform test
+    -verbose` prints each run's plan or state the way `terraform plan` does. Before T26 the alert
+    address was the positive control (it could not be sensitive); module ingestion's separate bool
+    made it sensitive, so it is now checked like the patient values, and the positive controls are
+    the email channel's display name and its redacted label."""
     env = {k: v for k, v in os.environ.items() if k not in CREDENTIAL_VARS}
     home = tempfile.mkdtemp(prefix="stack-plan-scan-home-")
     env.update(
@@ -622,17 +632,16 @@ def check_plan_redaction() -> list[str]:
     failures = []
     if result.returncode != 0:
         failures.append("redaction: terraform test -verbose failed")
-    for value in ("PAT-0001", "SYN-0001", "Examplefamily", "Examplegiven"):
+    for value in ("PAT-0001", "SYN-0001", "Examplefamily", "Examplegiven", ALERT_EMAIL):
         if value in text:
             failures.append(
-                f"redaction: the sensitive patient value {value!r} is shown in a "
-                "human-readable plan"
+                f"redaction: the sensitive value {value!r} is shown in a human-readable plan"
             )
-    if ALERT_EMAIL not in text:
-        failures.append(
-            "redaction: the (non-sensitive) alert address is not in the plan text; "
-            "the search proves nothing"
-        )
+    for control in PLAN_TEXT_POSITIVE_CONTROLS:
+        if control not in text:
+            failures.append(
+                f"redaction: {control!r} is not in the plan text; the search proves nothing"
+            )
     return failures
 
 

@@ -118,6 +118,52 @@ run "only_project_role_is_edge_vm_log_writer" {
   }
 }
 
+# --- The image-build account (T26) -----------------------------------------------------------------
+
+run "no_build_account_by_default" {
+  command = apply
+
+  assert {
+    condition     = !contains(keys(google_service_account.this), "build") && !contains(keys(output.service_account_emails), "build")
+    error_message = "Without create_build_account there must be no build account."
+  }
+}
+
+run "build_account_gets_only_the_log_writer_role" {
+  command = apply
+
+  variables {
+    create_build_account = true
+  }
+
+  assert {
+    condition     = contains(keys(google_service_account.this), "build") && google_service_account.this["build"].account_id == "pb-build" && length(google_service_account.this) == 8
+    error_message = "create_build_account = true must add exactly one account, pb-build."
+  }
+
+  # Its only project-level grant is the log writer (cloudbuild.yaml logs to Cloud Logging only);
+  # the repository grants are project-base's, on the two repositories.
+  assert {
+    condition = toset([for b in google_project_iam_member.this : "${b.role}=${b.member}"]) == toset([
+      "roles/logging.logWriter=${"serviceAccount:${google_service_account.this["edge-vm"].email}"}",
+      "roles/logging.logWriter=${"serviceAccount:${google_service_account.this["build"].email}"}",
+    ])
+    error_message = "The build account's only project-level grant must be roles/logging.logWriter."
+  }
+
+  # No access to any secret.
+  assert {
+    condition = length([
+      for m in google_secret_manager_secret_iam_member.accessor : m.member
+      if m.member == "serviceAccount:${google_service_account.this["build"].email}"
+      ]) == 0 && length([
+      for m in google_secret_manager_secret_iam_member.writer : m.member
+      if m.member == "serviceAccount:${google_service_account.this["build"].email}"
+    ]) == 0
+    error_message = "The build account must not be a reader or writer of any secret."
+  }
+}
+
 run "pubsub_token_creator_can_be_turned_off" {
   command = apply
 

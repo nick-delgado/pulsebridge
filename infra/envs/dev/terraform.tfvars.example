@@ -44,7 +44,7 @@ ingest_enabled = false
 # v2_to_fhir_image  = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
 
 # --- Reviewer password (dev may set it here; prod refuses) --------------------------------------
-# Either here OR with scripts/secrets/set-reviewer-password, never both. Better than writing it in
+# Either here OR with scripts/secrets/set-reviewer-password.sh, never both. Better than writing it in
 # this file: give it to the one apply through the environment, read without echo, and remove it
 # whether or not the apply succeeds:
 #   IFS= read -rs TF_VAR_reviewer_password; export TF_VAR_reviewer_password
@@ -59,3 +59,7 @@ ingest_enabled = false
 # openemr_scopes     = ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"] # first-boot trial
 # name_prefix          = "pulsebridge" # resource names; 3-20 characters
 # identity_name_prefix = "pb"          # service account and secret IDs; at most 12 characters
+
+# --- Image builds (T26; opt-in, README step 7) ------------------------------------------------------
+# create_build_service_account = true  # a build account with only the roles a build needs
+# build_trigger_repository     = "projects/your-dev-project-id/locations/us-central1/connections/github/repositories/pulsebridge" # after linking GitHub in the console

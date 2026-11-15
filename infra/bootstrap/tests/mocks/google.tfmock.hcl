@@ -35,3 +35,10 @@ mock_resource "google_iam_workload_identity_pool_provider" {
     name = "projects/111111111111/locations/global/workloadIdentityPools/github-actions/providers/github-oidc"
   }
 }
+
+# T26: the planner's custom role (its name is computed by the API).
+mock_resource "google_project_iam_custom_role" {
+  defaults = {
+    name = "projects/example-project/roles/pulsebridgeTerraformPlanner"
+  }
+}

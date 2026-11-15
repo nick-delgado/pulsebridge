@@ -11,7 +11,7 @@ output "project_number" {
 }
 
 output "state_bucket_name" {
-  description = "Name of the GCS bucket for remote state. Goes in each env root's backend \"gcs\" block as `bucket` (with a per-env `prefix`)."
+  description = "Name of the GCS bucket for remote state. Each env root takes it in its git-ignored backend.hcl (copied from backend.hcl.example: bucket = \"<this>\"), given to `terraform init -backend-config=backend.hcl`; the prefix is fixed in the root's backend.tf. CI passes it as TF_STATE_BUCKET (infra/envs/README.md, \"CI/CD\")."
   value       = google_storage_bucket.tfstate.name
 }
 
@@ -28,4 +28,14 @@ output "workload_identity_provider" {
 output "firebase_added" {
   description = "Whether bootstrap added Firebase to the project (add_firebase). module phr's Hosting site needs Firebase; with false, add it another way or leave the dashboard unhosted."
   value       = length(google_firebase_project.this) > 0
+}
+
+output "planner_service_account_email" {
+  description = "Email of the read-only planner (create_planner), or null. GitHub repository variable <ENV>_GCP_PLANNER_SA (infra/envs/README.md, \"CI/CD\")."
+  value       = one(google_service_account.planner[*].email)
+}
+
+output "page_deployer_service_account_email" {
+  description = "Email of the page deployer (create_page_deployer), or null. GitHub repository variable <ENV>_GCP_PAGE_DEPLOYER_SA."
+  value       = one(google_service_account.page_deployer[*].email)
 }

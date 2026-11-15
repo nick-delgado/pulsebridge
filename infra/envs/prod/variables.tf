@@ -257,9 +257,10 @@ variable "time_zone" {
 # ---------------------------------------------------------------------------------------------
 
 variable "alert_email" {
-  description = "Email address the ingestion alerts go to (failed sync, reconnect needed, failed seeding, failed Scheduler attempt). Creates a Cloud Monitoring email channel. Set this or alert_notification_channels; with neither the plan stops, because the alerts would then be metrics nobody sees. Stored in the state; never commit it (terraform.tfvars is git-ignored)."
+  description = "Email address the ingestion alerts go to (failed sync, reconnect needed, failed seeding, failed Scheduler attempt). Creates a Cloud Monitoring email channel. Set this or alert_notification_channels; with neither the plan stops, because the alerts would then be metrics nobody sees. Stored in the state; never commit it (terraform.tfvars is git-ignored). Sensitive, so plans (also the one CI posts on a pull request) show \"(sensitive value)\" instead of the address."
   type        = string
   default     = null
+  sensitive   = true
 
   validation {
     condition     = var.alert_email == null || can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", coalesce(var.alert_email, "x")))
@@ -288,7 +289,7 @@ variable "alert_notification_channels" {
 # ---------------------------------------------------------------------------------------------
 
 variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password, never both. Prefer giving it to one apply as TF_VAR_reviewer_password (read with `IFS= read -rs`, unset afterwards whether or not the apply succeeded; dev terraform.tfvars.example) over writing it into terraform.tfvars."
+  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password.sh, never both. Prefer giving it to one apply as TF_VAR_reviewer_password (read with `IFS= read -rs`, unset afterwards whether or not the apply succeeded; dev terraform.tfvars.example) over writing it into terraform.tfvars."
   type        = string
   default     = null
   sensitive   = true
@@ -302,7 +303,7 @@ variable "reviewer_password" {
     # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod. In
     # prod a password here would be silently unused; refuse it so nobody thinks it was set.
     condition     = var.reviewer_password == null || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): unset reviewer_password (and TF_VAR_reviewer_password) and use scripts/secrets/set-reviewer-password."
+    error_message = "This environment does not take the reviewer password from tfvars (prod): unset reviewer_password (and TF_VAR_reviewer_password) and use scripts/secrets/set-reviewer-password.sh."
   }
 }
 
@@ -319,7 +320,7 @@ variable "reviewer_password_wo_version" {
   validation {
     # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod.
     condition     = var.reviewer_password_wo_version == 0 || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password."
+    error_message = "This environment does not take the reviewer password from tfvars (prod): leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
   }
   validation {
     condition     = var.reviewer_password_wo_version == 0 || var.reviewer_password != null
@@ -436,4 +437,33 @@ variable "health_sync_ingress" {
     condition     = contains(["INGRESS_TRAFFIC_INTERNAL_ONLY", "INGRESS_TRAFFIC_ALL"], var.health_sync_ingress)
     error_message = "health_sync_ingress must be INGRESS_TRAFFIC_INTERNAL_ONLY or INGRESS_TRAFFIC_ALL."
   }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Image builds (T26): opt-in. infra/envs/README.md, step 7 and "CI/CD".
+# ---------------------------------------------------------------------------------------------
+
+variable "create_build_service_account" {
+  description = "Create the dedicated image-build service account: log writer on the project, writer on the services repository, reader on the Docker Hub mirror, nothing else (modules identity and project-base). Needed by build_trigger_repository; also usable for a manual `gcloud builds submit --service-account`. Default false."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "build_trigger_repository" {
+  description = "Opt-in Cloud Build trigger that builds the images on release tags (vX.Y.Z) as the build account: the full resource name of the 2nd-gen Cloud Build repository you linked once in the console, projects/<project>/locations/<region>/connections/<connection>/repositories/<repository> (project-base README, \"Image builds\"). Requires create_build_service_account = true. null (default): no trigger."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.build_trigger_repository == null || var.create_build_service_account
+    error_message = "build_trigger_repository needs create_build_service_account = true: the trigger runs the build as that account."
+  }
+}
+
+variable "build_trigger_approval_required" {
+  description = "Each build the trigger starts waits for an approval in the Cloud Build console (roles/cloudbuild.builds.approver). Default true: otherwise anyone who can push a v* tag publishes images. Set false once a GitHub tag ruleset limits who may create v* tags (infra/envs/README.md, step 7)."
+  type        = bool
+  default     = true
+  nullable    = false
 }

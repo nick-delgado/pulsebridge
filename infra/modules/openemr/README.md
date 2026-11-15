@@ -114,7 +114,9 @@ default): it lets the VM's account add versions to the key secret and read versi
 OpenEMR receives the vitals PulseBridge shares and gives them back through its FHIR API for the
 dashboard's "As stored in OpenEMR" panel (decision D13). Its screens are **not exposed**:
 
-- the VM has no external IP; OpenEMR's port is published only on the VM's internal address;
+- the VM has no external IP; OpenEMR's port is published on every interface of the VM
+  (`--publish 443:443`), which reaches nothing outside because the VM's only address is internal
+  (step 7 below; binding to the internal address only is a possible hardening);
 - project-base's one firewall rule admits only the serverless subnet (Cloud Run's Direct VPC
   egress, so in practice `fhir-proxy`) to that port (D14);
 - port 80 is not published at all, and there is no public switch;

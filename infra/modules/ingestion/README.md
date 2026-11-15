@@ -80,8 +80,9 @@ module "ingestion" {
   secret_ids             = module.identity.secret_ids
 
   # Set at least one, or the alerts are metrics only and nobody is told.
-  alert_email           = var.alert_email                 # creates an email channel
-  notification_channels = var.alert_notification_channels # existing channels, may be []
+  alert_email                = var.alert_email                 # sensitive; with the bool below
+  create_alert_email_channel = nonsensitive(var.alert_email != null) # see "Alerts"
+  notification_channels      = var.alert_notification_channels # existing channels, may be []
 
   # The secret accessor grants (module identity) must exist before health-sync deploys.
   depends_on = [module.identity]
@@ -121,8 +122,8 @@ depends on nothing.
 | `google_cloud_run_v2_job_iam_member.seed_runner` | synthetic data | `roles/run.invoker` on **that job only** for `scheduler-invoker`, which gives it `run.jobs.run` there and nowhere else. |
 | `google_cloud_scheduler_job.seed` | synthetic data **and** `ingest_enabled` | Hourly (minute 7) `POST https://run.googleapis.com/v2/projects/<p>/locations/<r>/jobs/<job>:run` with an OAuth token for `scheduler-invoker`; no retries. |
 | `google_logging_metric.this[...]` | always (keys per mode, see "Alerts") | Counters over the services' own log lines and Cloud Scheduler's attempt logs. |
-| `google_monitoring_notification_channel.email` | `alert_email` set | An email notification channel for that address. |
-| `google_monitoring_alert_policy.this[...]` | `alert_email` or `notification_channels` set | One per metric: notifies when the counter is above 0 in a 15-minute window. |
+| `google_monitoring_notification_channel.email` | `create_alert_email_channel` (with `alert_email`) | An email notification channel for that address. |
+| `google_monitoring_alert_policy.this[...]` | `create_alert_email_channel` or `notification_channels` set | One per metric: notifies when the counter is above 0 in a 15-minute window. |
 
 **Not created here, on purpose:**
 
@@ -446,9 +447,22 @@ no workload account has it).
 
 Each signal is a log-based metric (a counter of matching log entries); each gets an alert
 policy that fires when its count summed over 15 minutes is above 0 and closes after an hour
-without a match. **Where alerts go**: `alert_email` (this module creates an email notification
-channel for it) and/or `notification_channels` (channels made elsewhere). T25 should set one of
-them. **With neither, there are metrics only: no alert policy exists and nobody is told** when
+without a match. **Where alerts go**: `alert_email` with `create_alert_email_channel = true` (this
+module creates an email notification channel for it) and/or `notification_channels` (channels
+made elsewhere). T25 should set one of them.
+
+**Why two variables for one address (T26).** `alert_email` is a personal address, so it is
+`sensitive`: every plan, including the one CI posts on a pull request, shows `labels =
+(sensitive value)` on the channel. Terraform refuses a sensitive value (or anything computed from
+one, such as `alert_email != null`) in `count` or `for_each`, because the number of resources would
+then reveal it. So the plain bool `create_alert_email_channel` decides whether the channel exists
+(the same pattern as project-base's `grant_edge_vm_mirror_reader`): a validation refuses an address
+without the bool, and a precondition refuses the bool without an address. A caller whose
+address is itself sensitive passes `nonsensitive(var.alert_email != null)`: whether an address is
+set reveals nothing about it (env `_stack` does this). The address is still
+stored in the state and on the channel.
+
+**With neither, there are metrics only: no alert policy exists and nobody is told** when
 ingestion breaks; the counters can still be charted in Metrics Explorer as
 `logging.googleapis.com/user/<metric name>` (charting needs the Monitoring API, enabled by
 project-base).
@@ -514,7 +528,8 @@ module "identity" {
 }
 module "ingestion" {
   depends_on  = [module.identity] # secret accessor grants before health-sync deploys
-  alert_email = var.alert_email   # or notification_channels; with neither, metrics only
+  alert_email                = var.alert_email # or notification_channels; with neither, metrics only
+  create_alert_email_channel = true            # with alert_email (a plain bool: the address is sensitive)
 }
 ```
 
@@ -541,7 +556,7 @@ module "ingestion" {
 
 **Variables T25 sets from its own tfvars:** `project_id`, `region`, `use_synthetic_data`,
 `ingest_enabled`, `v2_to_fhir_image`, `health_sync_image` or `seed_image`, `patient_id`,
-`time_zone`, `alert_email` and/or `notification_channels`; optionally `name_prefix`, `labels`,
+`time_zone`, `alert_email` (with `create_alert_email_channel`) and/or `notification_channels`; optionally `name_prefix`, `labels`,
 `patient_assigning_authority`, `deletion_protection`, the two ingress variables.
 
 **Provided by other modules:** the deployer's `roles/logging.configWriter`,
@@ -577,9 +592,9 @@ environment, then runs `tests/static_checks.sh`.
 
 | File | Checks |
 | --- | --- |
-| `real_data.tftest.hcl` | health-sync and no seeder; exact invokers, nothing public, IAM check on, internal ingress; scale to zero, `max_instance_count = 1`, timeout ≥ 180 s; v2-to-fhir timeout ≤ the 60 s ack deadline and concurrency 4; `deletion_protection` false by default; images and service accounts; exact environments (with `RUN_DEADLINE_SECONDS = 150`); secrets as volumes at `latest`, one directory each, none in environment variables; the HTTP startup probe on `/status` and its timing limits; the three metrics and their filters (including the sync handler's `bug` clause and `not-configured`); no policy or channel without a destination; policies with channels: one per metric, threshold, aggregation, labels; `alert_email` creates the email channel and is used alone or with channels; the trigger (15 min, `retry_count = 0`, `attempt_deadline = 180s`, OIDC, audience); no trigger while `ingest_enabled = false`; outputs |
+| `real_data.tftest.hcl` | health-sync and no seeder; exact invokers, nothing public, IAM check on, internal ingress; scale to zero, `max_instance_count = 1`, timeout ≥ 180 s; v2-to-fhir timeout ≤ the 60 s ack deadline and concurrency 4; `deletion_protection` false by default; images and service accounts; exact environments (with `RUN_DEADLINE_SECONDS = 150`); secrets as volumes at `latest`, one directory each, none in environment variables; the HTTP startup probe on `/status` and its timing limits; the three metrics and their filters (including the sync handler's `bug` clause and `not-configured`); no policy or channel without a destination; policies with channels: one per metric, threshold, aggregation, labels; `alert_email` with `create_alert_email_channel` creates the email channel (its address label sensitive) and is used alone or with channels; the trigger (15 min, `retry_count = 0`, `attempt_deadline = 180s`, OIDC, audience); no trigger while `ingest_enabled = false`; outputs |
 | `synthetic.tftest.hcl` | the seeder job and nothing of health-sync; job account, retries, image, args, no `command`, timeout, environment, `deletion_protection`; the narrow job grant; the seeder and Scheduler metrics; no trigger until `ingest_enabled`, then hourly with OAuth to `jobs.run` |
-| `validation.tftest.hcl` | tag-only, tag-plus-digest, short-digest and `latest` images refused; required images per mode; `SYN-` required with and refused without synthetic data; patient ID characters; fixed-offset and malformed time zones; required accounts and secrets per mode; full paths for store IDs; a dataset in another project with internal ingress; short timeouts; bad channels and alert addresses; unsupported ingress |
+| `validation.tftest.hcl` | tag-only, tag-plus-digest, short-digest and `latest` images refused; required images per mode; `SYN-` required with and refused without synthetic data; patient ID characters; fixed-offset and malformed time zones; required accounts and secrets per mode; full paths for store IDs; a dataset in another project with internal ingress; short timeouts; bad channels and alert addresses; an address without `create_alert_email_channel`, and the bool without an address; unsupported ingress |
 | `static_checks.sh` | reads the `.tf` files and fails on any public principal, any `min_instance_count` other than 0 or `manual_instance_count`, any `_iam_binding`/`_iam_policy` or project IAM, any service account key, any other IAM member resource or member not built from `var.service_account_emails`, `invoker_iam_disabled` other than `false`, secrets in environment variables, a hardcoded project (argument, path, service account email, registry path), a child module, and a missing `depends_on` on the push endpoint output or on either Scheduler job |
 
 ```bash
@@ -662,7 +677,8 @@ No modules.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
-| <a name="input_alert_email"></a> [alert\_email](#input\_alert\_email) | Optional email address the alerts are sent to: creates a Cloud Monitoring email notification channel in this module, used together with notification\_channels. No default and never hardcoded: set it in the env root's tfvars (T25). It is stored in the Terraform state and on the channel. null (default) creates no channel. | `string` | `null` | no |
+| <a name="input_alert_email"></a> [alert\_email](#input\_alert\_email) | Optional email address the alerts are sent to, through a Cloud Monitoring email notification channel this module creates when create\_alert\_email\_channel is true (the two are set together). No default and never hardcoded: set it in the env root's tfvars. Sensitive: plans, including the plan CI posts on a pull request (T26), show "(sensitive value)" instead of the address. It is still stored in the Terraform state and on the channel. | `string` | `null` | no |
+| <a name="input_create_alert_email_channel"></a> [create\_alert\_email\_channel](#input\_create\_alert\_email\_channel) | Create the email notification channel for alert\_email (then alert\_email is required; a precondition checks it). A plain bool, so the channel's count is known at plan time while alert\_email stays sensitive: Terraform refuses a sensitive value in count or for\_each. Default false: no channel. The env roots set it to whether alert\_email is set. | `bool` | `false` | no |
 | <a name="input_deletion_protection"></a> [deletion\_protection](#input\_deletion\_protection) | Refuse to destroy the Cloud Run services and the job (the provider's deletion\_protection, which defaults to true). false (default) here, because they hold no data and dev is destroyed nightly; the data lives in module healthcare, which has its own deletion\_policy. | `bool` | `false` | no |
 | <a name="input_fhir_store_id"></a> [fhir\_store\_id](#input\_fhir\_store\_id) | Short ID of the main (health-data) FHIR store (module.healthcare.fhir\_store\_name), not the audit store. Becomes FHIR\_STORE\_ID. | `string` | n/a | yes |
 | <a name="input_health_sync_image"></a> [health\_sync\_image](#input\_health\_sync\_image) | health-sync image by digest (same form as v2\_to\_fhir\_image). Required when use\_synthetic\_data is false; ignored, and may be null, when it is true. | `string` | `null` | no |

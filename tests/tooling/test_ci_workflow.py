@@ -53,8 +53,6 @@ def test_runs_on_pull_requests(workflow: dict) -> None:
     [
         "make lint",
         "make test",
-        "make tf-validate",
-        "make tf-test",
         "make secret-scan",
         # The dashboard job (T16).
         "make web-lint",
@@ -235,3 +233,32 @@ def test_fhir_workflow_keeps_its_weekly_schedule(fhir_workflow: dict) -> None:
         assert len(fields) == 5, f"bad cron {cron!r}"
         assert fields[2] == "*" and fields[3] == "*", f"{cron!r} is not at least weekly"
         assert fields[4] != "*" or fields[1] != "*", f"{cron!r} runs more than daily"
+
+
+# --- The Terraform checks moved to terraform-checks.yml (T26) ---------------------------------
+# ci.yml's terraform job was removed; terraform-checks.yml runs the same targets (and tflint and
+# Trivy) on every pull request, unconditionally.
+
+CHECKS_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "terraform-checks.yml"
+
+
+@pytest.mark.parametrize(
+    "command", ["make tf-validate", "make tf-test", "make tf-lint", "make tf-scan"]
+)
+def test_terraform_checks_run_unconditionally(command: str) -> None:
+    checks = yaml.safe_load(CHECKS_WORKFLOW.read_text())
+    on = triggers(checks)
+    assert "pull_request" in on and not (on["pull_request"] or {})
+    steps = steps_running(checks, command)
+    assert steps, f"terraform-checks.yml does not run `{command}`"
+    for job_id, step in steps:
+        assert "if" not in step and "if" not in checks["jobs"][job_id], (
+            f"`{command}` is conditional"
+        )
+
+
+def test_ci_no_longer_has_its_own_terraform_job(workflow: dict) -> None:
+    # One place for the Terraform checks, so the two cannot drift apart.
+    assert "terraform" not in workflow["jobs"]
+    assert not steps_running(workflow, "make tf-validate")
+    assert not steps_running(workflow, "make tf-test")

@@ -17,8 +17,15 @@ resource "google_service_account" "deployer" {
 # One additive binding per role. google_project_iam_member only adds this member to the role;
 # it never removes other members, so adopting an existing project cannot wipe its existing IAM
 # (google_project_iam_policy or _binding would be authoritative and could).
+# T26: roles/cloudbuild.builds.editor only when the build trigger is opted in (allow_build_trigger):
+# creating a Cloud Build trigger needs cloudbuild.builds.create, which also lets the holder run
+# builds, so it is not granted by default.
+locals {
+  deployer_roles = toset(concat(var.deployer_roles, var.allow_build_trigger ? ["roles/cloudbuild.builds.editor"] : []))
+}
+
 resource "google_project_iam_member" "deployer" {
-  for_each = toset(var.deployer_roles)
+  for_each = local.deployer_roles
 
   project = local.project_id
   role    = each.value

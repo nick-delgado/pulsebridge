@@ -140,6 +140,91 @@ clean: ## Remove the venv and tool caches
 	rm -rf $(VENV) .pytest_cache .ruff_cache
 	find . -name __pycache__ -type d -not -path './.worktrees/*' -prune -exec rm -rf {} +
 
+# ---- Terraform lint and security scan (T26) -----------------------------------------------------
+# tflint (with the Google ruleset) and Trivy's misconfiguration scan over $(TF_ROOT). CI runs both
+# on every pull request (.github/workflows/terraform-checks.yml). Neither needs credentials or a
+# backend: tflint reads the configuration (call_module_type = "local" follows local module calls
+# without `terraform init`), and Trivy parses the .tf files.
+#
+# The tools are downloaded from their GitHub releases at pinned versions and checked against the
+# SHA-256 below before use (Linux x86_64 only; elsewhere install them yourself). Pinning the
+# checksum here, rather than trusting the release's own checksums file, means a release asset
+# replaced after the fact is refused. The versions were at least two weeks old when pinned, a
+# margin against a just-published compromised release (Trivy's release tags were hijacked once,
+# in 2026). The Google ruleset is unpacked straight into the plugin directory, so `tflint --init`
+# (which calls the GitHub API) is not needed. Keep TFLINT_GOOGLE_VERSION equal to the plugin
+# version in .tflint.hcl; tests/tooling/test_terraform_workflows.py checks that they match.
+TOOLS_DIR := $(VENV)/tools
+TFLINT_VERSION := v0.65.0
+TFLINT_SHA256 := d4c545ed2e29d6338604b586f34f544f380f70f243aa72f7b484713835eaec61
+TFLINT_GOOGLE_VERSION := 0.41.0
+TFLINT_GOOGLE_SHA256 := efb3910bbc9f0b90bebd76d475ca6cd2cf04a032f6cddc8fa7a334e5011da6d6
+TRIVY_VERSION := 0.76.1
+TRIVY_SHA256 := c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0
+TFLINT_CONFIG ?= .tflint.hcl
+TFLINT := $(TOOLS_DIR)/tflint-$(TFLINT_VERSION)/tflint
+TFLINT_PLUGIN_DIR := $(TOOLS_DIR)/tflint-plugins
+TFLINT_GOOGLE := $(TFLINT_PLUGIN_DIR)/github.com/terraform-linters/tflint-ruleset-google/$(TFLINT_GOOGLE_VERSION)/tflint-ruleset-google
+TRIVY := $(TOOLS_DIR)/trivy-$(TRIVY_VERSION)/trivy
+# Severities that fail tf-scan. MEDIUM and LOW findings are printed but accepted: the ones the
+# stack has today are listed in infra/envs/README.md ("CI/CD", "What the checks accept").
+TRIVY_FAIL_SEVERITY ?= HIGH,CRITICAL
+
+.PHONY: tf-lint tf-scan
+
+# $(call fetch,<url>,<sha256>,<output file>): download to <output>.download and move it into place
+# only when its checksum matches. A mismatching download is left as .download and never used.
+define fetch
+	@if [ "$$(uname -sm)" != "Linux x86_64" ]; then \
+		echo "$(3): only Linux x86_64 binaries are pinned here; install the tool yourself" >&2; exit 1; fi
+	@mkdir -p "$(dir $(3))"
+	curl -fsSL --retry 3 -o "$(3).download" "$(1)"
+	@echo "$(2)  $(3).download" | sha256sum --check --strict --quiet \
+		|| { echo "checksum mismatch for $(1)" >&2; exit 1; }
+	@mv "$(3).download" "$(3)"
+endef
+
+$(TOOLS_DIR)/tflint_$(TFLINT_VERSION).zip:
+	$(call fetch,https://github.com/terraform-linters/tflint/releases/download/$(TFLINT_VERSION)/tflint_linux_amd64.zip,$(TFLINT_SHA256),$@)
+
+$(TFLINT): $(TOOLS_DIR)/tflint_$(TFLINT_VERSION).zip
+	$(PYTHON) -m zipfile -e "$<" "$(dir $@)"
+	@chmod +x "$@"
+
+$(TOOLS_DIR)/tflint-ruleset-google_$(TFLINT_GOOGLE_VERSION).zip:
+	$(call fetch,https://github.com/terraform-linters/tflint-ruleset-google/releases/download/v$(TFLINT_GOOGLE_VERSION)/tflint-ruleset-google_linux_amd64.zip,$(TFLINT_GOOGLE_SHA256),$@)
+
+$(TFLINT_GOOGLE): $(TOOLS_DIR)/tflint-ruleset-google_$(TFLINT_GOOGLE_VERSION).zip
+	$(PYTHON) -m zipfile -e "$<" "$(dir $@)"
+	@chmod +x "$@"
+
+$(TOOLS_DIR)/trivy_$(TRIVY_VERSION).tar.gz:
+	$(call fetch,https://github.com/aquasecurity/trivy/releases/download/v$(TRIVY_VERSION)/trivy_$(TRIVY_VERSION)_Linux-64bit.tar.gz,$(TRIVY_SHA256),$@)
+
+$(TRIVY): $(TOOLS_DIR)/trivy_$(TRIVY_VERSION).tar.gz
+	@mkdir -p "$(dir $@)"
+	tar -xzf "$<" -C "$(dir $@)" trivy
+	@chmod +x "$@"
+
+# --recursive lints every directory under $(TF_ROOT) that holds .tf files, each with the repo's
+# .tflint.hcl. Run from inside $(TF_ROOT), so a checkout's .worktrees/ is never walked.
+tf-lint: $(TFLINT) $(TFLINT_GOOGLE) ## tflint (Terraform and Google rulesets) over $(TF_ROOT)
+	@if [ ! -d "$(TF_ROOT)" ]; then echo "tf-lint: no $(TF_ROOT)/; nothing to lint"; exit 0; fi
+	cd "$(TF_ROOT)" && $(TF_NO_CREDS) TFLINT_PLUGIN_DIR="$(abspath $(TFLINT_PLUGIN_DIR))" \
+		"$(abspath $(TFLINT))" --recursive --config="$(abspath $(TFLINT_CONFIG))" --format=compact
+
+# --skip-check-update: use the checks embedded in the pinned binary, so a run does not depend on
+# (or silently change with) the checks bundle Trivy would otherwise download. Two passes: every
+# finding is listed for information, then the findings at $(TRIVY_FAIL_SEVERITY) fail the target.
+tf-scan: $(TRIVY) ## Trivy misconfiguration scan of $(TF_ROOT) (fails on HIGH and CRITICAL)
+	@if [ ! -d "$(TF_ROOT)" ]; then echo "tf-scan: no $(TF_ROOT)/; nothing to scan"; exit 0; fi
+	$(TF_NO_CREDS) TRIVY_CACHE_DIR="$(abspath $(TOOLS_DIR))/trivy-cache" TRIVY_DISABLE_VEX_NOTICE=1 \
+		"$(TRIVY)" config --skip-check-update --misconfig-scanners terraform --quiet \
+		--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --exit-code 0 "$(TF_ROOT)"
+	$(TF_NO_CREDS) TRIVY_CACHE_DIR="$(abspath $(TOOLS_DIR))/trivy-cache" TRIVY_DISABLE_VEX_NOTICE=1 \
+		"$(TRIVY)" config --skip-check-update --misconfig-scanners terraform --quiet \
+		--severity $(TRIVY_FAIL_SEVERITY) --exit-code 1 "$(TF_ROOT)"
+
 # ---- Dashboard (web/) ---------------------------------------------------------------------------
 # The single-page dashboard is a Node project (Vite + TypeScript); see web/README.md. These targets
 # need Node 22.12 or newer and npm. They are deliberately NOT part of `check`: `check` is the

@@ -29,7 +29,7 @@ variable "protect_from_destroy" {
 }
 
 variable "allow_reviewer_password_from_tfvars" {
-  description = "true (dev only): reviewer_password and reviewer_password_wo_version may write the reviewer-password secret version from tfvars (module identity, write-only, never in state). false (prod): the password is set only with scripts/secrets/set-reviewer-password (T27) and rotated there."
+  description = "true (dev only): reviewer_password and reviewer_password_wo_version may write the reviewer-password secret version from tfvars (module identity, write-only, never in state). false (prod): the password is set only with scripts/secrets/set-reviewer-password.sh (T27) and rotated there."
   type        = bool
   nullable    = false
 }
@@ -187,9 +187,10 @@ variable "time_zone" {
 # ---------------------------------------------------------------------------------------------
 
 variable "alert_email" {
-  description = "Email address module ingestion's alerts go to (an email notification channel is created)."
+  description = "Email address module ingestion's alerts go to (an email notification channel is created). Sensitive: plans, including the one CI posts on a pull request, show \"(sensitive value)\" (T26)."
   type        = string
   default     = null
+  sensitive   = true
 }
 
 variable "alert_notification_channels" {
@@ -221,7 +222,7 @@ variable "reviewer_password_wo_version" {
     # Prod rotates the password with T27's script; a tfvars-managed version would be partly undone
     # by the script and partly undo it (module identity README, "Dev only").
     condition     = var.reviewer_password_wo_version == 0 || var.allow_reviewer_password_from_tfvars
-    error_message = "The reviewer password may come from tfvars only in dev. In prod leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password."
+    error_message = "The reviewer password may come from tfvars only in dev. In prod leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
   }
 }
 
@@ -297,5 +298,32 @@ variable "v2_to_fhir_ingress" {
 variable "health_sync_ingress" {
   description = "health-sync ingress (module ingestion); the fallback INGRESS_TRAFFIC_ALL only if fhir-proxy's /status call is refused."
   type        = string
+  nullable    = false
+}
+
+# ---------------------------------------------------------------------------------------------
+# Image builds (T26)
+# ---------------------------------------------------------------------------------------------
+
+variable "create_build_service_account" {
+  description = "Create the dedicated image-build service account (module identity) with its grants: log writer on the project, writer on the services repository and reader on the Docker Hub mirror (module project-base). Needed by the build trigger; also usable for a manual `gcloud builds submit --service-account`."
+  type        = bool
+  nullable    = false
+}
+
+variable "build_trigger_repository" {
+  description = "Opt-in Cloud Build trigger on release tags (module project-base): the 2nd-gen repository's full resource name, or null for no trigger. Requires create_build_service_account."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.build_trigger_repository == null || var.create_build_service_account
+    error_message = "build_trigger_repository needs create_build_service_account = true: the trigger runs the build as that account."
+  }
+}
+
+variable "build_trigger_approval_required" {
+  description = "Triggered builds wait for a manual approval in the Cloud Build console (module project-base)."
+  type        = bool
   nullable    = false
 }

@@ -155,6 +155,14 @@ run "rejects_ref_that_could_inject_cel" {
   expect_failures = [var.github_allowed_refs]
 }
 
+run "rejects_cel_injection_in_github_environments" {
+  command = plan
+  variables {
+    github_environments = ["prod\" || true || \""]
+  }
+  expect_failures = [var.github_environments]
+}
+
 run "rejects_ref_outside_heads_and_tags" {
   command = plan
   variables {
@@ -225,4 +233,158 @@ run "rejects_bad_label_key" {
     labels = { "App" = "pulsebridge" }
   }
   expect_failures = [var.labels]
+}
+
+# --- T26: the CI identities ------------------------------------------------------------------------
+
+run "rejects_a_pull_request_context_for_the_deployer" {
+  command = plan
+  variables {
+    deployer_wif_contexts = ["pull-request"]
+  }
+  expect_failures = [var.deployer_wif_contexts]
+}
+
+run "rejects_an_empty_deployer_context_list" {
+  command = plan
+  variables {
+    deployer_wif_contexts = []
+  }
+  expect_failures = [var.deployer_wif_contexts]
+}
+
+run "rejects_a_non_main_environment_context" {
+  command = plan
+  variables {
+    page_deployer_wif_contexts = ["env-prod-other"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_data_reading_extra_permission_for_the_planner" {
+  command = plan
+  variables {
+    create_planner            = true
+    planner_extra_permissions = ["compute.disks.get", "healthcare.hl7V2Messages.get"]
+  }
+  expect_failures = [var.planner_extra_permissions]
+}
+
+run "rejects_secret_access_for_the_planner" {
+  command = plan
+  variables {
+    create_planner            = true
+    planner_extra_permissions = ["secretmanager.versions.access"]
+  }
+  expect_failures = [var.planner_extra_permissions]
+}
+
+# A list permission is refused by its shape alone (compute.instances.list reads no data, but
+# list permissions are not what a refresh needs).
+run "rejects_a_list_permission_for_the_planner" {
+  command = plan
+  variables {
+    create_planner            = true
+    planner_extra_permissions = ["compute.instances.list"]
+  }
+  expect_failures = [var.planner_extra_permissions]
+}
+
+run "rejects_private_log_entries_for_the_planner" {
+  command = plan
+  variables {
+    create_planner            = true
+    planner_extra_permissions = ["logging.privateLogEntries.list"]
+  }
+  expect_failures = [var.planner_extra_permissions]
+}
+
+run "accepts_a_harmless_extra_get_for_the_planner" {
+  command = plan
+  variables {
+    create_planner            = true
+    planner_extra_permissions = ["compute.zones.get"]
+  }
+  assert {
+    condition     = contains(google_project_iam_custom_role.planner[0].permissions, "compute.zones.get")
+    error_message = "A get permission that reads no data must be added to the planner's role."
+  }
+}
+
+# --- the three accounts' contexts never meet (T26 review B1) -------------------------------------
+
+run "rejects_a_page_deployer_context_shared_with_the_deployer" {
+  command = plan
+  variables {
+    page_deployer_wif_contexts = ["env-dev-page-main"]
+    deployer_wif_contexts      = ["main", "env-dev-page-main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_page_deployer_context_shared_with_the_planner" {
+  command = plan
+  variables {
+    planner_wif_contexts       = ["pull-request", "env-dev-page-main"]
+    page_deployer_wif_contexts = ["env-dev-page-main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_planner_context_shared_with_the_deployer" {
+  command = plan
+  variables {
+    planner_wif_contexts = ["main"]
+  }
+  expect_failures = [var.planner_wif_contexts]
+}
+
+run "rejects_main_for_the_page_deployer" {
+  command = plan
+  variables {
+    page_deployer_wif_contexts = ["main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+# With github_environments set (prod), the dev defaults must not pass silently.
+run "rejects_the_dev_deployer_default_in_prod" {
+  command = plan
+  variables {
+    github_environments        = ["prod-plan", "prod", "prod-page"]
+    planner_wif_contexts       = ["env-prod-plan-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
+  }
+  expect_failures = [var.deployer_wif_contexts]
+}
+
+run "rejects_the_dev_planner_default_in_prod" {
+  command = plan
+  variables {
+    github_environments        = ["prod-plan", "prod", "prod-page"]
+    deployer_wif_contexts      = ["env-prod-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
+  }
+  expect_failures = [var.planner_wif_contexts]
+}
+
+run "rejects_the_dev_page_deployer_default_in_prod" {
+  command = plan
+  variables {
+    github_environments   = ["prod-plan", "prod", "prod-page"]
+    deployer_wif_contexts = ["env-prod-main"]
+    planner_wif_contexts  = ["env-prod-plan-main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_context_outside_the_environments" {
+  command = plan
+  variables {
+    github_environments        = ["prod-plan", "prod", "prod-page"]
+    deployer_wif_contexts      = ["env-staging-main"]
+    planner_wif_contexts       = ["env-prod-plan-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
+  }
+  expect_failures = [var.deployer_wif_contexts]
 }

@@ -45,7 +45,7 @@ ingest_enabled = false
 
 # --- Reviewer password ----------------------------------------------------------------------------
 # prod refuses reviewer_password from tfvars: set and rotate it with
-# scripts/secrets/set-reviewer-password (README, step 5, and "Rotating the reviewer password").
+# scripts/secrets/set-reviewer-password.sh (README, step 5, and "Rotating the reviewer password").
 
 # --- Optional -------------------------------------------------------------------------------------
 # enable_iap_ssh     = true   # during the first-boot checklist only; set false again afterwards
@@ -53,3 +53,7 @@ ingest_enabled = false
 # trusted_proxy_hops = 1      # measure on the first deploy (README, step 12)
 # public_origin      = "https://pulsebridge.example.com" # a custom domain (T30); default https://<project>.web.app
 # openemr_scopes     = ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"] # first-boot trial
+
+# --- Image builds (T26; opt-in, README step 7) ------------------------------------------------------
+# create_build_service_account = true  # a build account with only the roles a build needs
+# build_trigger_repository     = "projects/your-prod-project-id/locations/us-central1/connections/github/repositories/pulsebridge" # after linking GitHub in the console

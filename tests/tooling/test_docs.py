@@ -205,8 +205,8 @@ def test_slug_rules_match_github() -> None:
     assert github_slug("3.8 The setup step: write the Patient (exactly one of the two)") == (
         "38-the-setup-step-write-the-patient-exactly-one-of-the-two"
     )
-    assert github_slug("5. Secret versions (deployer; T27's scripts)") == (
-        "5-secret-versions-deployer-t27s-scripts"
+    assert github_slug("5. Secret versions (deployer; scripts/secrets)") == (
+        "5-secret-versions-deployer-scriptssecrets"
     )
     assert github_slug("`terraform destroy`, and what it leaves behind") == (
         "terraform-destroy-and-what-it-leaves-behind"
@@ -217,13 +217,6 @@ def test_slug_rules_match_github() -> None:
 
 # Paths a doc may name although they do not exist in this checkout.
 PENDING_PATHS = {
-    # Being built by T27 (secret version scripts).
-    "scripts/secrets/": "T27",
-    "scripts/secrets/README.md": "T27",
-    "scripts/secrets/set-secret.sh": "T27",
-    "scripts/secrets/set-reviewer-password.sh": "T27",
-    # Being built by T26 (Terraform CI/CD).
-    ".github/workflows/terraform-*.yml": "T26",
     # Planned in T29 (end-to-end smoke test).
     "tests/e2e/": "T29",
 }

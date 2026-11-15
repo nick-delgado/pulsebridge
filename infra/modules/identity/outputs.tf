@@ -1,5 +1,5 @@
 output "service_account_emails" {
-  description = "Service account email per workload, keyed health-sync, v2-to-fhir, cuff-sim, fhir-proxy, edge-vm, scheduler-invoker, pubsub-push (and seeder when created). Other modules use these for resource-level bindings and as the identity their resources run as."
+  description = "Service account email per workload, keyed health-sync, v2-to-fhir, cuff-sim, fhir-proxy, edge-vm, scheduler-invoker, pubsub-push (and seeder and build when created). Other modules use these for resource-level bindings and as the identity their resources run as."
   value       = { for k, sa in google_service_account.this : k => sa.email }
 }
 
@@ -29,6 +29,6 @@ output "secret_readers" {
 }
 
 output "reviewer_password_version_created" {
-  description = "True when this module wrote a reviewer-password version from tfvars (dev). False means the secret is empty until scripts/secrets/set-reviewer-password runs, and the proxy's login answers 503."
+  description = "True when this module wrote a reviewer-password version from tfvars (dev). False means the secret is empty until scripts/secrets/set-reviewer-password.sh runs, and the proxy's login answers 503."
   value       = length(google_secret_manager_secret_version.reviewer_password) > 0
 }
