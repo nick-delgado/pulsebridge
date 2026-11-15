@@ -69,7 +69,8 @@ Every `services/<name>/Dockerfile` follows the same pattern (`v2-to-fhir`'s is t
   root and read-only to that user, so the service cannot rewrite itself.
 - **Starts with the README's gunicorn command**, in exec form (`CMD ["gunicorn", ...]`): gunicorn
   is PID 1 and gets Cloud Run's SIGTERM directly, with no shell in between. The arguments are the
-  ones in the service README's "Running" section: one worker, four threads, `--timeout 0`. There
+  ones in the service README's "Running" section: one worker, four threads, `--timeout 0`,
+  `--preload` (see "Start-up failures" below). There
   is one exception, `--bind ":${PORT:-8080}"`, which needs a shell to expand. Instead the image
   sets `PORT=8080`, and when `PORT` is set and no `--bind` is given, gunicorn binds
   `0.0.0.0:$PORT`. The result is the same: Cloud Run's `PORT` is honoured and 8080 is the default.
@@ -90,6 +91,94 @@ Every `services/<name>/Dockerfile` follows the same pattern (`v2-to-fhir`'s is t
 - **No secrets.** The image holds no keys, tokens or `.env` files. On Cloud Run, credentials are
   the service account's own (Application Default Credentials), and secrets are mounted from
   Secret Manager at run time (`health-sync`'s Google Health files).
+
+### Start-up failures: `--preload`
+
+Each service checks its configuration in its app factory (`create_app()`) and refuses to start
+with a bad one (a malformed store id, a fixed-offset time zone, an audit store equal to the
+HL7v2 store). Without `--preload`, gunicorn's master opens the listening socket first and only
+then forks the worker that calls the factory (gunicorn 26.2.0 `arbiter.py`: `Arbiter.start()`
+calls `sock.create_sockets()` before `manage_workers()`). The port is then open for a moment
+while the worker crashes, and Cloud Run's default startup probe, a TCP connect to `PORT`, can
+pass.
+
+With `--preload` (gunicorn setting `preload_app`, "Load application code before the worker
+processes are forked"), `Arbiter.setup()` calls the factory in the master, before `start()`
+creates the socket. An exception there is not caught by gunicorn: the master exits with status
+1 and the port never opens.
+
+What this guarantees: a start-up configuration error means the container exits without ever
+accepting a connection on `PORT`. The revision fails its startup probe and the deploy fails,
+instead of a broken revision taking traffic. `make images-smoke` checks this inside each
+container for each service's documented bad configuration
+(`test_bad_configuration_exits_without_ever_listening`), and checks that good configuration
+still opens the port.
+
+What it does not cover: errors that appear only on the first request (a missing IAM role, a
+store that does not exist), because the factory makes no request. Not verified until a real
+deploy: that Cloud Run marks the revision failed and keeps the previous one serving, and how
+long it waits before it does.
+
+**Fork safety.** With one worker, the objects `create_app()` builds in the master are copied
+into the worker by the fork. They are: the logging handler, the configuration, the
+`HealthcareClient` and its `AuthorizedSession` (no connection is open and no token is fetched
+until the first request), health-sync's plain `requests.Session`, its status cache and two
+`threading.Lock`s, and cuff-sim's token bucket and its lock. The locks are unlocked, because no
+thread runs in the master. No app starts a thread or opens a socket at import or in its
+factory. One exception, on Cloud Run only: finding Application Default Credentials asks the
+metadata server (`google.auth.default()`) through a session that google-auth creates and drops.
+At worst the worker inherits that idle connection, which neither process uses again. This is
+not verified on Cloud Run. The master never serves requests, so nothing is used by two
+processes.
+
+### Job images (`seed`)
+
+A **Cloud Run job** runs a command to completion and serves nothing; a **Cloud Run service**
+is an HTTP server. The seeder (`seed`) is a job: one execution per first seeding or hourly
+top-up (its README, "For T20, T22, T24 and T25"). Its image is the same pattern with three
+differences, and `tests/tooling/test_container_images.py` tells the two kinds apart by
+`JOB_IMAGES` and the README, never by the Dockerfile it is checking:
+
+- **`ENTRYPOINT ["pulsebridge-seed"]`, and no `CMD`.** The program is the console script its
+  README's "Running it" commands run (the test reads it from there, as it reads the gunicorn
+  command for a service). In Cloud Run a container's `args` replace the image's `CMD` and its
+  `command` replaces the `ENTRYPOINT` (Google provider 8.11.0, `google_cloud_run_v2_job`
+  `containers.args`: "Arguments to the entrypoint. The docker image's CMD is used if this is
+  not provided."; `command`: "The docker image's ENTRYPOINT is used if this is not
+  provided."). So **T20 sets only `args`**, for example `["--hours", "4"]`, never `command`,
+  and an execution override (Cloud Scheduler's `jobs.run` call) can replace them for one run.
+  With no `CMD`, a job created without `args` runs `pulsebridge-seed` alone and exits 2 ("one
+  of --days or --hours is required"): a mis-wired job fails visibly instead of succeeding
+  without doing anything. `ENTRYPOINT` also clears the base image's `CMD` (`python3`).
+- **No `PORT`, no `EXPOSE`, no `GUNICORN_CMD_ARGS`**, and no gunicorn in the image.
+- **Every ending logs one `seed-run` line** (JSON on stderr), which the ingestion module's
+  `seed-run-failed` alert (event `seed-run`, severity WARNING or higher) reads:
+  - bad arguments, a bad or missing variable: outcome `not-started` at WARNING, with a reason
+    naming only the flag or variable (`usage:--days|--hours`, `config:PATIENT_ID`,
+    `missing:FHIR_STORE_ID`), exit 2. The human-readable message is still printed;
+  - SIGTERM (a task timeout or a cancelled execution): PID 1 gets no default action for it,
+    so the CLI has its own handler. It raises in the main thread, so the run stops at once,
+    even inside a FHIR request or a retry's sleep. It logs outcome `terminated` at WARNING
+    with the counts so far and exits 143, inside the 10 s Cloud Run allows before SIGKILL. A
+    Bundle in flight may or may not have been applied, and it is never half applied;
+  - the run's own outcomes: `seeded` and `dry-run` at INFO; `refused` and the FHIR failures at
+    WARNING; `bug` at ERROR.
+
+  Not alerted: an execution killed without a SIGTERM first (out of memory, SIGKILL), which logs
+  nothing. Cloud Run reports that execution as failed, but this alert does not see it. **A first
+  seeding (`--days 30`) that is stopped is not resumed by the hourly top-ups**, because they
+  cover only the last 4 hours. Run it again: windows already written are skipped.
+
+The smoke test for a job (`JOB_CASES`): `--help` exits 0; `--dry-run --days 1` with
+`PATIENT_ID=SYN-SMOKE-0001` and a time zone prints the counts report and exits 0, makes no
+network call (run with `--network none`, and again under a CPython audit hook that records
+every `socket.*` operation, even a swallowed one), and leaves no file in the container
+(`docker diff` is empty); without arguments it exits 2; a non-`SYN-` `PATIENT_ID` exits 2 and
+names the variable. It also gets the checks every image gets: UID 10001, no stray files, code
+owned by root, no copy of the pip CA bundle.
+
+The image is about 219 MB uncompressed, about 53 MB gzip-compressed (`docker save | gzip`), a
+little smaller than the service images because it has no Flask or gunicorn.
 
 `cuff-sim`'s image also checks at build time that T07's HL7v2 samples (package data of
 `pulsebridge_hl7v2`) were installed. `health-sync`'s image also contains the
@@ -127,11 +216,14 @@ that no request uses, with `PORT=9123`. For each image it checks four things:
 - it listens on that port and answers its own route without calling Google:
   `POST /pubsub/hl7v2` with an empty envelope gets 400, `GET /status` reports `not-configured`,
   and `GET /cuff/samples` lists the samples;
-- it refuses to start with bad configuration and says why;
+- it refuses to start with bad configuration and says why, and the port never opens: a probe
+  inside the container connects to `PORT` every 10 ms from start to exit (a port published to
+  the host would be accepted by Docker's proxy either way);
 - it runs as UID 10001, and nothing under `/opt/venv` is owned by anyone but root or writable by
   that user;
 - gunicorn's effective settings (`gunicorn --print-config` with the image's CMD) are the
-  README's, with `bind = 0.0.0.0:8080`, `graceful_timeout = 8` and the control socket off;
+  README's, with `bind = 0.0.0.0:8080`, `graceful_timeout = 8`, the control socket off and
+  `preload_app = True`;
 - it holds no stray files (`.git`, tests, key and certificate files, pip);
 - with `make images-smoke IMAGE_PIP_CERT=<the same file>`, no file in the image has that CA
   bundle's SHA-256, which proves the build secret was not copied into a layer.
@@ -159,12 +251,14 @@ every `services/*/Dockerfile` it finds, in phases:
 ----- BEGIN tfvars (v0.1.0, 0123456789abcdef0123456789abcdef01234567) -----
 cuff_sim_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/cuff-sim@sha256:<64 hex>"
 health_sync_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/health-sync@sha256:<64 hex>"
+seed_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/seed@sha256:<64 hex>"
 v2_to_fhir_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
 ----- END tfvars -----
 ```
 
 Each variable name is the service directory with `-` turned into `_`, plus `_image`. The value
-is the image by digest, without a tag. T20 (`v2_to_fhir_image`, `health_sync_image`), T22
+is the image by digest, without a tag. T20 (`v2_to_fhir_image`, `health_sync_image`, and
+`seed_image` for the seeder's Cloud Run job, created only with `use_synthetic_data`), T22
 (`cuff_sim_image`, later `fhir_proxy_image`) and T25 should use these names, so the block can be
 pasted unchanged. The block is printed only by a build that succeeded, and then it lists
 every service, each digest read back from the registry. A failed build prints no block. It may
@@ -253,12 +347,12 @@ account.
 ### Cost
 
 Nothing here is always on. A build runs only when a tag is pushed (or you start one by hand) and
-is billed per build-minute. One build of the three images takes a few minutes on the default
+is billed per build-minute. One build of the four images takes a few minutes on the default
 `e2-standard-2` worker. That is inside Cloud Build's monthly free allowance (2,500 build-minutes
 at the time of writing), and about $0.006 per minute beyond it. These are not confirmed
 against the current pricing page.
 
-Storage is Artifact Registry's: each image is about 55 to 58 MB compressed. The three share the
+Storage is Artifact Registry's: each image is about 53 to 58 MB compressed. The four share the
 base layers, so a release adds about 100 MB, and the first 0.5 GB is free. Each release keeps
 its images, because tags are immutable and nothing deletes them. A cleanup policy on the
 repository (keep the last few releases) belongs in `project-base`. It is a suggested follow-up,
@@ -280,14 +374,15 @@ Bump the builder image in `cloudbuild.yaml` the same way. Use
 `docker buildx imagetools inspect gcr.io/cloud-builders/docker:<major>` and keep the major
 version tag in front of the digest.
 
-### Adding an image (T09 `seed`, T14 `fhir-proxy`)
+### Adding an image (T14 `fhir-proxy`; `seed` was added by T35)
 
 1. Copy `services/v2-to-fhir/Dockerfile` to `services/<name>/Dockerfile`. The directory name
    must be lower-case words joined by `-` (the build checks it).
 2. Change the `COPY libs/...` lines and the first `pip install` line to the local libraries your
    `pyproject.toml` declares, and `services/v2-to-fhir` to `services/<name>`.
 3. Set `CMD` to your README's command in exec form. For a gunicorn service, use the README's
-   arguments without `--bind ":${PORT:-8080}"`; the image's `PORT` covers that.
+   arguments without `--bind ":${PORT:-8080}"`; the image's `PORT` covers that. For a Cloud
+   Run job, follow "Job images" instead (`seed`'s Dockerfile) and add it to `JOB_IMAGES`.
 4. Delete the service from `NO_IMAGE_YET` in `tests/tooling/test_container_images.py`, or leave
    it (the Dockerfile is checked either way). Add a case to `tests/tooling/test_image_smoke.py`
    for its route and its bad-configuration error.
@@ -303,11 +398,7 @@ installed after the service, or if the CMD differs from the README. Expected res
   and `libs/pulsebridge_gcp`, but its `pyproject.toml` decides. The CMD is its README's gunicorn
   command. If the login rate limit is kept per process, as `cuff-sim`'s is, that means one
   worker.
-- **`seed` (T09)**: needs an image only if it runs on Cloud Run, as a job, for example with
-  `use_synthetic_data`. If it does, give it the same Dockerfile, with
-  `CMD ["<its console script>", ...]` instead of gunicorn, and no `PORT` (a job serves nothing).
-  `test_starts_with_the_readme_gunicorn_command` assumes a web service, so T09 would extend that
-  test for jobs. If `seed` is only run from a laptop, leave it on `NO_IMAGE_YET` with that reason.
+- **`seed`**: built by T35 as a job image; see "Job images".
 
 ### Not verified against Google Cloud
 

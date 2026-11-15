@@ -252,11 +252,16 @@ character set or with the wrong `SYN-` prefix, a malformed or fixed-offset time 
 without a digest. **Not** caught at plan time: a well-shaped but unknown time zone
 (`America/Newyork`, `Mars/Olympus`), because a validation cannot carry the tz database.
 
-**At run time** both services check their configuration in `create_app()` and raise. That alone
-does not fail a deploy: gunicorn's master process opens port 8080 *before* its worker builds the
-app, so Cloud Run's default TCP startup probe ("If you don't explicitly configure a TCP startup
-probe […] Cloud Run automatically configures a TCP startup probe", Cloud Run "Configure
-container health checks") can pass while the worker crashes. What each service does about it:
+**At run time** both services check their configuration in `create_app()` and raise. The
+images start gunicorn with `--preload` (services/README.md, "Start-up failures"), so
+`create_app()` runs in gunicorn's master *before* it opens port 8080. A start-up configuration
+error therefore means the container exits (status 1) without ever listening. Cloud Run's
+default TCP startup probe ("If you don't explicitly configure a TCP startup probe […] Cloud Run
+automatically configures a TCP startup probe", Cloud Run "Configure container health checks")
+then fails, and the revision does not become Ready. The image smoke tests check, inside each
+container, that the port never opens with the documented bad configuration. Without
+`--preload`, the port opened about 0.1 to 0.2 s before the worker crashed, and the TCP probe
+could pass. What each service adds:
 
 - **health-sync** has an **HTTP startup probe on `GET /status`**. `/status` answers 200 in every
   state once the app exists, and nothing at all if `create_app()` failed. Cloud Run: "Any 2XX or
@@ -270,17 +275,30 @@ container health checks") can pass while the worker crashes. What each service d
   first success, so that is once per instance start. An unknown `TIME_ZONE` therefore ends in
   a revision that never becomes Ready. It does *not* fail on missing secret files: health-sync
   starts and reports `not-configured`, by design, so it can deploy before the connect step.
-- **v2-to-fhir** still relies on the default TCP probe: its only route is `POST /pubsub/hl7v2`,
-  and a probe's `GET` there answers 405, which counts as failure. A cheap `GET` route (for
-  example `/healthz`) has been asked for in the service; until then, a v2-to-fhir whose
-  `create_app()` fails can pass the deploy. Its pushes then get no answer, are retried, and are
-  dead-lettered after about 40 minutes (see "Dead-lettered and pending"). The image-side fix
-  (gunicorn `--preload`, so the master builds the app before opening the port) belongs to the
-  container task. All of v2-to-fhir's environment is validated at plan time, so this path should
-  not be reachable with values that passed the variables.
-- **Seeder**: a job has no startup probe; a configuration error makes the execution exit with
-  code 2 and log `seed-run` at WARNING, which the `seed-run-failed` alert reports.
+  The probe is kept although `--preload` already stops a bad configuration from listening.
+  It proves more than an open port: the app answers HTTP on its own route. It also still
+  protects a deploy of an image built without `--preload`. Its cost is one Google token
+  request per instance start.
+- **v2-to-fhir** relies on the default TCP probe. With `--preload` that is enough for a
+  start-up configuration error: a failing `create_app()` never opens the port, so the revision
+  fails its startup probe and the deploy fails. It has no GET route for an HTTP probe (its only
+  route is `POST /pubsub/hl7v2`, where a probe's `GET` answers 405). All of v2-to-fhir's
+  environment is validated at plan time anyway.
+- **Seeder**: a job has no startup probe. Every execution logs one `seed-run` line on stderr
+  (services/README.md, "Job images"), and the `seed-run-failed` alert (event `seed-run`,
+  severity WARNING or higher) reports each one that did not succeed:
+  - a configuration or argument error exits 2 and logs `seed-run` with outcome `not-started`
+    at WARNING, with a reason naming the variable or flag only;
+  - a task timeout or a cancelled execution sends SIGTERM. The seeder logs outcome
+    `terminated` at WARNING with its counts and exits 143, before Cloud Run's SIGKILL;
+  - FHIR failures and `refused` log at WARNING, a `bug` at ERROR.
 
+  Not seen by the alert: an execution killed without a SIGTERM first (out of memory, SIGKILL),
+  which logs nothing. A first seeding (`--days 30`) that is stopped is not resumed by the
+  hourly top-ups; run it again.
+
+Not verified until a real deploy: that a container which exits before listening makes the
+revision fail and Cloud Run keep the previous revision serving, and how long that takes.
 Whether a revision that never becomes Ready makes `terraform apply` fail (the provider waits for
 the service's Ready condition) is not verified.
 

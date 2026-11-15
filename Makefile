@@ -18,7 +18,11 @@ TEST_PATHS ?=
 TF_ROOT ?= infra
 
 # Every library and service with its own pyproject.toml is installed editable into the venv.
-PACKAGE_PYPROJECTS := $(wildcard libs/*/pyproject.toml services/*/pyproject.toml)
+# Installed in this order: the libraries first, sorted, then the services. Local packages are
+# declared by name only and are not on PyPI, so each must already be installed when something
+# that depends on it is: pulsebridge_gcp depends on pulsebridge_fhir, and "fhir" sorts before
+# "gcp". $(sort) makes the order explicit; GNU make 3.82 to 4.2 return wildcard results unsorted.
+PACKAGE_PYPROJECTS := $(sort $(wildcard libs/*/pyproject.toml)) $(sort $(wildcard services/*/pyproject.toml))
 
 .PHONY: help install hooks lint fmt test tf-validate tf-test secret-scan pre-commit check clean
 

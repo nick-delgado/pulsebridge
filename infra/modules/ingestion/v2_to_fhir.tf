@@ -63,11 +63,10 @@ resource "google_cloud_run_v2_service" "v2_to_fhir" {
       # services/v2-to-fhir/README.md, "Configuration". create_app() builds the store resource
       # names from these at start-up and raises on an id that cannot form one. The variables'
       # validation refuses such ids at plan time, so that path should not be reached. If it
-      # were, the deploy would NOT reliably fail: gunicorn's master opens port 8080 before its
-      # worker builds the app, so Cloud Run's default TCP startup probe can pass while the
-      # worker crashes, and pushes then fail (and are retried, then dead-lettered). An HTTP
-      # startup probe would close that gap, but this service has no GET route to probe (its
-      # only route is POST /pubsub/hl7v2); see the README, "What a bad configuration does".
+      # were, the image's gunicorn --preload runs create_app() before port 8080 opens: the
+      # container exits without listening, Cloud Run's default TCP startup probe fails and the
+      # revision does not become Ready (README, "What a bad configuration does"; the revision
+      # failing a real deploy is not verified). There is no GET route for an HTTP probe.
       dynamic "env" {
         for_each = merge(
           local.healthcare_env,

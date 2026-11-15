@@ -223,3 +223,100 @@ def test_a_failure_before_the_run_is_still_reported(env, capsys, monkeypatch):
     assert main(["--hours", "1"]) == EXIT_FAILED
     report = json.loads(capsys.readouterr().out)
     assert (report["outcome"], report["reason"]) == ("bug", "RuntimeError")
+
+
+# ---- every ending logs one seed-run line (the job's alert, T35) --------------------------------
+
+
+def seed_runs(caplog) -> list[dict]:
+    return [
+        {"level": r.levelname, **r.fields}
+        for r in caplog.records
+        if getattr(r, "fields", {}).get("event") == "seed-run"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("argv", "reason"),
+    [
+        ([], "usage:--days|--hours"),
+        (["--hours", "x"], "usage:--hours"),
+        (["--days", "1", "--hours", "2"], "usage:--days|--hours"),
+        (["--days", "1", "--colour", "SYN-SECRET"], "usage:unrecognized-arguments"),
+    ],
+)
+def test_bad_arguments_log_a_not_started_seed_run(env, caplog, capsys, argv, reason):
+    caplog.set_level(logging.INFO)
+    with pytest.raises(SystemExit) as caught:
+        main(argv, deps=deps_for(StoreFake()))
+    assert caught.value.code == EXIT_USAGE
+    runs = seed_runs(caplog)
+    assert [(r["level"], r["outcome"], r["reason"]) for r in runs] == [
+        ("WARNING", "not-started", reason)
+    ]
+    assert "SYN-SECRET" not in caplog.text
+    assert "usage: pulsebridge-seed" in capsys.readouterr().err  # the human message stays
+
+
+def test_a_bad_patient_id_logs_a_not_started_seed_run_naming_the_variable(env, caplog, capsys):
+    caplog.set_level(logging.INFO)
+    env.setenv("PATIENT_ID", "REAL-PERSON-7")
+    assert main(["--days", "1", "--dry-run"]) == EXIT_USAGE
+    runs = seed_runs(caplog)
+    assert [(r["level"], r["outcome"], r["reason"]) for r in runs] == [
+        ("WARNING", "not-started", "config:PATIENT_ID")
+    ]
+    output = capsys.readouterr()
+    assert "PATIENT_ID must start with SYN-" in output.err
+    assert "REAL-PERSON-7" not in output.err + output.out + caplog.text
+
+
+def test_missing_variables_log_a_not_started_seed_run(env, caplog, capsys):
+    caplog.set_level(logging.INFO)
+    env.delenv("GCP_PROJECT_ID")
+    env.delenv("FHIR_STORE_ID")
+    assert main(["--days", "1"]) == EXIT_USAGE
+    (run_line,) = seed_runs(caplog)
+    assert (run_line["outcome"], run_line["reason"]) == (
+        "not-started",
+        "missing:GCP_PROJECT_ID,FHIR_STORE_ID",
+    )
+
+
+def test_sigterm_during_a_write_logs_terminated_with_the_counts_and_exits_143(env, caplog, capsys):
+    """SIGTERM arrives while the second data Bundle is being sent: the run stops at once, the
+    first Bundle stays written, the second is never applied (no half Bundle), and the seed-run
+    line says terminated with the counts so far."""
+    import os
+    import signal
+
+    from pulsebridge_seed.cli import EXIT_TERMINATED
+
+    caplog.set_level(logging.INFO)
+    env.setenv("BATCH_WINDOWS", "10")
+    store = StoreFake()
+    sent = []
+    original = store.request
+
+    def request(method, url, **kwargs):
+        if method == "POST":
+            sent.append(url)
+            if len(sent) == 3:  # setup Bundle, first data Bundle, then the second
+                os.kill(os.getpid(), signal.SIGTERM)
+        return original(method, url, **kwargs)
+
+    store.request = request
+    before = signal.getsignal(signal.SIGTERM)
+    code = main(["--hours", "1", "--until", "2026-03-10T05:00:00Z"], deps=deps_for(store))
+    assert code == EXIT_TERMINATED == 143
+    (run_line,) = seed_runs(caplog)
+    assert (run_line["level"], run_line["outcome"], run_line["reason"]) == (
+        "WARNING",
+        "terminated",
+        "sigterm",
+    )
+    assert (run_line["setup_written"], run_line["bundles_written"]) == (True, 1)
+    assert len(store.bundles()) == 2  # setup and the first data Bundle, each applied whole
+    assert len(store.observations) == 10
+    assert json.loads(capsys.readouterr().out)["outcome"] == "terminated"
+    assert signal.getsignal(signal.SIGTERM) is before  # the handler is the CLI's only
