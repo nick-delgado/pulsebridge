@@ -167,3 +167,16 @@ web-build: web-install ## Dashboard: production build plus the bundle check
 	cd $(WEB_DIR) && $(NPM) run build
 
 web-check: web-lint web-test web-build web-browser-test ## Every dashboard check (needs Chromium for web-browser-test)
+
+# ---- FHIR Validator (T08) -----------------------------------------------------------------------
+# Runs the official HL7 FHIR Validator (pinned, checksum-verified) over libs/pulsebridge_fhir/examples/
+# as FHIR R4, with codes checked by the public terminology server tx.fhir.org. Deliberately NOT part
+# of `check`: it needs Java 17+ and the network (GitHub, packages.fhir.org, tx.fhir.org). CI runs it
+# in its own workflow, .github/workflows/fhir-validate.yml. Pass options through FHIR_VALIDATE_ARGS,
+# for example `make fhir-validate FHIR_VALIDATE_ARGS=--offline` (structure only, codes NOT checked).
+FHIR_VALIDATE_ARGS ?=
+
+.PHONY: fhir-validate
+
+fhir-validate: ## FHIR Validator over the examples (needs Java 17+ and network; not in `check`)
+	scripts/fhir-validate.sh $(FHIR_VALIDATE_ARGS)
