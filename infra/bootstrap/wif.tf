@@ -26,6 +26,11 @@ locals {
     # Optional: only these git refs. Values are validated to contain no quotes or backslashes,
     # so they cannot break out of the CEL string literal (no expression injection).
     length(var.github_allowed_refs) == 0 ? "" : "assertion.ref in [${join(", ", [for r in var.github_allowed_refs : "\"${r}\""])}]",
+    # Optional (T26): only jobs that reference one of these GitHub Environments. GitHub puts the
+    # `environment` claim in the token only for such a job, and only after the environment's
+    # protection rules (required reviewers, allowed branches) have passed. A token without the
+    # claim makes the expression fail, and a condition that is not true rejects the token.
+    length(var.github_environments) == 0 ? "" : "assertion.environment in [${join(", ", [for e in var.github_environments : "\"${e}\""])}]",
   ]))
 }
 
@@ -50,14 +55,18 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   # "repo:owner/name:ref:refs/heads/main". Google limits google.subject to 127 bytes; a long
   # owner, repository or branch name can exceed that and the exchange then fails (README.md).
   # attribute.repository_id is what the IAM binding in this file matches on.
-  attribute_mapping = {
+  attribute_mapping = merge({
     "google.subject"                = "assertion.sub"
     "attribute.repository"          = "assertion.repository"
     "attribute.repository_id"       = "assertion.repository_id"
     "attribute.repository_owner"    = "assertion.repository_owner"
     "attribute.repository_owner_id" = "assertion.repository_owner_id"
     "attribute.ref"                 = "assertion.ref"
-  }
+    }, length(var.github_environments) == 0 ? {} : {
+    # Google: "You must have an attribute mapping for all attribute condition fields." Mapped only
+    # when the condition uses it, so tokens of jobs without an environment are unaffected.
+    "attribute.environment" = "assertion.environment"
+  })
 
   attribute_condition = local.github_attribute_condition
 

@@ -134,7 +134,7 @@ in a Firebase project.
 
 The deployer must later create the whole stack: APIs, VPC and firewall, an e2-micro, Artifact
 Registry, service accounts and their IAM bindings, Secret Manager secrets, Healthcare dataset and
-stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, and the Firebase Hosting site. The default `deployer_roles` is one
+stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, the Firebase Hosting site and, optionally, the image build trigger. The default `deployer_roles` is one
 predefined admin role per product the stack uses, rather than `roles/owner` or `roles/editor`
 (which the variable's validation rejects):
 
@@ -157,6 +157,7 @@ predefined admin role per product the stack uses, rather than `roles/owner` or `
 | `roles/monitoring.alertPolicyEditor` | alert policies on those metrics (only with an alert address or channel) |
 | `roles/monitoring.notificationChannelEditor` | the optional email notification channel (module ingestion's `alert_email`) |
 | `roles/firebasehosting.admin` | module phr's Firebase Hosting site, and deploying the page to it (T26) |
+| `roles/cloudbuild.builds.editor` | project-base's opt-in Cloud Build trigger on release tags (T26): creating, changing and deleting a trigger needs `cloudbuild.builds.create`. Not used while no env root sets `build_trigger_repository` |
 
 The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only Cloud
 Storage access (the stack creates no bucket), so it can always read and write state.
@@ -229,16 +230,26 @@ the repository can therefore get deployer tokens, including a `pull_request_targ
 which runs with the repository's permissions on events from forks. A "manual approval before
 prod" that exists only in workflow YAML can be bypassed by a workflow that skips it.
 
-Options for the CI/CD task (T26):
+What this root offers, and what T26's workflows use:
 
-- Separate identities for plan and apply: a read-only planner that any pull request may use, and
-  an applier whose condition also requires `assertion.ref == "refs/heads/main"` or
-  `assertion.environment == "prod"` (a GitHub environment with required reviewers, which GitHub
-  enforces before the job gets a token).
-- In this root, `github_allowed_refs` (optional) adds `assertion.ref in [...]` to the condition.
-  Values are validated to contain only letters, digits, `.`, `_`, `/` and `-`, so they cannot
-  inject CEL. Pull-request workflows run on `refs/pull/<n>/merge`, so setting it also blocks
-  plan-on-PR with this one identity; that is why separate identities are the better fix.
+- `github_environments` (optional, T26) adds `assertion.environment in [...]` to the condition.
+  GitHub puts the `environment` claim into a job's OIDC token only when the job references a
+  **GitHub Environment**, and only after that environment's protection rules (required reviewers,
+  allowed branches) have passed. A token without the claim fails the condition. So with
+  `github_environments = ["prod-plan", "prod"]` the prod deployer is reachable only from jobs that
+  GitHub itself has gated, whatever a workflow file says. T26 uses this for **prod**
+  (infra/envs/README.md, "CI/CD"). The condition field is also mapped (`attribute.environment`),
+  because Google requires a mapping for every condition field; the mapping exists only when the
+  option is set.
+- `github_allowed_refs` (optional) adds `assertion.ref in [...]` to the condition. Pull-request
+  workflows run on `refs/pull/<n>/merge`, so setting it also blocks plan-on-PR.
+- Values of both are validated to contain no quotes or backslashes, so they cannot inject CEL.
+- **dev** keeps the default (no environment, no ref): pull-request plans, applies on merge and the
+  nightly destroy all use the dev deployer, so anyone who can push a branch to the repository can
+  run a workflow with dev deployer rights. That is accepted for dev, which holds synthetic data
+  only. A separate read-only planner identity for pull requests (bound by a second
+  `principalSet` on the same pool) would narrow it; it is not built (infra/envs/README.md,
+  "Decisions you could change").
 
 ### Limits and lifecycle
 
@@ -346,9 +357,10 @@ No modules.
 | <a name="input_billing_account"></a> [billing\_account](#input\_billing\_account) | Billing account ID (format XXXXXX-XXXXXX-XXXXXX) to link to a newly created project. Required when create\_project = true; must be unset when adopting, because bootstrap does not change an existing project's billing. | `string` | `null` | no |
 | <a name="input_create_project"></a> [create\_project](#input\_create\_project) | true: create a new GCP project with var.project\_id and link var.billing\_account to it. false: adopt an existing project with var.project\_id and create nothing at project level. No default, so the choice is always explicit. | `bool` | n/a | yes |
 | <a name="input_deployer_account_id"></a> [deployer\_account\_id](#input\_deployer\_account\_id) | account\_id (the part before @) of the deployer service account that env roots and CI run as. 6-30 characters. | `string` | `"terraform-deployer"` | no |
-| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin"<br/>]</pre> | no |
+| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin",<br/>  "roles/cloudbuild.builds.editor"<br/>]</pre> | no |
 | <a name="input_folder_id"></a> [folder\_id](#input\_folder\_id) | Optional numeric folder ID to create the new project under. Leave unset for a personal account. Mutually exclusive with org\_id; only used when create\_project = true. | `string` | `null` | no |
 | <a name="input_github_allowed_refs"></a> [github\_allowed\_refs](#input\_github\_allowed\_refs) | Optional list of git refs (for example ["refs/heads/main"]) allowed to obtain deployer tokens. Empty (the default) allows every branch, tag and pull-request ref in the repository; see README.md ("What the condition does not restrict"). Note that pull-request workflows run on refs/pull/N/merge, so restricting refs also blocks plan-on-PR with this identity. | `list(string)` | `[]` | no |
+| <a name="input_github_environments"></a> [github\_environments](#input\_github\_environments) | Optional list of GitHub Environment names whose jobs alone may obtain deployer tokens (adds `assertion.environment in [...]`; GitHub applies the environment's protection rules before such a job starts). Use it for the prod project. | `list(string)` | `[]` | no |
 | <a name="input_github_repository"></a> [github\_repository](#input\_github\_repository) | The ONE GitHub repository, as "owner/name", whose Actions workflows may impersonate the deployer service account. Matched exactly (case-sensitive) against the `repository` claim of GitHub's OIDC token. | `string` | n/a | yes |
 | <a name="input_github_repository_id"></a> [github\_repository\_id](#input\_github\_repository\_id) | Numeric ID of the same GitHub repository: the `id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .id`. Required. Names can be reused after a repository is deleted or renamed, or its owner account is renamed; the numeric ID never is. Both the attribute condition and the impersonation binding match on it. | `string` | n/a | yes |
 | <a name="input_github_repository_owner_id"></a> [github\_repository\_owner\_id](#input\_github\_repository\_owner\_id) | Optional numeric ID of the repository's owner (user or organization): the `owner.id` field of https://api.github.com/repos/OWNER/NAME, or `gh api repos/OWNER/NAME --jq .owner.id`. When set, the attribute condition also requires `assertion.repository_owner_id` to match. | `string` | `null` | no |

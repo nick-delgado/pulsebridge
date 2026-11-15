@@ -155,6 +155,14 @@ run "rejects_ref_that_could_inject_cel" {
   expect_failures = [var.github_allowed_refs]
 }
 
+run "rejects_cel_injection_in_github_environments" {
+  command = plan
+  variables {
+    github_environments = ["prod\" || true || \""]
+  }
+  expect_failures = [var.github_environments]
+}
+
 run "rejects_ref_outside_heads_and_tags" {
   command = plan
   variables {

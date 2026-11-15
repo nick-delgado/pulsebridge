@@ -227,6 +227,9 @@ variable "deployer_roles" {
     # Firebase to the project needs more (firebase.projects.update): bootstrap does that once
     # with the owner's credentials (add_firebase), so the deployer never needs roles/firebase.admin.
     "roles/firebasehosting.admin",
+    # T26: create, update and delete project-base's Cloud Build trigger (triggers.create needs
+    # cloudbuild.builds.create). Used only when build_trigger_repository is set in an env root.
+    "roles/cloudbuild.builds.editor",
   ]
 
   validation {
@@ -303,6 +306,19 @@ variable "github_allowed_refs" {
     # characters exclude quotes and backslashes: a value cannot close the literal and inject CEL.
     condition     = alltrue([for r in var.github_allowed_refs : can(regex("^refs/(heads|tags)/[A-Za-z0-9._/-]{1,200}$", r))])
     error_message = "Each entry of github_allowed_refs must look like refs/heads/<branch> or refs/tags/<tag>, using only letters, digits, '.', '_', '/' and '-'."
+  }
+}
+
+variable "github_environments" {
+  description = "Optional list of GitHub Environment names (for example [\"prod-plan\", \"prod\"]) whose jobs alone may obtain deployer tokens. Empty (the default) adds nothing. When set, the attribute condition also requires `assertion.environment in [...]`: only a job that references one of these environments gets a token, and GitHub applies the environment's protection rules (required reviewers, allowed branches) BEFORE such a job starts, so the gate is enforced by GitHub rather than by workflow YAML. Use it for the prod project (infra/envs/README.md, \"CI/CD\"). Pull-request plans reference no environment, so a project with this set cannot be planned from pull requests."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    # Pasted into a CEL string literal, like github_allowed_refs: no quotes or backslashes.
+    condition     = alltrue([for e in var.github_environments : can(regex("^[A-Za-z0-9._-]{1,255}$", e))])
+    error_message = "Each entry of github_environments must be an environment name of letters, digits, '.', '_' and '-'."
   }
 }
 

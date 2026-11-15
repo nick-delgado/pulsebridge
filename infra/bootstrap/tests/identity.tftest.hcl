@@ -70,6 +70,34 @@ run "wif_condition_adds_owner_id_and_refs_when_given" {
   }
 }
 
+# T26: the prod project's pool admits only jobs that reference a protected GitHub Environment.
+run "wif_condition_requires_the_github_environment_when_given" {
+  command = plan
+
+  variables {
+    github_environments = ["prod-plan", "prod"]
+  }
+
+  assert {
+    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\" && assertion.environment in [\"prod-plan\", \"prod\"]"
+    error_message = "github_environments must add `assertion.environment in [...]` to the condition, and nothing else."
+  }
+
+  assert {
+    condition     = google_iam_workload_identity_pool_provider.github.attribute_mapping["attribute.environment"] == "assertion.environment"
+    error_message = "A condition field must be mapped: attribute.environment from assertion.environment."
+  }
+}
+
+run "no_environment_clause_or_mapping_by_default" {
+  command = plan
+
+  assert {
+    condition     = !strcontains(google_iam_workload_identity_pool_provider.github.attribute_condition, "environment") && !contains(keys(google_iam_workload_identity_pool_provider.github.attribute_mapping), "attribute.environment")
+    error_message = "Without github_environments the condition and mapping must not mention the environment (pull-request plans have none)."
+  }
+}
+
 run "deployer_gets_exactly_the_configured_roles" {
   command = plan
 
@@ -107,6 +135,14 @@ run "default_deployer_roles_are_not_basic_roles" {
     # bucket, so no project-wide storage role (state access is the bucket-scoped grant).
     condition     = contains(keys(google_project_iam_member.deployer), "roles/firebasehosting.admin") && !contains(keys(google_project_iam_member.deployer), "roles/storage.admin")
     error_message = "The default deployer roles must include roles/firebasehosting.admin and not roles/storage.admin."
+  }
+  assert {
+    # T26: project-base's build trigger (triggers.create needs cloudbuild.builds.create). Only the
+    # editor role: no Cloud Build connection admin, no builder role.
+    condition = contains(keys(google_project_iam_member.deployer), "roles/cloudbuild.builds.editor") && length(setintersection(toset(keys(google_project_iam_member.deployer)), toset([
+      "roles/cloudbuild.connectionAdmin", "roles/cloudbuild.builds.builder", "roles/cloudbuild.integrationsOwner",
+    ]))) == 0
+    error_message = "The default deployer roles must include roles/cloudbuild.builds.editor and no broader Cloud Build role."
   }
   assert {
     # Adding Firebase is bootstrap's job (add_firebase), so the deployer gets no broad Firebase role.
