@@ -22,6 +22,7 @@ Where each FHIR element comes from::
     MSH-4   sending facility              Device.deviceName, and part of the idempotency key
     MSH-10  message control ID            Observation.identifier (a UUIDv5 over the key) ->
                                           conditional update, so a redelivery rewrites it
+    OBR-4   universal service identifier  must be the LOINC panel 85354-9; one OBR per message
     PID-3.1 patient ID                    Patient.identifier (must be the configured patient)
     PID-5   patient name (family^given)   Patient.name, only if the Patient does not exist
     OBX-3   observation identifier        8480-6 -> component[systolic].code,
@@ -30,16 +31,20 @@ Where each FHIR element comes from::
     OBX-2   value type (NM)               must be numeric
     OBX-5   observation value             component.valueQuantity.value
     OBX-6   units (UCUM mm[Hg])           component.valueQuantity.code / system
-    OBX-11  result status (F, C, P)       Observation.status (final, corrected, preliminary)
+    OBX-11  result status (F, P)          Observation.status (final, preliminary)
     OBX-14  date/time of the observation  Observation.effectiveDateTime, with its own offset
     (store) message resource name         Provenance.entity[source].what.identifier
 
-OBR (the order) is not mapped: for one cuff reading it repeats what MSH and OBX say. OBR-7 is
-deliberately not a fallback for an empty OBX-14 (see :func:`_read_observation_time`).
+OBR (the order) is checked but adds no FHIR element: for one cuff reading the panel code it
+names is the one Observation.code carries anyway. OBR-7 is deliberately not a fallback for an
+empty OBX-14 (see :func:`_read_observation_time`).
+
+The HL7 explicit null ``""`` ("this field is known to be empty") is read as empty everywhere.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import traceback
@@ -58,7 +63,7 @@ from pulsebridge_fhir import (
     SourceInfo,
     blood_pressure_transaction,
 )
-from pulsebridge_fhir.codes import BP_DIASTOLIC, BP_SYSTOLIC, UCUM_MM_HG
+from pulsebridge_fhir.codes import BP_DIASTOLIC, BP_PANEL, BP_SYSTOLIC, UCUM_MM_HG
 from pulsebridge_fhir.inputs import DIASTOLIC_RANGE, SYSTOLIC_RANGE
 from pulsebridge_hl7v2 import HL7ParseError, decode_escapes, parse_er7
 from pulsebridge_hl7v2.validation import NM_PATTERN
@@ -78,10 +83,19 @@ SYSTOLIC = BP_SYSTOLIC["code"]  # LOINC 8480-6 Systolic blood pressure
 DIASTOLIC = BP_DIASTOLIC["code"]  # LOINC 8462-4 Diastolic blood pressure
 # OBX-6.3 "UCUM": the units are coded in the Unified Code for Units of Measure.
 UCUM_CODING_SYSTEM = "UCUM"
+# OBR-4 universal service identifier: the blood-pressure panel, LOINC 85354-9.
+PANEL = BP_PANEL["code"]
 # OBX-11 result status (HL7 table 0085) -> FHIR Observation.status (R4 observation-status).
-# Modelled on the HL7 v2-to-FHIR implementation guide's mapping; only the statuses a cuff can
-# meaningfully send are accepted.
-RESULT_STATUS = {"F": "final", "C": "corrected", "P": "preliminary"}
+# Only F (final) and P (preliminary) are accepted. C (corrected), D (delete) and W (wrong) refer
+# to an earlier result: a correction arrives as a new message with a new MSH-10, so mapping it
+# here would write a second Observation and leave the original untouched. Handling them would
+# mean finding the original Observation first; that is out of scope.
+RESULT_STATUS = {"F": "final", "P": "preliminary"}
+# MSH-10 is at most 199 characters (its length from HL7 v2.7 on; 2.5.1 says 20, which senders
+# often exceed). Anything longer is refused rather than hashed into a key.
+MAX_CONTROL_ID = 199
+# The HL7 explicit null: a field containing exactly two double quotes means "known to be empty".
+HL7_NULL = '""'
 # OBX-14 is a DTM: YYYYMMDDHHMM[SS[.S[S[S[S]]]]][+/-ZZZZ]. We need at least the minute, and ASCII
 # digits only (Python's strptime would also take digits from other scripts).
 OBX14_PATTERN = re.compile(
@@ -148,6 +162,7 @@ def map_message(
         if not observations:
             raise _Rejected(Reason.NO_OBSERVATIONS)
         patient = _read_patient(message, config)
+        observations = _read_order(message, observations)
         reading = _read_reading(observations, header)
         bundle = _build_bundle(header, patient, reading, message_name, recorded)
     except _Rejected as rejected:
@@ -194,7 +209,8 @@ def _parse(raw: bytes) -> Message:
 
 # Small readers over hl7apy's tree. They only look things up by HL7 name (``obx_5``,
 # ``obx_3_1``); hl7apy did the splitting. Values come back as ER7 text with escape sequences
-# still in place (hl7apy does not decode them), trimmed of surrounding spaces.
+# still in place (hl7apy does not decode them), trimmed of surrounding spaces, and with the HL7
+# null ``""`` turned into an empty string.
 
 
 def _segments(node: object, name: str) -> list:
@@ -209,13 +225,31 @@ def _segments(node: object, name: str) -> list:
     return found
 
 
+def _groups(node: object, name: str) -> list:
+    """Every group hl7apy built with this name (e.g. ``ORU_R01_ORDER_OBSERVATION``)."""
+    found = []
+    for child in node.children:  # type: ignore[attr-defined]
+        if child.classname == "Group":
+            if child.name == name:
+                found.append(child)
+            found.extend(_groups(child, name))
+    return found
+
+
 def _repetitions(segment: object, field: str) -> list:
-    """The repetitions of a field (HL7 ``~``), empty when the field is empty."""
-    return [rep for rep in getattr(segment, field) if rep.to_er7().strip()]
+    """The repetitions of a field (HL7 ``~``), empty when the field is empty or null."""
+    return [rep for rep in getattr(segment, field) if _text(rep)]
 
 
 def _text(element: object) -> str:
-    return element.to_er7().strip()  # type: ignore[attr-defined]
+    value = element.to_er7().strip()  # type: ignore[attr-defined]
+    return "" if value == HL7_NULL else value
+
+
+def _has_control_characters(text: str) -> bool:
+    # C0 controls (NUL to US) and DEL. FHIR strings may not contain them, so the store would
+    # reject the Bundle later with a less precise error.
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in text)
 
 
 def _component(segment: object, field: str, number: int) -> str:
@@ -231,9 +265,13 @@ def _component(segment: object, field: str, number: int) -> str:
 
 @dataclass(frozen=True)
 class _Header:
+    # As written in the message (escape sequences not decoded): what the key is built from.
     sending_application: str  # MSH-3.1 (HD.1 namespace ID)
     sending_facility: str  # MSH-4.1, may be empty
     control_id: str  # MSH-10
+    # The same two names with escape sequences decoded (\F\ becomes |): what people read.
+    application_display: str
+    facility_display: str
 
     @property
     def source_key(self) -> str:
@@ -242,17 +280,22 @@ class _Header:
         HL7 makes MSH-10 unique per sending system (MSH-3 at MSH-4), so the key is all three.
         The cuff simulator keeps the control ID when it resends a reading (T07), so a resend,
         or Pub/Sub delivering the same notification twice, gives the same key, the same
-        Observation identifier and so a rewrite instead of a second Observation. ``|`` joins
-        them because it is the ER7 field separator and cannot occur inside a field value.
+        Observation identifier and so a rewrite instead of a second Observation.
+
+        The parts are the raw field text, so the key does not depend on how escape sequences
+        are decoded, and they are encoded as a JSON list: a message may declare another field
+        separator in MSH-1, and then a literal ``|`` can occur inside a field, so joining with
+        ``|`` would let ``A|B`` + ``C`` collide with ``A`` + ``B|C``.
         """
-        return "|".join((self.sending_application, self.sending_facility, self.control_id))
+        parts = [self.sending_application, self.sending_facility, self.control_id]
+        return json.dumps(parts, ensure_ascii=False, separators=(",", ":"))
 
     @property
     def device_name(self) -> str:
         """Device.deviceName: the sending application, at its facility when MSH-4 says one."""
-        if self.sending_facility:
-            return f"{self.sending_application} ({self.sending_facility})"
-        return self.sending_application
+        if self.facility_display:
+            return f"{self.application_display} ({self.facility_display})"
+        return self.application_display
 
 
 def _read_header(message: Message) -> _Header:
@@ -270,12 +313,19 @@ def _read_header(message: Message) -> _Header:
     control_id = _text(msh.msh_10)
     if not control_id:
         raise _Rejected(Reason.MISSING_CONTROL_ID)
+    if len(control_id) > MAX_CONTROL_ID:
+        raise _Rejected(Reason.CONTROL_ID_TOO_LONG)
     # MSH-3 sending application, MSH-4 sending facility (HD.1, the namespace ID, of each).
     application = _component(msh, "msh_3", 1)
     if not application:
         raise _Rejected(Reason.MISSING_SENDING_APPLICATION)
     facility = _component(msh, "msh_4", 1)
-    return _Header(application, facility, control_id)
+    separators = message.encoding_chars
+    application_display = decode_escapes(application, separators)
+    facility_display = decode_escapes(facility, separators)
+    if _has_control_characters(application_display + facility_display):
+        raise _Rejected(Reason.INVALID_SENDING_APPLICATION)
+    return _Header(application, facility, control_id, application_display, facility_display)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -316,12 +366,15 @@ def _read_patient(message: Message, config: MappingConfig) -> PatientInput:
         raise _Rejected(Reason.UNKNOWN_PATIENT)
 
     # PID-5 patient name (XPN), first repetition: PID-5.1.1 family name (FN.1 surname), PID-5.2
-    # given name. Either may be empty; an empty part is left out, never an error.
+    # given name. Either may be empty or the HL7 null ""; an empty part is left out, never an
+    # error.
     family = given = ""
     names = _repetitions(pid, "pid_5")
     if names:
         family = decode_escapes(_text(names[0].pid_5_1.fn_1), separators).strip()
         given = decode_escapes(_text(names[0].pid_5_2), separators).strip()
+    if _has_control_characters(family + given):
+        raise _Rejected(Reason.INVALID_PATIENT_NAME)
     return PatientInput(
         config.patient_id,
         family=family or None,
@@ -330,7 +383,41 @@ def _read_patient(message: Message, config: MappingConfig) -> PatientInput:
 
 
 # ----------------------------------------------------------------------------------------------
-# Step 4. OBX, the observations: exactly one systolic and one diastolic value.
+# Step 4. OBR, the order: one blood-pressure panel, with the OBX segments under it.
+# ----------------------------------------------------------------------------------------------
+
+
+def _read_order(message: Message, observations: list) -> list:
+    """Check the ORU^R01 order structure the cuff builder (T07) emits, and return its OBX.
+
+    In ORU^R01 every OBX belongs to an order: an OBR (observation request) segment followed by
+    its OBX segments, which hl7apy groups as ``ORU_R01_ORDER_OBSERVATION``. The OBR says which
+    test the results answer (OBR-4); without it the OBX codes have no context. We accept
+    exactly one order, opened by its OBR, naming LOINC 85354-9, with every OBX inside it.
+    """
+    orders = _groups(message, "ORU_R01_ORDER_OBSERVATION")
+    if len(orders) > 1:
+        raise _Rejected(Reason.MULTIPLE_ORDERS)
+    order_children = list(orders[0].children) if orders else []
+    obrs = [child for child in order_children if child.name == "OBR"]
+    if len(obrs) > 1:
+        raise _Rejected(Reason.MULTIPLE_ORDERS)
+    # hl7apy's tolerant parse puts an OBX that comes before its OBR into the order group ahead
+    # of the OBR; the OBR must open the group.
+    if not obrs or order_children[0].name != "OBR":
+        raise _Rejected(Reason.MISSING_OBR)
+    order_observations = _segments(orders[0], "OBX")
+    if len(order_observations) != len(observations):
+        raise _Rejected(Reason.MISSING_OBR)  # an OBX outside the order has no OBR of its own
+    # OBR-4 universal service identifier (CE): OBR-4.1 code, OBR-4.3 coding system.
+    obr = obrs[0]
+    if (_component(obr, "obr_4", 1), _component(obr, "obr_4", 3)) != (PANEL, LOINC_CODING_SYSTEM):
+        raise _Rejected(Reason.UNKNOWN_OBR_4_CODE)
+    return order_observations
+
+
+# ----------------------------------------------------------------------------------------------
+# Step 5. OBX, the observations: exactly one systolic and one diastolic value.
 # ----------------------------------------------------------------------------------------------
 
 
@@ -413,7 +500,7 @@ def _read_observation(obx: object) -> _Observation:
     if unit != UCUM_MM_HG or unit_system not in ("", UCUM_CODING_SYSTEM):
         raise _Rejected(Reason.WRONG_UNIT)
 
-    # OBX-11 observation result status.
+    # OBX-11 observation result status: F or P only (see RESULT_STATUS).
     status = RESULT_STATUS.get(_text(obx.obx_11))  # type: ignore[attr-defined]
     if status is None:
         raise _Rejected(Reason.UNSUPPORTED_RESULT_STATUS)
@@ -430,8 +517,12 @@ def _read_observation_time(obx: object) -> datetime:
       zone of the sender", which the receiver cannot know; guessing UTC would move a reading by
       hours without anyone noticing. The cuff always writes the offset (T07).
     - The offset is kept: ``20261113155329-0500`` becomes ``2026-11-13T15:53:29-05:00``, the
-      wall-clock time the person saw, as the same instant.
+      wall-clock time the person saw, as the same instant. Fractional seconds (up to four
+      digits in HL7) are truncated to milliseconds by the FHIR builder.
+    - One value only: a repeated OBX-14 is refused rather than silently using the first.
     """
+    if len(_repetitions(obx, "obx_14")) > 1:
+        raise _Rejected(Reason.REPEATED_OBX_14)
     # OBX-14 in 2.5.1 is a TS; its first component (TS.1) is the DTM value.
     text = _component(obx, "obx_14", 1)
     if not text:
@@ -454,7 +545,7 @@ def _read_observation_time(obx: object) -> datetime:
 
 
 # ----------------------------------------------------------------------------------------------
-# Step 5. Build the FHIR transaction Bundle with T06's builders.
+# Step 6. Build the FHIR transaction Bundle with T06's builders.
 # ----------------------------------------------------------------------------------------------
 
 

@@ -126,11 +126,20 @@ def test_the_table_covers_every_sample_and_every_class():
     assert by_class("unparseable") and by_class("structurally_invalid")
 
 
-def test_outcomes_agree_with_the_t07_manifest_where_it_states_one():
-    for name, outcome, _ in SAMPLE_OUTCOMES:
-        expected = load(name).expected.application_outcome
-        if expected is not None:
-            assert outcome == expected, name
+@pytest.mark.parametrize("sample", [s.name for s in all_samples()])
+def test_mapper_agrees_with_the_t07_manifest_for_every_sample(sample):
+    # The manifest and the mapper cannot drift apart: an "error" sample's mapping_reason is
+    # the mapper's reason; an "accepted" one has none (the mapper says "mapped"); a sample the
+    # store rejects (outcome null) is not expected to reach the mapper.
+    expected = load(sample).expected
+    result = run(load(sample).payload)
+    if expected.application_outcome == "error":
+        assert (result.outcome.value, result.reason.value) == ("error", expected.mapping_reason)
+    elif expected.application_outcome == "accepted":
+        assert expected.mapping_reason is None
+        assert result.reason is Reason.MAPPED
+    else:
+        assert expected.application_outcome is None and expected.mapping_reason is None
 
 
 # ---- the valid sample, element by element -----------------------------------------------------
@@ -227,10 +236,10 @@ def test_valid_sample_patient_and_device_are_conditional_creates_and_referenced(
 def test_valid_sample_observation_is_a_conditional_update_on_a_pinned_key():
     obs = entries(run(load("valid_bp_reading").payload))["Observation"]
     # Pinned: UUIDv5 (namespace uuid5(URL, "urn:pulsebridge")) of the JSON list
-    # ["Observation", "SYN-000123", "85354-9", "CUFFSIM|PULSEBRIDGE|SYN-VALID-0001"], computed by
-    # hand from T06's documented recipe, not copied from the output. If it changes, every stored
-    # Observation becomes unreachable and redeliveries create duplicates.
-    key = "c5f3ac49-72f2-5e63-8196-3834ffa6cd5b"
+    # ["Observation", "SYN-000123", "85354-9", '["CUFFSIM","PULSEBRIDGE","SYN-VALID-0001"]'],
+    # computed by hand from T06's documented recipe, not copied from the output. If it changes,
+    # every stored Observation becomes unreachable and redeliveries create duplicates.
+    key = "a704437f-1123-5b1d-9fed-3d05be2c2e36"
     assert obs["resource"]["identifier"] == [
         {"use": "official", "system": "urn:pulsebridge:observation", "value": key}
     ]
@@ -310,6 +319,9 @@ def test_mapping_the_same_bytes_twice_gives_the_same_bundle():
         (MSH.replace("|2.5.1", "|2.6"), "unsupported-version"),
         (MSH.replace("|SYN-T12-0001|", "||"), "missing-control-id"),
         (MSH.replace("|CUFFSIM|", "||"), "missing-sending-application"),
+        (MSH.replace("|CUFFSIM|", '|""|'), "missing-sending-application"),  # HL7 null
+        (MSH.replace("|SYN-T12-0001|", '|""|'), "missing-control-id"),
+        (MSH.replace("SYN-T12-0001", "C" * 200), "control-id-too-long"),
     ],
 )
 def test_header_problems(msh, reason):
@@ -318,9 +330,48 @@ def test_header_problems(msh, reason):
     assert result.bundle is None
 
 
-def test_empty_msh4_names_the_device_by_application_only():
-    result = run(message(msh=MSH.replace("|CUFFSIM|PULSEBRIDGE|", "|CUFFSIM||")))
+@pytest.mark.parametrize("facility", ["", '""'])
+def test_empty_or_null_msh4_names_the_device_by_application_only(facility):
+    result = run(message(msh=MSH.replace("|CUFFSIM|PULSEBRIDGE|", f"|CUFFSIM|{facility}|")))
     assert entries(result)["Device"]["resource"]["deviceName"][0]["name"] == "CUFFSIM"
+
+
+def test_control_id_of_199_characters_is_accepted():
+    result = run(message(msh=MSH.replace("SYN-T12-0001", "C" * 199)))
+    assert result.outcome is Outcome.ACCEPTED
+    assert result.control_id == "C" * 199
+
+
+def test_device_name_is_escape_decoded_but_the_key_uses_the_raw_text():
+    escaped = MSH.replace("|CUFFSIM|PULSEBRIDGE|", "|CU\\F\\FF|PULSE\\T\\BRIDGE|")
+    result = run(message(msh=escaped))
+    assert entries(result)["Device"]["resource"]["deviceName"][0]["name"] == "CU|FF (PULSE&BRIDGE)"
+    # The key is built from the field text as sent, escapes and all, as a JSON list.
+    header = mapping._read_header(mapping._parse(message(msh=escaped).encode()))
+    assert header.source_key == '["CU\\\\F\\\\FF","PULSE\\\\T\\\\BRIDGE","SYN-T12-0001"]'
+
+
+@pytest.mark.parametrize("bad", ["\x00", "\x01", "\x1b", "\x7f"])
+def test_control_characters_in_sending_application_are_refused(bad):
+    result = run(message(msh=MSH.replace("|CUFFSIM|", f"|CUFF{bad}SIM|")))
+    assert result.reason is Reason.INVALID_SENDING_APPLICATION
+
+
+def test_key_parts_cannot_collide_when_msh1_declares_another_separator():
+    # With MSH-1 "#", a literal "|" is ordinary text inside a field. MSH-3 "A|B" + MSH-4 "C" and
+    # MSH-3 "A" + MSH-4 "B|C" are different senders and must give different keys.
+    def with_hash_separator(application: str, facility: str) -> str:
+        msh = (
+            f"MSH#^~\\&#{application}#{facility}#PHR#PULSEBRIDGE#20261113205329+0000##"
+            "ORU^R01^ORU_R01#SYN-T12-0001#P#2.5.1"
+        )
+        rest = [segment.replace("|", "#") for segment in (PID, OBR, SYS, DIA)]
+        return "\r".join([msh, *rest]) + "\r"
+
+    first = run(with_hash_separator("A|B", "C"))
+    second = run(with_hash_separator("A", "B|C"))
+    assert first.outcome is second.outcome is Outcome.ACCEPTED
+    assert observation(first)["identifier"] != observation(second)["identifier"]
 
 
 # ---- PID --------------------------------------------------------------------------------------
@@ -331,6 +382,9 @@ def test_empty_msh4_names_the_device_by_application_only():
     [
         ("PID|1||SYN-999999^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA", "unknown-patient"),
         ("PID|1||^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA", "missing-patient-identifier"),
+        ('PID|1||""^^^PULSEBRIDGE^MR||TESTPATIENT^SYNTHIA', "missing-patient-identifier"),
+        ("PID|1||SYN-000123^^^PULSEBRIDGE^MR||TEST\x00PATIENT^SYNTHIA", "invalid-patient-name"),
+        ("PID|1||SYN-000123^^^PULSEBRIDGE^MR||TESTPATIENT^SYN\x1bTHIA", "invalid-patient-name"),
         (None, "missing-patient-identifier"),
         (f"{PID}\rPID|2||SYN-000123", "multiple-patients"),
     ],
@@ -358,6 +412,10 @@ def test_assigning_authority_when_configured():
     ("pid5", "expected_name"),
     [
         ("", None),
+        ('""', None),  # the HL7 null for the whole field
+        ('""^""', None),  # and for each part
+        ('TESTPATIENT^""', [{"use": "official", "family": "TESTPATIENT"}]),
+        ('""^SYNTHIA', [{"use": "official", "given": ["SYNTHIA"]}]),
         ("TESTPATIENT", [{"use": "official", "family": "TESTPATIENT"}]),
         ("^SYNTHIA", [{"use": "official", "given": ["SYNTHIA"]}]),
         ("O\\T\\BRIEN^SYNTHIA", [{"use": "official", "family": "O&BRIEN", "given": ["SYNTHIA"]}]),
@@ -370,6 +428,38 @@ def test_an_empty_or_partial_name_does_not_fail_the_message(pid5, expected_name)
 
 
 # ---- OBX: codes and structure ------------------------------------------------------------------
+
+
+# ---- OBR: the order -----------------------------------------------------------------------
+
+
+OBR_2 = OBR.replace("OBR|1|", "OBR|2|")
+
+
+@pytest.mark.parametrize(
+    ("segments", "reason"),
+    [
+        ([MSH, PID, SYS, DIA], "missing-obr"),
+        ([MSH, PID, SYS, OBR, DIA], "missing-obr"),  # an OBX before its OBR
+        ([MSH, PID, OBR, SYS, OBR_2, DIA], "multiple-orders"),
+        ([MSH, PID, OBR, SYS, DIA, OBR_2], "multiple-orders"),
+        ([MSH, PID, OBR.replace("85354-9", "55284-4"), SYS, DIA], "unknown-obr-4-code"),
+        ([MSH, PID, OBR.replace("^LN|", "^L|"), SYS, DIA], "unknown-obr-4-code"),
+        (
+            [MSH, PID, "OBR|1||SYN-T12-0001^CUFFSIM||||20261113205329+0000", SYS, DIA],
+            "unknown-obr-4-code",
+        ),
+    ],
+)
+def test_order_structure_problems(segments, reason):
+    result = run("\r".join(segments) + "\r")
+    assert (result.outcome, result.reason.value) == (Outcome.ERROR, reason)
+    assert result.bundle is None
+
+
+def test_every_valid_t07_sample_still_has_the_order_structure_we_require():
+    for sample in by_class("valid"):
+        assert run(sample.payload).outcome is Outcome.ACCEPTED, sample.name
 
 
 def test_swapped_obx_order_is_read_by_code_not_position():
@@ -423,7 +513,14 @@ def test_range_boundaries_are_accepted():
         (obx(1, "8480-6", "120", unit="mm[Hg]^mm[Hg]^L"), "wrong-unit"),
         (obx(1, "8480-6", "120", status="X"), "unsupported-result-status"),
         (obx(1, "8480-6", "120", status=""), "unsupported-result-status"),
-        (obx(1, "8480-6", "120", status="C"), "mixed-result-status"),
+        (obx(1, "8480-6", "120", status='""'), "unsupported-result-status"),
+        (obx(1, "8480-6", "120", status="Q"), "unsupported-result-status"),
+        (
+            obx(1, "8480-6", "120", when="20261113205329+0000~20261113205330+0000"),
+            "repeated-obx-14",
+        ),
+        (obx(1, "8480-6", '""'), "missing-obx-5"),
+        (obx(1, "8480-6", "120", unit='""'), "missing-unit"),
     ],
 )
 def test_systolic_obx_field_problems(systolic, reason):
@@ -445,13 +542,27 @@ def test_unit_without_a_coding_system_is_accepted():
     assert components(result)["8480-6"]["code"] == "mm[Hg]"
 
 
-@pytest.mark.parametrize(
-    ("hl7", "fhir"), [("F", "final"), ("C", "corrected"), ("P", "preliminary")]
-)
+@pytest.mark.parametrize(("hl7", "fhir"), [("F", "final"), ("P", "preliminary")])
 def test_result_status_maps_to_observation_status(hl7, fhir):
     observations = (obx(1, "8480-6", "120", status=hl7), obx(2, "8462-4", "80", status=hl7))
     result = run(message(observations=observations))
     assert observation(result)["status"] == fhir
+
+
+@pytest.mark.parametrize("hl7", ["C", "D", "W", "X", "I", "R", "S", "Z"])
+def test_corrections_deletions_and_other_statuses_are_refused(hl7):
+    # C (corrected), D (delete) and W (wrong) refer to an earlier result. A correction comes as
+    # a new message with a new MSH-10, so writing it would add a second Observation and leave the
+    # original "final" one in place. Refused, on both OBX, before anything is written.
+    observations = (obx(1, "8480-6", "120", status=hl7), obx(2, "8462-4", "80", status=hl7))
+    result = run(message(observations=observations))
+    assert (result.outcome, result.reason.value) == (Outcome.ERROR, "unsupported-result-status")
+    assert result.bundle is None
+
+
+def test_mixed_result_status_is_refused():
+    observations = (obx(1, "8480-6", "120", status="F"), obx(2, "8462-4", "80", status="P"))
+    assert run(message(observations=observations)).reason is Reason.MIXED_RESULT_STATUS
 
 
 # ---- OBX-14 and time zones --------------------------------------------------------------------
@@ -468,7 +579,8 @@ def both(when: str) -> tuple[str, str]:
         ("20261113155329-0500", "2026-11-13T15:53:29-05:00"),
         ("20261114022329+0530", "2026-11-14T02:23:29+05:30"),  # half-hour offset
         ("202611131553-0500", "2026-11-13T15:53:00-05:00"),  # minute precision
-        ("20261113155329.1234-0500", "2026-11-13T15:53:29.123-05:00"),  # fractional seconds
+        # Fractional seconds: four HL7 digits, truncated to milliseconds by the FHIR builder.
+        ("20261113155329.1239-0500", "2026-11-13T15:53:29.123-05:00"),
     ],
 )
 def test_obx14_with_offset_becomes_effective_datetime_with_that_offset(when, effective):

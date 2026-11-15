@@ -46,15 +46,16 @@ same library builds and validates the messages in T07 and T13.
 | --- | --- | --- |
 | MSH-9 | none | must be `ORU^R01` |
 | MSH-12 | none | must be `2.5.1` (what the cuff sends; other versions have other group and field rules) |
-| MSH-3.1, MSH-4.1 | `Device.deviceName` `"CUFFSIM (PULSEBRIDGE)"`; `Observation.device` | conditional create (D11) |
-| MSH-10 | `Observation.identifier` = UUIDv5(patient, `85354-9`, `MSH-3|MSH-4|MSH-10`) | conditional update on that identifier, so a redelivery rewrites the same Observation |
+| MSH-3.1, MSH-4.1 | `Device.deviceName` `"CUFFSIM (PULSEBRIDGE)"` (escape sequences decoded); `Observation.device` | conditional create (D11) |
+| MSH-10 | `Observation.identifier` = UUIDv5(patient, `85354-9`, JSON list of raw MSH-3.1, MSH-4.1, MSH-10) | conditional update on that identifier, so a redelivery rewrites the same Observation; at most 199 characters |
+| OBR, OBR-4 | none | exactly one order (`ORU_R01_ORDER_OBSERVATION`), opened by its OBR, every OBX inside it; OBR-4 is `85354-9^â€¦^LN` |
 | PID-3.1 | `Patient.identifier` (`urn:pulsebridge:patient`) | must equal `PATIENT_ID`; any PID-3 repetition may carry it |
-| PID-5.1.1, PID-5.2 | `Patient.name` family, given | either may be empty; only used if the Patient does not exist yet (conditional create) |
+| PID-5.1.1, PID-5.2 | `Patient.name` family, given | either may be empty or `""`; control characters are refused; only used if the Patient does not exist yet (conditional create) |
 | OBX-3 `8480-6^â€¦^LN` / `8462-4^â€¦^LN` | `component[].code` (LOINC); `Observation.code` is the panel `85354-9` | any other code or coding system is refused |
 | OBX-2, OBX-5 | `component[].valueQuantity.value` | OBX-2 `NM`; one value matching HL7's NM rule |
 | OBX-6 | `valueQuantity.code` `mm[Hg]`, `system` `http://unitsofmeasure.org` | OBX-6.1 exactly `mm[Hg]`; OBX-6.3 empty or `UCUM` |
-| OBX-11 | `Observation.status` | `F` final, `C` corrected, `P` preliminary; both OBX the same |
-| OBX-14 | `Observation.effectiveDateTime` | required, with a UTC offset, kept as sent; both OBX the same instant |
+| OBX-11 | `Observation.status` | `F` final, `P` preliminary; anything else refused; both OBX the same |
+| OBX-14 | `Observation.effectiveDateTime` | required, one value, with a UTC offset (kept); fractional seconds truncated to milliseconds; both OBX the same instant |
 | store message name | `Provenance.entity[role=source].what.identifier` | the name from the notification |
 
 The Bundle itself is built by `pulsebridge_fhir.blood_pressure_transaction` (T06): Patient and
@@ -62,6 +63,19 @@ Device `POST` with `ifNoneExist`, the Observation `PUT Observation?identifier=â€
 `PUT Provenance/<uuid>`. See `libs/pulsebridge_fhir/README.md` for the JSON.
 
 ### Decisions
+
+- **Only `F` and `P` in OBX-11.** OBX-11 (result status, HL7 table 0085) says whether a result
+  is final, preliminary, or refers to an earlier one: `C` corrected, `D` delete, `W` wrong. A
+  correction arrives as a new message with a new MSH-10, so with our key it would write a
+  second Observation and leave the original `final` one standing. Doing corrections and
+  deletions properly means finding the original Observation first; that is out of scope, so
+  every status other than `F` and `P` is refused (`unsupported-result-status`).
+- **The HL7 null `""`** (a field holding exactly two double quotes, meaning "known to be
+  empty") is read as empty everywhere, so it never becomes a literal name `""`.
+- **The order must be a blood-pressure panel.** In ORU^R01 every OBX belongs to an order: an
+  OBR saying which test the results answer (OBR-4), followed by its OBX. The mapper reads this
+  through hl7apy's `ORU_R01_ORDER_OBSERVATION` group, not by segment position, and requires
+  exactly one order, opened by its OBR, naming LOINC 85354-9, with every OBX inside it.
 
 - **No OBR-7 fallback for OBX-14.** D7 lists a missing OBX-14 as a malformed class and T07's
   `unmappable_missing_obx14` sample has OBR-7 set; the cuff always writes OBX-14, so an empty one
@@ -74,7 +88,11 @@ Device `POST` with `ifNoneExist`, the Observation `PUT Observation?identifier=â€
   a clinical message is worse than an `error` the log shows.
 - **The idempotency key includes MSH-3 and MSH-4**, because HL7 makes MSH-10 unique per sending
   system, not globally. It excludes MSH-7, so a resend of the same reading (same control ID,
-  new MSH-7, therefore a new stored message, spike S5) updates the same Observation.
+  new MSH-7, therefore a new stored message, spike S5) updates the same Observation. The three
+  parts are the raw field text (not escape-decoded, so the key does not depend on decoding) and
+  are encoded as a JSON list: a message may declare another field separator in MSH-1, and then
+  a literal `|` can sit inside a field, so joining with `|` could make two senders collide.
+- **Device names are escape-decoded** (`CU\F\FF` is shown as `CU|FF`); the key is not.
 - **Version 2.5.1 only.** hl7apy can read 2.3 to 2.8, but group names and field types differ;
   mapping only the version we test keeps the rules honest.
 - **Ranges** are T06's (systolic 50-300, diastolic 20-200 mm[Hg]), checked here first so the
@@ -96,29 +114,34 @@ there is no loop. Codes keep to the documented label limits. The sentence for ea
 | `unsupported-version` | error | MSH-12 is not 2.5.1, including versions hl7apy cannot load (`9.9`, empty) |
 | `unsupported-message-type` | error | MSH-9 is not ORU^R01 (empty, `ADT^A01`, bare `MSH|^~\&`) |
 | `missing-control-id` | error | MSH-10 empty |
+| `control-id-too-long` | error | MSH-10 longer than 199 characters |
 | `missing-sending-application` | error | MSH-3 empty |
+| `invalid-sending-application` | error | MSH-3 or MSH-4 contains control characters |
 | `no-observations` | error | no OBX segment (MSH-only message) |
 | `multiple-patients` | error | more than one PID |
 | `missing-patient-identifier` | error | no PID, or no PID-3.1 |
 | `unknown-patient` | error | no PID-3 repetition is the configured patient |
+| `invalid-patient-name` | error | PID-5 contains control characters (NUL, ESC, DEL, ...) |
+| `missing-obr` | error | no OBR opens the order, or an OBX lies outside it |
+| `multiple-orders` | error | more than one order (OBR) |
+| `unknown-obr-4-code` | error | OBR-4 is not LOINC 85354-9 with coding system LN |
 | `unknown-obx-3-code` | error | an OBX-3 that is not LOINC 8480-6 or 8462-4 |
 | `duplicate-obx-3-code` | error | the same OBX-3 twice |
 | `missing-systolic` / `missing-diastolic` | error | one of the two values is absent |
 | `wrong-value-type` | error | OBX-2 is not NM |
 | `missing-obx-5` / `repeated-obx-5` / `non-numeric-obx-5` | error | OBX-5 empty, repeated, or not an HL7 NM number |
 | `missing-unit` / `wrong-unit` | error | OBX-6 empty, or not UCUM `mm[Hg]` |
-| `unsupported-result-status` / `mixed-result-status` | error | OBX-11 not F, C or P; or the two differ |
-| `missing-obx-14` / `invalid-obx-14` / `missing-time-zone` / `mismatched-obx-14` | error | OBX-14 empty; not a DTM to the minute; no offset; the two differ |
+| `unsupported-result-status` / `mixed-result-status` | error | OBX-11 not F or P (corrections and deletions are out of scope); or the two differ |
+| `missing-obx-14` / `repeated-obx-14` / `invalid-obx-14` / `missing-time-zone` / `mismatched-obx-14` | error | OBX-14 empty; repeated; not a DTM to the minute; no offset; the two differ |
 | `out-of-range` | error | outside the plausible range |
 | `systolic-not-above-diastolic` | error | systolic not greater than diastolic |
 | `fhir-input-rejected` | error | T06's builders refused a value (should not happen after the checks above) |
 | `mapping-failed` | error | unexpected exception while mapping (a bug); logged by type and line, never by content |
 | `fhir-rejected` | error | the FHIR store refused the Bundle with a 4xx; its OperationOutcome is logged without free text |
 
-Against T07's samples: every `parses_but_cannot_map` and `structurally_invalid` sample ends
-`error` with the reason above; T07 suggested `unparseable-by-mapper` for MSH-12 `9.9` and empty,
-and we use the more precise `unsupported-version`. The `unparseable` samples never reach the
-mapper (the store answers `AE`), but would end `unparseable-by-mapper` if they did.
+Against T07's samples: every sample's mapper reason equals the `mapping_reason` in T07's
+manifest (a test checks every one, so the two cannot drift). The `unparseable` samples never
+reach the mapper (the store answers `AE`), but would end `unparseable-by-mapper` if they did.
 
 ## Acknowledge or retry
 
@@ -136,11 +159,26 @@ dead-letter subscription.
 | message no longer exists (404 on get or patch) | 204 | none |
 | 5xx, 429, 408, timeout, network error, token refresh failure (either store) | 503 | none |
 | 401/403 (IAM missing or still propagating), FHIR 404 (store missing), FHIR 409 (concurrent write) | 503 | none |
-| body is not a Pub/Sub push, or names a message outside `HL7V2_STORE_ID` | 400 | none |
+| the label patch fails with anything but 404, including a 400 | 503 | none |
+| a well-formed message name of another store (a mis-wired topic) | 204, logged as a warning | none |
+| a body that cannot be read as a push of a message name | 400 | none |
 | a bug in the handler itself | 500 | none |
 
 - Labels are written only after the outcome is final. A message whose FHIR write is being
   retried stays unlabelled, which the dashboard shows as "pending", never a false `accepted`.
+- **Conditions that cannot heal by themselves** (a missing role giving 401/403, a missing FHIR
+  store giving 404, a persistent FHIR 409, a 400 on the label patch) are retried about 10 times
+  over roughly 40 minutes (T05's backoff) and then dead-lettered. The message stays "pending"
+  until someone fixes the cause and replays the dead-letter subscription (the replay path
+  belongs to T20/T25). So "pending" covers both "not processed yet" and "dead-lettered".
+- **A message of another store** is acknowledged with a warning, not refused: it can never
+  succeed here, and every refused push makes Pub/Sub slow delivery to the whole subscription.
+- **Write succeeded, label patch failed:** the retry rewrites the same Observation (same
+  key), while the Provenance gains a version each time, because its `recorded` time changes.
+  `Provenance.activity` stays `CREATE` on such rewrites (T06's fixed coding).
+- **A resend of the same reading** (new MSH-7, so a new stored message) rewrites the same
+  Observation and overwrites the Provenance's source entity with the latest stored message
+  name; the earlier name remains in the Provenance's version history.
 - Retrying is safe (at-least-once delivery): the Observation is keyed on the control ID, the
   Provenance on the Observation, the Patient and Device are conditional creates, and the label
   patch overwrites both keys.
@@ -153,12 +191,14 @@ dead-letter subscription.
 The Cloud Run service does not allow unauthenticated calls. Pub/Sub attaches an OIDC token
 signed for the `pubsub-push` service account; Cloud Run verifies it and checks that account's
 `roles/run.invoker` on this service before the request reaches the container (T04, T05, T20).
-The handler itself checks only that the body is a push envelope and that the message name is
-inside the configured dataset's HL7v2 store.
+The handler itself checks only that the body is a push envelope carrying a well-formed message
+name, and that the name is inside the configured dataset's HL7v2 store.
 
 ## Configuration
 
-Environment variables, set by Terraform (T20). Nothing deployment-specific is in the code.
+Environment variables, set by Terraform (T20). Nothing deployment-specific is in the code. `create_app` builds the
+store resource names at start-up, so an id that cannot form one (a space, a `/`, an uppercase
+project) stops the service from starting instead of failing every push later.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
@@ -186,13 +226,22 @@ gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 "v2_to_fhir
 
 - Honours `PORT` (Cloud Run sets it). `--timeout 0` leaves request deadlines to Cloud Run, as
   Google's Cloud Run Python samples do.
+- One authorised session (`google-auth`'s `AuthorizedSession`, a `requests.Session`) is shared
+  by gunicorn's threads. `requests` does not formally promise that a session is thread-safe;
+  sharing one across a few threads is the common pattern, and the worst case of two threads
+  refreshing the token at once is an extra token fetch. If that ever matters, use one session
+  per thread.
 - The push endpoint is `POST /pubsub/hl7v2`.
 - For T24's container: install `libs/pulsebridge_fhir`, `libs/pulsebridge_hl7v2` and
   `libs/pulsebridge_gcp` before this package. They are not on PyPI and are declared by name
   only, so installing this package alone would look for them on PyPI.
-- Logs are one JSON object per line on stdout (`severity`, `message`, `event`, `http_status`,
-  `application_outcome`, `reason`, `hl7v2_message` id, `control_id`, Pub/Sub ids). They never
-  contain message content or patient fields.
+- Logs are one JSON object per line on stdout. What is logged: `severity`, `message`, `event`,
+  `http_status`, `application_outcome`, `reason` (codes), the stored message's id (the end of
+  its resource name, a hash of its bytes), the control ID (MSH-10, at most its first 64
+  characters), the Pub/Sub message id and delivery attempt, HTTP statuses of failed calls, and
+  for a refused Bundle the OperationOutcome's issue severity, code and element paths. What is
+  never logged: patient names or identifiers, observation values, times, raw message text,
+  exception messages, or a server's free-text diagnostics.
 
 ## Tests
 

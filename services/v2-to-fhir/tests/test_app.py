@@ -83,6 +83,37 @@ def test_a_handler_bug_answers_500_and_does_not_crash_the_worker(http, monkeypat
     assert http.post(PUSH_PATH, json=ENVELOPE).status_code == 204  # the app still serves
 
 
+def test_foreign_store_push_is_logged_as_a_warning(http, transport, caplog):
+    other = STORE.replace("/main", "/other") + "/messages/m="
+    body = {"message": {"data": b64(other.encode()), "attributes": {"msgType": "ORU"}}}
+    with caplog.at_level(logging.INFO, logger="v2_to_fhir"):
+        assert http.post(PUSH_PATH, json=body).status_code == 204
+    (record,) = [r for r in caplog.records if r.name == "v2_to_fhir"]
+    assert record.levelname == "WARNING"
+    assert record.fields["event"] == "ignored-foreign-message"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("hl7v2_store_id", "main store"),
+        ("fhir_store_id", "fhir/../x"),
+        ("dataset_id", ""),
+        ("project_id", "Demo_Project"),
+        ("location", "us central1"),
+    ],
+)
+def test_a_bad_configured_id_fails_at_start_up(field, value):
+    import dataclasses
+
+    from v2_to_fhir.config import ConfigError
+
+    # A stand-in client: the check must not depend on (or ever reach) real credentials.
+    with pytest.raises(ConfigError):
+        create_app(dataclasses.replace(CONFIG, **{field: value}), client=object())
+    create_app(CONFIG, client=object())  # the valid configuration starts
+
+
 def test_log_line_is_structured_and_free_of_patient_data(http, caplog):
     with caplog.at_level(logging.INFO, logger="v2_to_fhir"):
         http.post(PUSH_PATH, json=ENVELOPE)

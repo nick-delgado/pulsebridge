@@ -2,7 +2,8 @@
 
 Run in production with gunicorn (see README.md):
 
-    gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 "v2_to_fhir.app:create_app()"
+    gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 4 --timeout 0 \
+        "v2_to_fhir.app:create_app()"
 
 Authentication happens before a request reaches this code: the Cloud Run service does not allow
 unauthenticated calls, so Cloud Run checks the OIDC token Pub/Sub sends and the caller's
@@ -19,7 +20,7 @@ import sys
 from flask import Flask, Response, request
 from pulsebridge_gcp import HealthcareClient, default_transport
 
-from v2_to_fhir.config import ServiceConfig
+from v2_to_fhir.config import ConfigError, ServiceConfig
 from v2_to_fhir.handler import Client, PushResult, handle_push
 
 PUSH_PATH = "/pubsub/hl7v2"  # the push endpoint path T05's usage example points at
@@ -54,8 +55,32 @@ def _log(result: PushResult) -> None:
         "reason": result.reason.value if result.reason else None,
         **result.details,
     }
-    level = logging.INFO if result.status < 400 else logging.WARNING
+    level = logging.WARNING if result.warning or result.status >= 400 else logging.INFO
     logger.log(level, "hl7v2 notification: %s", result.event, extra={"fields": fields})
+
+
+class _NoTransport:
+    """A transport for building names only; any request through it is a bug."""
+
+    def request(self, *_args: object, **_kwargs: object) -> object:
+        raise AssertionError("name check must not send requests")
+
+
+def check_resource_names(config: ServiceConfig) -> None:
+    """Fail at start-up, so a bad deploy fails visibly, if a configured id cannot form a valid
+    resource name. Otherwise the service would start and answer every push with 500 until each
+    notification was dead-lettered."""
+    try:
+        names = HealthcareClient(
+            project=config.project_id,
+            location=config.location,
+            dataset=config.dataset_id,
+            transport=_NoTransport(),
+        )
+        names.fhir_store_name(config.fhir_store_id)
+        names.hl7v2_store_name(config.hl7v2_store_id)
+    except ValueError as exc:
+        raise ConfigError(f"configuration does not form valid resource names: {exc}") from exc
 
 
 def create_app(config: ServiceConfig | None = None, client: Client | None = None) -> Flask:
@@ -63,7 +88,10 @@ def create_app(config: ServiceConfig | None = None, client: Client | None = None
     uses Application Default Credentials (the service's own service account on Cloud Run)."""
     _configure_logging()
     config = config or ServiceConfig.from_env()
+    check_resource_names(config)
     if client is None:
+        # One authorised session for the process, shared by gunicorn's threads (README,
+        # "Running").
         client = HealthcareClient(
             project=config.project_id,
             location=config.location,

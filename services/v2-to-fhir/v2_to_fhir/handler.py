@@ -25,7 +25,13 @@ the dead-letter topic. So the rule is:
 | message no longer exists (404 on get or on the patch) | 204 | none (nothing to label) |
 | FHIR or HL7v2 store 5xx, 429, 408, timeout, network, token refresh | 503 | none: stays "pending" |
 | 401 / 403 (IAM missing or still propagating), FHIR 404 (store missing), FHIR 409 | 503 | none |
-| envelope that is not a Pub/Sub push, or a message outside our HL7v2 store | 400 | none |
+| any failure of the label patch other than 404 (including a 400) | 503 | none |
+| a well-formed message name outside our HL7v2 store | 204, logged as a warning | none |
+| an envelope that cannot be read as a Pub/Sub push of a message name | 400 | none |
+
+Conditions that cannot heal by themselves (a missing role, a missing FHIR store, a 400 on the
+label patch) are retried about 10 times over roughly 40 minutes and then dead-lettered; the
+message stays unlabelled ("pending") until the dead-letter subscription is replayed (T20/T25).
 
 Retrying never does harm: the Observation is keyed on the control ID and the Provenance on the
 Observation, so a second run rewrites the same resources, and the label patch overwrites both
@@ -43,6 +49,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from pulsebridge_gcp import (
+    MESSAGE_NAME,
     ClientError,
     ConflictError,
     HealthcareApiError,
@@ -64,6 +71,8 @@ REASON_LABEL = "reason"
 ACKNOWLEDGE = 204
 RETRY = 503
 NOT_A_PUSH = 400
+# At most this much of MSH-10 goes into a log line (the mapper refuses more than 199).
+LOGGED_CONTROL_ID_CHARS = 64
 
 
 class Client(Protocol):
@@ -85,6 +94,7 @@ class PushResult:
     outcome: Outcome | None = None
     reason: Reason | None = None
     details: dict = field(default_factory=dict)
+    warning: bool = False  # log at WARNING even though the push is acknowledged
 
 
 class EnvelopeError(ValueError):
@@ -147,11 +157,16 @@ def handle_push(
         "pubsub_message_id": notification.pubsub_message_id,
         "delivery_attempt": notification.delivery_attempt,
     }
-    if not client.is_message_in_store(notification.message_name, config.hl7v2_store_id):
-        # Not a message of the store this service serves. Cloud Run's OIDC check already limits
-        # callers to the push identity; this guards against a wrong topic or a forged body.
-        return PushResult(NOT_A_PUSH, "rejected-foreign-message", details=details)
     name = notification.message_name
+    if not MESSAGE_NAME.fullmatch(name):
+        return PushResult(
+            NOT_A_PUSH, "rejected-envelope", details={"problem": "data is not a message name"}
+        )
+    if not client.is_message_in_store(name, config.hl7v2_store_id):
+        # A real message name, but of another store (a mis-wired topic). It can never succeed
+        # here, and every refused push slows Pub/Sub's delivery to the whole subscription, so
+        # acknowledge it and log a warning for someone to fix the wiring.
+        return PushResult(ACKNOWLEDGE, "ignored-foreign-message", details=details, warning=True)
     details["hl7v2_message"] = _short(name)
 
     # 2. ACK messages are acknowledged and ignored (S5: a stored ACK also notifies).
@@ -173,7 +188,9 @@ def handle_push(
         result = MappingResult(Outcome.ERROR, Reason.UNPARSEABLE_BY_MAPPER)
     else:
         result = map_message(stored.data, message_name=name, config=config.mapping, recorded=now())
-    details["control_id"] = result.control_id
+    details["control_id"] = (
+        result.control_id[:LOGGED_CONTROL_ID_CHARS] if result.control_id else None
+    )
     outcome, reason = result.outcome, result.reason
 
     # 5. Write the Bundle.

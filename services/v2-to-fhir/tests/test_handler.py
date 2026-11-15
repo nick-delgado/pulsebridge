@@ -201,6 +201,8 @@ TRANSIENT_FHIR = [
     json_response(500, {}),
     json_response(429, {"error": {"message": "quota"}}),
     json_response(403, {"error": {"message": "denied"}}),  # IAM still propagating
+    json_response(401, {"error": {"message": "unauthenticated"}}),
+    json_response(408, {"error": {"message": "request timeout"}}),
     json_response(404, {"error": {"message": "no store"}}),
     json_response(409, {"resourceType": "OperationOutcome", "issue": []}),
     RetryableError("POST fhir", None),  # network failure or timeout
@@ -233,8 +235,12 @@ def test_fetch_failure_is_retried(push, transport, failure):
     assert [r.method for r in transport.requests] == ["GET"]
 
 
-@pytest.mark.parametrize("failure", [json_response(503, {}), json_response(403, {})])
+@pytest.mark.parametrize(
+    "failure", [json_response(503, {}), json_response(403, {}), json_response(400, {})]
+)
 def test_label_patch_failure_is_retried(push, transport, failure):
+    # Including a 400: it cannot heal by itself, so after ~10 attempts the notification is
+    # dead-lettered and the message stays "pending" until the dead-letter queue is replayed.
     script(transport, load("unmappable_missing_obx14").payload, patch=failure)
     assert push(envelope()).status == 503
 
@@ -282,7 +288,7 @@ def test_redelivery_rewrites_the_same_observation_and_overwrites_both_labels(pus
     one, two = (r.json() for r in transport.calls("POST"))
     assert one["entry"][2]["request"] == two["entry"][2]["request"]
     assert one["entry"][2]["request"]["url"] == (
-        "Observation?identifier=urn:pulsebridge:observation|c5f3ac49-72f2-5e63-8196-3834ffa6cd5b"
+        "Observation?identifier=urn:pulsebridge:observation|a704437f-1123-5b1d-9fed-3d05be2c2e36"
     )
     assert one["entry"][3]["request"] == two["entry"][3]["request"]  # Provenance by id
     assert patched_labels(transport) == [
@@ -351,15 +357,48 @@ def test_malformed_envelope_is_rejected_without_any_call(push, transport, body):
     "name",
     [
         "projects/demo-project/locations/us-central1/datasets/demo/hl7V2Stores/other/messages/m=",
+        "projects/demo-project/locations/us-central1/datasets/demo/hl7V2Stores/main2/messages/m=",
         "projects/elsewhere/locations/us-central1/datasets/demo/hl7V2Stores/main/messages/m=",
+        "projects/demo-project/locations/us-central1/datasets/other/hl7V2Stores/main/messages/m=",
+    ],
+)
+def test_a_well_formed_message_of_another_store_is_acknowledged_with_a_warning(
+    push, transport, name
+):
+    # It can never succeed here, and refusing it would slow delivery for the whole
+    # subscription; acknowledge, fetch nothing, and log a warning.
+    result = push(envelope(name))
+    assert (result.status, result.event, result.warning) == (204, "ignored-foreign-message", True)
+    assert transport.requests == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
         f"{STORE}/messages/../../fhirStores/fhir",
+        f"{STORE}/messages/..%2F..%2Fx",  # encoded traversal
+        f"{STORE}/messages/a/b",
+        f"{STORE}/messages/",
         "hello",
     ],
 )
-def test_a_message_outside_our_store_is_rejected_without_any_call(push, transport, name):
+def test_data_that_is_not_a_message_name_is_rejected_without_any_call(push, transport, name):
     result = push(envelope(name))
     assert result.status == 400
     assert transport.requests == []
+
+
+def test_a_processed_message_is_not_a_warning(push, transport):
+    script(transport, load("valid_bp_reading").payload)
+    assert push(envelope()).warning is False
+
+
+def test_logged_control_id_is_bounded(push, transport):
+    raw = load("valid_bp_reading").payload.replace(b"|SYN-VALID-0001|", b"|" + b"C" * 199 + b"|")
+    script(transport, raw)
+    result = push(envelope())
+    assert result.status == 204
+    assert result.details["control_id"] == "C" * 64
 
 
 def test_parse_envelope_reads_the_documented_push_shape():
