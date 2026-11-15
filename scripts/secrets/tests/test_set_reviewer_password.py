@@ -118,6 +118,7 @@ def test_argument_refused_and_not_repeated(sandbox, fake):
 def test_gcloud_logging_flags_refused(sandbox, fake, flag):
     r = sandbox.run(SCRIPT, flag, stdin=fake(20).encode())
     assert r.rc == 2 and r.calls == []
+    assert "is refused" in r.err and "HTTP log" in r.err
 
 
 def test_missing_secret_points_to_terraform_apply(sandbox, fake):
