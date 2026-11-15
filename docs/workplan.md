@@ -191,7 +191,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | done |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
-| T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | todo |
+| T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | in-progress |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
@@ -466,15 +466,15 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
-| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | todo |
+| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | in-progress |
 | T19 | Dashboard: share action and messages log | T16, T34 | `web/src/share/`, `web/src/messages/` | todo |
-| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | todo |
-| T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | todo |
+| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | in-progress |
+| T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | in-progress |
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
-| T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | todo |
+| T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | in-progress |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
 task fills its own directory through the mount function and slots defined by the shell (T16) and
