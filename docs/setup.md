@@ -67,11 +67,13 @@ The [README's architecture diagram](../README.md#architecture) shows how the pie
   and `mm[Hg]` (millimetres of mercury).
 - **Provenance**: a FHIR resource that records where another resource came from (the watch's
   roll-up window, or the stored HL7v2 message), so a reader can trace every value to its source.
+- **Transaction Bundle**: a FHIR `Bundle` of `type: transaction`, a list of writes the server
+  applies all together or not at all. Both ingest services write each batch this way.
 - **FHIR store**: a managed FHIR server in Google's Cloud Healthcare API. It is the system of
   record for everything above.
 - **HL7v2**: the older, pipe-delimited messaging standard that most hospital devices and systems
   still speak. A message is made of **segments** (lines) such as `MSH` (header), `PID`
-  (patient), `OBR` (order) and `OBX` (one observation value).
+  (patient), `OBR` (observation request: the panel being reported) and `OBX` (one observation value).
 - **ORU^R01**: the HL7v2 message type "unsolicited observation result": a device reporting a
   measurement. The cuff sends one ORU^R01 with two OBX segments per reading.
 - **MLLP** (Minimal Lower Layer Protocol): how HL7v2 travels over a plain TCP connection. Each
@@ -94,14 +96,26 @@ The [README's architecture diagram](../README.md#architecture) shows how the pie
   a named container; each value you put in it is a numbered **version**.
 - **Application Default Credentials (ADC)**: the login that Google's tools and libraries pick up
   automatically. `gcloud auth application-default login` sets it to your own Google account.
+- **Cloud Run**: Google's service for running containers that start on demand and scale to zero
+  when idle. Every PulseBridge service and the seeder job run on it.
+- **Artifact Registry**: Google's store for container images; the deploy pushes the service
+  images there and Cloud Run pulls them from it.
+- **OIDC identity token**: a short-lived token, signed by Google, that says which service account
+  is calling. Cloud Scheduler, Pub/Sub and `fhir-proxy` attach one when they call a private Cloud
+  Run service, and Cloud Run checks it.
+- **IAP (Identity-Aware Proxy) TCP forwarding**: a way to reach a VM that has no public address,
+  through Google, after Google has checked your identity and roles. Used here only for SSH during
+  the first-boot checks.
+- **Container-Optimized OS (COS)**: Google's minimal Linux image for VMs that only run
+  containers. The edge VM runs it.
 - **Workload Identity Federation (WIF)**: lets GitHub Actions act as a Google service account by
   exchanging GitHub's short-lived signed token for a short-lived Google token. No long-lived key
   is ever created or stored in GitHub.
 
 **Terraform**
 
-- **Terraform**: a tool that creates cloud resources from code (`*.tf` files) and keeps them in
-  the state the code describes.
+- **Terraform**: a tool that creates cloud resources from code (`*.tf` files) and then keeps
+  them matching that code.
 - **Module**: a reusable directory of Terraform code. PulseBridge has seven, under
   [`infra/modules/`](../infra/modules/).
 - **Root module (root)**: the directory you run Terraform in. PulseBridge's roots are
@@ -130,6 +144,7 @@ The runbook has a longer list ([Terms used here](../infra/envs/README.md#terms-u
 | Python | 3.13 or newer | the connect script (real data), `make test` |
 | Node.js and npm | Node 22.12 or newer | building and deploying the dashboard (`web/`) |
 | A web browser | | the dashboard; the Google consent screen (real data) |
+| GitHub CLI (`gh`) | optional | reading your repository's numeric ID for bootstrap; without it, read the `id` field of `https://api.github.com/repos/<owner>/<name>` in a browser |
 
 Optional, for development only: Docker (`make images` builds the service images locally), Java 17
 or newer (`make fhir-validate` runs the HL7 FHIR Validator), Go (`make secret-scan` builds
@@ -141,8 +156,12 @@ gitleaks), and Chromium for the dashboard's browser tests (`make web-check`).
   (`roles/billing.user` on it; `gcloud billing accounts list` shows yours). An organization is
   not needed: a personal Google account can create a project with no parent.
 - Or an **existing project** where you are **Owner** and billing is already linked.
-- A **GitHub repository** for your copy of this code (a fork or a push of your clone), only if you
-  want CI to deploy for you. Bootstrap asks for its `owner/name` and numeric ID.
+- **Your own GitHub repository** holding your copy of this code: a fork, or a new repository you
+  push your clone to. Bootstrap **requires** its `owner/name` and its numeric ID
+  (`github_repository` and `github_repository_id` have no default). Never give it the repository
+  you cloned from: Workload Identity Federation trusts exactly the repository you name, and
+  whoever controls that repository can run workflows that deploy into your project. Create it
+  before Step 1, even if you do not plan to use CI yet.
 - **Real data only:** a Pixel Watch (or another device that syncs heart rate to Google Health)
   and the Google account it syncs to.
 
@@ -153,13 +172,25 @@ gcloud auth login                              # gcloud commands, as you
 gcloud auth application-default login          # Terraform and the scripts, as you (ADC)
 ```
 
-Never use a service account key file for this. Bootstrap's README explains why your ADC also
-needs a **quota project** on a brand-new project
-([Prerequisites](../infra/bootstrap/README.md#prerequisites)):
+Never use a service account key file for this.
+
+Your ADC also needs a **quota project**: an existing project, with the Cloud Billing and Service
+Usage APIs enabled, that Google bills the first API calls against while the new project does not
+exist yet ([Prerequisites](../infra/bootstrap/README.md#prerequisites)):
 
 ```bash
 gcloud auth application-default set-quota-project <an-existing-project-id>
 ```
+
+A new Google account has no project to name here. Two ways out, neither yet tried with this
+repository (*not verified*):
+
+- create a first project by hand in the [Google Cloud console](https://console.cloud.google.com/),
+  link your billing account to it, enable the Cloud Billing API and the Service Usage API there,
+  and use it as the quota project; then let bootstrap create the PulseBridge project
+  (`create_project = true`); or
+- create the PulseBridge project itself by hand in the same way, set it as its own quota project,
+  and let bootstrap **adopt** it (`create_project = false`).
 
 ## What it costs, and how to stop paying
 
@@ -173,7 +204,7 @@ runbook's [Cost](../infra/envs/README.md#cost) table has the details and caveats
 | The **e2-micro VM** (OpenEMR, its database, the MLLP adapter), with 20 + 10 GB standard disks | **$0 inside the free tier**: one e2-micro per *billing account*, in `us-central1`, `us-east1` or `us-west1`, and 30 GB-months of standard disk | It is the **only always-on resource**. A second e2-micro on the same billing account (dev and prod, or any other VM of that type) is billed: about $6 a month, not confirmed |
 | Artifact Registry (container images) | cents a month | 0.5 GB free; the cached OpenEMR image likely passes it |
 | Cloud Healthcare API (FHIR and HL7v2 stores) | cents | billed per request and per GB stored; a few MB |
-| Cloud Run (4 services, 1 job), Pub/Sub, Secret Manager, Scheduler | about $0 | scale to zero; Scheduler gives 3 jobs free per billing account |
+| Cloud Run (4 services with real data; 3 services and the seeder job with synthetic data), Pub/Sub, Secret Manager, Scheduler | about $0 | scale to zero; Scheduler gives 3 jobs free per billing account |
 | Alert policies | $0 until 1 September 2027, then about $0.70 to $1.05 a month | Google's announced pricing for metric references |
 | Firebase Hosting | $0 under 10 GB stored and 10 GB a month transferred | |
 | Data-disk snapshots (prod only) | cents a month | kept 7 days; they **outlive a destroy** |
@@ -213,7 +244,7 @@ external account at all.
 
 **Never run the Google Health connect script against a synthetic patient ID** (one starting
 with `SYN-`). The script refuses such an ID, the env roots refuse a `SYN-` ID without synthetic
-data, and a synthetic deployment's `setup_env` output warns in its first line, but the rule is
+data, and a synthetic deployment's `setup_env` output warns on its second line, but the rule is
 worth knowing: a `SYN-` deployment must never hold a real person's data, and the seeder refuses
 to touch a store whose Patient is not its own.
 
@@ -257,8 +288,9 @@ terraform output                               # values for the env roots and Gi
 ```
 
 In `terraform.tfvars`, pick one mode and set `project_id`, `billing_account` (create mode only),
-`github_repository` (`<owner>/<name>`) and `github_repository_id`
-(`gh api repos/<owner>/<name> --jq .id`). Leave `deployer_roles` at its default unless you have
+`github_repository` (`<owner>/<name>` of **your own** repository, see
+[Accounts and permissions](#accounts-and-permissions)) and `github_repository_id`
+(`gh api repos/<owner>/<name> --jq .id`, or the `id` field of the GitHub API address above). Leave `deployer_roles` at its default unless you have
 read [Deployer roles](../infra/bootstrap/README.md#deployer-roles).
 
 **How to know it worked.** `terraform output` shows `project_id`, `state_bucket_name`,
@@ -327,6 +359,12 @@ In the [Google Cloud console](https://console.cloud.google.com/), in your projec
    application" client would need that exact address registered. Keep the client ID and secret
    to paste when the script asks; do not save them in a file.
 
+**How to know it worked.** In Google Auth Platform: Audience shows publishing status "Testing"
+and your account under Test users; Data Access lists the scope above; Clients lists your client
+with type "Desktop". The real proof comes in [3.8](#38-the-setup-step-write-the-patient-exactly-one-of-the-two),
+when the connect script stores a refresh token. *Not yet verified with this repository's script*
+(checklist I14, I15).
+
 ### Testing status: the 7-day refresh token
 
 While the app's publishing status is **Testing**:
@@ -378,6 +416,17 @@ which would name your project; you give the bucket at `init` from the git-ignore
 `ingest_enabled = false`. The runbook's [What a stranger sets](../infra/envs/README.md#what-a-stranger-sets)
 table explains each.
 
+**Running as the deployer.** If you set `deployer_service_account_email` instead of holding the
+deployer's roles yourself, the project owner first lets you impersonate it, once:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding <deployer_service_account_email> \
+  --member="user:<your-google-account>" --role=roles/iam.serviceAccountTokenCreator \
+  --project <project-id>
+```
+
+This is an IAM change on a real project: it lets your account act as the deployer.
+
 **About the alert address:** `alert_email` is not a sensitive variable, so it appears in plan
 output, including plans CI posts on pull requests. Use an address you do not mind showing there
 ([What a plan shows](../infra/envs/README.md#what-a-plan-shows)).
@@ -396,8 +445,10 @@ terraform apply -target=module.stack.module.project_base
 **What and why.** `-target` applies only the named module (and what it depends on). This one
 enables the stack's APIs and creates the VPC network, its subnets, the firewall rule and the two
 Artifact Registry repositories (`pulsebridge-services` for our images, `pulsebridge-dockerhub`,
-a cache of Docker Hub). The registry must exist before the images can be pushed to it (3.6).
-Terraform warns that targeting is in effect; that is expected here.
+a cache of Docker Hub). It also creates module `identity`'s **service accounts** (not its
+secrets): project-base's firewall rule and mirror grant name the edge VM's account, and Terraform
+pulls in what a targeted module depends on. The registry must exist before the images can be
+pushed to it (3.6). Terraform warns that targeting is in effect; that is expected here.
 
 **Worked when:** `gcloud artifacts repositories list --project <project-id>` shows both
 repositories. Runbook: [step 3](../infra/envs/README.md#3-first-targeted-apply-apis-network-registry-deployer).
@@ -409,10 +460,11 @@ repositories. Runbook: [step 3](../infra/envs/README.md#3-first-targeted-apply-a
 terraform apply -target=module.stack.module.identity
 ```
 
-**What and why.** Module `identity` creates one service account per workload and **eight empty
-secrets**. It is a separate step because the secrets need the Secret Manager API that 3.2
-enabled. In dev, a reviewer password given through Terraform is written here
-([Step 4](#step-4-log-in-as-a-reviewer)).
+**What and why.** The service accounts already exist (3.2); this creates module `identity`'s
+**eight empty secrets** and who may read each. It is a separate step because the secrets need the
+Secret Manager API that 3.2 enabled. In dev, if you chose to give the reviewer password through
+Terraform, it is written here ([Step 4](#step-4-log-in-as-a-reviewer)); the simpler route is the
+script in 3.4.
 
 The secrets are named `<prefix>-<key>`, where `<prefix>` is `identity_name_prefix` (default
 `pb`; `terraform output -raw secret_name_prefix` prints it). The scripts and services know **only
@@ -442,22 +494,35 @@ plan or in Terraform state. You now add one **version** to each of `db-root-pass
 into password files), and the reviewer password needs **at least 16 characters** (24 or more is
 better).
 
-With the scripts **added by T27** (being built; check `scripts/secrets/` once it merges), values
-are read from a hidden prompt or stdin, or generated, and never echoed or written to disk. The
-project comes from `CLOUDSDK_CORE_PROJECT` and the prefix from `SECRET_NAME_PREFIX`:
+With the scripts **added by T27** (being reviewed; follow `scripts/secrets/README.md` once it
+merges, since the details below may still change), values come from a hidden prompt (typed
+twice), from standard input when it is not a terminal, or are generated; they are never echoed,
+never passed as an argument and never written to disk. Values must be 16 to 128 printable ASCII
+characters. The project comes from `CLOUDSDK_CORE_PROJECT` (or `--project`) and the prefix from
+`SECRET_NAME_PREFIX` (or `--prefix`). Run them from the repository root:
 
 ```bash
-CLOUDSDK_CORE_PROJECT=<project-id> SECRET_NAME_PREFIX=pb \
-  scripts/secrets/set-secret.sh --generate db-root-password      # run from the repository root
-CLOUDSDK_CORE_PROJECT=<project-id> SECRET_NAME_PREFIX=pb \
-  scripts/secrets/set-reviewer-password.sh                       # prompts, hidden
+export CLOUDSDK_CORE_PROJECT=<project-id>
+export SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/dev output -raw secret_name_prefix)"
+scripts/secrets/set-secret.sh --generate db-root-password       # 32 random characters, never shown
+scripts/secrets/set-secret.sh --generate openemr-db-password
+scripts/secrets/set-secret.sh openemr-admin-password            # or --generate; hidden prompt
+scripts/secrets/set-reviewer-password.sh --generate             # prints the new password once
 ```
 
-(The exact flags are T27's; follow `scripts/secrets/` once it is merged.) Until then, the
-runbook's [step 5](../infra/envs/README.md#5-secret-versions-deployer-t27s-scripts) has a safe
-by-hand command (`IFS= read -rs`, then `printf '%s'` piped to `gcloud secrets versions add
---data-file=-`, then `unset`). Never type a secret on a command line, where it would stay in your
-shell history.
+- `set-secret.sh` accepts exactly `db-root-password`, `openemr-db-password` and
+  `openemr-admin-password`, and refuses any other name.
+- It refuses to add a version when the secret already has an enabled one, unless you pass
+  `--replace` (rotation: see the scripts' README).
+- `set-reviewer-password.sh --generate` prints the password once, after it is stored, and only to
+  a terminal (add `--show` to send it to a pipe on purpose). Without `--generate` it prompts.
+- `openemr-admin-password` is OpenEMR's `admin` login, which you only need to look at OpenEMR's
+  own screens through IAP; if you generate it, nobody can read it except through Secret Manager.
+
+Until T27 merges, the runbook's [step 5](../infra/envs/README.md#5-secret-versions-deployer-t27s-scripts)
+has a safe by-hand command (`IFS= read -rs`, then `printf '%s'` piped to `gcloud secrets versions
+add --data-file=-`, then `unset`). Never type a secret on a command line, where it would stay in
+your shell history.
 
 **Worked when:** `gcloud secrets versions list <prefix>-db-root-password --project <project-id>`
 shows version 1 `enabled`, and the same for each secret you set. *Not yet verified on a real
@@ -507,7 +572,9 @@ gcloud builds log <BUILD_ID> --project <project-id> | sed -n '/BEGIN tfvars/,/EN
 registry from 3.2. The build ends by printing a `BEGIN tfvars` block: five lines such as
 `cuff_sim_image = "...@sha256:<64 hex>"`. Paste them unchanged into `terraform.tfvars`. Images
 are referenced **by digest** (the hash of their exact bytes), so an apply always deploys exactly
-what was built; the roots refuse an image given by tag. If `gcloud builds log` prefixes each line
+what was built; the roots refuse an image given by tag. `<BUILD_ID>` is printed by `gcloud
+builds submit` as it starts (the `ID` column, and in the build's console link); `gcloud builds
+list --project <project-id> --limit=1` shows it too. If `gcloud builds log` prefixes each line
 with `Step #0 - "...": `, delete that prefix (not verified whether it does).
 
 `gcloud builds submit` also creates a bucket `gs://<project-id>_cloudbuild` that `terraform
@@ -526,9 +593,10 @@ terraform apply            # with ingest_enabled = false
 terraform output -raw next_steps
 ```
 
-**What and why.** This creates everything else: the Healthcare dataset with its FHIR store, the
-separate audit FHIR store (cuff send records) and the HL7v2 store; the Pub/Sub topic and
-subscription; the Cloud Run services (`v2-to-fhir`, `health-sync` or the seeder job,
+**What and why.** The Healthcare dataset, the HL7v2 store and its Pub/Sub topic already exist:
+3.5 pulled them in, because the MLLP adapter's settings name the store. This apply creates
+everything else: the FHIR store, the separate audit FHIR store (cuff send records), the Pub/Sub
+subscription and dead-letter topic, the Cloud Run services (`v2-to-fhir`, `health-sync` or the seeder job,
 `fhir-proxy`, `cuff-sim`); the Firebase Hosting site; the alerts. With `ingest_enabled = false`
 **no Scheduler job exists and the HL7v2 subscription does not push**, so nothing writes to the
 FHIR store by itself before the setup step.
@@ -536,7 +604,8 @@ FHIR store by itself before the setup step.
 **Worked when:** the apply ends without error, `terraform output scheduler_job_names` is `[]`
 and `terraform output push_enabled` is `false`. Real data: if it stops at
 `google_cloud_run_v2_service.health_sync` on a secret error, run the connect script (3.8) now and
-apply again. Runbook: [step 8](../infra/envs/README.md#8-first-full-apply-ingest-off-deployer).
+apply again. Then run checklist item E8's `AA` test (a test message through the MLLP adapter must
+get `AA`; the VM's ingest grant on the store is created by this apply). Runbook: [step 8](../infra/envs/README.md#8-first-full-apply-ingest-off-deployer).
 *Not yet verified on a real project* (A8 to A11, A19).
 
 ### 3.8 The setup step: write the Patient (exactly one of the two)
@@ -647,25 +716,26 @@ The runbook's [step 12](../infra/envs/README.md#12-the-front-doors-first-deploy-
 (the front door: measure `trusted_proxy_hops` first, then logins, the rewrite, the security
 policy, the time limits) and
 [step 13](../infra/envs/README.md#13-the-ingestion-checks-deployer) (first and second sync run,
-alerts) are first-deployment checks, items P1 to P16 and I1 to I25 of the
-[master checklist](../infra/envs/README.md#master-checklist). Please record what you find there:
+alerts) are first-deployment checks, listed in the master checklist's tables
+[The front door (steps 11 and 12)](../infra/envs/README.md#the-front-door-steps-11-and-12) and
+[The setup step and ingestion (steps 9, 10 and 13)](../infra/envs/README.md#the-setup-step-and-ingestion-steps-9-10-and-13). Please record what you find there:
 that is how this project's open assumptions get closed. The end-to-end smoke test (T29,
 [step 14](../infra/envs/README.md#14-end-to-end-t29)) is not built yet.
 
 ## Step 4: log in as a reviewer
 
 The dashboard has **one shared password**, not user accounts (decision D9). `fhir-proxy` checks
-it and hands back a signed **session token** valid for **8 hours**, kept in the page's memory
-and sent with every request (no cookie). After five wrong passwords within a minute from one
+it and hands back a signed **session token** valid for **8 hours**, kept in the browser tab's
+`sessionStorage` (per tab, gone when the tab closes) and sent with every request (no cookie). After five wrong passwords within a minute from one
 address, further attempts from it are refused (HTTP 429, with the seconds to wait) until the
 oldest failure is a minute old.
 
 Set the password one of two ways, **never both** in one environment:
 
-- **prod (and dev, if you prefer):** `scripts/secrets/set-reviewer-password.sh` (added by T27;
-  3.4 above). Until a version exists the login page answers "Reviewer login is not configured"
-  (HTTP 503).
-- **dev only, through Terraform:** set `reviewer_password_wo_version = 1` in `terraform.tfvars`
+- **Recommended, prod and dev:** `scripts/secrets/set-reviewer-password.sh` (added by T27; 3.4
+  above), with `reviewer_password_wo_version` left at its default `0`. Until a version exists the
+  login page answers "Reviewer login is not configured" (HTTP 503).
+- **dev only, through Terraform** (more work, see the note below): set `reviewer_password_wo_version = 1` in `terraform.tfvars`
   and give the password to the apply through the environment, read without echo, and remove it
   afterwards whether or not the apply succeeds:
 
@@ -676,7 +746,14 @@ Set the password one of two ways, **never both** in one environment:
 
   It is a **write-only** value: sent to Secret Manager, never saved in the plan or the state.
 
-Open `terraform output -raw dashboard_url` and enter the password. Give it to reviewers through
+  **The catch:** while `reviewer_password_wo_version` is above 0, **every later** `terraform plan`
+  or `apply` in that root needs `TF_VAR_reviewer_password` set again (read it the same way, and
+  unset it afterwards); without it the run stops with "reviewer_password must be set when
+  reviewer_password_wo_version is greater than 0". That is why the script is the simpler route.
+
+Open `terraform output -raw dashboard_url` and enter the password. **It worked** when the
+dashboard replaces the login page and the status strip fills in (*not yet verified on a real
+project*, checklist P2). Give it to reviewers through
 a private channel; to take access away, rotate it
 ([Rotating the reviewer password](#rotating-the-reviewer-password)).
 
@@ -717,10 +794,11 @@ You can try the page locally with no cloud at all: `cd web && npm ci && npm run 
 
 - **Share with clinic** (middle): sends the **one selected, final** reading to OpenEMR. A
   confirmation first lists what leaves and what does not:
-  - **sent:** the Patient's identifier, official name, gender and birth date (only if OpenEMR
-    does not have the Patient yet); an Encounter (a visit) for the reading's day, because
-    OpenEMR files vitals on a visit; and the Observation's status, category, code, value and
-    unit, components and time;
+  - **sent:** the Patient's identifier on every share (to search for the Patient); the
+    official name, gender and birth date only if OpenEMR does not have the Patient yet; an
+    Encounter (a visit) for the reading's day in UTC, because OpenEMR files vitals on a visit;
+    and the Observation's status, category, code, method text, value and unit, components and
+    time;
   - **never sent:** the Google Health user ID, PulseBridge's own resource IDs and metadata, the
     device, the performer, notes or any other reference.
 
@@ -747,7 +825,8 @@ from the password.
   (added by T27) again. `fhir-proxy` reads the newest version within about 30 seconds.
 - **dev with a tfvars password:** raise `reviewer_password_wo_version` by one and apply with the
   new `TF_VAR_reviewer_password` (read and unset as in [Step 4](#step-4-log-in-as-a-reviewer)).
-  There may be a moment with no enabled version, when login answers 503.
+  There may be a moment with no enabled version, when login answers 503. As in Step 4, every
+  later plan and apply in that root needs the variable set again.
 
 Runbook: [Rotating the reviewer password](../infra/envs/README.md#rotating-the-reviewer-password).
 
@@ -800,7 +879,7 @@ protected so a stray destroy cannot delete real health data. To really remove it
 
 | Left behind | Billed? | What to do |
 | --- | --- | --- |
-| The default Firebase Hosting site **and its last page**, still public at `https://<project-id>.web.app` (every `/api` call fails) | no | `firebase hosting:disable --project <project-id>` if no page should stay online |
+| The default Firebase Hosting site **and its last page**, still public at `https://<project-id>.web.app` (every `/api` call fails) | no | `npx --yes firebase-tools@<pinned version> hosting:disable --project <project-id>` (from `web/`) if no page should stay online |
 | Firebase on the project | no | nothing; it cannot be removed |
 | The serverless subnet and the VPC, on the first try: Google needs **one to two hours** after the Cloud Run services are deleted | no | run `terraform destroy` again after one to two hours |
 | The enabled APIs | no | nothing |
@@ -819,7 +898,7 @@ a day later. If the project exists only for PulseBridge, deleting it
 | Symptom | Likely cause | What to do |
 | --- | --- | --- |
 | "API has not been used in project ... or it is disabled" | a just-enabled API is not ready yet | wait a minute and run the same apply again |
-| Bootstrap or Firebase calls fail about a quota project | your ADC has no quota project | `gcloud auth application-default set-quota-project <project-id>` |
+| Bootstrap or Firebase calls fail about a quota project | your ADC has no quota project | `gcloud auth application-default set-quota-project <an-existing-project-id>`, naming an existing project with the Cloud Billing and Service Usage APIs enabled ([Log in with your own credentials](#log-in-with-your-own-credentials)) |
 | Plan refuses `patient_id` | a `SYN-` ID without synthetic data, or a non-`SYN-` ID with it | match `patient_id` to `use_synthetic_data` ([Choose your data](#choose-your-data-synthetic-or-your-own-watch)) |
 | Plan refuses an image | given by tag, not digest | paste the build's `BEGIN tfvars` block unchanged |
 | Plan says a full apply needs the images | the image variables are not set yet | do 3.6 first; the targeted applies 3.2, 3.3 and 3.5 do not need them |
@@ -827,6 +906,7 @@ a day later. If the project exists only for PulseBridge, deleting it
 | VM image pulls fail | no route to Artifact Registry over Private Google Access | `enable_cloud_nat = true` and apply (**billed hourly**); checklist E5 |
 | 3.7 stops at `fhir_proxy` on `openemr-client-private-key` | the VM had not registered its OpenEMR client yet | finish 3.5 (the `hook openemr-oauth-client: ok` line), then apply again |
 | 3.7 stops at `health_sync` on a secret (real data) | its three secrets have no version yet | run the connect script (3.8), then apply again |
+| Plan stops: "reviewer_password must be set when reviewer_password_wo_version is greater than 0" | dev with a Terraform-managed reviewer password, and `TF_VAR_reviewer_password` not set for this run | set it again for every plan and apply ([Step 4](#step-4-log-in-as-a-reviewer)), or move to the script and set the version back to `0` (see the note in Step 4 first) |
 | Login says "Reviewer login is not configured" (503) | no reviewer-password version | set one ([Step 4](#step-4-log-in-as-a-reviewer)) |
 | Login refused with HTTP 429 | five failed logins from your address within a minute | wait for the time shown |
 | Status strip: "reconnect needed" | the Google Health refresh token expired (7 days in Testing) or was revoked | run the connect script again; consider publishing the app |
