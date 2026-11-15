@@ -117,13 +117,13 @@ def check_configuration(config: ServiceConfig) -> None:
     """Fail at start-up, so a bad deploy fails visibly, if the configuration cannot produce a
     valid message or AuditEvent. Builds both offline, from a fixed synthetic reading; nothing is
     sent. Messages name the variables, never their values."""
-    names = HealthcareClient(
-        project=config.project_id,
-        location=config.location,
-        dataset=config.dataset_id,
-        transport=_NoTransport(),
-    )
     try:
+        names = HealthcareClient(
+            project=config.project_id,
+            location=config.location,
+            dataset=config.dataset_id,
+            transport=_NoTransport(),
+        )
         store_name = names.hl7v2_store_name(config.hl7v2_store_id)
         names.fhir_store_name(config.audit_fhir_store_id)
     except ValueError as exc:

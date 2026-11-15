@@ -18,7 +18,7 @@ from __future__ import annotations
 import base64
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 from pulsebridge_fhir import now_ms
@@ -136,7 +136,7 @@ class CuffSimulator:
             if sample is None:  # parse_request already refused this; do not guess
                 raise ValueError("sample does not apply to this transport")
             return from_sample(sample, request.transport)
-        return build_reading(
+        outgoing = build_reading(
             self.config,
             systolic=request.systolic,
             diastolic=request.diastolic,
@@ -146,6 +146,8 @@ class CuffSimulator:
             # MSH-7, OBR-7 and OBX-14: whole seconds with the UTC offset (HL7 DTM).
             observed_at=datetime.now(UTC).replace(microsecond=0),
         )
+        # MLLP framing applies only to the MLLP transport; HTTPS carries the bare bytes.
+        return outgoing if request.transport == "mllp" else replace(outgoing, framing=None)
 
     def send(self, outgoing: Outgoing, transport: str) -> SendResult:
         started = time.monotonic()
