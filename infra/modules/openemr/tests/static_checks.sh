@@ -67,7 +67,7 @@ if [[ -n "$hits" ]]; then bad "a script enables tracing:"; echo "$hits"; else ok
 #    so `mkdir -p dir` and `awk -v name=value` are not.
 hits="$(code_lines "$here"/scripts/*.sh | grep -E -- '(^|[[:space:]])(-v|-p)[[:space:]]+"?[^[:space:]]*:|--volume|(^|[[:space:]])(-k|--insecure)([[:space:]]|$)' || true)"
 if [[ -n "$hits" ]]; then bad "docker -v/--volume/-p or curl -k/--insecure in a script:"; echo "$hits"; else ok "no -v/--volume/-p and no curl -k/--insecure"; fi
-n="$(code_lines "$here"/scripts/*.sh | grep -cE -- '--publish' || true)"
+n="$(code_lines "$here"/scripts/*.sh | grep -oE -- '--publish' | wc -l)"
 if [[ "$n" -eq 1 ]]; then ok "exactly one --publish in the scripts"; else bad "expected exactly one --publish in the scripts, found $n"; fi
 
 # 6. No variable that would carry a secret into Terraform (and so into state and metadata).
