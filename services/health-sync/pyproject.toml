@@ -1,0 +1,34 @@
+# health-sync: pulls five-minute heart-rate roll-ups from the Google Health API, maps them to FHIR
+# R4 and writes them to the FHIR store (task T10). See README.md.
+
+[build-system]
+requires = ["hatchling==1.32.4"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pulsebridge-health-sync"
+version = "0.1.0"
+description = "Syncs Google Health API heart-rate roll-ups into the FHIR store as heart-rate Observations, every 15 minutes and as a backfill."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+  # The repository's own libraries (libs/). They are not on PyPI: install them from libs/ first
+  # (`make install` does; the container build in T24 must too). Unpinned because they are
+  # versioned with this repository.
+  "pulsebridge-fhir",
+  "pulsebridge-gcp",
+  # Third-party, exact pins (CLAUDE.md), the same versions as v2-to-fhir and pulsebridge-gcp.
+  "Flask==3.1.3",
+  "gunicorn==26.2.0",
+  # The Google Health API and Google's OAuth token endpoint are called with a plain
+  # requests.Session (not google-auth's AuthorizedSession: that one carries the service
+  # account's token, which the Google Health API must never receive).
+  "requests==2.34.2",
+]
+
+[project.scripts]
+# backfill --days N (README, "Backfill")
+health-sync-backfill = "health_sync.backfill:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["health_sync"]
