@@ -139,6 +139,19 @@ SYNTHETIC_SEND_NO_ACK = SendAttempt(
     destination=SYNTHETIC_HL7V2_STORE,
     sample_name="noack_missing_end_block",
 )
+SYNTHETIC_SEND_UNREADABLE_REPLY = SendAttempt(
+    sent_at=datetime(2026, 1, 1, 14, 33, 0, tzinfo=UTC),
+    transport="mllp",
+    control_id="MSG-SYN-0005",
+    # A reply the ACK parser refuses: it starts with a UTF-8 byte order mark, not with MSH.
+    result=NotAcknowledged(
+        why="unreadable-reply",
+        reply_prefix=b"\xef\xbb\xbfMSH|^~\\&|||||20260101143300||ACK|ACK-SYN-0005\rMSA|AA|MSG-SYN-0005",
+    ),
+    patient_id="PB-SYN-0001",
+    agent="cuff-sim",
+    destination=SYNTHETIC_HL7V2_STORE,
+)
 
 
 def build_examples() -> dict[str, dict]:
@@ -174,6 +187,7 @@ def build_examples() -> dict[str, dict]:
             ("auditevent-send-rejected.json", SYNTHETIC_SEND_REJECTED, 1),
             # recorded after the simulator's read timeout
             ("auditevent-send-no-ack.json", SYNTHETIC_SEND_NO_ACK, 5),
+            ("auditevent-send-unreadable-reply.json", SYNTHETIC_SEND_UNREADABLE_REPLY, 1),
         )
     }
     return sends | {

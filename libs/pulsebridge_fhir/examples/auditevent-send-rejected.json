@@ -33,6 +33,7 @@
         ]
       },
       "who": {
+        "type": "Device",
         "identifier": {
           "system": "urn:pulsebridge:service",
           "value": "cuff-sim"
@@ -51,6 +52,7 @@
         ]
       },
       "who": {
+        "type": "Device",
         "identifier": {
           "system": "urn:pulsebridge:hl7v2-store",
           "value": "projects/example-project/locations/us-central1/datasets/example-dataset/hl7V2Stores/example-store"
@@ -61,6 +63,7 @@
   ],
   "source": {
     "observer": {
+      "type": "Device",
       "identifier": {
         "system": "urn:pulsebridge:service",
         "value": "cuff-sim"
@@ -106,6 +109,10 @@
         "display": "Report"
       },
       "detail": [
+        {
+          "type": "format-version",
+          "valueString": "1"
+        },
         {
           "type": "transport",
           "valueString": "mllp"

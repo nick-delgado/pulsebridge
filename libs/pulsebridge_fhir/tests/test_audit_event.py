@@ -19,17 +19,22 @@ from pulsebridge_fhir import (
     BuiltResource,
     FhirInputError,
     NotAcknowledged,
+    NotASendAttempt,
     SendAttempt,
+    UnreadableSendAttempt,
     Write,
     audit_event_write,
     build_ingest_bundle,
     build_patient,
     build_send_attempt_audit_event,
+    is_send_attempt,
+    now_ms,
     parse_send_attempt,
     request_for,
     sanitise_reason,
     send_attempt_key,
     send_attempt_search_params,
+    truncate_to_ms,
 )
 from pulsebridge_fhir.examples import (
     SYNTHETIC_HL7V2_STORE,
@@ -37,6 +42,7 @@ from pulsebridge_fhir.examples import (
     SYNTHETIC_SEND_ACCEPTED,
     SYNTHETIC_SEND_NO_ACK,
     SYNTHETIC_SEND_REJECTED,
+    SYNTHETIC_SEND_UNREADABLE_REPLY,
 )
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
@@ -66,12 +72,18 @@ S4_NACK_B64 = (
 DCM = "http://dicom.nema.org/resources/ontology/DCM"
 SOURCE_AGENT = {
     "type": {"coding": [{"system": DCM, "code": "110153", "display": "Source Role ID"}]},
-    "who": {"identifier": {"system": "urn:pulsebridge:service", "value": "cuff-sim"}},
+    "who": {
+        "type": "Device",
+        "identifier": {"system": "urn:pulsebridge:service", "value": "cuff-sim"},
+    },
     "requestor": True,
 }
 DESTINATION_AGENT = {
     "type": {"coding": [{"system": DCM, "code": "110152", "display": "Destination Role ID"}]},
-    "who": {"identifier": {"system": "urn:pulsebridge:hl7v2-store", "value": STORE}},
+    "who": {
+        "type": "Device",
+        "identifier": {"system": "urn:pulsebridge:hl7v2-store", "value": STORE},
+    },
     "requestor": False,
 }
 PATIENT_ENTITY = {
@@ -90,6 +102,7 @@ PATIENT_ENTITY = {
         "display": "Patient",
     },
 }
+VERSION_1 = {"type": "format-version", "valueString": "1"}
 MESSAGE_TYPE_AND_ROLE = {
     "type": {
         "system": "http://terminology.hl7.org/CodeSystem/audit-entity-type",
@@ -174,7 +187,10 @@ def test_accepted_attempt_whole_resource():
         "outcome": "0",
         "agent": [SOURCE_AGENT, DESTINATION_AGENT],
         "source": {
-            "observer": {"identifier": {"system": "urn:pulsebridge:service", "value": "cuff-sim"}},
+            "observer": {
+                "type": "Device",
+                "identifier": {"system": "urn:pulsebridge:service", "value": "cuff-sim"},
+            },
             "type": [
                 {
                     "system": "http://terminology.hl7.org/CodeSystem/security-source-type",
@@ -194,6 +210,7 @@ def test_accepted_attempt_whole_resource():
                 },
                 **MESSAGE_TYPE_AND_ROLE,
                 "detail": [
+                    VERSION_1,
                     {"type": "transport", "valueString": "https"},
                     {"type": "MSH-10", "valueString": "MSG-SYN-0010"},
                     {"type": "MSA-1", "valueString": "AA"},
@@ -236,6 +253,7 @@ def test_rejected_attempt_details_outcome_and_reason():
     assert message_entity(r) == {
         **MESSAGE_TYPE_AND_ROLE,
         "detail": [
+            VERSION_1,
             {"type": "transport", "valueString": "mllp"},
             {"type": "MSA-1", "valueString": "AE"},
             {"type": "MSA-3", "valueString": "Invalid MSH header"},
@@ -279,12 +297,58 @@ def test_no_acknowledgment_details_and_outcome(why, status, transport, desc, ext
     assert message_entity(r) == {
         **MESSAGE_TYPE_AND_ROLE,
         "detail": [
+            VERSION_1,
             {"type": "transport", "valueString": transport},
             {"type": "MSH-10", "valueString": "MSG-SYN-0010"},
             {"type": "no-ack-reason", "valueString": why},
             *extra,
         ],
     }
+
+
+BOM_REPLY = b"\xef\xbb\xbf" + S5_ACK
+
+
+@pytest.mark.parametrize("transport", ["mllp", "https"])
+def test_unreadable_reply_is_recorded_with_its_first_bytes(transport):
+    """A reply the ACK parser refuses is still an attempt (review minor 4)."""
+    a = no_ack(why="unreadable-reply", transport=transport)
+    a = replace(a, result=NotAcknowledged(why="unreadable-reply", reply_prefix=BOM_REPLY))
+    r = build(a)
+    assert r["outcome"] == "8"
+    assert r["outcomeDesc"] == (
+        "No acknowledgment received: the reply could not be read as an HL7v2 ACK"
+    )
+    assert message_entity(r)["detail"] == [
+        VERSION_1,
+        {"type": "transport", "valueString": transport},
+        {"type": "MSH-10", "valueString": "MSG-SYN-0010"},
+        {"type": "no-ack-reason", "valueString": "unreadable-reply"},
+        {"type": "unreadable-reply-bytes", "valueBase64Binary": "77u/" + S5_ACK_B64},
+    ]
+    # Never mistaken for an ACK.
+    assert "ack-message" not in [d["type"] for d in message_entity(r)["detail"]]
+    assert "MSA-1" not in [d["type"] for d in message_entity(r)["detail"]]
+
+
+def test_unreadable_reply_over_the_cap_keeps_the_first_bytes():
+    result = NotAcknowledged(why="unreadable-reply", reply_prefix=b"x" * 5000)
+    assert result.reply_prefix == b"x" * 4096
+    assert NotAcknowledged(why="unreadable-reply").reply_prefix is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"why": "timeout", "reply_prefix": b"x"}, "reply_prefix is only for unreadable-reply"),
+        ({"why": "unreadable-reply", "reply_prefix": b""}, "must be non-empty bytes"),
+        ({"why": "unreadable-reply", "reply_prefix": "MSH"}, "must be non-empty bytes"),
+        ({"why": "unreadable-reply", "http_status": 500}, "http_status is only for api-error"),
+    ],
+)
+def test_unreadable_reply_validation(kwargs, message):
+    with pytest.raises(FhirInputError, match=message):
+        NotAcknowledged(**kwargs)
 
 
 @pytest.mark.parametrize(
@@ -352,7 +416,11 @@ def test_input_has_no_slot_for_the_message_or_a_name():
         "sample_name",
     ]
     assert [f.name for f in dataclasses.fields(Acknowledged)] == ["code", "raw_ack", "reason"]
-    assert [f.name for f in dataclasses.fields(NotAcknowledged)] == ["why", "http_status"]
+    assert [f.name for f in dataclasses.fields(NotAcknowledged)] == [
+        "why",
+        "http_status",
+        "reply_prefix",
+    ]
 
 
 @pytest.mark.parametrize("a", [attempt(), rejected(), no_ack()], ids=["aa", "ae", "none"])
@@ -512,6 +580,9 @@ def test_example_ids_are_pinned():
     assert send_attempt_key(SYNTHETIC_SEND_ACCEPTED) == "69ec535d-bb94-5c1e-927c-96a189a17a59"
     assert send_attempt_key(SYNTHETIC_SEND_REJECTED) == "914007c0-02fc-5df7-9571-d9a91edae82b"
     assert send_attempt_key(SYNTHETIC_SEND_NO_ACK) == "ba24b13a-bed7-55ea-879e-60bd9cab12ca"
+    assert (
+        send_attempt_key(SYNTHETIC_SEND_UNREADABLE_REPLY) == "c7eedc53-9fda-5be6-92a5-1d2528376107"
+    )
 
 
 def test_same_attempt_twice_is_one_audit_event():
@@ -618,6 +689,7 @@ def test_ingest_bundle_still_refuses_an_audit_event_record():
         no_ack(),
         no_ack(why="connection-closed"),
         no_ack(why="api-error", http_status=404, transport="https"),
+        no_ack(why="unreadable-reply", transport="https"),
         attempt(result=Acknowledged(code="CA", raw_ack=S5_ACK, reason="ok"), sample_name="a_b"),
     ],
 )
@@ -652,7 +724,7 @@ def test_record_fields_for_each_result_shape():
     assert (none.ack_code, none.raw_ack, none.reason) == (None, None, None)
 
 
-@pytest.mark.parametrize("name", ["accepted", "rejected", "no-ack"])
+@pytest.mark.parametrize("name", ["accepted", "rejected", "no-ack", "unreadable-reply"])
 def test_round_trip_resource_to_record_to_resource(name):
     stored = json.loads((EXAMPLES / f"auditevent-send-{name}.json").read_text())
     record = parse_send_attempt(stored)
@@ -673,8 +745,8 @@ def test_tolerates_what_a_server_adds_on_read():
     assert record.recorded == RECORDED
 
 
-def _altered(change):
-    stored = build(rejected())
+def _altered(change, base=None):
+    stored = build(base or rejected())
     change(stored)
     return stored
 
@@ -683,37 +755,145 @@ def _detail(stored, name):
     return next(d for d in message_entity(stored)["detail"] if d["type"] == name)
 
 
+def _drop_detail(name):
+    return lambda r: message_entity(r)["detail"].remove(_detail(r, name))
+
+
+# Presentation the parser must ignore (review major 1): each still reads as rejected().
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda r: r["agent"].reverse(),
+        lambda r: r["entity"].reverse(),
+        lambda r: message_entity(r)["detail"].reverse(),
+        lambda r: r.update(outcomeDesc="Reworded in a later release"),
+        lambda r: r.pop("outcomeDesc"),
+        lambda r: r["type"].update(display="Export (renamed)"),
+        lambda r: r["subtype"][0].pop("display"),
+        lambda r: r["agent"][0]["type"]["coding"][0].update(display="x"),
+        lambda r: r["entity"][1]["role"].update(display="Report v2"),
+        lambda r: r["agent"][0]["who"].pop("type"),
+        lambda r: message_entity(r)["detail"].append({"type": "added-later", "valueString": "x"}),
+        lambda r: message_entity(r)["detail"].append({"type": "blob", "valueBase64Binary": "AA=="}),
+        lambda r: message_entity(r)["detail"].append("not a dict"),
+        lambda r: r.update(language="en", extension=[{"url": "urn:x", "valueString": "y"}]),
+        lambda r: r["subtype"].insert(0, {"system": "urn:other", "code": "x"}),
+        lambda r: r["agent"].append({"type": {"text": "relay"}, "who": {"display": "adapter"}}),
+        lambda r: r["entity"].append({"what": {"display": "something else"}}),
+        lambda r: r["period"].update(end="2026-01-01T15:00:00Z"),
+        lambda r: r.update(id="assigned-by-server"),
+    ],
+    ids=[
+        "agents-reordered",
+        "entities-reordered",
+        "details-reordered",
+        "outcome-desc-reworded",
+        "outcome-desc-missing",
+        "type-display",
+        "subtype-display-dropped",
+        "agent-display",
+        "role-display",
+        "who-type-dropped",
+        "unknown-detail",
+        "unknown-bytes-detail",
+        "non-dict-detail",
+        "unknown-elements",
+        "extra-subtype",
+        "extra-agent",
+        "extra-entity",
+        "period-end",
+        "server-id",
+    ],
+)
+def test_presentation_changes_parse_to_the_same_values(change):
+    record = parse_send_attempt(_altered(change))
+    assert record.attempt == rejected()
+    assert (record.result, record.outcome, record.reason) == ("rejected", "4", "Invalid MSH header")
+    assert record.recorded == RECORDED
+
+
+def test_record_id_is_the_stored_id():
+    assert parse_send_attempt(_altered(lambda r: r.update(id="abc"))).id == "abc"
+    no_id = _altered(lambda r: r.pop("id"))
+    assert parse_send_attempt(no_id).id == send_attempt_key(rejected())
+
+
+# Not ours: NotASendAttempt, safe to skip.
 @pytest.mark.parametrize(
     ("resource", "message"),
     [
         ({"resourceType": "Provenance"}, "resourceType is not AuditEvent"),
         ("not a dict", "resourceType is not AuditEvent"),
         (_altered(lambda r: r["type"].update(code="110107")), "type is not DICOM 110106"),
-        (_altered(lambda r: r.update(id="other-id")), "its id is not the one derived"),
-        (_altered(lambda r: r.update(outcome="0")), "differs from the AuditEvent"),
-        (_altered(lambda r: r.update(outcomeDesc="hello")), "differs from the AuditEvent"),
-        (_altered(lambda r: r.update(action="C")), "differs from the AuditEvent"),
-        (_altered(lambda r: r.update(language="en")), "differs from the AuditEvent"),
-        (_altered(lambda r: r["subtype"].clear()), "differs from the AuditEvent"),
-        (_altered(lambda r: r["agent"][0].update(requestor=False)), "differs from the AuditEvent"),
-        (_altered(lambda r: r["agent"].pop()), "expected one destination-role agent, found 0"),
-        (_altered(lambda r: r["agent"][1].update(type="x")), "destination-role agent, found 0"),
-        (_altered(lambda r: r["agent"].append(r["agent"][0])), "source-role agent, found 2"),
-        (_altered(lambda r: r["entity"].pop(0)), "expected one patient entity, found 0"),
-        (_altered(lambda r: r.update(entity="x")), "expected one patient entity, found 0"),
         (
-            _altered(lambda r: r["entity"][0]["what"].update(display="Avery Example")),
-            "differs from the AuditEvent",
+            _altered(lambda r: r["type"].update(system="http://example.org/other")),
+            "type is not DICOM 110106",
+        ),
+        (_altered(lambda r: r.update(type="Export")), "type is not DICOM 110106"),
+        (_altered(lambda r: r["subtype"][0].update(code="R03")), "subtype has no v2-0003 R01"),
+        (_altered(lambda r: r.pop("subtype")), "subtype has no v2-0003 R01"),
+        (
+            _altered(lambda r: r["agent"][0]["who"]["identifier"].update(system="urn:other")),
+            "no source-role agent identified in urn:pulsebridge:service",
         ),
         (
-            _altered(lambda r: r["entity"][0]["what"]["identifier"].update(system="urn:x")),
-            "patient entity has no urn:pulsebridge:patient identifier",
+            _altered(lambda r: r["agent"][0]["type"]["coding"][0].update(code="110150")),
+            "no source-role agent",
+        ),
+        (
+            _altered(lambda r: r["agent"][1]["who"]["identifier"].update(system="urn:other")),
+            "no destination-role agent identified in urn:pulsebridge:hl7v2-store",
+        ),
+        (_altered(lambda r: r["agent"].pop()), "no destination-role agent"),
+        (_altered(lambda r: r.update(agent="x")), "no source-role agent"),
+        (
+            _altered(lambda r: r["source"]["observer"]["identifier"].update(system="urn:other")),
+            "source.observer is not identified in urn:pulsebridge:service",
+        ),
+        (_altered(lambda r: r.pop("source")), "source.observer is not identified"),
+    ],
+)
+def test_foreign_audit_event_is_not_ours(resource, message):
+    with pytest.raises(NotASendAttempt, match=message):
+        parse_send_attempt(resource)
+    assert is_send_attempt(resource) is False
+
+
+# Ours but unreadable: UnreadableSendAttempt, which names the problem.
+@pytest.mark.parametrize(
+    ("resource", "message"),
+    [
+        (_altered(_drop_detail("format-version")), "'format-version' is missing"),
+        (
+            _altered(lambda r: _detail(r, "format-version").update(valueString="one")),
+            "'format-version' is missing or not a positive number",
+        ),
+        (
+            _altered(lambda r: _detail(r, "format-version").update(valueString="0")),
+            "not a positive number",
+        ),
+        (_altered(_drop_detail("transport")), "'transport' is missing"),
+        (
+            _altered(lambda r: _detail(r, "transport").update(valueString="ftp")),
+            "transport 'ftp' is not one of",
+        ),
+        (_altered(_drop_detail("MSA-1")), "needs both 'MSA-1' and 'ack-message'"),
+        (_altered(_drop_detail("ack-message")), "needs both 'MSA-1' and 'ack-message'"),
+        (
+            _altered(lambda r: _detail(r, "MSA-1").update(valueString="ZZ")),
+            "code 'ZZ' is not one of",
         ),
         (
             _altered(
-                lambda r: message_entity(r)["detail"].append({"type": "raw", "valueString": "x"})
+                lambda r: _detail(r, "MSA-1").update(
+                    valueCode=_detail(r, "MSA-1").pop("valueString")
+                )
             ),
-            "differs from the AuditEvent",
+            "'MSA-1' has no valueString",
+        ),
+        (
+            _altered(lambda r: _detail(r, "MSA-1").pop("valueString")),
+            "'MSA-1' has no valueString",
         ),
         (
             _altered(lambda r: message_entity(r)["detail"].append(_detail(r, "MSA-1"))),
@@ -721,40 +901,137 @@ def _detail(stored, name):
         ),
         (
             _altered(lambda r: _detail(r, "ack-message").update(valueBase64Binary="***")),
-            "the raw ACK is not valid base64",
+            "'ack-message' is not valid base64",
         ),
         (
-            _altered(lambda r: _detail(r, "MSA-1").update(valueString="ZZ")),
-            "code 'ZZ' is not one of",
+            _altered(
+                lambda r: message_entity(r)["detail"].append(
+                    {"type": "no-ack-reason", "valueString": "timeout"}
+                )
+            ),
+            "both an acknowledgment and a no-acknowledgment reason",
         ),
-        (_altered(lambda r: _detail(r, "MSA-1").pop("valueString")), "needs exactly one value"),
-        (_altered(lambda r: r.update(recorded="yesterday")), "recorded is not a FHIR instant"),
-        (_altered(lambda r: r.update(period={})), "period.start is not a FHIR instant"),
         (
-            _altered(lambda r: r["period"].update(end="2026-01-01T14:40:00+00:00")),
-            "period.end is not the recorded time",
+            _altered(_drop_detail("no-ack-reason"), base=no_ack()),
+            "neither 'MSA-1' nor 'no-ack-reason': the result is unknown",
         ),
-        (_altered(lambda r: r["period"].pop("end")), "period.end is not a FHIR instant"),
-        (
-            _altered(lambda r: r["period"].update(extension=[])),
-            "differs from the AuditEvent",
-        ),
+        (_altered(lambda r: r.update(outcome="0")), "outcome '0' does not match the result"),
+        (_altered(lambda r: r.pop("outcome")), "outcome None does not match"),
+        (_altered(lambda r: r.update(recorded="yesterday")), "recorded is missing or not a FHIR"),
+        (_altered(lambda r: r.pop("recorded")), "recorded is missing"),
+        (_altered(lambda r: r.update(period={})), "period.start is missing"),
         (
             _altered(lambda r: r.update(recorded="2026-02-30T00:00:00Z")),
-            "recorded is not a real date",
+            "recorded .* is not a real date",
+        ),
+        (
+            _altered(lambda r: r.update(recorded="2026-01-01T14:29:00Z")),
+            "recorded is before period.start",
+        ),
+        (_altered(lambda r: r["entity"].pop(0)), "no patient entity"),
+        (_altered(lambda r: r["entity"].append(r["entity"][0])), "2 patient entitys"),
+        (_altered(lambda r: r["entity"].pop(1)), "no message entity"),
+        (
+            _altered(lambda r: r["entity"][0]["what"]["identifier"].update(system="urn:x")),
+            "patient has no urn:pulsebridge:patient identifier",
+        ),
+        (
+            _altered(lambda r: r["entity"][0]["what"]["identifier"].update(value="")),
+            "patient_id is missing or empty",
+        ),
+        (_altered(lambda r: r["agent"].append(r["agent"][0])), "2 source agents"),
+        (
+            _altered(lambda r: r["agent"][0]["who"]["identifier"].update(value="Cuff Sim")),
+            "agent 'Cuff Sim' must be a service name",
+        ),
+        (
+            _altered(lambda r: r["agent"][1]["who"]["identifier"].pop("value")),
+            "destination agent identifier has no value",
+        ),
+        (
+            _altered(
+                lambda r: message_entity(r).update(
+                    what={"identifier": {"system": "urn:x", "value": "y"}}
+                )
+            ),
+            "message entity has no urn:pulsebridge:source-record:hl7v2-message identifier",
+        ),
+        (
+            _altered(
+                lambda r: message_entity(r).update(
+                    what={
+                        "identifier": {
+                            "system": "urn:pulsebridge:source-record:hl7v2-message",
+                            "value": STORE + "/messages/x",
+                        }
+                    }
+                )
+            ),
+            "message_name is only for an accepted message",
         ),
     ],
 )
-def test_resource_that_is_not_ours_is_rejected(resource, message):
-    with pytest.raises(FhirInputError, match=message):
+def test_ours_but_unreadable_names_the_problem(resource, message):
+    assert is_send_attempt(resource) is True
+    with pytest.raises(UnreadableSendAttempt, match=message):
         parse_send_attempt(resource)
 
 
-def test_bad_http_status_detail_is_rejected():
+def test_the_two_errors_are_distinct_input_errors():
+    assert issubclass(NotASendAttempt, FhirInputError)
+    assert issubclass(UnreadableSendAttempt, FhirInputError)
+    assert not issubclass(NotASendAttempt, UnreadableSendAttempt)
+    assert not issubclass(UnreadableSendAttempt, NotASendAttempt)
+
+
+def test_bad_http_status_detail_is_unreadable():
     stored = build(no_ack(why="api-error", http_status=503, transport="https"))
     _detail(stored, "http-status")["valueString"] = "5O3"
-    with pytest.raises(FhirInputError, match="http-status is not a three-digit number"):
+    with pytest.raises(UnreadableSendAttempt, match="'http-status' is not a three-digit number"):
         parse_send_attempt(stored)
+
+
+def test_bad_unreadable_reply_bytes_are_unreadable():
+    a = no_ack(why="unreadable-reply")
+    a = replace(a, result=NotAcknowledged(why="unreadable-reply", reply_prefix=b"x"))
+    stored = build(a)
+    _detail(stored, "unreadable-reply-bytes")["valueBase64Binary"] = "%%"
+    with pytest.raises(UnreadableSendAttempt, match="'unreadable-reply-bytes' is not valid base64"):
+        parse_send_attempt(stored)
+
+
+# Format versions.
+
+
+def test_emitted_format_version_is_1():
+    record = parse_send_attempt(build(rejected()))
+    assert record.format_version == 1
+
+
+def test_newer_format_still_reads_the_fields_it_knows():
+    stored = _altered(lambda r: _detail(r, "format-version").update(valueString="2"))
+    message_entity(stored)["detail"].append({"type": "added-in-v2", "valueString": "x"})
+    record = parse_send_attempt(stored)
+    assert record.format_version == 2
+    assert record.attempt == rejected()
+
+
+def test_newer_format_that_lost_a_known_field_says_so():
+    stored = _altered(lambda r: _detail(r, "format-version").update(valueString="3"))
+    message_entity(stored)["detail"].remove(_detail(stored, "transport"))
+    with pytest.raises(
+        UnreadableSendAttempt, match="written in format version 3, newer than this library's 1"
+    ):
+        parse_send_attempt(stored)
+
+
+def test_version_does_not_depend_on_meta():
+    """A server owns meta and may drop or rewrite it on read; the version is in the body."""
+    stored = build(rejected())
+    stored["meta"] = {"tag": [{"system": "urn:pulsebridge:format", "code": "99"}]}
+    assert parse_send_attempt(stored).format_version == 1
+    stored.pop("meta")
+    assert parse_send_attempt(stored).format_version == 1
 
 
 def test_parse_does_not_change_its_input():
@@ -763,6 +1040,44 @@ def test_parse_does_not_change_its_input():
     before = copy.deepcopy(stored)
     parse_send_attempt(stored)
     assert stored == before
+
+
+# --- Last write wins (review minor 5) -------------------------------------------------------------
+
+
+def test_recording_an_attempt_again_overwrites_it_whatever_it_says():
+    """The id leaves the result out on purpose: the same attempt recorded twice, even with a
+    different result, is one AuditEvent and the second write replaces the first. T13 records
+    each attempt once, after its final outcome; the audit store's version history keeps both."""
+    first = build_send_attempt_audit_event(no_ack(transport="https"), recorded=RECORDED)
+    second = build_send_attempt_audit_event(attempt(), recorded=RECORDED)
+    assert audit_event_write(first)["url"] == audit_event_write(second)["url"]
+    assert first.resource["outcome"] == "8"
+    assert second.resource["outcome"] == "0"
+
+
+# --- Millisecond helpers (review minor 3) ---------------------------------------------------------
+
+
+def test_truncate_to_ms_makes_a_time_the_builder_accepts():
+    raw = datetime(2026, 1, 1, 14, 30, 0, 125999, tzinfo=timezone(timedelta(hours=-5)))
+    with pytest.raises(FhirInputError, match="use truncate_to_ms"):
+        build_send_attempt_audit_event(attempt(sent_at=SENT), recorded=raw)
+    cut = truncate_to_ms(raw)
+    assert cut == datetime(2026, 1, 1, 14, 30, 0, 125000, tzinfo=timezone(timedelta(hours=-5)))
+    assert truncate_to_ms(cut) == cut
+    assert build_send_attempt_audit_event(attempt(sent_at=cut), recorded=cut)
+    with pytest.raises(FhirInputError, match="expected a datetime"):
+        truncate_to_ms("2026-01-01")
+
+
+def test_now_ms_is_aware_and_whole_milliseconds():
+    for _ in range(50):
+        now = now_ms()
+        assert now.tzinfo is UTC
+        assert now.microsecond % 1000 == 0
+    sent = now_ms()
+    assert build_send_attempt_audit_event(attempt(sent_at=sent), recorded=now_ms())
 
 
 # --- Listing --------------------------------------------------------------------------------------

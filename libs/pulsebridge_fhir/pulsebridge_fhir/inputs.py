@@ -281,7 +281,10 @@ ACK_CODES = ACCEPT_CODES + REJECT_CODES
 #   the connection dropped);
 # - api-error: HTTPS only, an HTTP error with no hl7Nack in it (403, 404, 5xx, a 400 that is not
 #   an HL7 reply). It always carries the HTTP status.
-NO_ACK_REASONS = ("timeout", "connection-closed", "api-error")
+# - unreadable-reply: bytes came back but they are not a readable HL7v2 ACK (T07's parse_ack
+#   refused them, they are over RAW_ACK_MAX, or they start with a BOM or whitespace). The first
+#   bytes may be kept for the trace, never as an ACK.
+NO_ACK_REASONS = ("timeout", "connection-closed", "api-error", "unreadable-reply")
 
 # The longest reason kept from MSA-3. MSA-3 is an ST of 80 characters in v2.5.1, so a conforming
 # reason is never cut; the store's longest reasons in S4/S5 are under 60. The raw ACK keeps the
@@ -342,6 +345,23 @@ def sanitise_reason(value: object) -> str | None:
     return text or None
 
 
+def truncate_to_ms(value: datetime) -> datetime:
+    """``value`` with its sub-millisecond part dropped (toward the past), time zone kept.
+
+    The send-attempt builder rejects sub-millisecond times rather than rounding them, so the id,
+    ``period`` and ``recorded`` are always derived from one exact value. Pass times through this
+    first: ``truncate_to_ms(datetime.now(UTC))``, or use :func:`now_ms`.
+    """
+    if not isinstance(value, datetime):
+        raise FhirInputError(f"truncate_to_ms: expected a datetime, got {type(value).__name__}")
+    return value.replace(microsecond=value.microsecond // 1000 * 1000)
+
+
+def now_ms() -> datetime:
+    """The current time in UTC, whole milliseconds: what ``sent_at`` and ``recorded`` need."""
+    return truncate_to_ms(datetime.now(UTC))
+
+
 def _require_whole_milliseconds(where: str, name: str, value: object) -> datetime:
     """An aware datetime with no sub-millisecond part.
 
@@ -397,14 +417,18 @@ class Acknowledged:
 
 @dataclass(frozen=True, kw_only=True)
 class NotAcknowledged:
-    """No ACK came back.
+    """No readable ACK came back.
 
     - ``why``: one of ``NO_ACK_REASONS``.
     - ``http_status``: the HTTP status, required for ``api-error`` and allowed only there.
+    - ``reply_prefix``: for ``unreadable-reply`` only, optionally the bytes that came back. Only
+      the first ``RAW_ACK_MAX`` bytes are kept (longer input is cut, not refused, so the attempt
+      is still recorded). Stored under its own detail name, never as an ACK.
     """
 
     why: str
     http_status: int | None = None
+    reply_prefix: bytes | None = None
 
     def __post_init__(self) -> None:
         where = "no acknowledgment"
@@ -422,6 +446,12 @@ class NotAcknowledged:
             raise FhirInputError(
                 f"{where}: http_status is only for api-error; {self.why} got no HTTP response"
             )
+        if self.reply_prefix is not None:
+            if self.why != "unreadable-reply":
+                raise FhirInputError(f"{where}: reply_prefix is only for unreadable-reply")
+            if not isinstance(self.reply_prefix, bytes) or not self.reply_prefix:
+                raise FhirInputError(f"{where}: reply_prefix must be non-empty bytes")
+            object.__setattr__(self, "reply_prefix", self.reply_prefix[:RAW_ACK_MAX])
 
 
 @dataclass(frozen=True, kw_only=True)

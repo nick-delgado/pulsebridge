@@ -22,6 +22,7 @@ EXPECTED = {
     "auditevent-send-accepted.json",
     "auditevent-send-rejected.json",
     "auditevent-send-no-ack.json",
+    "auditevent-send-unreadable-reply.json",
 }
 
 
