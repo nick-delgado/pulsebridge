@@ -49,7 +49,8 @@ select = [
 [tool.pytest.ini_options]
 # Repository-level tooling tests live in tests/; each library and service keeps its tests next to
 # its code (libs/<name>/tests, services/<name>/tests). Paths that do not exist yet are skipped.
-# scripts/connect-google-health (T11) is a deployer-run tool with its own tests.
-testpaths = ["tests", "libs", "services", "scripts/connect-google-health"]
+# scripts/connect-google-health (T11) and scripts/secrets (T27) are deployer-run tools with their
+# own tests.
+testpaths = ["tests", "libs", "services", "scripts/connect-google-health", "scripts/secrets"]
 # importlib mode lets several packages each have a tests/ directory with same-named test modules.
 addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]
