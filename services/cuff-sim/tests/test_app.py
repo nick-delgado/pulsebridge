@@ -582,3 +582,24 @@ def test_no_other_routes(http):
     assert http.get("/").status_code == 404
     assert http.get("/healthz").status_code == 404
     assert http.get(READINGS_PATH).status_code == 405
+
+
+def test_a_clock_stepping_back_still_records_the_attempt(config, client, adapter, audit_ok, h):
+    from datetime import UTC, datetime, timedelta
+
+    from cuff_sim.request import SendRequest
+    from cuff_sim.service import CuffSimulator
+
+    times = iter(
+        [datetime(2026, 11, 15, 10, tzinfo=UTC), datetime(2026, 11, 15, 9, 59, tzinfo=UTC)]
+    )
+    simulator = CuffSimulator(config, client, clock=lambda: next(times))
+    adapter.reply(h.S4_AA)
+    request = SendRequest(transport="mllp", systolic=120, diastolic=80)
+    result = simulator.send(simulator.prepare(request), "mllp")
+    assert result.audit.recorded  # T31 refuses recorded < sent_at; the service never asks it to
+    _id, event = only_audit_put(audit_ok, h)
+    assert event["recorded"] == event["period"]["start"]
+    assert timedelta(0) == (
+        datetime.fromisoformat(event["recorded"]) - datetime.fromisoformat(event["period"]["start"])
+    )
