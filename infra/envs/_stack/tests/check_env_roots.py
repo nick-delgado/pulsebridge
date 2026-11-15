@@ -235,6 +235,28 @@ PROJECT_PATH = re.compile(r"projects/([a-z][a-z0-9-]{4,28}[a-z0-9])\b")
 NUMBER = re.compile(r"(?<![\w.:-])\d{12}(?![\w-]|\.\d)")
 
 
+def check_patterns() -> None:
+    """Positive controls: the patterns must find what they are for, or the scan below passes
+    vacuously. A host inside a URL (after "//"), a 12-digit number at the end of a sentence."""
+    # Assembled at run time, so this file's own text holds no such host or number.
+    host_a = "pulsebridge-demo.example" + ".net"
+    host_b = "dashboard.pulsebridge" + ".app"
+    number = "1234567890" + "13"
+    canaries = {
+        "a host in a URL": (HOST, f"see https://{host_a}/x", host_a),
+        "a bare host": (HOST, f"at {host_b} today", host_b),
+        "a number before a full stop": (NUMBER, f"project number {number}.", number),
+        "a number in a path": (NUMBER, f"projects/{number}/secrets/x", number),
+    }
+    for what, (pattern, text, expected) in canaries.items():
+        found = [m.group(0) for m in pattern.finditer(text)]
+        if found != [expected]:
+            fail(f"pattern self-check: {what} not found as {expected!r} (got {found})")
+    # And no false positive on a decimal or a longer number.
+    if NUMBER.findall(f"{number}4 and {number}.5"):
+        fail("pattern self-check: NUMBER matches a 13-digit number or a decimal")
+
+
 def check_no_hardcoded_identity() -> None:
     for path in candidate_files():
         if path.suffix in (".png", ".jpg") or path in GENERATED_THIRD_PARTY:
@@ -648,6 +670,7 @@ def check_deploy_tools_lockfile() -> None:
 
 
 def main() -> int:
+    check_patterns()
     check_deploy_tools_lockfile()
     check_roots_differ_only_where_documented()
     check_no_hardcoded_identity()
