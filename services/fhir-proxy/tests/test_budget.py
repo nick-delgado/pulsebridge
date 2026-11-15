@@ -217,3 +217,12 @@ def test_a_slow_cuff_sim_ends_at_the_forward_timeout(tmp_path) -> None:
     )
     assert response.status_code == 504
     assert time.monotonic() - started < 2
+
+
+def test_upstream_calls_get_at_most_the_time_left(tmp_path) -> None:
+    h = build_harness(tmp_path, request_budget=2)
+    h.sender.answer("/status", 200, {"googleHealth": "connected"})
+    h.get("/status")
+    (call,) = h.sender.calls
+    # health-sync's own timeout is 25 s; the call may only use what is left of the 2 s budget.
+    assert call["timeout"] <= 2
