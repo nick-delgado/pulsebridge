@@ -1,0 +1,58 @@
+{
+  "about": "Warnings the HL7 FHIR Validator is EXPECTED to report on libs/pulsebridge_fhir/examples/, read by scripts/fhir-validate.sh. Each entry matches warnings by message_id (the validator's message key) and/or text_contains (all substrings must occur), optionally location_contains. 'when': 'always', or 'terminology' if the warning only appears when a terminology server is used. Every entry needs a reason. Only warnings can be listed: an ERROR is never allow-listed. A warning that matches no entry is NEW and fails the run. 'status': 'documented' means libs/pulsebridge_fhir/README.md explains the choice; 'reported' means T08 reported it to the library owner as a possible improvement and it is accepted until they decide.",
+  "expected_warnings": [
+    {
+      "id": "hr-minimum-component-code",
+      "message_id": "Terminology_TX_NoValid_2_CC",
+      "text_contains": ["observation-vitalsignresult", "http://loinc.org#96935-2"],
+      "when": "terminology",
+      "status": "documented",
+      "reason": "Heart-rate minimum component uses LOINC 96935-2. Observation.component.code in the R4 vital-signs profile is bound EXTENSIBLY to observation-vitalsignresult, which has no minimum/maximum codes; an extensible binding allows another code when the value set has none suitable. Deliberate divergence, see the README 'Conformance to the R4 Vital Signs profiles' and 'Heart rate: value, components and the LOINC codes'."
+    },
+    {
+      "id": "hr-maximum-component-code",
+      "message_id": "Terminology_TX_NoValid_2_CC",
+      "text_contains": ["observation-vitalsignresult", "http://loinc.org#55426-1"],
+      "when": "terminology",
+      "status": "documented",
+      "reason": "Heart-rate maximum component uses LOINC 55426-1; same extensible-binding divergence as the minimum (README, 'Conformance to the R4 Vital Signs profiles')."
+    },
+    {
+      "id": "local-recording-method-code-system",
+      "message_id": "UNKNOWN_CODESYSTEM",
+      "text_contains": ["urn:pulsebridge:recording-method"],
+      "status": "documented",
+      "reason": "Provenance.agent.role carries the source's recording method (PASSIVELY_MEASURED) in the local code system urn:pulsebridge:recording-method, which has no published CodeSystem resource, so the validator cannot check the code. agent.role has only an example binding, so a local code is allowed (README, 'Provenance' and 'urn:pulsebridge:* code systems')."
+    },
+    {
+      "id": "patient-identifier-type-pt",
+      "message_id": "Terminology_TX_NoValid_2_CC",
+      "text_contains": ["identifier-type", "http://terminology.hl7.org/CodeSystem/v2-0203#PT"],
+      "when": "always",
+      "status": "reported",
+      "reason": "Patient.identifier.type is v2-0203 PT (Patient external identifier). Identifier.type is bound EXTENSIBLY to the R4 IdentifierType value set, a short subset of v2-0203 that does not include PT; PT is a real v2-0203 code and OpenEMR searches by it (README, 'Identifiers'). Not discussed in the README; reported to the library owner (T08) to decide between documenting it and using MR."
+    },
+    {
+      "id": "auditevent-subtype-v2-trigger",
+      "message_id": "Terminology_TX_NoValid_13",
+      "text_contains": ["audit-event-sub-type", "http://terminology.hl7.org/CodeSystem/v2-0003#R01"],
+      "when": "always",
+      "status": "reported",
+      "reason": "AuditEvent.subtype is v2-0003 R01 (the HL7v2 trigger event attempted, README 'AuditEvent ... The model'). R4 binds subtype EXTENSIBLY to audit-event-sub-type, which lists FHIR REST interactions only and has nothing for an HL7v2 send, so another code is allowed. The README does not mention the binding; reported to the library owner (T08) to document."
+    },
+    {
+      "id": "no-narrative-dom-6",
+      "message_id": "http://hl7.org/fhir/StructureDefinition/DomainResource#dom-6",
+      "when": "always",
+      "status": "reported",
+      "reason": "dom-6 is a best-practice invariant ('A resource should have narrative'). The library writes no Resource.text: text is optional in R4 and the dashboard renders the data itself. Reported to the library owner (T08) as a possible improvement (a generated narrative), not a conformance error."
+    },
+    {
+      "id": "observation-without-performer",
+      "message_id": "All_observations_should_have_a_performer",
+      "when": "always",
+      "status": "reported",
+      "reason": "Best-practice recommendation that every Observation has a performer. Observation.performer is 0..* in R4 and in the vital-signs profiles; the device is recorded in Observation.device and as the Provenance performer agent. Reported to the library owner (T08): Observation.performer = the Patient (self-measured) would remove it."
+    }
+  ]
+}
