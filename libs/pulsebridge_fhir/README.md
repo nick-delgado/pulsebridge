@@ -142,7 +142,9 @@ Fallback, matching decision D11 (not implemented):
 | `SendAttempt(*, sent_at, transport, control_id, result, patient_id, agent, destination, message_name=None, sample_name=None)` | One cuff send attempt (T31). `result` is `Acknowledged(*, code, raw_ack, reason=None)` or `NotAcknowledged(*, why, http_status=None)`. |
 | `build_send_attempt_audit_event(attempt, *, recorded)` | The AuditEvent for one attempt; a `BuiltResource`. |
 | `audit_event_write(built)` | The single-resource write: `{method: "PUT", url: "AuditEvent/<id>", content_type, body}`. AuditEvent only. |
-| `parse_send_attempt(resource)` | An AuditEvent read back from the store, as a `SendAttemptRecord`. |
+| `parse_send_attempt(resource)` | An AuditEvent read back from the audit store, as a `SendAttemptRecord`. Raises `NotASendAttempt` (not ours) or `UnreadableSendAttempt` (ours, a value cannot be read); both are `FhirInputError`s. |
+| `is_send_attempt(resource)` | The "is it ours" check alone. |
+| `now_ms()`, `truncate_to_ms(dt)` | The current UTC time, or `dt`, in whole milliseconds, as `sent_at` and `recorded` require. |
 | `send_attempt_search_params(*, count=50, since=None, before=None)` | Query parameters to list attempts newest first. |
 | `send_attempt_key(attempt)`, `sanitise_reason(text)` | The attempt's id; the MSA-3 cleaning rule. |
 
@@ -174,7 +176,7 @@ bundle = heart_rate_transaction(
     device=DeviceInput(device_display_name),
     data_source=GoogleDataSource(platform=None, recording_method=None),  # or what a listed point says
     tz=ZoneInfo(configured_time_zone),              # IANA zone, e.g. "America/New_York"
-    recorded=datetime.now(UTC),
+    recorded=now_ms(),                              # pulsebridge_fhir.now_ms: UTC, whole ms
     complete_before=start_of_next_overlap,          # windows ending later are "preliminary"
 )
 ```
@@ -189,7 +191,7 @@ bundle = blood_pressure_transaction(
     device=DeviceInput(sending_application),
     source=SourceInfo(record_type="hl7v2-message", record_id=store_message_name,
                       platform="HL7V2_STORE", recording_method=None),  # nothing asserted when unknown
-    recorded=datetime.now(UTC),
+    recorded=now_ms(),
 )
 ```
 
@@ -374,22 +376,40 @@ so there is nothing for a Provenance to describe. The AuditEvent describes the *
 whatever happened to it (decision D12). The HL7v2 store keeps neither rejected messages nor ACK
 bytes (spikes S4 and S5), so this record is the only place they survive.
 
+**These AuditEvents live in a separate audit FHIR store (D15)**, not in the FHIR store that holds
+the Patient and the Observations. The cuff simulator can write to the audit store and has no
+access to health data; `fhir-proxy` reads both. Every URL in this section (`PUT AuditEvent/<id>`,
+the search) is relative to the audit store's base URL.
+
 ### The model
 
 | Element | Value | Why |
 | --- | --- | --- |
-| `type` | DICOM `110106` Export | "Data has been exported out of a system": the simulator sends a reading out to the HL7v2 store. |
+| `type` | DICOM `110106` Export | "Data has been exported out of a system": the simulator sends a reading out to the HL7v2 store. See the note below the table. |
 | `subtype` | v2-0003 `R01` ORU/ACK | The HL7v2 trigger event attempted. A malformed sample is still an attempt at this transaction. |
 | `action` | `R` (read) | DICOM PS3.15 A.5.3.4 (Data Export) and IHE (for example the ITI-41 source audit) fix an Export's action to R: the sender reads what it sends. The receiver would record its own Import (`110107`) with action C. |
 | `period` | `start`: sent; `end`: recorded | When the activity happened: the send, then the wait for the answer. |
 | `recorded` | when the attempt was recorded | R4 requires it. Passed in by the caller, so the builder stays deterministic. |
 | `outcome` | `0` / `4` / `8` | See the mapping table below. |
 | `outcomeDesc` | fixed wording, plus the cleaned MSA-3 reason | Only for a failure, or an accept that carried MSA-3 text. No caller text enters it. |
-| `agent[0]` | DICOM `110153` Source Role ID, `who` = `urn:pulsebridge:service\|cuff-sim`, `requestor: true` | The sender, which started the activity. |
-| `agent[1]` | DICOM `110152` Destination Role ID, `who` = `urn:pulsebridge:hl7v2-store\|<store name>`, `requestor: false` | The receiver. Over MLLP it is reached through the adapter, but the store is the destination. |
-| `source.observer` | `urn:pulsebridge:service\|cuff-sim`; `source.type` security-source-type `4` Application Server | R4 requires an observer: the system that reports the event, here the simulator itself (a Cloud Run service). |
+| `agent[0]` | DICOM `110153` Source Role ID, `who` = `{type: Device, identifier: urn:pulsebridge:service\|cuff-sim}`, `requestor: true` | The sender, which started the activity. |
+| `agent[1]` | DICOM `110152` Destination Role ID, `who` = `{type: Device, identifier: urn:pulsebridge:hl7v2-store\|<store name>}`, `requestor: false` | The receiver. Over MLLP it is reached through the adapter, but the store is the destination. |
+| `source.observer` | `{type: Device, identifier: urn:pulsebridge:service\|cuff-sim}`; `source.type` security-source-type `4` Application Server | R4 requires an observer: the system that reports the event, here the simulator itself (a Cloud Run service). |
 | `entity[0]` | the patient: `what` = `{type: Patient, identifier: urn:pulsebridge:patient\|<id>}`; `type` audit-entity-type `1` Person; `role` object-role `1` Patient | What the reading was about. **The patient is not an agent**: they took no part in sending it. |
 | `entity[1]` | the message: `what` = `urn:pulsebridge:source-record:hl7v2-message\|<stored name>` when stored; `type` `2` System Object; `role` `3` Report; `detail` (below) | An ORU^R01 is an unsolicited observation report. Its identifier system is the one T06's Provenance uses for the same message, so the trace panel can join the two. |
+
+`Reference.type`: `Device` on the sender, the store and the observer, because in R4 a Device can
+be software, which both are. The patient's is `Patient`. The message's `what` has **no** `type`:
+an HL7v2 store message is not a FHIR resource, and the near candidates (`Binary`,
+`DocumentReference`) would each claim something false about it.
+
+**Why Export.** DICOM "Export" strictly describes data leaving a security domain (copied out to
+media or another organisation). Sending a reading to our own HL7v2 store is a push inside one
+deployment, so it is a looser fit. IHE nonetheless uses 110106 with action `R` for push-style
+source actors (for example the ITI-41 Document Source), which is this role exactly. The two
+alternatives fit worse. `110107` Import is the receiver's event, and the store records nothing
+of ours. `http://terminology.hl7.org/CodeSystem/audit-event-type` `rest` is for FHIR REST
+interactions only, and this is an HL7v2 send.
 
 Not used: `entity.lifecycle` (R4's DICOM lifecycle code system is marked "not currently used",
 and the element is optional) and `purposeOfEvent`.
@@ -400,13 +420,15 @@ audit messages for HL7v2 transactions do for MSH-10.
 
 | `detail.type` | Value | Present when |
 | --- | --- | --- |
+| `format-version` | `"1"` | always (see "Reading back") |
 | `transport` | `mllp` or `https` | always |
 | `MSH-10` | the message control ID | the message had one (a "no MSH" sample has none) |
 | `MSA-1` | `AA`, `AE`, `AR`, `CA`, `CE`, `CR` | an ACK came back |
 | `MSA-3` | the cleaned reason | the ACK carried one |
 | `ack-message` | the raw ACK, `valueBase64Binary` | an ACK came back |
-| `no-ack-reason` | `timeout`, `connection-closed`, `api-error` | no ACK came back |
+| `no-ack-reason` | `timeout`, `connection-closed`, `api-error`, `unreadable-reply` | no readable ACK came back |
 | `http-status` | for example `"503"` | `api-error` only |
+| `unreadable-reply-bytes` | the first bytes of a reply that was not a readable ACK, `valueBase64Binary` | `unreadable-reply`, when the caller kept them |
 | `malformed-sample` | the T07 sample name, for example `unparseable_no_msh` | "send malformed" was used |
 
 ### Code systems
@@ -441,6 +463,7 @@ response)"; `12` Major failure, "the system is no longer available for use".
 | accepted | `Acknowledged(code="AA")` or `CA` | `0` | The store took the message (commit-level accept, D7). |
 | rejected | `Acknowledged(code="AE")`, `AR`, `CE`, `CR` | `4` | The receiver answered and refused the message itself, like an HTTP 400. S4 found the store only returns AE; AR is treated the same way so the mapping depends only on accept or refuse. |
 | no acknowledgment | `NotAcknowledged(why="timeout" \| "connection-closed" \| "api-error")` | `8` | No answer at all: the delivery path failed, like an HTTP 500, and the message's fate is unknown. |
+| no acknowledgment | `NotAcknowledged(why="unreadable-reply", reply_prefix=...)` | `8` | Bytes came back but they are not a readable ACK (T07's `parse_ack` refused them, they are over 4096 bytes, or they start with a BOM or whitespace). The message's fate is just as unknown. |
 
 `12` is never used. A timeout or a closed connection does not show that the store is down, only
 that this attempt got no answer.
@@ -454,9 +477,17 @@ an accepted message (the application-level outcome) is in the stored message's l
   `Acknowledged` or `NotAcknowledged`. There is no field for the message itself.
 - `sent_at` and `recorded`: time-zone aware, **whole milliseconds**, and `recorded` must not be
   before `sent_at`. This is milliseconds, not whole seconds as for heart-rate windows, because a
-  resend can follow within the same second and the key includes the send time.
+  resend can follow within the same second and the key includes the send time. A sub-millisecond
+  time is **refused, not rounded**, so the id, `period` and `recorded` always come from one exact
+  value. Pass times through `truncate_to_ms(...)`, or take them from `now_ms()`.
 - `transport`: `mllp` or `https`. `api-error` happens only over `https` and always has an
   `http_status` of 400 to 599. The status is allowed with nothing else.
+- `unreadable-reply`, on either transport: `reply_prefix` is optional, must be non-empty bytes,
+  and only its first 4096 bytes are kept. Longer input is cut, not refused, so the attempt is
+  still recorded. It is stored under `unreadable-reply-bytes`, never as `ack-message`, so it
+  cannot be mistaken for an ACK.
+- Patterns are matched against the whole value (`fullmatch`). `"MSG-1\n"` is refused, where
+  `re.match` with `$` would have accepted the trailing newline.
 - `control_id` (MSH-10): 1 to 64 of `A-Za-z0-9._-` (T07 builds 1 to 20 of them). It may be `None`
   only for a malformed sample.
 - `raw_ack`: 1 to 4096 bytes, the ACK message without the MLLP frame (no `0x0B`, no `0x1C`),
@@ -498,8 +529,11 @@ The patient, the sender and the store are **logical references**: a `Reference` 
 `identifier` and no `reference` (no `Patient/<id>`). R4 allows a Reference to carry only an
 identifier when the target is known by identifier rather than by server id.
 
-This suits an AuditEvent written **outside a transaction Bundle**:
+This suits an AuditEvent written **outside a transaction Bundle, in another store**:
 
+- **The Patient is not in the audit store at all (D15).** A server id such as `Patient/123`
+  could not resolve there, and the audit store would refuse it under referential integrity. An
+  identifier names the same person in any store.
 - There is no Bundle, so there is no `urn:uuid` to point at.
 - D11 says ingest never assumes the Patient's server id.
 - The simulator writes the AuditEvent before, and whether or not, `v2-to-fhir` has created
@@ -524,9 +558,15 @@ The id is UUIDv5 of `["AuditEvent", "cuff-send-attempt", <agent>, <transport>, <
 - **Agent and transport** keep two simulators, or an MLLP and an HTTPS send at the same
   millisecond, apart.
 - **Not the result, the destination or `recorded`**: they are what is recorded about the
-  attempt. Writing the same attempt again (a retried write) replaces the same AuditEvent.
+  attempt.
 
-The three example ids are pinned by a test.
+**Last write wins.** Because the result is left out on purpose, recording the same attempt again
+overwrites the AuditEvent, whatever the second write says. T13 records each attempt **once,
+after its final outcome** (the ACK, the timeout or the error), so in practice a second write is
+a retry with the same content. The audit store keeps every version of a resource, so an
+overwrite is still visible in its history. A test states this behaviour.
+
+The four example ids are pinned by a test.
 
 `audit_event_write` derives method and URL from the resource with `request_for`, like every other
 request in this library. It refuses anything but an AuditEvent, so it cannot write a Patient or
@@ -537,10 +577,14 @@ record.
 
 ```python
 from pulsebridge_fhir import (Acknowledged, NotAcknowledged, SendAttempt, FhirInputError,
-                              audit_event_write, build_send_attempt_audit_event)
+                              audit_event_write, build_send_attempt_audit_event, now_ms)
 
+sent_at = now_ms()                      # just before the first byte is sent
+...
 if ack is not None:   # T07 parse_ack(payload): the frame payload, or base64-decoded hl7Ack/hl7Nack
     result = Acknowledged(code=ack.code, raw_ack=ack.raw, reason=ack.reason)
+elif reply_bytes:     # bytes came back but parse_ack refused them (or they are over 4096 bytes)
+    result = NotAcknowledged(why="unreadable-reply", reply_prefix=reply_bytes)
 else:                 # timeout, connection closed, or an HTTPS error with no hl7Nack
     result = NotAcknowledged(why=why, http_status=status if why == "api-error" else None)
 attempt = SendAttempt(
@@ -549,35 +593,67 @@ attempt = SendAttempt(
     message_name=ingest_response_name,          # HTTPS 200 only; None otherwise
     sample_name=malformed_sample_name,          # None unless "send malformed"
 )
-write = audit_event_write(build_send_attempt_audit_event(attempt, recorded=datetime.now(UTC)))
-# PUT {fhir_base}/{write["url"]}, Content-Type: write["content_type"], body json.dumps(write["body"])
+write = audit_event_write(build_send_attempt_audit_event(attempt, recorded=now_ms()))
+# PUT {audit_fhir_base}/{write["url"]}, Content-Type: write["content_type"],
+# body json.dumps(write["body"]). The audit store, not the health-data store (D15).
 ```
 
-Truncate `datetime.now(UTC)` and `sent_at` to milliseconds
-(`.replace(microsecond=t.microsecond // 1000 * 1000)`). A `FhirInputError` or a failed write is
-logged and reported, and never hides the send's result (T13 AC).
+Record each attempt once, after its final outcome. A `FhirInputError` or a failed write is logged
+and reported, and never hides the send's result (T13 AC).
 
 ### Usage: FHIR proxy (T14), the messages log
 
 ```python
 from urllib.parse import urlencode
-from pulsebridge_fhir import parse_send_attempt, send_attempt_search_params, FhirInputError
+from pulsebridge_fhir import (NotASendAttempt, UnreadableSendAttempt, parse_send_attempt,
+                              send_attempt_search_params)
 
-url = f"{fhir_base}/AuditEvent?{urlencode(send_attempt_search_params(count=50, since=since))}"
+url = f"{audit_fhir_base}/AuditEvent?{urlencode(send_attempt_search_params(count=50, since=since))}"
+rows, unreadable = [], 0
 for entry in bundle.get("entry", []):
+    resource = entry["resource"]
     try:
-        row = parse_send_attempt(entry["resource"])
-    except FhirInputError:
-        continue                                # not one of ours; skip it, log at debug
-    row.sent_at, row.transport, row.control_id, row.result          # accepted / rejected / no-acknowledgment
-    row.ack_code, row.reason, row.raw_ack, row.no_ack_reason, row.http_status
-    row.message_name                            # join to the stored message and its labels
+        row = parse_send_attempt(resource)
+    except NotASendAttempt:
+        continue                                # another system's AuditEvent: skip silently
+    except UnreadableSendAttempt as exc:
+        log.warning("unreadable send attempt %s: %s", resource.get("id"), exc)
+        unreadable += 1
+        rows.append(error_row(resource.get("id"), str(exc)))  # shown, never hidden
+        continue
+    rows.append(row)  # row.sent_at, .transport, .control_id, .result, .ack_code, .reason,
+                      # .raw_ack, .no_ack_reason, .http_status, .reply_prefix, .message_name
+# report `unreadable` with the page, so a format problem is visible at once
 ```
 
-`parse_send_attempt` tolerates what a server adds on read (`id`, `meta`, `text`) and a time
-written in another valid form (`Z` for `+00:00`). Otherwise the values are read out, validated as
-a `SendAttempt`, built again, and the result must equal the given resource. Anything else, or
-an id that does not match, is a `FhirInputError`.
+### Reading back: strict on values, tolerant of presentation
+
+`parse_send_attempt` answers two questions, with two errors:
+
+1. **Is it ours?** It checks `resourceType`, `type` (system and code), `subtype` (R01), a
+   source-role agent identified in `urn:pulsebridge:service`, a destination-role agent identified
+   in `urn:pulsebridge:hl7v2-store`, and `source.observer` in `urn:pulsebridge:service`. If any
+   of these fails it raises **`NotASendAttempt`**, which a caller may skip silently.
+2. **What does it say?** It reads each value the messages log needs and validates it by building
+   the same input types the builder takes (`SendAttempt`, `Acknowledged`, `NotAcknowledged`). It
+   checks that `outcome` matches the result. If a value is missing, malformed, duplicated or
+   contradictory it raises **`UnreadableSendAttempt`**, whose message names what was wrong. A
+   caller must show or count these, at warning level, never hide them.
+
+It ignores display strings, `outcomeDesc` wording, `period.end`, the order of agents, entities
+and details, detail entries it does not know, unknown elements, and what a server adds on read
+(`id`, `meta`, `text`). A time written another valid way (`Z` for `+00:00`, more fraction digits)
+reads as the same instant. So a later change to wording or layout cannot make records already
+stored unreadable; only a change to a value's meaning can, and that is what the format version
+is for. `record.id` is the stored id.
+
+**Format version.** Every AuditEvent carries `detail` `format-version` = `"1"`. It is a detail
+entry, not a `meta.tag`, because the server owns `meta` and may drop or rewrite it on read. When
+the meaning of an element or detail changes, the writer bumps the number and the parser branches
+on it. Wording, order and new optional details need no bump, because they are already tolerated.
+A record with a **newer** version is read for the fields this library knows. If one of those is
+missing, the error says the record was "written in format version N, newer than this library's
+1", so the fix (update the library) is obvious. A record with no version is unreadable.
 
 ### Listing
 
@@ -588,7 +664,7 @@ parameters: `type` and `subtype` are tokens, and `date` searches `AuditEvent.rec
 Healthcare's support for each of them on AuditEvent is unverified until the first real call in
 T14.**
 
-`date` sorts by `recorded`, not by the send time. One simulator sends one message at a time, so
+Search the **audit** store (D15). `date` sorts by `recorded`, not by the send time. One simulator sends one message at a time, so
 the order is the same. `outcome` (token) is also a standard parameter if a filter is wanted. The
 `patient` and `agent` reference searches do not apply, because those references are logical.
 
@@ -597,11 +673,12 @@ the order is the same. `outcome` (token) is also a standard parameter if a filte
 `examples/` holds one file per resource type plus three transaction Bundles, all synthetic:
 `bundle-patient-setup.json` (the Patient upsert), `bundle-heart-rate-ingest.json` and
 `bundle-blood-pressure-ingest.json` (conditional creates; the latter built from PID-3 and PID-5
-only, and the former with one `preliminary` window). Three AuditEvents (T31) cover each send
+only, and the former with one `preliminary` window). Four AuditEvents (T31) cover each send
 result: `auditevent-send-accepted.json` (HTTPS, `AA`, stored message name),
-`auditevent-send-rejected.json` (MLLP, the `unparseable_no_msh` sample, `AE` with reason) and
-`auditevent-send-no-ack.json` (MLLP, the `noack_missing_end_block` sample, timeout). That makes
-twelve files. The store name in them uses the placeholder project `example-project`. Expected
+`auditevent-send-rejected.json` (MLLP, the `unparseable_no_msh` sample, `AE` with reason),
+`auditevent-send-no-ack.json` (MLLP, the `noack_missing_end_block` sample, timeout) and
+`auditevent-send-unreadable-reply.json` (MLLP, a reply starting with a byte order mark). That
+makes thirteen files. The store name in them uses the placeholder project `example-project`. Expected
 validator warnings, beyond those listed above: the local `urn:pulsebridge:*` identifier systems.
 They are generated, never edited by hand:
 
