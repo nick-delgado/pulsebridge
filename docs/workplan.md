@@ -492,7 +492,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | --- | --- | --- | --- | --- |
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
 | T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | done |
-| T19 | Dashboard: share action and messages log | T16, T34, T14, T18 | `web/src/share/`, `web/src/messages/`, and, to follow the proxy's contract, `web/src/api/`, `web/README.md` and the minimum needed in `web/src/cuff/` and `web/src/shell/` | in-progress |
+| T19 | Dashboard: share action and messages log | T16, T34, T14, T18 | `web/src/share/`, `web/src/messages/`, and, to follow the proxy's contract, `web/src/api/`, `web/README.md` and the minimum needed in `web/src/cuff/` and `web/src/shell/` | done |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | done |
 | T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | done |
 | T22 | Module `phr` | T03, T04, T14, T20 | `infra/modules/phr/`, `services/fhir-proxy/Dockerfile` and the proxy's entries in `tests/tooling/` and `.dockerignore` | done |
