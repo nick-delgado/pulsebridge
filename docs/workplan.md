@@ -421,7 +421,7 @@ has no access to the store holding health data, they go to a second, separate FH
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | in-progress |
+| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
 | T18 | Dashboard: cuff simulator and left trace panel | T16 | `web/src/cuff/` | todo |
 | T19 | Dashboard: share action and messages log | T16 | `web/src/share/`, `web/src/messages/` | todo |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | todo |
