@@ -32,10 +32,11 @@ function sentences(py: string): Map<string, string> {
  * dependency, hence the small local type).
  */
 const fsModule = 'node:fs';
-const { readFileSync } = (await import(/* @vite-ignore */ fsModule)) as {
-  readFileSync(path: string, encoding: 'utf8'): string;
+// eslint-disable-next-line no-unsanitized/method -- a constant module name, in a unit test only
+const fs = (await import(/* @vite-ignore */ fsModule)) as {
+  readFileSync: (path: string, encoding: 'utf8') => string;
 };
-const source = readFileSync(
+const source = fs.readFileSync(
   // A path string: jsdom replaces the global URL class, which Node's fs does not accept; Vite
   // serves files outside its root under `/@fs/<absolute path>`.
   decodeURIComponent(

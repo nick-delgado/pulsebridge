@@ -149,8 +149,8 @@ describe('trace panel: three tabs', () => {
       expect(ack.textContent).toContain('No acknowledgment received');
       expect(ack.textContent).toContain(`Detailsynthetic ${why} detail`);
       expect(ack.textContent).not.toContain('MSA-1');
-      expect(ack.textContent?.includes('HTTP status503')).toBe(why === 'api-error');
-      expect(ack.textContent?.includes('77u/TVNIfA==')).toBe(why === 'unreadable-reply');
+      expect(ack.textContent.includes('HTTP status503')).toBe(why === 'api-error');
+      expect(ack.textContent.includes('77u/TVNIfA==')).toBe(why === 'unreadable-reply');
     },
   );
 });

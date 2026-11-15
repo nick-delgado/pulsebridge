@@ -103,13 +103,13 @@ async function mount(options: { maxReadings?: number; samples?: boolean } = {}) 
     api.sampleCalls[0]?.resolve(SAMPLES);
     await flush();
   }
-  const q = <T extends Element>(selector: string, root: ParentNode = slots.panel) => {
-    const found = root.querySelector<T>(selector);
+  const q = (selector: string, root: ParentNode = slots.panel): HTMLElement => {
+    const found = root.querySelector<HTMLElement>(selector);
     if (!found) throw new Error(`nothing matches ${selector}`);
     return found;
   };
-  const input = (id: string) => q<HTMLInputElement>(`#${id}`);
-  const sendButton = () => q<HTMLButtonElement>('#cuff-send');
+  const input = (id: string) => q(`#${id}`) as HTMLInputElement;
+  const sendButton = () => q('#cuff-send') as HTMLButtonElement;
   const set = (id: string, value: string) => {
     const i = input(id);
     i.value = value;
@@ -121,12 +121,12 @@ async function mount(options: { maxReadings?: number; samples?: boolean } = {}) 
     i.dispatchEvent(new Event('change', { bubbles: true }));
   };
   const submit = () => {
-    q<HTMLFormElement>('#cuff-form').dispatchEvent(
+    (q('#cuff-form') as HTMLFormElement).dispatchEvent(
       new Event('submit', { bubbles: true, cancelable: true }),
     );
   };
   const rows = () => [...slots.panel.querySelectorAll<HTMLLIElement>('.cuff-reading')];
-  const message = () => q<HTMLElement>('#cuff-form-message').textContent;
+  const message = () => q('#cuff-form-message').textContent;
   /** Sends a built reading and answers it with `result`. */
   const sendAndAnswer = async (result: CuffSendResult) => {
     submit();
@@ -196,8 +196,8 @@ describe('the request sent for each form state', () => {
   it('a malformed sample sends no pressures, and the pressure inputs are disabled', async () => {
     const m = await mount();
     m.check('cuff-malformed');
-    expect(m.q<HTMLFieldSetElement>('.cuff-pressures').disabled).toBe(true);
-    expect(m.q<HTMLFieldSetElement>('#cuff-samples').hidden).toBe(false);
+    expect((m.q('.cuff-pressures') as HTMLFieldSetElement).disabled).toBe(true);
+    expect((m.q('#cuff-samples') as HTMLFieldSetElement).hidden).toBe(false);
     expect(m.sendButton().textContent).toBe('Send malformed sample');
     m.check('cuff-sample-unmappable_missing_obx14');
     m.submit();
@@ -296,7 +296,7 @@ describe('samples and transports', () => {
     expect(m.q('#cuff-samples [role="alert"]').textContent).toBe(
       'Could not load the samples: Service unavailable',
     );
-    m.q<HTMLButtonElement>('#cuff-samples button').click();
+    (m.q('#cuff-samples button') as HTMLButtonElement).click();
     m.sampleCalls[1]?.resolve(SAMPLES);
     await flush();
     expect(m.slots.panel.querySelectorAll('input[name="cuff-sample"]')).toHaveLength(4);
