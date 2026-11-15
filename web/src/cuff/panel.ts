@@ -707,7 +707,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
       if (selectedKey === old.key) {
         selectedKey = null;
         traceController?.abort();
-        selection.set(null);
+        setOwn(null);
         trace.render({ kind: 'empty' });
       }
     }
@@ -717,7 +717,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
   /** Clears the selection because its attempt is gone from the audit store, and says so. */
   const dropSelection = (r: Reading) => {
     selectedKey = null;
-    selection.set(null);
+    setOwn(null);
     trace.render({ kind: 'gone', summary: readingSummary(r, deps.timeZone) });
     renderAllRows();
   };
@@ -728,7 +728,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     const shown = find(selectedKey);
     const latest = traces.get(selectedKey);
     if (!shown || !latest) return;
-    selection.set(selectionFor(shown)); // no notification when nothing changed
+    setOwn(selectionFor(shown)); // no notification when nothing changed
     trace.render({
       kind: 'ready',
       reading: shown,
@@ -788,7 +788,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
         // Not knowing is not shareable: say why on the selection, and offer a retry.
         const sel = selectionFor(current);
         if (sel)
-          selection.set({
+          setOwn({
             ...sel,
             unshareableReason: `could not be checked: ${errorMessage(error)}`,
           });
@@ -809,24 +809,37 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     const sel = selectionFor(r);
     if (sel === null) return;
     selectedKey = r.key;
-    selection.set(sel);
+    setOwn(sel);
     renderAllRows();
     loadTrace(r);
   };
+
+  /** True while the panel itself sets the selection, so the listener can tell outside sets. */
+  let settingOwn = false;
+  function setOwn(next: Selection | null): void {
+    const before = settingOwn;
+    settingOwn = true;
+    try {
+      selection.set(next);
+    } finally {
+      settingOwn = before;
+    }
+  }
 
   selection.subscribe((current) => {
     const ours =
       current?.source === 'cuff'
         ? readings.find((r) => r.recorded && r.result.attemptId === current.attemptId)
         : undefined;
-    if (ours && ours.key !== selectedKey) {
-      // Another feature (for example the messages log) selected one of our rows: show its trace,
-      // and until it answers, mark the selection as being checked (the outside summary and
-      // reason are not ours to trust). Setting it here re-enters this listener, which then
-      // finds the key already selected; the store hands every listener the latest value.
+    if (ours && !settingOwn) {
+      // Another feature (for example the messages log) selected one of our rows, a different one
+      // or the same one with its own values: show its trace, and until it answers, mark the
+      // selection as being checked (the outside summary and reason are not ours to trust).
+      // Setting it here re-enters this listener as our own set; the store hands every listener
+      // the latest value.
       selectedKey = ours.key;
       const sel = selectionFor(ours);
-      if (sel) selection.set({ ...sel, unshareableReason: CHECKING_REASON });
+      if (sel) setOwn({ ...sel, unshareableReason: CHECKING_REASON });
       loadTrace(ours);
     } else if (ours) {
       selectedKey = ours.key;
@@ -966,7 +979,7 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     const r = find(selectedKey);
     const sel = r ? selectionFor(r) : null;
     if (!r || !sel) return;
-    selection.set({ ...sel, unshareableReason: RECHECK_REASON });
+    setOwn({ ...sel, unshareableReason: RECHECK_REASON });
     loadTrace(r);
   }, signal);
 

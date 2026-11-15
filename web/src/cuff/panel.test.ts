@@ -1042,6 +1042,33 @@ describe('selection and later data changes', () => {
     );
   });
 
+  it('another feature re-selecting the selected row with its own values gets it checked too', async () => {
+    const m = await mount();
+    await m.sendAndAnswer(sendResult());
+    m.traces[0]?.answer.resolve(attemptTrace(sendResult(), { outcome: 'pending', reason: null }));
+    await flush();
+    expect(shareableObservation(m.selection.get())).toBeNull();
+    // A stale outside copy that claims an Observation and no reason must not make it shareable.
+    m.selection.set({
+      source: 'cuff',
+      attemptId: 'att-1',
+      observationId: 'bp-9',
+      summary: 'from elsewhere',
+      unshareableReason: null,
+    });
+    expect(m.selection.get()?.unshareableReason).toBe(CHECKING_REASON);
+    expect(shareableObservation(m.selection.get())).toBeNull();
+    m.traces
+      .at(-1)
+      ?.answer.resolve(attemptTrace(sendResult(), { outcome: 'pending', reason: null }));
+    await flush();
+    expect(m.selection.get()).toMatchObject({
+      observationId: null,
+      summary: 'BP 120/80 mm[Hg] at 09:15:30, MLLP',
+    });
+    expect(m.selection.get()?.unshareableReason).toContain('not mapped to FHIR yet');
+  });
+
   it('a re-check that finds the attempt gone clears the selection and says so', async () => {
     const m = await selectedAccepted();
     m.bus.notify('sync');
