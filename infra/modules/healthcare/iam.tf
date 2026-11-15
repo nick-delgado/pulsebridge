@@ -78,7 +78,14 @@ locals {
       hl7v2 = "roles/healthcare.hl7V2Ingest" # MLLP adapter -> messages:ingest
     }
     "cuff-sim" = {
-      hl7v2 = "roles/healthcare.hl7V2Ingest" # HTTPS transport -> messages:ingest
+      # D12: the simulator records every send attempt as an AuditEvent (PUT AuditEvent/<id>,
+      # an update-as-create). fhirResourceEditor is the narrowest predefined role with
+      # healthcare.fhirResources.create/update. It is NOT limited to AuditEvent: Healthcare
+      # IAM permissions apply to the whole FHIR store, so no role, predefined or custom, is
+      # scoped to one resource type. Accepted because cuff-sim is not publicly invocable
+      # (D10); see the README's IAM section.
+      fhir  = "roles/healthcare.fhirResourceEditor" # write AuditEvent for each send attempt (D12)
+      hl7v2 = "roles/healthcare.hl7V2Ingest"        # HTTPS transport -> messages:ingest
     }
   }
 

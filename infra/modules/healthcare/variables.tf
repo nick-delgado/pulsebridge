@@ -226,7 +226,8 @@ variable "store_iam_service_accounts" {
       fhir-proxy  -> FHIR store: roles/healthcare.fhirResourceReader;
                      HL7v2 store: roles/healthcare.hl7V2Consumer (list and get messages)
       edge-vm     -> HL7v2 store: roles/healthcare.hl7V2Ingest (MLLP adapter)
-      cuff-sim    -> HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)
+      cuff-sim    -> FHIR store: roles/healthcare.fhirResourceEditor (AuditEvent per send, D12);
+                     HL7v2 store: roles/healthcare.hl7V2Ingest (HTTPS ingest transport)
     Bindings are chosen by key name only, so Terraform knows at plan time which exist even
     while the emails are still unknown (first apply, accounts not yet created).
   EOT

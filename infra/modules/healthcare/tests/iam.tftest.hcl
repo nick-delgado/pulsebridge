@@ -45,8 +45,9 @@ run "identity_map_gets_exactly_the_expected_roles" {
       "seeder"      = "serviceAccount:seeder@example-project.iam.gserviceaccount.com roles/healthcare.fhirResourceEditor"
       "v2-to-fhir"  = "serviceAccount:v2-to-fhir@example-project.iam.gserviceaccount.com roles/healthcare.fhirResourceEditor"
       "fhir-proxy"  = "serviceAccount:fhir-proxy@example-project.iam.gserviceaccount.com roles/healthcare.fhirResourceReader"
+      "cuff-sim"    = "serviceAccount:cuff-sim@example-project.iam.gserviceaccount.com roles/healthcare.fhirResourceEditor"
     }
-    error_message = "FHIR store bindings must be exactly: health-sync, seeder and v2-to-fhir editor, fhir-proxy reader."
+    error_message = "FHIR store bindings must be exactly: health-sync, seeder, v2-to-fhir and cuff-sim editor, fhir-proxy reader."
   }
   assert {
     condition = {
@@ -139,5 +140,68 @@ run "one_account_gets_only_its_own_binding" {
   assert {
     condition     = keys(google_healthcare_hl7_v2_store_iam_member.app) == ["edge-vm"] && google_healthcare_hl7_v2_store_iam_member.app["edge-vm"].role == "roles/healthcare.hl7V2Ingest"
     error_message = "edge-vm alone must create exactly one HL7v2 ingest binding."
+  }
+}
+
+# T32 / D12: the cuff simulator writes one AuditEvent per send attempt, so it needs FHIR write
+# access in addition to HL7v2 ingest, and nothing else.
+run "cuff_sim_gets_fhir_editor_and_hl7v2_ingest_only" {
+  command = apply
+
+  variables {
+    store_iam_service_accounts = {
+      "cuff-sim" = "cuff-sim@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  assert {
+    condition = {
+      for k, b in google_healthcare_fhir_store_iam_member.app : k => "${b.fhir_store_id} ${b.member} ${b.role}"
+      } == {
+      "cuff-sim" = "projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir serviceAccount:cuff-sim@example-project.iam.gserviceaccount.com roles/healthcare.fhirResourceEditor"
+    }
+    error_message = "cuff-sim alone must get exactly one FHIR store binding: roles/healthcare.fhirResourceEditor on the module's FHIR store (AuditEvent writes, D12)."
+  }
+  assert {
+    condition = {
+      for k, b in google_healthcare_hl7_v2_store_iam_member.app : k => "${b.hl7_v2_store_id} ${b.member} ${b.role}"
+      } == {
+      "cuff-sim" = "projects/example-project/locations/us-central1/datasets/pulsebridge/hl7V2Stores/pulsebridge-hl7v2 serviceAccount:cuff-sim@example-project.iam.gserviceaccount.com roles/healthcare.hl7V2Ingest"
+    }
+    error_message = "cuff-sim alone must get exactly one HL7v2 store binding: roles/healthcare.hl7V2Ingest on the module's HL7v2 store."
+  }
+}
+
+# D10/D12: fhir-proxy is the public front door, so it must never be able to write to the FHIR
+# store. Any role other than the reader (editor, admin, ...) fails this run.
+run "fhir_proxy_stays_read_only_on_fhir_store" {
+  command = apply
+
+  variables {
+    store_iam_service_accounts = {
+      "fhir-proxy" = "fhir-proxy@example-project.iam.gserviceaccount.com"
+      "cuff-sim"   = "cuff-sim@example-project.iam.gserviceaccount.com"
+    }
+  }
+
+  assert {
+    condition     = google_healthcare_fhir_store_iam_member.app["fhir-proxy"].role == "roles/healthcare.fhirResourceReader"
+    error_message = "fhir-proxy must have exactly roles/healthcare.fhirResourceReader on the FHIR store (read-only, D12)."
+  }
+  assert {
+    condition = length([
+      for b in google_healthcare_fhir_store_iam_member.app : b
+      if b.member == "serviceAccount:fhir-proxy@example-project.iam.gserviceaccount.com"
+    ]) == 1
+    error_message = "fhir-proxy must have exactly one binding on the FHIR store."
+  }
+  assert {
+    condition = !contains([
+      "roles/healthcare.fhirResourceEditor",
+      "roles/healthcare.fhirStoreAdmin",
+      "roles/healthcare.datasetAdmin",
+      "roles/healthcare.admin",
+    ], google_healthcare_fhir_store_iam_member.app["fhir-proxy"].role)
+    error_message = "fhir-proxy must never hold a FHIR writer or admin role; AuditEvents are written by cuff-sim (D12)."
   }
 }
