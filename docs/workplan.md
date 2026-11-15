@@ -186,7 +186,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | done |
-| T09 | Synthetic data seeder | T06 | `services/seed/` | in-progress |
+| T09 | Synthetic data seeder | T06 | `services/seed/` | done |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | done |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | done |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
@@ -474,6 +474,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
+| T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | todo |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
 task fills its own directory through the mount function and slots defined by the shell (T16) and
@@ -505,6 +506,10 @@ OIDC invoker bindings.
   = 1`, Scheduler `retry_count = 0` and `attempt_deadline = 180s`, a request timeout of at
   least 180 s, `fhir-proxy` allowed to invoke it (for `/status`), and log-based alerts on a
   failed run and on "reconnect needed".
+- AC: when `use_synthetic_data` is true, the seeder (T09) runs instead of `health-sync`: a
+  Cloud Run job as the `seeder` account, image `seed_image` by digest, no retries, started
+  hourly by Scheduler with `--hours 4`; the README says how to run the first `--days 30`
+  seeding and how to size the job timeout. Nothing is created for it otherwise.
 - AC: there is a documented way to replay the dead-letter subscription. A message whose
   notification was dead-lettered (for example because a role was missing) stays "pending"
   until it is replayed; the README says how to find and replay such messages.
@@ -544,7 +549,9 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
 - AC: the cuff simulator is invocable only by the proxy's service account, and is configured
   as its README says: `MLLP_TIMEOUT_SECONDS`, `MLLP_HOST` as the VM's IP address, one gunicorn
   worker (the rate limit is per instance), a 90 s request timeout, and the same patient
-  identifier and authority as `v2-to-fhir`.
+  identifier and authority as `v2-to-fhir`. In a synthetic deployment its patient name is the
+  seeder's synthetic name (family `Synthetic`, given `Demo`), or the seeder refuses the
+  Patient the cuff path creates.
 - AC: the hosting layer sets a Content-Security-Policy header.
 - AC: images are given by digest in the variables `fhir_proxy_image` and `cuff_sim_image`
   (the names the build prints). The README states the hosting layer's request timeout for
@@ -578,6 +585,14 @@ reports image digests.
 - AC: each image installs the local libraries it needs from `libs/` before the service; they
   are declared by name only and are not on PyPI. `v2-to-fhir` starts with the gunicorn command
   in its README and honours `PORT`.
+
+**T35 Seeder image and shared stored-window logic.** Two follow-ups from T09 and T24.
+- AC: `services/seed/Dockerfile` follows "Adding an image" in `services/README.md`; its command
+  is the `pulsebridge-seed` console script (a Cloud Run job, not gunicorn); `seed` leaves the
+  no-image allow-list and gains a smoke case (`--dry-run`); the build prints `seed_image`.
+- AC: the "read what is stored once, write only what changed" logic exists once, in a library,
+  used by both `health-sync` and the seeder with no change in either service's behaviour
+  (their existing tests pass unchanged apart from imports).
 
 **T34 Dashboard shell follow-ups.** Changes to shell-owned files that T13 and T17 showed are
 needed before T18 and T19 start.
@@ -615,6 +630,9 @@ needed before T18 and T19 start.
   create the Patient at first contact. The connect script (T11) and the first seeding (T09)
   are steps run outside `terraform apply`, so this needs an "ingest enabled" variable that
   defaults to off, or a documented second apply.
+- AC: `use_synthetic_data` and a real Google Health connection are exclusive: a `SYN-` patient
+  ID is required with synthetic data and refused without it, and the setup guide says never
+  to run the connect script against a synthetic patient ID.
 - AC: outputs give everything the connect script and the seeder need (FHIR location, dataset
   and store IDs, the secret name prefix), and one `patient_id` variable feeds every service
   and both scripts.
