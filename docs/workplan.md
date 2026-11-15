@@ -665,7 +665,7 @@ needed before T18 and T19 start.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/` | todo |
+| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/` | in-progress |
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml`, `.tflint.hcl` | todo |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` | todo |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md` | todo |
