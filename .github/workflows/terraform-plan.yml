@@ -1,0 +1,127 @@
+# Terraform plan of dev on pull requests (T26), posted as a comment on the pull request.
+#
+# A PLAN is Terraform's preview: what an apply would create, change or destroy, computed from the
+# code in the pull request against the real dev project and its state. It changes nothing (it
+# does take the state lock briefly). Reviewing it before merging is the point of plan-on-PR.
+#
+# Skips cleanly (no failure) until the user has set it up (infra/envs/README.md, "CI/CD"):
+#   - the three DEV_* repository variables must be set (dev's bootstrap outputs);
+#   - pull requests from forks never run it: their code would get deployer credentials. GitHub
+#     also withholds OIDC tokens from fork pull requests, but the job does not rely on that;
+#   - Dependabot's pull requests are skipped for the same reason;
+#   - while dev is not deployed (no first full apply, or after the nightly destroy) it reports
+#     that in the job summary and posts nothing.
+#
+# Two jobs, so that each token has only what it needs: `plan` may get a dev deployer token
+# (id-token: write) but cannot write to the pull request; `comment` can write the comment but
+# gets no cloud credential. The plan crosses between them as a job output of the human-readable,
+# redacted plan text (base64). The binary plan file, which holds sensitive values in clear, stays
+# in the runner's temp directory and is never uploaded.
+#
+# Every action is pinned to a full commit SHA; tests/tooling/test_terraform_workflows.py checks
+# that and the gates above.
+
+name: Terraform plan (dev)
+
+on:
+  pull_request:
+
+# Nothing by default; each job lists what it needs.
+permissions: {}
+
+# A newer push to the same pull request replaces a plan that is still running.
+concurrency:
+  group: terraform-plan-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: "1.17.2"
+
+jobs:
+  plan:
+    name: Plan dev
+    # Same-repository pull requests only, and only once the dev variables exist.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository
+      && github.actor != 'dependabot[bot]'
+      && vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+      && vars.DEV_GCP_DEPLOYER_SA != ''
+      && vars.DEV_TF_STATE_BUCKET != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # request GitHub's OIDC token for Workload Identity Federation
+    outputs:
+      up: ${{ steps.up.outputs.up }}
+      changes: ${{ steps.plan.outputs.changes }}
+      text_b64: ${{ steps.plan.outputs.text_b64 }}
+    env:
+      TF_STATE_BUCKET: ${{ vars.DEV_TF_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      # Workload Identity Federation: GitHub's OIDC token for this job is exchanged for a
+      # short-lived token of the dev deployer. No key is stored anywhere. The credential file it
+      # writes (GOOGLE_APPLICATION_CREDENTIALS) lets Terraform refresh that token itself; the
+      # access token output is used once, to read the tfvars.
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEV_GCP_DEPLOYER_SA }}
+          token_format: access_token
+          access_token_lifetime: 300s
+      - name: Fetch dev's tfvars from the state bucket
+        env:
+          GCP_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: python3 infra/envs/ci/tf_ci.py fetch-tfvars --env dev
+      - run: python3 infra/envs/ci/tf_ci.py init --env dev
+      - id: up
+        run: python3 infra/envs/ci/tf_ci.py stack-is-up --env dev
+      - id: plan
+        if: steps.up.outputs.up == 'true'
+        run: python3 infra/envs/ci/tf_ci.py plan --env dev
+
+  comment:
+    name: Post the plan on the pull request
+    needs: plan
+    if: needs.plan.outputs.up == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write # write the comment; nothing else
+    steps:
+      # Every value reaches the script through env, never as ${{ }} inside it, so plan text or a
+      # branch name cannot become shell code. --edit-last updates this workflow's earlier comment.
+      - name: Comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHANGES: ${{ needs.plan.outputs.changes }}
+          PLAN_B64: ${{ needs.plan.outputs.text_b64 }}
+        run: |
+          {
+            echo "### Terraform plan: dev"
+            echo
+            echo "Commit \`${HEAD_SHA}\`: ${CHANGES} resource change(s). Sensitive values show as"
+            echo "\`(sensitive value)\`; the plan was checked for the sensitive tfvars values before"
+            echo "posting. Nothing is applied until the pull request is merged."
+            echo
+            echo "<details><summary>Plan</summary>"
+            echo
+            echo '````text'
+            printf '%s' "${PLAN_B64}" | base64 --decode
+            echo '````'
+            echo
+            echo "</details>"
+          } > "${RUNNER_TEMP}/comment.md"
+          gh pr comment "${PR_NUMBER}" --repo "${REPO}" --edit-last --create-if-none \
+            --body-file "${RUNNER_TEMP}/comment.md"

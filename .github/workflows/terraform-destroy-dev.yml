@@ -1,0 +1,88 @@
+# Nightly destroy test of dev (T26, D1): `terraform destroy` of infra/envs/dev, then a check that
+# nothing is left. It proves the stack can be torn down cleanly and keeps dev at no cost
+# overnight (a second e2-micro on the same billing account is billed; infra/envs/README.md,
+# "dev and prod"). prod is never destroyed by CI (tf_ci.py refuses it).
+#
+# The serverless subnet: after the Cloud Run services that used it with Direct VPC egress are
+# deleted, Google asks to "wait 1-2 hours" before the subnet can be deleted, and the VPC cannot go
+# before its subnet. So there are two runs:
+#   03:17 UTC  destroy everything; the subnet and the VPC (both free) may remain, nothing else
+#   06:17 UTC  retry: destroy what is left; now nothing may remain
+# rather than one run that sleeps for hours (which would bill GitHub Actions minutes for waiting).
+#
+# After it, dev is gone, including its images and secret values: CI does not plan or apply it
+# again until a person brings it back up with the runbook (infra/envs/README.md, steps 3 to 8).
+#
+# Off unless the user opts in: repository variable DEV_NIGHTLY_DESTROY = true, plus the three
+# DEV_* variables. Runs only on main (scheduled runs use the default branch; a manual run from
+# another branch is skipped). Shares the concurrency group terraform-state-dev with the dev apply,
+# so a destroy and an apply never overlap.
+#
+# Note: GitHub disables scheduled workflows in a public repository after 60 days without
+# repository activity; re-enable it from the Actions tab.
+
+name: Terraform destroy test (dev)
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # destroy
+    - cron: "17 6 * * *" # retry, three hours later: the serverless subnet must be gone by now
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  TERRAFORM_VERSION: "1.17.2"
+  RETRY_SCHEDULE: "17 6 * * *"
+
+jobs:
+  destroy:
+    name: Destroy dev and check nothing is left
+    if: >-
+      github.ref == 'refs/heads/main'
+      && vars.DEV_NIGHTLY_DESTROY == 'true'
+      && vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER != ''
+      && vars.DEV_GCP_DEPLOYER_SA != ''
+      && vars.DEV_TF_STATE_BUCKET != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    concurrency:
+      group: terraform-state-dev
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TF_STATE_BUCKET: ${{ vars.DEV_TF_STATE_BUCKET }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.DEV_GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.DEV_GCP_DEPLOYER_SA }}
+          token_format: access_token
+          access_token_lifetime: 300s
+      # A destroy still evaluates the root's variables, so it needs the same tfvars as an apply.
+      - name: Fetch dev's tfvars from the state bucket
+        env:
+          GCP_ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: python3 infra/envs/ci/tf_ci.py fetch-tfvars --env dev
+      - run: python3 infra/envs/ci/tf_ci.py init --env dev
+      # On the retry run nothing may be left (--final); on the first run (and a manual run) the
+      # subnet and the VPC may wait for the retry.
+      - name: Destroy
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [ "${SCHEDULE}" = "${RETRY_SCHEDULE}" ]; then
+            python3 infra/envs/ci/tf_ci.py destroy --env dev --final
+          else
+            python3 infra/envs/ci/tf_ci.py destroy --env dev
+          fi

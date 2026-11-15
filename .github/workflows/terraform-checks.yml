@@ -1,0 +1,54 @@
+# Terraform checks (T26): formatting, validation, lint and a security scan of every Terraform
+# directory under infra/, on every pull request and every push to main. No cloud credentials:
+# nothing here can reach a project, so it runs for pull requests from forks too.
+#
+#   make tf-validate   terraform fmt -check and terraform validate (init -backend=false)
+#   make tf-lint       tflint with the Terraform and Google rulesets (.tflint.hcl)
+#   make tf-scan       Trivy's misconfiguration checks; HIGH and CRITICAL findings fail
+#
+# The Terraform tests (`make tf-test`, mocked providers) run in ci.yml. The plan of the real dev
+# environment is terraform-plan.yml; applies are terraform-apply.yml (infra/envs/README.md,
+# "CI/CD").
+#
+# Every action is pinned to a full commit SHA (the tag is in the trailing comment): a tag can be
+# moved to different code, a commit SHA cannot. tests/tooling/test_terraform_workflows.py checks
+# this and the other rules these workflows rely on.
+
+name: Terraform checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege for the GITHUB_TOKEN: the job only reads the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TERRAFORM_VERSION: "1.17.2"
+
+jobs:
+  checks:
+    name: Terraform fmt, validate, tflint and trivy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+      - run: make tf-validate
+      # tflint and Trivy are downloaded at pinned versions and checked against pinned SHA-256
+      # sums (Makefile, "Terraform lint and security scan").
+      - run: make tf-lint
+      - run: make tf-scan
