@@ -22,7 +22,14 @@ if (!dir || (mode !== 'http' && mode !== 'mock')) {
 }
 
 // Strings that only exist in src/api/mock-client.ts and src/api/mock-data.ts.
-const MOCK_MARKERS = ['mock-session-', 'SYN-000123', 'Synthetic watch (mock mode)'];
+const MOCK_MARKERS = [
+  'mock-session-',
+  'SYN-000123',
+  'Synthetic watch (mock mode)',
+  // The hostile data set and the ?mock-audit= switch (mock-data.ts).
+  'pulsebridge-hostile-mock',
+  'mock-audit',
+];
 
 // The manifest is listed by readdirSync too, but it is JSON, not a script.
 const files = readdirSync(dir, { recursive: true }).map(String);

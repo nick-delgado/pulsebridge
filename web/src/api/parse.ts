@@ -11,7 +11,11 @@
  * through the client.
  */
 import type {
+  AckCode,
+  CommitAck,
   CuffSendResult,
+  NoAckReason,
+  Transport,
   GoogleHealthConnection,
   GoogleHealthRollUpWindow,
   GoogleHealthSource,
@@ -24,6 +28,7 @@ import type {
   WatchSyncNote,
   WatchSyncStatus,
 } from './contract';
+import { ApiError } from './errors';
 
 const CONNECTION_STATES: readonly GoogleHealthConnection[] = [
   'connected',
@@ -122,12 +127,75 @@ export function parseHeartRateSource(wire: unknown): GoogleHealthSource | null {
   return { kind: oneOf(SOURCE_KINDS, wire.kind) ?? 'unknown', window: wire.window };
 }
 
+const ACK_CODES: readonly AckCode[] = ['AA', 'AE', 'AR', 'CA', 'CE', 'CR'];
+const NO_ACK_REASONS: readonly NoAckReason[] = [
+  'timeout',
+  'connection-closed',
+  'api-error',
+  'unreadable-reply',
+];
+const TRANSPORTS: readonly Transport[] = ['mllp', 'https'];
+
+/** A 200 from the cuff route whose body the page cannot read: a proxy-side fault, so 502. */
+function unreadableResult(what: string): ApiError {
+  return new ApiError(
+    502,
+    `The send answered, but its result could not be read (${what}). It is not known what the store said.`,
+  );
+}
+
+/** `ack` exactly as cuff-sim documents it, or a thrown 502: the page never guesses an ACK. */
+function parseCommitAck(wire: unknown): CommitAck {
+  if (!isObject(wire)) throw unreadableResult('no ack');
+  if (wire.received === true) {
+    const code = oneOf(ACK_CODES, wire.code);
+    if (code === null) throw unreadableResult('ack without a known MSA-1 code');
+    return {
+      received: true,
+      code,
+      controlId: stringOrNull(wire.controlId),
+      reason: stringOrNull(wire.reason),
+      raw: stringOrNull(wire.raw),
+    };
+  }
+  if (wire.received === false) {
+    const why = oneOf(NO_ACK_REASONS, wire.why);
+    if (why === null) throw unreadableResult('no-acknowledgment without a known reason');
+    return {
+      received: false,
+      why,
+      httpStatus: typeof wire.httpStatus === 'number' ? wire.httpStatus : null,
+      detail: stringOrNull(wire.detail) ?? '',
+      replyPrefixBase64: stringOrNull(wire.replyPrefixBase64),
+    };
+  }
+  throw unreadableResult('ack without received');
+}
+
+function parseAudit(wire: unknown): CuffSendResult['audit'] {
+  if (isObject(wire) && wire.recorded === true) return { recorded: true };
+  if (isObject(wire) && wire.recorded === false) {
+    return { recorded: false, detail: stringOrNull(wire.detail) ?? 'no detail given' };
+  }
+  throw unreadableResult('no audit');
+}
+
 /**
- * The 200 body of `POST /cuff/readings`. Only the fields whose meaning the page relies on for a
- * claim are normalised; the rest is cuff-sim's JSON as it is.
+ * The 200 body of `POST /cuff/readings`. The fields the page builds a claim on are checked:
+ * `ack` and `audit` must have cuff-sim's documented shapes, and `transport`, `sentAt` and
+ * `messageSent` must be there; otherwise this throws `ApiError(502)` rather than letting a
+ * half-read result reach the page. `result`, `attemptId`, `framing` and the message name are
+ * normalised as before; anything else is cuff-sim's JSON as it is.
  */
 export function parseCuffSendResult(wire: unknown): CuffSendResult {
-  const body = (isObject(wire) ? wire : {}) as unknown as CuffSendResult & Record<string, unknown>;
+  if (!isObject(wire)) throw unreadableResult('not a JSON object');
+  const body = wire as unknown as CuffSendResult & Record<string, unknown>;
+  const ack = parseCommitAck(body.ack);
+  const audit = parseAudit(body.audit);
+  const transport = oneOf(TRANSPORTS, body.transport);
+  if (transport === null) throw unreadableResult('no transport');
+  if (typeof body.sentAt !== 'string') throw unreadableResult('no sentAt');
+  if (typeof body.messageSent !== 'string') throw unreadableResult('no messageSent');
   const messageName = stringOrNull(body.messageName);
   // Only the store's own answer counts as confirmed; any other source of a name is "derived".
   const messageNameSource: MessageNameSource | null =
@@ -138,8 +206,11 @@ export function parseCuffSendResult(wire: unknown): CuffSendResult {
         : 'derived-sha256-unverified';
   return {
     ...body,
+    ack,
+    audit,
+    transport,
     // An unknown `result` is not passed on: it is worked out from the ACK, as T31 does.
-    result: oneOf(RESULTS, body.result) ?? resultFromAck(body.ack),
+    result: oneOf(RESULTS, body.result) ?? resultFromAck(ack),
     attemptId: stringOrNull(body.attemptId),
     framing: oneOf(FRAMINGS, body.framing),
     messageName,

@@ -109,10 +109,11 @@ p {
 /* Tabs (src/ui/tabs.ts) */
 .tabs__list {
   display: flex;
+  /* Wrap rather than scroll, so no tab is cut off on a phone (three trace tabs at 390 px). */
+  flex-wrap: wrap;
   gap: var(--space-1);
   border-bottom: 1px solid var(--color-border);
   margin-bottom: var(--space-3);
-  overflow-x: auto;
 }
 
 .tabs__tab {

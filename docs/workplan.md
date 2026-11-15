@@ -192,7 +192,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | in-progress |
-| T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
+| T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/fhir_proxy/share/`, `services/fhir-proxy/tests/share/` | todo |
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
@@ -466,12 +466,12 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | done |
-| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | in-progress |
+| T18 | Dashboard: cuff simulator and left trace panel | T16, T13, T34 | `web/src/cuff/` | done |
 | T19 | Dashboard: share action and messages log | T16, T34 | `web/src/share/`, `web/src/messages/` | todo |
-| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | in-progress |
-| T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | in-progress |
+| T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | done |
+| T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | done |
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
-| T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
+| T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | in-progress |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | in-progress |
@@ -553,6 +553,10 @@ MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in 
   seeder's synthetic name (family `Synthetic`, given `Demo`), or the seeder refuses the
   Patient the cuff path creates.
 - AC: the hosting layer sets a Content-Security-Policy header.
+- AC: `fhir-proxy` uses Direct VPC egress on the serverless subnet with all traffic routed
+  through the VPC (`ALL_TRAFFIC`), so its calls to `health-sync` and the cuff simulator count
+  as internal and both stay internal-only (see the ingestion module's README, "For T22"). The
+  proxy talks only to Google services and the VM, so this needs no NAT.
 - AC: images are given by digest in the variables `fhir_proxy_image` and `cuff_sim_image`
   (the names the build prints). The README states the hosting layer's request timeout for
   forwarded requests and whether it is shorter than the cuff simulator's documented worst
@@ -578,6 +582,10 @@ registration script.
   them; spike S2 used database writes instead); fall back to database writes if they do not.
 - AC: `site_addr_oath` is the URL the FHIR proxy actually calls, and the README states how the
   proxy verifies OpenEMR's certificate (it is self-signed by default).
+- AC: builds on the seam in the edge-vm README: a boot hook that starts OpenEMR after MariaDB
+  is healthy, bind mounts with `--mount type=bind` (never `-v`), extra secrets through
+  `secret_files` (a missing one must not stop MariaDB), a graceful stop, and the metadata
+  server blocked for the OpenEMR container so it cannot obtain the VM account's token.
 
 **T24 Container build pipeline.** Dockerfiles and a Cloud Build config that builds on tag and
 reports image digests.
@@ -633,6 +641,15 @@ needed before T18 and T19 start.
 - AC: `use_synthetic_data` and a real Google Health connection are exclusive: a `SYN-` patient
   ID is required with synthetic data and refused without it, and the setup guide says never
   to run the connect script against a synthetic patient ID.
+- AC: wires the edge VM as its README says: project-base's `edge_vm_service_account_email` is
+  set (it grants the VM's account read access to the Docker Hub mirror and targets the firewall
+  rule), the mirror stays enabled, and `mllp_port` and `name_prefix` match project-base. The
+  first real boot works through the ordered checklist in the edge-vm README ("Not verified"),
+  and the README's "Patching the VM" routine is carried into the setup guide.
+- AC: wires the ingestion module as its README's "For T25" section says (push endpoint and
+  `ingest_enabled` into the healthcare module, the seeder account only with synthetic data,
+  the same project for healthcare) and sets an alert email or channel, so a failed sync and
+  "reconnect needed" reach someone.
 - AC: outputs give everything the connect script and the seeder need (FHIR location, dataset
   and store IDs, the secret name prefix), and one `patient_id` variable feeds every service
   and both scripts.
@@ -649,7 +666,8 @@ requests, apply to dev on merge, manual gate for prod, nightly destroy test for 
   `services/README.md`.
 
 **T27 Secret version scripts.** Add secret versions after apply.
-- AC: values are read from a prompt or stdin and never echoed or written to disk.
+- AC: values are read from a prompt or stdin and never echoed or written to disk, and are
+  stored without a trailing newline (the edge VM reads them into password files).
 - AC: the three Google Health secrets are written by the connect script (T11), not here. If a
   script uses the Python Secret Manager client it switches off Google SDK payload logging
   first (reuse `quiet_sdk_logging` from T11), and no script uses `gcloud --log-http`.

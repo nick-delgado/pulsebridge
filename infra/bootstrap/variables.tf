@@ -210,6 +210,12 @@ variable "deployer_roles" {
     "roles/run.admin",
     # Scheduler job that triggers health-sync (module ingestion).
     "roles/cloudscheduler.admin",
+    # Log-based metrics for the ingestion alerts (module ingestion; every apply creates them).
+    "roles/logging.configWriter",
+    # Alert policies on those metrics, and the optional email notification channel (module
+    # ingestion, only when an alert address or channel is given).
+    "roles/monitoring.alertPolicyEditor",
+    "roles/monitoring.notificationChannelEditor",
     # Dashboard bucket (module phr).
     "roles/storage.admin",
   ]
