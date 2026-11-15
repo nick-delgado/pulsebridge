@@ -38,7 +38,12 @@ finish() {
 TMP=$(mktemp -d)
 SB=""
 # shellcheck disable=SC2317 # called through the EXIT trap
-cleanup() { rm -rf "$TMP"; }
+cleanup() {
+  # The fake seeds sites/ read-only, as the image ships it (dr-x------). Root can remove that tree;
+  # a non-root user (CI's runner) must first make it writable. Only inside this run's own TMP.
+  chmod -R u+rwX "$TMP" 2> /dev/null || true
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 
 # ---- 1. Render the hooks with Terraform ---------------------------------------------------------
@@ -310,7 +315,7 @@ if [ "$(id -u)" = 0 ]; then
 else
   echo "WARN: not root, so the fake cannot give the seed the image's owner; owner check skipped"
 fi
-expect_calls '^timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh --mount type=bind,source='"$SB"'/mnt/disks/edge/\.openemr-sites-seed,target=/seed .* -c cp -a /swarm-pieces/sites /seed/sites$' 1 "the seed copies the image's pristine sites into a temporary directory first"
+expect_calls '^timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh --mount type=bind,source='"$SB"'/mnt/disks/edge/\.openemr-sites-seed,target=/seed .* -c cp -a /swarm-pieces/sites/\. /seed/ && chown ' 1 "the seed copies the image's pristine sites into a staging directory next to the final one"
 expect_log "first-time setup is complete" "checks that OpenEMR's first-time setup finished"
 if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "no seed directory left behind"; else fail "the seed directory was left behind"; fi
 expect_eq "$("$REAL_OPENSSL" x509 -in "$SB/mnt/disks/edge/openemr-tls/server.crt" -noout -ext subjectAltName | tail -n 1 | tr -d ' ')" "IPAddress:$IP" "the certificate names the VM's address"
