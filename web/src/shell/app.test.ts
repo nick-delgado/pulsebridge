@@ -215,10 +215,12 @@ describe('feature context', () => {
           fetch: fetch,
         }),
     });
-    expect(signals).toHaveLength(1);
-    expect(signals[0]?.aborted).toBe(false);
+    // The status call plus any feature's first load: every one of them is cancelled on logout.
+    // (Not "exactly one request": a feature that loads data when it mounts adds its own.)
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((s) => !s.aborted)).toBe(true);
     [...el.querySelectorAll('button')].find((b) => b.textContent === 'Log out')?.click();
-    expect(signals[0]?.aborted).toBe(true);
+    expect(signals.every((s) => s.aborted)).toBe(true);
   });
 
   it('names the two trace regions differently', async () => {
