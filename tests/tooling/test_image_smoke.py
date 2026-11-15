@@ -217,6 +217,7 @@ class Case:
     status: int
     bad_env: dict[str, str] = field(default_factory=dict)
     bad_message: str = ""
+    threads: str = "4"  # gunicorn --threads in the README's command
 
 
 CASES = {
@@ -270,7 +271,35 @@ CASES = {
         bad_env={"AUDIT_FHIR_STORE_ID": "smoke-hl7v2"},
         bad_message="AUDIT_FHIR_STORE_ID must differ from HL7V2_STORE_ID",
     ),
+    # Every route but POST /auth/login needs a session token, so GET <prefix>/status without one
+    # is 401 with WWW-Authenticate: Bearer, decided before any Google call. PATH_PREFIX=/api as
+    # behind the Firebase Hosting rewrite (module phr). The password file is a fake mounted like
+    # the reviewer-password secret volume; the URLs are reserved .test names nothing resolves.
+    "fhir-proxy": Case(
+        service="fhir-proxy",
+        env={
+            **COMMON,
+            "FHIR_STORE_ID": "smoke-fhir",
+            "AUDIT_FHIR_STORE_ID": "smoke-audit",
+            "HL7V2_STORE_ID": "smoke-hl7v2",
+            "REVIEWER_PASSWORD_FILE": "/smoke/reviewer-password",
+            "ALLOWED_ORIGINS": "https://smoke.example.test",
+            "CUFF_SIM_URL": "https://cuff-sim.smoke.example.test",
+            "PUBLIC_BASE_URL": "https://smoke.example.test/api",
+            "PATH_PREFIX": "/api",
+        },
+        method="GET",
+        path="/api/status",
+        body=None,
+        status=401,
+        bad_env={"CUFF_SIM_URL": ""},
+        bad_message="missing environment variables: CUFF_SIM_URL",
+        threads="8",
+    ),
 }
+
+# A fake reviewer password for fhir-proxy's smoke case: obviously not a real one, never logged.
+FAKE_REVIEWER_PASSWORD = "smoke-test-placeholder-password"  # noqa: S105 - a fake
 
 
 def docker(*args: str, check: bool = True, timeout: float = 120) -> subprocess.CompletedProcess:
@@ -298,8 +327,10 @@ def adc_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert shutil.which(DOCKER), f"{DOCKER} not found"
     d = tmp_path_factory.mktemp("adc")
     (d / "adc.json").write_text(json.dumps(FAKE_ADC))
+    (d / "reviewer-password").write_text(FAKE_REVIEWER_PASSWORD)
     d.chmod(0o755)
     (d / "adc.json").chmod(0o644)  # readable by the image's non-root user
+    (d / "reviewer-password").chmod(0o644)
     return d
 
 
@@ -354,7 +385,7 @@ def running(case: Case, adc_dir: Path) -> Iterator[tuple[str, str]]:
         docker("rm", "--force", container, check=False)
 
 
-def request(base: str, case: Case) -> tuple[int, bytes]:
+def request(base: str, case: Case) -> tuple[int, bytes, dict[str, str]]:
     url = base + case.path
     if not url.startswith("http://127.0.0.1:"):  # only the published port on this machine
         raise ValueError(url)
@@ -367,12 +398,12 @@ def request(base: str, case: Case) -> tuple[int, bytes]:
     )
     try:
         with opener.open(req, timeout=5) as resp:
-            return resp.status, resp.read()
+            return resp.status, resp.read(), dict(resp.headers)
     except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
+        return exc.code, exc.read(), dict(exc.headers)
 
 
-def wait_for_answer(container: str, base: str, case: Case) -> tuple[int, bytes]:
+def wait_for_answer(container: str, base: str, case: Case) -> tuple[int, bytes, dict[str, str]]:
     deadline = time.monotonic() + START_TIMEOUT
     last_error: Exception | None = None
     while time.monotonic() < deadline:
@@ -390,15 +421,24 @@ def wait_for_answer(container: str, base: str, case: Case) -> tuple[int, bytes]:
 
 def test_starts_listens_on_port_and_answers(case: Case, running: tuple[str, str]) -> None:
     container, base = running
-    status, body = wait_for_answer(container, base, case)
+    status, body, headers = wait_for_answer(container, base, case)
     assert status == case.status, body
     if case.service == "health-sync":
         assert json.loads(body)["googleHealth"] == "not-configured"
     if case.service == "cuff-sim":
         samples = json.loads(body)
         assert samples and all({"name", "label", "class", "transports"} <= set(s) for s in samples)
+    if case.service == "fhir-proxy":
+        # The token gate answered, under the prefix, with a FHIR OperationOutcome and its fixed
+        # reason. 401 (not 503 "login-not-configured") also proves the password file was read.
+        outcome = json.loads(body)
+        assert outcome["resourceType"] == "OperationOutcome", outcome
+        codes = [c["code"] for c in outcome["issue"][0]["details"]["coding"]]
+        assert codes == ["unauthorized"], outcome
+        assert headers.get("WWW-Authenticate", "").startswith("Bearer"), headers
     logs = docker("logs", container)
     output = logs.stdout + logs.stderr
+    assert FAKE_REVIEWER_PASSWORD not in output, "the password file's content was logged"
     assert f"Listening at: http://0.0.0.0:{SMOKE_PORT}" in output, output
     assert "Control server error" not in output, output
 
@@ -464,6 +504,14 @@ def test_package_data_and_entry_points_are_installed(case: Case) -> None:
         result = docker(
             "run", "--rm", image(case.service), "health-sync-backfill", "--help", check=False
         )
+        assert result.returncode == 0, result.stderr
+    if case.service == "fhir-proxy":
+        # The cuff trace loads T07's samples (package data of pulsebridge_hl7v2).
+        code = (
+            "import fhir_proxy.app; from pulsebridge_hl7v2.samples import all_samples; "
+            "assert all_samples(), 'no samples'"
+        )
+        result = docker("run", "--rm", image(case.service), "python", "-c", code, check=False)
         assert result.returncode == 0, result.stderr
     if case.service == "v2-to-fhir":
         code = "import v2_to_fhir.app, pulsebridge_fhir, pulsebridge_gcp, pulsebridge_hl7v2"
@@ -531,7 +579,7 @@ def test_effective_gunicorn_settings(case: Case) -> None:
             settings[name.strip()] = value.strip()
     assert settings.get("bind") == "['0.0.0.0:8080']", result.stdout[-2000:]
     assert settings.get("workers") == "1"
-    assert settings.get("threads") == "4"
+    assert settings.get("threads") == case.threads
     assert settings.get("timeout") == "0"
     assert settings.get("graceful_timeout") == "8", "Cloud Run kills 10 s after SIGTERM"
     assert settings.get("control_socket_disable") == "True"

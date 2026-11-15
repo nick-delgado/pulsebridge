@@ -464,13 +464,12 @@ edge VM use the same path (D14).
 
 ## For T24/T35: the image
 
-No Dockerfile is added by T14 (the `fhir-proxy` entry in `tests/tooling/test_container_images.py`
-`NO_IMAGE_YET` is left as it is). Following services/README.md "Adding an image":
+The Dockerfile was added by T22, following services/README.md "Adding an image":
 
 - `COPY` and install `libs/pulsebridge_fhir`, `libs/pulsebridge_hl7v2` (with its `samples/`
   package data: the cuff trace loads T07's samples) and `libs/pulsebridge_gcp`, then
   `services/fhir-proxy`.
-- `CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "0", "fhir_proxy.app:create_app()"]`
+- `CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "0", "--preload", "fhir_proxy.app:create_app()"]`
   (the "Running" command without `--bind`). **One worker**: the login limit is per process.
 - `.dockerignore` allow-list: `services/fhir-proxy/pyproject.toml`, `README.md`, `fhir_proxy/`.
 - Smoke case: `GET /status` with no token answers `401` without calling Google; start-up with
@@ -489,11 +488,18 @@ No Dockerfile is added by T14 (the `fhir-proxy` entry in `tests/tooling/test_con
 ## Running
 
 ```bash
-gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 8 --timeout 0 "fhir_proxy.app:create_app()"
+gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 8 --timeout 0 --preload "fhir_proxy.app:create_app()"
 ```
 
 One worker (the login limit is per process), eight threads (the messages log looks up stored
-messages in parallel), `--timeout 0` (Cloud Run's request timeout is the limit). Credentials are
+messages in parallel), `--timeout 0` (Cloud Run's request timeout is the limit), `--preload`
+(`create_app()`, which checks the configuration, runs in gunicorn's master before the port
+opens, so a bad configuration exits without ever listening and Cloud Run's startup probe fails;
+services/README.md, "Start-up failures"). The image (`Dockerfile`) runs this command without
+`--bind` (it sets `PORT=8080`). Fork safety with `--preload`: `create_app()` starts no thread
+(its `ThreadPoolExecutor`s start threads on first submit), holds no lock and opens no
+connection; on Cloud Run, finding Application Default Credentials asks the metadata server
+once, as for the other services. Credentials are
 Application Default Credentials: on Cloud Run the `fhir-proxy` service account (FHIR reader on
 both FHIR stores, HL7v2 consumer, secret accessor on `reviewer-password`); identity tokens for
 cuff-sim and health-sync come from the metadata server. No key file.
