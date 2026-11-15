@@ -423,6 +423,14 @@ expect_rc 0 "$RC" "registration hook with no viewer access"
 expect_log 'cannot check the key secret' "warns that it cannot check"
 expect_eq "$(registrations)" 4 "does not re-register on a guess"
 
+# -- Case: the database cannot be queried during the check ----------------------------------------
+echo "== the database query hangs while checking the registered client"
+run_hook openemr-oauth-client "FAKE_HANG=docker exec"
+expect_rc nonzero "$RC" "registration hook when the database does not answer"
+expect_log 'cannot query OpenEMR.s database' "says it cannot query the database"
+expect_eq "$(registrations)" 4 "does not register a new client because a query failed"
+expect_no_hang "database hang during the check"
+
 # -- Case: the settings variables have no effect (spike S2) ----------------------------------------
 echo "== OPENEMR_SETTING_* ignored by the image; rest_api found on"
 new_sandbox
