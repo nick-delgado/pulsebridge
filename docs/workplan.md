@@ -196,7 +196,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
-| T33 | Library follow-ups from wave 3 reviews | T08, T10, T13 | `libs/pulsebridge_fhir/`, `libs/pulsebridge_hl7v2/`, `libs/pulsebridge_gcp/`, one marked line each in `services/cuff-sim/` and `services/health-sync/`, `scripts/fhir-validate-expected-warnings.json` | in-progress |
+| T33 | Library follow-ups from wave 3 reviews | T08, T10, T13 | `libs/pulsebridge_fhir/`, `libs/pulsebridge_hl7v2/`, `libs/pulsebridge_gcp/`, one marked line each in `services/cuff-sim/` and `services/health-sync/`, `scripts/fhir-validate-expected-warnings.json` | done |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
@@ -378,6 +378,10 @@ Bundle endpoint and ignores conditional create.
 - AC: uses a registered client with the client credentials grant, authenticated by a signed
   assertion (`private_key_jwt`) with `system/*` scopes; no admin API key and no user login.
 - AC: sharing the same reading twice does not create a duplicate patient (search, then create).
+- AC: the Observation sent carries no reference to our own store: `subject` and `encounter`
+  are OpenEMR's, and `performer`, `device`, `meta` and `identifier` are dropped (OpenEMR does not
+  keep `performer`; see spike S1 and the T06 README). Only `final` Observations are shared; an
+  `amended` one is not.
 - AC: the Patient sent has a `PT`-typed identifier, a name with `use: official`, gender and birth date.
 - AC: the Patient sent is built with T06's `patient_for_sharing`, so the Google Health user ID,
   `id` and `meta` never go to the clinic; a Patient that is not complete is refused with what is
