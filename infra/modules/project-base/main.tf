@@ -255,3 +255,18 @@ resource "google_artifact_registry_repository" "dockerhub" {
 
   depends_on = [google_project_service.this]
 }
+
+# Read access to the Docker Hub mirror for the edge VM's service account (T21), so the VM can pull
+# MariaDB and OpenEMR through it. The grant lives here because this module owns the repository
+# (a binding lives in the module that owns the resource). It is the only IAM binding in this
+# module, it is on this one repository only, and it is created only when both the mirror exists
+# and the VM's account email is given. Additive `_iam_member`, so other readers are left alone.
+resource "google_artifact_registry_repository_iam_member" "dockerhub_mirror_edge_vm_reader" {
+  count = var.create_dockerhub_mirror && var.edge_vm_service_account_email != null ? 1 : 0
+
+  project    = var.project_id
+  location   = google_artifact_registry_repository.dockerhub[0].location
+  repository = google_artifact_registry_repository.dockerhub[0].repository_id
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${var.edge_vm_service_account_email}"
+}

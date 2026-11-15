@@ -157,7 +157,7 @@ variable "openemr_https_port" {
 }
 
 variable "edge_vm_service_account_email" {
-  description = "Optional email of the edge VM's service account (created by the identity module). When set, firewall rules target that service account instead of the edge network tag, which is stronger: anyone allowed to edit an instance can add a tag, but attaching a service account needs IAM permission on it. Leave null to target the network tag."
+  description = "Email of the edge VM's service account (created by the identity module). When set, (1) firewall rules target that service account instead of the edge network tag, which is stronger: anyone allowed to edit an instance can add a tag, but attaching a service account needs IAM permission on it; and (2) the account gets roles/artifactregistry.reader on the Docker Hub mirror repository, which the edge VM needs to pull MariaDB and OpenEMR. Leave null only when no edge VM is deployed: the VM cannot pull its images without it."
   type        = string
   default     = null
 
