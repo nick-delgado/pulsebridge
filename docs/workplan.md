@@ -189,7 +189,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T09 | Synthetic data seeder | T06 | `services/seed/` | todo |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | todo |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
-| T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | in-progress |
+| T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | todo |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6 | `services/fhir-proxy/` (except `share/`) | todo |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
@@ -277,7 +277,8 @@ parse; map; write to FHIR; patch the outcome labels; acknowledge.
 - AC: a notification whose `msgType` attribute is `ACK` is acknowledged and ignored.
 - AC: every `hl7apy` exception, including an unsupported version, becomes an `error` outcome, and
   a message that no longer exists (404) is acknowledged, not retried.
-- AC: the `Provenance` target is the message name from the notification.
+- AC: the `Provenance` source entity is the message name from the notification (its target is
+  the Observation).
 - AC: unknown OBX-3 code, missing OBX-14 and non-numeric OBX-5 each give outcome `error` with a
   distinct reason and write no Observation.
 - AC: on any mapping error the push is still acknowledged; the handler never raises to Pub/Sub
@@ -311,6 +312,11 @@ HTTPS ingest; returns the ACK.
   D15). The simulator builds that resource itself from validated values and never forwards FHIR
   supplied by a caller. A
   failure to record is logged and reported in the response, but never hides the send's result.
+- AC: uses the shared `pulsebridge_gcp` client (T12) for HTTPS ingest and for writing the
+  AuditEvent. A 401, 403 or 404 from the API and a network failure are recorded as "no
+  acknowledgment" with one of T31's reasons, never raised to the caller.
+- AC: every reading gets a new, unique control ID (MSH-10): the mapper keys the Observation on
+  it, so a reused ID would overwrite an earlier reading.
 - AC: rate-limited; both transports covered by tests against a fake listener.
 - AC: it has no login of its own and relies on Cloud Run's invoker check; the README says so.
 
@@ -446,6 +452,11 @@ contract or the shell reports it to the orchestrator instead of editing those fi
 **T20 Module `ingestion`.** Cloud Run services `health-sync` and `v2-to-fhir`, Scheduler job,
 OIDC invoker bindings.
 - AC: services scale to zero and are not publicly invocable; images are referenced by digest.
+- AC: `v2-to-fhir` gets the environment variables listed in its README, and Pub/Sub pushes to
+  its `/pubsub/hl7v2` route; a bad store ID stops the service starting, so it fails the deploy.
+- AC: there is a documented way to replay the dead-letter subscription. A message whose
+  notification was dead-lettered (for example because a role was missing) stays "pending"
+  until it is replayed; the README says how to find and replay such messages.
 
 **T21 Module `edge-vm`.** e2-micro, startup script, swap file, persistent disk, MLLP adapter and
 MariaDB containers. The firewall rule that lets Cloud Run reach the VM lives in `project-base`
@@ -505,6 +516,9 @@ registration script.
 **T24 Container build pipeline.** Dockerfiles and a Cloud Build config that builds on tag and
 reports image digests.
 - AC: images run as a non-root user; a build prints the digest to put in `tfvars`.
+- AC: each image installs the local libraries it needs from `libs/` before the service; they
+  are declared by name only and are not on PyPI. `v2-to-fhir` starts with the gunicorn command
+  in its README and honours `PORT`.
 
 ## Wave 4: integration, CI/CD and documentation
 

@@ -12,6 +12,10 @@ Planned services (from the project brief; each task that builds one creates its 
 | FHIR proxy | Narrow read API for the dashboard; runs the share action against OpenEMR |
 | Cuff simulator | Builds an ORU^R01 from entered blood-pressure values, sends it over MLLP, returns the ACK |
 
+`v2-to-fhir` (task T12) is the first service built and the pattern for the others: a mapping
+module with no cloud calls, a thin handler, configuration validated at start-up, and tests that
+use the shared client's fake transport. Read its README before starting a new service.
+
 ## Layout
 
 ```text

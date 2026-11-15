@@ -266,7 +266,7 @@
         "commit_ack_reason": null,
         "no_ack": null,
         "application_outcome": "error",
-        "mapping_reason": "unparseable-by-mapper"
+        "mapping_reason": "unsupported-version"
       }
     },
     {
@@ -302,7 +302,7 @@
         "commit_ack_reason": null,
         "no_ack": null,
         "application_outcome": "error",
-        "mapping_reason": "unparseable-by-mapper"
+        "mapping_reason": "unsupported-version"
       }
     }
   ]
