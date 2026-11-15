@@ -59,3 +59,7 @@ ingest_enabled = false
 # openemr_scopes     = ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"] # first-boot trial
 # name_prefix          = "pulsebridge" # resource names; 3-20 characters
 # identity_name_prefix = "pb"          # service account and secret IDs; at most 12 characters
+
+# --- Image builds (T26; opt-in, README step 7) ------------------------------------------------------
+# create_build_service_account = true  # a build account with only the roles a build needs
+# build_trigger_repository     = "projects/your-dev-project-id/locations/us-central1/connections/github/repositories/pulsebridge" # after linking GitHub in the console

@@ -186,3 +186,14 @@ run "patient_check_fires_without_an_assigning_authority" {
 
   expect_failures = [check.one_patient_for_the_cuff_path]
 }
+
+# T26: the build trigger runs as the build account, so it is refused without it.
+run "build_trigger_needs_the_build_account" {
+  command = plan
+
+  variables {
+    build_trigger_repository = "projects/example-project/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  expect_failures = [var.build_trigger_repository]
+}

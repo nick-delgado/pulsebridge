@@ -287,6 +287,8 @@ variables {
 
   alert_email = "alerts@example.com"
 
+  create_build_service_account = false
+
   mllp_port          = 2575
   openemr_https_port = 443
   enable_iap_ssh     = false
@@ -556,4 +558,76 @@ run "step_6_targeted_edge_vm_needs_no_images" {
   plan_options {
     target = [module.edge_vm]
   }
+}
+
+# ---- T26: the alert address is sensitive; image builds are opt-in ----------------------------
+
+# The channel follows "is an address set", through a plain bool (the address itself is sensitive).
+run "no_alert_address_means_no_email_channel" {
+  command = plan
+
+  variables {
+    alert_email                 = null
+    alert_notification_channels = ["projects/example-project/notificationChannels/123"]
+  }
+
+  assert {
+    condition     = length(module.ingestion.alert_policy_names) > 0 && module.ingestion.alert_email_channel == null
+    error_message = "With only a notification channel there must be alert policies but no email channel."
+  }
+}
+
+run "no_build_account_or_trigger_by_default" {
+  command = plan
+
+  assert {
+    condition = (
+      !contains(keys(module.identity.service_account_emails), "build") &&
+      output.build_service_account_email == null &&
+      output.build_trigger_name == null &&
+      length(module.project_base.build_account_registry_grants) == 0
+    )
+    error_message = "Image builds are opt-in: no build account, grant or trigger by default."
+  }
+}
+
+run "image_builds_are_wired_when_enabled" {
+  command = plan
+
+  variables {
+    create_build_service_account = true
+    build_trigger_repository     = "projects/example-project/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  assert {
+    condition = (
+      contains(keys(module.identity.service_account_emails), "build") &&
+      module.project_base.build_account_registry_grants == tolist(["pulsebridge-dockerhub=roles/artifactregistry.reader", "pulsebridge-services=roles/artifactregistry.writer"]) &&
+      output.build_trigger_name == "pulsebridge-images-on-tag"
+    )
+    error_message = "With create_build_service_account and build_trigger_repository the build account, its two repository grants and the trigger must exist."
+  }
+}
+
+run "build_account_without_trigger" {
+  command = plan
+
+  variables {
+    create_build_service_account = true
+  }
+
+  assert {
+    condition     = length(module.project_base.build_account_registry_grants) == 2 && output.build_trigger_name == null
+    error_message = "The build account (for manual builds) must not need the trigger."
+  }
+}
+
+run "trigger_without_build_account_is_refused" {
+  command = plan
+
+  variables {
+    build_trigger_repository = "projects/example-project/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  expect_failures = [var.build_trigger_repository]
 }

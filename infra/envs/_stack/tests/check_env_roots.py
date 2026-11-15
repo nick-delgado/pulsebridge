@@ -595,11 +595,12 @@ def check_ordering_and_versions() -> None:
                     f'{root}/versions.tf must pin {name} to hashicorp/{name} "~> 8.11" '
                     "(the modules' constraint)"
                 )
-    # The patient's identifier and names are personal data: sensitive at the root and in the stack,
-    # so plans (posted on pull requests by T26) show "(sensitive value)" (plan_scan.py proves it).
+    # The patient's identifier and names, and the alert address, are personal data: sensitive at
+    # the root and in the stack, so plans (posted on pull requests by T26) show "(sensitive value)"
+    # (plan_scan.py proves it).
     for path in (ENVS / "dev" / "variables.tf", ENVS / "_stack" / "variables.tf"):
         text = path.read_text()
-        for name in ("patient_id", "patient_family_name", "patient_given_name"):
+        for name in ("patient_id", "patient_family_name", "patient_given_name", "alert_email"):
             m = re.search(r'^variable\s+"' + name + r'"\s*\{(.*?)^\}', text, re.S | re.M)
             if not m or not re.search(r"^\s*sensitive\s*=\s*true\s*$", m.group(1), re.M):
                 fail(f"{path.relative_to(REPO)}: variable {name} must be sensitive = true")

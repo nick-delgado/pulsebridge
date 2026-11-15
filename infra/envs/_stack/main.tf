@@ -49,6 +49,9 @@ module "identity" {
   # The OpenEMR registration hook runs on the VM and uploads the client key (openemr README).
   edge_vm_writes_openemr_key = true
 
+  # T26: the image-build account (log writer only here; its repository grants are project-base's).
+  create_build_account = var.create_build_service_account
+
   secret_deletion_protection = var.protect_from_destroy
   secret_labels              = local.labels
 
@@ -85,6 +88,13 @@ module "project_base" {
   openemr_https_port = var.openemr_https_port
   enable_iap_ssh     = var.enable_iap_ssh
   enable_cloud_nat   = var.enable_cloud_nat
+
+  # T26: the build account pushes to the services repository and pulls through the mirror; the
+  # optional trigger runs cloudbuild.yaml as it on release tags. As with the edge VM, a plain bool
+  # decides the grants, because the email is unknown until module identity creates the account.
+  build_service_account_email         = lookup(module.identity.service_account_emails, "build", null)
+  grant_build_account_registry_access = var.create_build_service_account
+  build_trigger_repository            = var.build_trigger_repository
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -154,8 +164,12 @@ module "ingestion" {
   secret_ids             = module.identity.secret_ids
 
   # At least one is required at the root, so a failed sync and "reconnect needed" reach someone.
-  alert_email           = var.alert_email
-  notification_channels = var.alert_notification_channels
+  # alert_email is sensitive (T26: CI posts plans on pull requests), so whether the channel exists
+  # is a separate bool. "Is an address set?" reveals nothing about the address, so it is unwrapped
+  # with nonsensitive(); a sensitive value is refused in the module's count.
+  alert_email                = var.alert_email
+  create_alert_email_channel = nonsensitive(var.alert_email != null)
+  notification_channels      = var.alert_notification_channels
 
   v2_to_fhir_ingress  = var.v2_to_fhir_ingress
   health_sync_ingress = var.health_sync_ingress
