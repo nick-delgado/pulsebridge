@@ -78,13 +78,13 @@ run "prod_identities_are_bound_to_their_environments" {
   command = plan
 
   variables {
-    github_environments        = ["prod-plan", "prod"]
+    github_environments        = ["prod-plan", "prod", "prod-page"]
     github_allowed_refs        = ["refs/heads/main"]
     deployer_wif_contexts      = ["env-prod-main"]
     create_planner             = true
     planner_wif_contexts       = ["env-prod-plan-main"]
     create_page_deployer       = true
-    page_deployer_wif_contexts = ["env-prod-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
   }
 
   override_resource {
@@ -111,31 +111,55 @@ run "prod_identities_are_bound_to_their_environments" {
     condition = {
       for k, b in google_service_account_iam_member.github_wif : k => "${b.service_account_id}|${b.member}"
       } == {
-      "deployer/env-prod-main"      = "projects/example-project/serviceAccounts/terraform-deployer@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-main"
-      "planner/env-prod-plan-main"  = "projects/example-project/serviceAccounts/terraform-planner@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-plan-main"
-      "page-deployer/env-prod-main" = "projects/example-project/serviceAccounts/page-deployer@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-main"
+      "deployer/env-prod-main"           = "projects/example-project/serviceAccounts/terraform-deployer@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-main"
+      "planner/env-prod-plan-main"       = "projects/example-project/serviceAccounts/terraform-planner@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-plan-main"
+      "page-deployer/env-prod-page-main" = "projects/example-project/serviceAccounts/page-deployer@example-project.iam.gserviceaccount.com|principalSet://iam.googleapis.com/projects/111111111111/locations/global/workloadIdentityPools/github-actions/attribute.ci_context/env-prod-page-main"
     }
-    error_message = "prod: the deployer and page deployer only from env-prod-main, the planner only from env-prod-plan-main."
+    error_message = "prod: the deployer only from env-prod-main, the planner only from env-prod-plan-main, the page deployer only from env-prod-page-main."
   }
 
   # Ref AND environment together in the pool's condition (B2).
   assert {
-    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\" && assertion.ref in [\"refs/heads/main\"] && assertion.environment in [\"prod-plan\", \"prod\"]"
+    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\" && assertion.ref in [\"refs/heads/main\"] && assertion.environment in [\"prod-plan\", \"prod\", \"prod-page\"]"
     error_message = "github_allowed_refs and github_environments must both be in the condition."
   }
 
-  # The planner reads, never writes: viewer-type project roles and objectViewer on the state bucket.
+  # The planner reads, never writes, and reads no data (T26 review M1): one custom role whose
+  # permissions are all get/getIamPolicy (plus serviceusage.services.use), none of the data-reading
+  # ones, and no predefined project role.
   assert {
-    condition = alltrue([
-      for k, m in google_project_iam_member.planner :
-      can(regex("([Vv]iewer|reader|securityReviewer)$", m.role)) && m.member == "serviceAccount:terraform-planner@example-project.iam.gserviceaccount.com"
-    ]) && length(google_project_iam_member.planner) == 16
-    error_message = "The planner must get exactly its 16 read-only roles."
+    condition = (
+      length(google_project_iam_member.planner) == 1 &&
+      google_project_iam_member.planner[0].role == "projects/example-project/roles/pulsebridgeTerraformPlanner" &&
+      google_project_iam_member.planner[0].member == "serviceAccount:terraform-planner@example-project.iam.gserviceaccount.com" &&
+      google_project_iam_custom_role.planner[0].role_id == "pulsebridgeTerraformPlanner"
+    )
+    error_message = "The planner's only project role must be its custom role."
   }
 
   assert {
-    condition     = !contains(keys(google_project_iam_member.planner), "roles/secretmanager.secretAccessor") && !contains(keys(google_project_iam_member.planner), "roles/healthcare.fhirResourceReader")
-    error_message = "The planner must not read secret values or FHIR resources."
+    condition = alltrue([
+      for p in google_project_iam_custom_role.planner[0].permissions :
+      can(regex("\\.(get|getIamPolicy)$", p)) || p == "serviceusage.services.use"
+    ])
+    error_message = "The planner's custom role may hold only get, getIamPolicy and serviceusage.services.use."
+  }
+
+  assert {
+    condition = length([
+      for p in google_project_iam_custom_role.planner[0].permissions : p
+      if can(regex("^(healthcare\\.(hl7V2Messages|fhirResources|dicom|consent)|healthcare\\..*\\.(export|import|ingest)$|logging\\.(privateLogEntries|logEntries)|secretmanager\\.versions\\.access$|storage\\.objects\\.|compute\\.instances\\.(getSerialPortOutput|getScreenshot)$)", p))
+    ]) == 0
+    error_message = "The planner must not read HL7v2 messages, FHIR resources, log entries, secret values, objects, or the VM's serial port or screen."
+  }
+
+  assert {
+    # Every permission the stack's refresh needs (spot check of the ones a plan cannot do without).
+    condition = length(setsubtract(toset([
+      "resourcemanager.projects.getIamPolicy", "healthcare.fhirStores.getIamPolicy", "run.services.get",
+      "compute.instances.get", "secretmanager.secrets.getIamPolicy", "serviceusage.services.use",
+    ]), toset(google_project_iam_custom_role.planner[0].permissions))) == 0
+    error_message = "The planner's custom role is missing a permission the plan needs."
   }
 
   assert {
@@ -164,8 +188,8 @@ run "dev_planner_from_pull_requests_deployer_from_main" {
   }
 
   assert {
-    condition     = toset(keys(google_service_account_iam_member.github_wif)) == toset(["deployer/main", "planner/pull-request", "page-deployer/main"])
-    error_message = "dev defaults: deployer and page deployer from main, the planner from pull requests."
+    condition     = toset(keys(google_service_account_iam_member.github_wif)) == toset(["deployer/main", "planner/pull-request", "page-deployer/env-dev-page-main"])
+    error_message = "dev defaults: the deployer from main, the planner from pull requests, the page deployer only from its dev-page Environment."
   }
 }
 
@@ -188,11 +212,14 @@ run "wif_condition_requires_the_github_environment_when_given" {
   command = plan
 
   variables {
-    github_environments = ["prod-plan", "prod"]
+    github_environments        = ["prod-plan", "prod", "prod-page"]
+    deployer_wif_contexts      = ["env-prod-main"]
+    planner_wif_contexts       = ["env-prod-plan-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
   }
 
   assert {
-    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\" && assertion.environment in [\"prod-plan\", \"prod\"]"
+    condition     = google_iam_workload_identity_pool_provider.github.attribute_condition == "assertion.repository == \"example-owner/example-repo\" && assertion.repository_id == \"123456789\" && assertion.environment in [\"prod-plan\", \"prod\", \"prod-page\"]"
     error_message = "github_environments must add `assertion.environment in [...]` to the condition, and nothing else."
   }
 

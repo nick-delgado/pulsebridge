@@ -261,29 +261,107 @@ run "rejects_a_non_main_environment_context" {
   expect_failures = [var.page_deployer_wif_contexts]
 }
 
-run "rejects_a_writing_role_for_the_planner" {
+run "rejects_a_data_reading_extra_permission_for_the_planner" {
   command = plan
   variables {
-    create_planner = true
-    planner_roles  = ["roles/compute.viewer", "roles/run.admin"]
+    create_planner            = true
+    planner_extra_permissions = ["compute.disks.get", "healthcare.hl7V2Messages.get"]
   }
-  expect_failures = [var.planner_roles]
+  expect_failures = [var.planner_extra_permissions]
 }
 
 run "rejects_secret_access_for_the_planner" {
   command = plan
   variables {
-    create_planner = true
-    planner_roles  = ["roles/secretmanager.secretAccessor"]
+    create_planner            = true
+    planner_extra_permissions = ["secretmanager.versions.access"]
   }
-  expect_failures = [var.planner_roles]
+  expect_failures = [var.planner_extra_permissions]
 }
 
-run "rejects_a_basic_viewer_role_for_the_planner" {
+run "rejects_a_list_permission_for_the_planner" {
   command = plan
   variables {
-    create_planner = true
-    planner_roles  = ["roles/viewer"]
+    create_planner            = true
+    planner_extra_permissions = ["logging.privateLogEntries.list"]
   }
-  expect_failures = [var.planner_roles]
+  expect_failures = [var.planner_extra_permissions]
+}
+
+# --- the three accounts' contexts never meet (T26 review B1) -------------------------------------
+
+run "rejects_a_page_deployer_context_shared_with_the_deployer" {
+  command = plan
+  variables {
+    page_deployer_wif_contexts = ["env-dev-page-main"]
+    deployer_wif_contexts      = ["main", "env-dev-page-main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_page_deployer_context_shared_with_the_planner" {
+  command = plan
+  variables {
+    planner_wif_contexts       = ["pull-request", "env-dev-page-main"]
+    page_deployer_wif_contexts = ["env-dev-page-main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_planner_context_shared_with_the_deployer" {
+  command = plan
+  variables {
+    planner_wif_contexts = ["main"]
+  }
+  expect_failures = [var.planner_wif_contexts]
+}
+
+run "rejects_main_for_the_page_deployer" {
+  command = plan
+  variables {
+    page_deployer_wif_contexts = ["main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+# With github_environments set (prod), the dev defaults must not pass silently.
+run "rejects_the_dev_deployer_default_in_prod" {
+  command = plan
+  variables {
+    github_environments        = ["prod-plan", "prod", "prod-page"]
+    planner_wif_contexts       = ["env-prod-plan-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
+  }
+  expect_failures = [var.deployer_wif_contexts]
+}
+
+run "rejects_the_dev_planner_default_in_prod" {
+  command = plan
+  variables {
+    github_environments        = ["prod-plan", "prod", "prod-page"]
+    deployer_wif_contexts      = ["env-prod-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
+  }
+  expect_failures = [var.planner_wif_contexts]
+}
+
+run "rejects_the_dev_page_deployer_default_in_prod" {
+  command = plan
+  variables {
+    github_environments   = ["prod-plan", "prod", "prod-page"]
+    deployer_wif_contexts = ["env-prod-main"]
+    planner_wif_contexts  = ["env-prod-plan-main"]
+  }
+  expect_failures = [var.page_deployer_wif_contexts]
+}
+
+run "rejects_a_context_outside_the_environments" {
+  command = plan
+  variables {
+    github_environments        = ["prod-plan", "prod", "prod-page"]
+    deployer_wif_contexts      = ["env-staging-main"]
+    planner_wif_contexts       = ["env-prod-plan-main"]
+    page_deployer_wif_contexts = ["env-prod-page-main"]
+  }
+  expect_failures = [var.deployer_wif_contexts]
 }

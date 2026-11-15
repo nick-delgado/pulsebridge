@@ -44,13 +44,14 @@ locals {
   #                         push, schedule or workflow_dispatch
   #   env-<name>-other      a job in that environment anywhere else (bound to nothing)
   #   pull-request          a pull_request event without an environment
-  #   main                  a job on the main branch triggered by push, schedule or
+  #   main                  a job on the main branch (refs/heads/main; the workflows assume this
+  #                         name too) triggered by push, schedule or
   #                         workflow_dispatch, without an environment
   #   other                 everything else: branch pushes, tags, pull_request_target, ...
   #
   # pull_request_target runs on the BASE branch (refs/heads/main) for events from forks, so the
   # event check matters: without it, such a workflow would read as "main".
-  github_main_push = "(assertion.ref == \"refs/heads/${var.github_main_branch}\" && assertion.event_name in [\"push\", \"schedule\", \"workflow_dispatch\"])"
+  github_main_push = "(assertion.ref == \"refs/heads/main\" && assertion.event_name in [\"push\", \"schedule\", \"workflow_dispatch\"])"
   github_ci_context = join("", [
     "assertion.repository_id != \"${var.github_repository_id}\" ? \"other-repository\" : ",
     "(\"environment\" in assertion) ? (\"env-\" + assertion.environment + (${local.github_main_push} ? \"-main\" : \"-other\")) : ",

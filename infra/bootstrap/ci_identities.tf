@@ -3,9 +3,10 @@
 #
 #   planner        read-only. `terraform plan` on pull requests (dev) and in the prod-plan
 #                  Environment (prod) runs as it, so a pull request's code, or prod's code before
-#                  approval, never holds a token that can change anything. It reads the state and
-#                  the CI tfvars from the state bucket, and plans with -lock=false (it cannot take
-#                  the state lock, which would need object write).
+#                  approval, never holds a token that can change anything. It can read the state
+#                  and the CI tfvars (which hold the patient's ID and, in prod, name, and the alert
+#                  address in clear) and the resources' configuration; no FHIR resources, HL7v2
+#                  messages, log entries or secret values. It plans with -lock=false.
 #   page deployer  roles/firebasehosting.admin only. The page deploy job runs the Firebase CLI and
 #                  its npm dependencies; with this account a compromised dependency can at worst
 #                  change the Hosting site, not the infrastructure.
@@ -24,11 +25,73 @@ resource "google_service_account" "planner" {
   depends_on = [google_project_service.bootstrap]
 }
 
+# The planner's one project role: a CUSTOM role with exactly what `terraform plan` needs to refresh
+# the stack's resources (T26 review). Predefined viewer roles read too much: iam.securityReviewer
+# includes healthcare.hl7V2Messages.list (message contents) and logging.privateLogEntries.list,
+# compute.viewer includes the VM's serial port output and screenshots, logging.viewer reads log
+# entries. Each permission below is the read (get) of one resource type the modules manage, or the
+# IAM policy read (getIamPolicy) of a type that has *_iam_member resources; nothing lists or reads
+# data. Creating a custom role needs iam.roles.create: bootstrap runs as the owner, who has it.
+locals {
+  planner_permissions = sort(distinct(concat([
+    "resourcemanager.projects.get",          # data "google_project"; every provider call
+    "resourcemanager.projects.getIamPolicy", # google_project_iam_member (identity)
+    "serviceusage.services.get",             # google_project_service (project-base)
+    "serviceusage.services.use",             # google-beta bills its calls to the project (user_project_override)
+    "iam.serviceAccounts.get",               # google_service_account (identity)
+    "iam.serviceAccounts.getIamPolicy",      # google_service_account_iam_member (identity)
+    "secretmanager.secrets.get",             # google_secret_manager_secret (metadata, never a value)
+    "secretmanager.secrets.getIamPolicy",    # google_secret_manager_secret_iam_member
+    "secretmanager.versions.get",            # google_secret_manager_secret_version (state of the dev version; not .access)
+    "artifactregistry.repositories.get",     # google_artifact_registry_repository (project-base)
+    "artifactregistry.repositories.getIamPolicy",
+    "compute.networks.get",                # google_compute_network
+    "compute.subnetworks.get",             # google_compute_subnetwork
+    "compute.firewalls.get",               # google_compute_firewall
+    "compute.routers.get",                 # google_compute_router, google_compute_router_nat
+    "compute.addresses.get",               # google_compute_address (edge-vm)
+    "compute.disks.get",                   # google_compute_disk, google_compute_disk_resource_policy_attachment
+    "compute.instances.get",               # google_compute_instance (not getSerialPortOutput or getScreenshot)
+    "compute.resourcePolicies.get",        # google_compute_resource_policy (prod's snapshot schedule)
+    "healthcare.datasets.get",             # google_healthcare_dataset
+    "healthcare.fhirStores.get",           # google_healthcare_fhir_store (configuration only)
+    "healthcare.fhirStores.getIamPolicy",  # google_healthcare_fhir_store_iam_member
+    "healthcare.hl7V2Stores.get",          # google_healthcare_hl7_v2_store (configuration only)
+    "healthcare.hl7V2Stores.getIamPolicy", # google_healthcare_hl7_v2_store_iam_member
+    "pubsub.topics.get",                   # google_pubsub_topic
+    "pubsub.topics.getIamPolicy",          # google_pubsub_topic_iam_member
+    "pubsub.subscriptions.get",            # google_pubsub_subscription
+    "pubsub.subscriptions.getIamPolicy",   # google_pubsub_subscription_iam_member
+    "run.services.get",                    # google_cloud_run_v2_service (its environment holds the patient ID, as the state does)
+    "run.services.getIamPolicy",           # google_cloud_run_v2_service_iam_member
+    "run.jobs.get",                        # google_cloud_run_v2_job (the seeder)
+    "run.jobs.getIamPolicy",               # google_cloud_run_v2_job_iam_member
+    "cloudscheduler.jobs.get",             # google_cloud_scheduler_job
+    "logging.logMetrics.get",              # google_logging_metric (the metric's definition, not log entries)
+    "monitoring.alertPolicies.get",        # google_monitoring_alert_policy
+    "monitoring.notificationChannels.get", # google_monitoring_notification_channel (labels hold the alert address, as the state does)
+    "firebasehosting.sites.get",           # google_firebase_hosting_site (phr)
+    "firebase.projects.get",               # google_firebase_project, when phr manages it
+    "cloudbuild.builds.get",               # google_cloudbuild_trigger (triggers.get needs builds.get)
+  ], var.planner_extra_permissions)))
+}
+
+resource "google_project_iam_custom_role" "planner" {
+  count = var.create_planner ? 1 : 0
+
+  project     = local.project_id
+  role_id     = var.planner_role_id
+  title       = "Terraform planner (read-only)"
+  description = "Reads the PulseBridge stack's resources and IAM policies for terraform plan; no data, no secret values. Created by infra/bootstrap (T26)."
+  permissions = local.planner_permissions
+  stage       = "GA"
+}
+
 resource "google_project_iam_member" "planner" {
-  for_each = var.create_planner ? toset(var.planner_roles) : toset([])
+  count = var.create_planner ? 1 : 0
 
   project = local.project_id
-  role    = each.value
+  role    = google_project_iam_custom_role.planner[0].name
   member  = google_service_account.planner[0].member
 }
 
