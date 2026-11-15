@@ -139,8 +139,23 @@ run "timeouts_fit_under_hostings_60_seconds" {
     error_message = "cuff-sim's worst case (MLLP and HTTPS) must be below the proxy's cuff forward timeout."
   }
   assert {
-    condition     = output.timeouts.cuff_worst_case_mllp == 29 && output.timeouts.cuff_worst_case_https == 48 && output.timeouts.proxy_cuff_forward == 55 && output.timeouts.cuff_request == 60
-    error_message = "The documented numbers: worst cases 29 s / 48 s, forward 55 s, cuff-sim request timeout 60 s."
+    # The proxy refuses to start unless each budget is at least 10 s below REQUEST_TIMEOUT_SECONDS
+    # (fhir_proxy/config.py, REQUEST_TIMEOUT_MARGIN_SECONDS).
+    condition = (
+      tonumber({ for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["CUFF_FORWARD_TIMEOUT_SECONDS"]) + 10 <= tonumber({ for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["REQUEST_TIMEOUT_SECONDS"]) &&
+      tonumber({ for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["REQUEST_BUDGET_SECONDS"]) + 10 <= tonumber({ for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["REQUEST_TIMEOUT_SECONDS"])
+    )
+    error_message = "Both proxy budgets must be at least 10 s below REQUEST_TIMEOUT_SECONDS, or the proxy does not start."
+  }
+  assert {
+    # Behind Hosting nothing waits longer than 60 s; a longer request timeout only lets a slow
+    # body hold a thread longer.
+    condition     = tonumber(trimsuffix(google_cloud_run_v2_service.fhir_proxy.template[0].timeout, "s")) <= 70
+    error_message = "fhir-proxy's request timeout must stay at 70 s or less."
+  }
+  assert {
+    condition     = output.timeouts.cuff_worst_case_mllp == 29 && output.timeouts.cuff_worst_case_https == 48 && output.timeouts.proxy_cuff_forward == 55 && output.timeouts.cuff_request == 60 && output.timeouts.proxy_request == 70
+    error_message = "The documented numbers: worst cases 29 s / 48 s, forward 55 s, cuff-sim request timeout 60 s, proxy request timeout 70 s."
   }
 }
 
@@ -279,7 +294,7 @@ run "fhir_proxy_environment" {
       TOKEN_ISSUER                 = "pulsebridge-fhir-proxy:example-project:pulsebridge"
       REQUEST_BUDGET_SECONDS       = "50"
       CUFF_FORWARD_TIMEOUT_SECONDS = "55"
-      REQUEST_TIMEOUT_SECONDS      = "120"
+      REQUEST_TIMEOUT_SECONDS      = "70"
     }
     error_message = "fhir-proxy must get exactly the environment its README lists for T22."
   }

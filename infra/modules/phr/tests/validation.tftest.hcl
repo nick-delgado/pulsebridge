@@ -120,6 +120,38 @@ run "origin_with_trailing_slash_refused" {
   expect_failures = [var.extra_allowed_origins]
 }
 
+run "hostless_origin_dot_host_refused" {
+  command = plan
+  variables {
+    extra_allowed_origins = ["https://."]
+  }
+  expect_failures = [var.extra_allowed_origins]
+}
+
+run "hostless_origin_empty_host_refused" {
+  command = plan
+  variables {
+    extra_allowed_origins = ["https://"]
+  }
+  expect_failures = [var.extra_allowed_origins]
+}
+
+run "hostless_origin_hyphen_host_refused" {
+  command = plan
+  variables {
+    extra_allowed_origins = ["https://-"]
+  }
+  expect_failures = [var.extra_allowed_origins]
+}
+
+run "hostless_origin_dotted_edges_refused" {
+  command = plan
+  variables {
+    extra_allowed_origins = ["https://.example.org"]
+  }
+  expect_failures = [var.extra_allowed_origins]
+}
+
 run "openemr_http_url_refused" {
   command = plan
   variables {

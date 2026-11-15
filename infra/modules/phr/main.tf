@@ -41,14 +41,19 @@ locals {
   #   cuff-sim worst case (MLLP and HTTPS) < proxy cuff forward timeout < Hosting's 60 s limit
   #   proxy cuff forward timeout < cuff-sim's own request timeout
   #   proxy budgets + 10 s <= proxy request timeout (the proxy refuses to start otherwise)
+  # Hosting's 60 s also includes the proxy's cold start (README, "Timeouts end to end").
   timeouts = {
     # Firebase Hosting ends a rewritten request at 60 s: "Firebase Hosting is subject to a
     # 60-second request timeout" (firebase.google.com/docs/hosting/cloud-run). Not settable.
     hosting_limit = 60
     # fhir-proxy (services/fhir-proxy/README.md, "Time budget").
-    proxy_request_budget = 50  # REQUEST_BUDGET_SECONDS: every route but the cuff send
-    proxy_cuff_forward   = 55  # CUFF_FORWARD_TIMEOUT_SECONDS: POST /cuff/readings
-    proxy_request        = 120 # REQUEST_TIMEOUT_SECONDS = the Cloud Run request timeout
+    proxy_request_budget = 50 # REQUEST_BUDGET_SECONDS: every route but the cuff send
+    proxy_cuff_forward   = 55 # CUFF_FORWARD_TIMEOUT_SECONDS: POST /cuff/readings
+    # REQUEST_TIMEOUT_SECONDS = the Cloud Run request timeout. The proxy requires each budget to
+    # be at least 10 s below it (55 + 10 = 65). Behind Hosting nothing waits longer than 60 s, so
+    # a larger value only serves direct run.app callers and lets a slow (trickled) request body
+    # hold one of the 8 threads longer: 70 s, not the service's default 120 s.
+    proxy_request = 70
     # cuff-sim (services/cuff-sim/README.md, "Time limits"). T = HTTPS_TIMEOUT_SECONDS.
     cuff_mllp  = 5 # MLLP_TIMEOUT_SECONDS: one deadline for connect, write and the ACK frame
     cuff_https = 6 # HTTPS_TIMEOUT_SECONDS, lowered from 10 so the HTTPS worst case fits in 55 s

@@ -397,14 +397,14 @@ variable "openemr" {
 # ---------------------------------------------------------------------------------------------
 
 variable "manage_firebase_project" {
-  description = "Whether this module adds Firebase to the project (google_firebase_project), which Firebase Hosting needs. false (default): Firebase was added once outside this module (bootstrap, or `firebase projects:addfirebase <project>` by the project owner; README, \"Adding Firebase to the project\"), so the deployer needs only roles/firebasehosting.admin. true: this module adds it, and the deployer also needs firebase.projects.update (roles/firebase.admin). Firebase cannot be removed from a project again, so destroying this resource only forgets it."
+  description = "Whether this module adds Firebase to the project (google_firebase_project), which Firebase Hosting needs. false (default): bootstrap added Firebase once with the owner's credentials (its add_firebase, default true; README, \"Adding Firebase to the project\"), so the deployer needs only roles/firebasehosting.admin. true: this module adds it, and the deployer also needs firebase.projects.update (roles/firebase.admin). Firebase cannot be removed from a project again, so destroying this resource only forgets it."
   type        = bool
   default     = false
   nullable    = false
 }
 
 variable "hosting_site_id" {
-  description = "Firebase Hosting site ID: the page is served at https://<site_id>.web.app. null (default) uses project_id, the project's default site. Site IDs are globally unique DNS labels. If the default site already exists (for example after opening Hosting in the Firebase console), import it: terraform import 'module.phr.google_firebase_hosting_site.dashboard' projects/<project>/sites/<site_id>."
+  description = "Firebase Hosting site ID: the page is served at https://<site_id>.web.app. null (default) uses project_id, the project's default site. Site IDs are globally unique DNS labels. An existing site with this ID is adopted on create (the provider reads it first), so no import is needed. Destroy: the provider SKIPS deleting a default site (type DEFAULT_SITE), so after `terraform destroy` the last deployed page stays public at <site_id>.web.app with every /api call failing; run `firebase hosting:disable` if no page should stay live (README, \"Destroy\")."
   type        = string
   default     = null
 
@@ -434,7 +434,7 @@ variable "extra_allowed_origins" {
   validation {
     condition = alltrue([
       for o in var.extra_allowed_origins :
-      can(regex("^(https://[a-z0-9.-]+(:[0-9]{1,5})?|http://(localhost|127\\.0\\.0\\.1)(:[0-9]{1,5})?)$", o))
+      can(regex("^(https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?|http://(localhost|127\\.0\\.0\\.1)(:[0-9]{1,5})?)$", o))
     ])
     error_message = "Each extra_allowed_origins entry must be an origin: https://<host>[:port], or http://localhost[:port] / http://127.0.0.1[:port], with no path or trailing slash."
   }
@@ -445,9 +445,17 @@ variable "trusted_proxy_hops" {
     TRUSTED_PROXY_HOPS for fhir-proxy: how many X-Forwarded-For entries, counted from the
     right, were appended by proxies Google runs in front of it. The login rate limit keys on
     the entry just left of them. Default 1 (the right-most entry), the proxy's own default.
-    MEASURE IT ON THE FIRST DEPLOY (README, "Verify on the first real deploy", step 1): behind
-    the Firebase Hosting rewrite the right-most entry may be Firebase's own address, and then
-    2 is right. 0 ignores the header (no proxy in front; local use only). 0 to 5.
+    0 ignores the header (local use only). 0 to 5. Neither 1 nor 2 is safe for both paths,
+    because the proxy's run.app URL stays reachable directly (Firebase Hosting needs it, and
+    nothing free closes that door):
+      2: a direct run.app caller can forge the entry used as the rate-limit key, so the
+         per-address limit is void for it and its guesses are bounded only by throughput
+         (harmless against a random password of 16+ characters, but it costs log volume and
+         Cloud Run usage).
+      1: behind Hosting, every reviewer may share Hosting's edge address as the key, so an
+         attacker making 5 wrong guesses a minute through Hosting locks reviewers out.
+    MEASURE IT ON THE FIRST DEPLOY before choosing (README, "Verify on the first real deploy",
+    step 1).
   EOT
   type        = number
   default     = 1

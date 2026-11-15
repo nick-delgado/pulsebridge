@@ -41,8 +41,9 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
     # of starting the second one, and a slow client trickling a body holds one of only 8.
     max_instance_request_concurrency = 8
 
-    # The hard stop above both of the proxy's own budgets; REQUEST_TIMEOUT_SECONDS below is the
-    # same number (the proxy checks its budgets are at least 10 s below it).
+    # The hard stop above both of the proxy's own budgets (70 s: main.tf explains why not 120);
+    # REQUEST_TIMEOUT_SECONDS below is the same number (the proxy checks its budgets are at
+    # least 10 s below it).
     timeout = "${local.timeouts.proxy_request}s"
 
     # Direct VPC egress (D14) with ALL_TRAFFIC: every outbound request, including the ones to

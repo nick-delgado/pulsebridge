@@ -14,6 +14,7 @@ The header must have every directive of the <meta> policy with the same value, p
 `frame-ancestors 'none'` (a <meta> policy cannot set it; web/README.md, "Security basics"), and
 nothing else. No source may be `'unsafe-inline'`, `'unsafe-eval'`, `'unsafe-hashes'`,
 `'strict-dynamic'`, a wildcard, or a scheme (`data:`, `http:`, `https:`, `blob:`).
+The other security headers must have their documented values (REQUIRED_HEADERS).
 
 Usage: python3 infra/modules/phr/tests/check_hosting_csp.py   (standard library only)
 """
@@ -33,6 +34,17 @@ CHECK_BUNDLE = REPO / "web" / "scripts" / "check-bundle.mjs"
 
 # Only a header can set these; the <meta> policy does not have them.
 HEADER_ONLY = {"frame-ancestors": "'none'"}
+# The other security headers (README, "The headers"). HSTS without includeSubDomains: on a custom
+# domain (T30) it must not pin the domain's other hosts.
+REQUIRED_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Strict-Transport-Security": "max-age=31536000",
+}
 FORBIDDEN_SOURCES = re.compile(
     r"'unsafe-inline'|'unsafe-eval'|'unsafe-hashes'|'strict-dynamic'|\*|\b(data|https?|blob):",
 )
@@ -114,8 +126,9 @@ def main() -> int:
                 f"check-bundle.mjs requires {name} {value!r}, the header has {header.get(name)!r}"
             )
 
-    if headers.get("X-Content-Type-Options") != "nosniff":
-        problems.append("X-Content-Type-Options must be nosniff")
+    for name, value in REQUIRED_HEADERS.items():
+        if headers.get(name) != value:
+            problems.append(f"{name} must be {value!r}, got {headers.get(name)!r}")
 
     for p in problems:
         print(f"FAIL: {p}")

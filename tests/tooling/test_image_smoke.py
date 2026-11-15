@@ -463,6 +463,12 @@ def test_bad_configuration_stops_start_up(case: Case, adc_dir: Path) -> None:
         docker("rm", "--force", name, check=False)
     assert result.returncode != 0, "the service started with bad configuration"
     assert case.bad_message in result.stdout + result.stderr
+    # gunicorn logs "Listening at" when it opens the port. With --preload the app fails to load
+    # first, so the line never appears (test_bad_configuration_exits_without_ever_listening
+    # proves the same with a probe inside the container).
+    assert "Listening at" not in result.stdout + result.stderr, (
+        "the port opened before the app failed"
+    )
 
 
 def test_runs_as_non_root(any_image: str) -> None:
