@@ -1,5 +1,6 @@
 """The MLLP client against a fake adapter on 127.0.0.1: every outcome spike S4 found, and more."""
 
+import os
 import socket
 import time
 
@@ -15,18 +16,14 @@ MESSAGE = (
 )
 
 
-def send(port, wire=None, ack_timeout=0.6, connect_timeout=1.0):
+def send(port, wire=None, timeout=0.6, host="127.0.0.1"):
     return send_mllp(
-        frame(MESSAGE) if wire is None else wire,
-        host="127.0.0.1",
-        port=port,
-        connect_timeout=connect_timeout,
-        ack_timeout=ack_timeout,
+        frame(MESSAGE) if wire is None else wire, host=host, port=port, timeout=timeout
     )
 
 
 def assert_closed_by_client(adapter):
-    """The client closed its socket before send_mllp returned (so it is never left open)."""
+    """The client closed its socket (the adapter saw EOF), so it is never left open."""
     assert adapter.connections, "no connection was made"
     assert adapter.connections[-1].client_closed.wait(2)
 
@@ -63,6 +60,13 @@ def test_nack_reason_escape_is_decoded(adapter, h):
     assert outcome.ack.reason == 'invalid segment terminator, store expects: "\\r"'
 
 
+def test_two_frames_in_one_reply_the_first_wins(adapter, h):
+    adapter.reply_raw(frame(h.S4_AA) + frame(h.S4_NACK_NO_MSH))
+    outcome = send(adapter.port)
+    assert outcome.ack.code == "AA"
+    assert outcome.ack.acknowledged_control_id == "S4-205329-0001"  # visible: not our T1
+
+
 def test_close_with_no_data_is_connection_closed(adapter):
     adapter.close()
     outcome = send(adapter.port)
@@ -86,19 +90,19 @@ def test_close_after_part_of_a_frame_is_connection_closed(adapter):
 def test_silence_is_a_timeout_within_the_deadline(adapter):
     adapter.silent()
     started = time.monotonic()
-    outcome = send(adapter.port, ack_timeout=0.5)
+    outcome = send(adapter.port, timeout=0.5)
     elapsed = time.monotonic() - started
     assert isinstance(outcome, NoAck) and outcome.why == "timeout"
-    assert 0.45 <= elapsed < 1.5
+    assert 0.45 <= elapsed < 1.0
     assert_closed_by_client(adapter)
 
 
 def test_trickling_bytes_still_time_out_on_one_deadline(adapter):
     adapter.trickle()  # a byte every 50 ms, never an end block
     started = time.monotonic()
-    outcome = send(adapter.port, ack_timeout=0.5)
+    outcome = send(adapter.port, timeout=0.5)
     assert outcome.why == "timeout"
-    assert time.monotonic() - started < 1.5  # not reset by each byte
+    assert time.monotonic() - started < 1.0  # not reset by each byte
     assert_closed_by_client(adapter)
 
 
@@ -120,6 +124,14 @@ def test_garbage_frame_is_unreadable_and_keeps_the_bytes(adapter):
     outcome = send(adapter.port)
     assert outcome.why == "unreadable-reply"
     assert outcome.reply_prefix == b"HELLO NOT HL7"
+
+
+def test_reply_that_crashes_the_parser_is_unreadable(adapter):
+    # T07's parse_ack raises IndexError (not AckParseError) on this; reported to T07.
+    adapter.reply(b"MSH^~MSH|")
+    outcome = send(adapter.port)
+    assert outcome.why == "unreadable-reply"
+    assert outcome.reply_prefix == b"MSH^~MSH|"
 
 
 def test_empty_frame_is_unreadable_with_no_prefix(adapter):
@@ -152,22 +164,53 @@ def test_refused_connection_is_connection_closed(h):
     assert "could not connect" in outcome.detail
 
 
-def test_connect_timeout_is_timeout(monkeypatch):
-    def hang(*_args, **_kwargs):
-        raise TimeoutError
+def test_hanging_connect_is_a_timeout_within_the_deadline(hanging):
+    started = time.monotonic()
+    outcome = send(hanging.port, timeout=0.4)
+    elapsed = time.monotonic() - started
+    assert outcome.why == "timeout" and "connect" in outcome.detail
+    assert 0.35 <= elapsed < 0.8
 
-    monkeypatch.setattr(mllp_client.socket, "create_connection", hang)
-    outcome = send(1)
-    assert outcome.why == "timeout"
-    assert "connect" in outcome.detail
+
+def test_several_hanging_addresses_share_one_deadline(hanging, monkeypatch):
+    # Three addresses for one name, all hanging: socket.create_connection would give each the
+    # full timeout (3 x 0.4 s); one deadline means the whole connect takes 0.4 s.
+    address = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", hanging.port))
+    monkeypatch.setattr(mllp_client.socket, "getaddrinfo", lambda *_a, **_k: [address] * 3)
+    started = time.monotonic()
+    assert send(hanging.port, timeout=0.4, host="adapter.internal").why == "timeout"
+    assert time.monotonic() - started < 0.8
+
+
+def test_refused_first_address_falls_through_to_the_next(adapter, h, monkeypatch):
+    refused = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", h.closed_port()))
+    good = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", adapter.port))
+    monkeypatch.setattr(mllp_client.socket, "getaddrinfo", lambda *_a, **_k: [refused, good])
+    adapter.reply(h.S4_AA)
+    assert send(adapter.port, host="adapter.internal").ack.code == "AA"
+
+
+def test_one_deadline_covers_connect_and_read(adapter, monkeypatch):
+    # A slow connect uses up part of the deadline; the read gets only what is left.
+    real = mllp_client._connect
+
+    def slow(host, port, deadline):
+        time.sleep(0.3)
+        return real(host, port, deadline)
+
+    monkeypatch.setattr(mllp_client, "_connect", slow)
+    adapter.silent()
+    started = time.monotonic()
+    assert send(adapter.port, timeout=0.5).why == "timeout"
+    assert time.monotonic() - started < 0.75  # not 0.3 + 0.5
 
 
 def test_unresolvable_host_is_connection_closed(monkeypatch):
     def unknown(*_args, **_kwargs):
         raise socket.gaierror("name not known")
 
-    monkeypatch.setattr(mllp_client.socket, "create_connection", unknown)
-    assert send(1).why == "connection-closed"
+    monkeypatch.setattr(mllp_client.socket, "getaddrinfo", unknown)
+    assert send(1, host="no-such-host.invalid").why == "connection-closed"
 
 
 class _FailingSocket:
@@ -194,18 +237,35 @@ class _FailingSocket:
 )
 def test_write_failures_close_the_socket(monkeypatch, error, why):
     fake = _FailingSocket(error)
-    monkeypatch.setattr(mllp_client.socket, "create_connection", lambda *_a, **_k: fake)
+    monkeypatch.setattr(mllp_client, "_connect", lambda *_a: fake)
     assert send(1).why == why
     assert fake.closed
 
 
-def test_connect_uses_the_connect_timeout(monkeypatch):
-    seen = {}
+def open_fds() -> int:
+    return len(os.listdir("/proc/self/fd"))
 
-    def record(address, timeout):
-        seen["address"], seen["timeout"] = address, timeout
-        raise ConnectionRefusedError
 
-    monkeypatch.setattr(mllp_client.socket, "create_connection", record)
-    send(2575, connect_timeout=2.5)
-    assert seen == {"address": ("127.0.0.1", 2575), "timeout": 2.5}
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="needs /proc (Linux)")
+def test_failing_sends_leave_no_file_descriptors_open(h):
+    behaviours = ["close", "reset", "silent"]
+    adapters = [h.FakeMllpAdapter() for _ in behaviours]
+    try:
+        for fake, behaviour in zip(adapters, behaviours, strict=True):
+            getattr(fake, behaviour)()
+        refused = h.closed_port()
+        send(refused)  # warm up anything lazily opened
+        before = open_fds()
+        for _ in range(10):
+            send(refused)
+            for fake in adapters:
+                send(fake.port, timeout=0.05)
+        # The fake adapters' own sockets (same process) close on their threads; give them a
+        # moment. A socket leaked by the client stays open however long we wait.
+        settle = time.monotonic() + 2
+        while open_fds() != before and time.monotonic() < settle:
+            time.sleep(0.05)
+        assert open_fds() == before
+    finally:
+        for fake in adapters:
+            fake.stop()

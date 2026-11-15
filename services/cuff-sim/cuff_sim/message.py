@@ -149,7 +149,11 @@ def sample_control_id(payload: bytes) -> str | None:
 
 
 def from_sample(sample: Sample, transport: str) -> Outgoing:
-    """The sample's exact bytes. Over MLLP its own framing is kept (possibly broken)."""
+    """The sample's exact bytes. Over MLLP its own framing is kept (possibly broken).
+
+    The bytes carry T07's synthetic patient (SYN-000123), not the configured one; see
+    ``CuffSimulator.prepare`` for the follow-up.
+    """
     wire = sample.wire_bytes if transport == "mllp" else sample.payload
     framing = sample.mllp_framing if transport == "mllp" else None
     return Outgoing(

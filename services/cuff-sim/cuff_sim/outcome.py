@@ -63,3 +63,8 @@ def read_ack(raw: bytes) -> TransportOutcome:
         return AckReceived(parse_ack(raw))
     except AckParseError:
         return NoAck("unreadable-reply", "the reply is not a readable HL7v2 ACK", None, prefix)
+    except Exception:  # noqa: BLE001 - see below
+        # The reply comes from outside, and parse_ack (through hl7apy) can raise other errors on
+        # odd input: an IndexError for b"MSH^~MSH|", reported to T07. Whatever the parser does,
+        # the message has already been sent, so the outcome must still be a result and recorded.
+        return NoAck("unreadable-reply", "the reply is not a readable HL7v2 ACK", None, prefix)

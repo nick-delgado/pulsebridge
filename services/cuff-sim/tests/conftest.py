@@ -198,6 +198,36 @@ def adapter():
     fake.stop()
 
 
+class HangingPort:
+    """A loopback port where connect() hangs: a listener with a backlog of 0 whose one queue
+    slot is taken by a connection nobody accepts, so later SYNs are dropped (Linux)."""
+
+    def __init__(self) -> None:
+        self.server = socket.socket()
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen(0)
+        self.port = self.server.getsockname()[1]
+        self.held = []
+        for _ in range(2):  # fill the queue; extra tries simply time out
+            s = socket.socket()
+            s.settimeout(0.2)
+            with contextlib.suppress(OSError):
+                s.connect(("127.0.0.1", self.port))
+            self.held.append(s)
+
+    def close(self) -> None:
+        for s in self.held:
+            s.close()
+        self.server.close()
+
+
+@pytest.fixture
+def hanging():
+    port = HangingPort()
+    yield port
+    port.close()
+
+
 def closed_port() -> int:
     """A loopback port nothing listens on (bound, then released)."""
     sock = socket.socket()
@@ -211,7 +241,7 @@ def closed_port() -> int:
 
 
 def make_config(port: int, **overrides: str) -> ServiceConfig:
-    env = dict(ENV, MLLP_PORT=str(port), MLLP_ACK_TIMEOUT_SECONDS="0.6", **overrides)
+    env = dict(ENV, MLLP_PORT=str(port), MLLP_TIMEOUT_SECONDS="0.6", **overrides)
     return ServiceConfig.from_env(env)
 
 

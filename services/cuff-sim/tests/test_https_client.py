@@ -3,7 +3,9 @@
 import base64
 import hashlib
 
+import google.auth.exceptions
 import pytest
+import requests
 from cuff_sim.https_client import send_https
 from cuff_sim.outcome import AckReceived, NoAck
 from pulsebridge_gcp import RetryableError
@@ -87,11 +89,42 @@ def test_error_without_nack_is_api_error_with_status(client, transport, status):
     assert delivery.message_name is None
 
 
-def test_network_failure_is_connection_closed_without_status(client, transport):
-    transport.add("POST", INGEST, RetryableError("POST ingest", None, server_message="Reset"))
+def no_response(cause: BaseException) -> RetryableError:
+    """What RequestsTransport raises when no response arrived: the original exception chained."""
+    error = RetryableError("POST ingest", None, server_message=type(cause).__name__)
+    error.__cause__ = cause
+    return error
+
+
+@pytest.mark.parametrize(
+    ("cause", "why"),
+    [
+        (requests.ReadTimeout(), "timeout"),  # sent; the message may have been stored
+        (requests.ConnectTimeout(), "timeout"),
+        (requests.ConnectionError(), "connection-closed"),
+        (google.auth.exceptions.RefreshError(), "connection-closed"),  # nothing was sent
+        (None, "connection-closed"),
+    ],
+)
+def test_no_response_is_classified_by_its_cause(client, transport, cause, why):
+    error = no_response(cause) if cause is not None else RetryableError("POST ingest", None)
+    transport.add("POST", INGEST, error)
     outcome = send_https(client, "main", PAYLOAD).outcome
-    assert outcome.why == "connection-closed"
+    assert outcome.why == why
     assert outcome.http_status is None
+
+
+@pytest.mark.parametrize("reply", [b"MSH^~MSH|", b"MSH|^~\\&|\rMSA"])
+def test_ack_or_nack_that_crashes_the_parser_is_unreadable(client, transport, h, reply):
+    transport.add("POST", INGEST, json_response(200, accepted_body(h, ack=reply)))
+    assert send_https(client, "main", PAYLOAD).outcome.why == "unreadable-reply"
+    other = type(transport)()
+    other.add("POST", INGEST, json_response(400, nack_body(h, 400, reply)))
+    client2 = type(client)(
+        project=h.PROJECT, location="us-central1", dataset="demo", transport=other
+    )
+    outcome = send_https(client2, "main", PAYLOAD).outcome
+    assert outcome.why == "unreadable-reply" and outcome.reply_prefix == reply
 
 
 def test_unexpected_3xx_is_unreadable_not_api_error(client, transport):

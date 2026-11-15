@@ -5,6 +5,8 @@ import base64
 import hashlib
 import json
 import logging
+import random
+from datetime import UTC, datetime
 
 import pytest
 from cuff_sim import message as message_module
@@ -532,35 +534,72 @@ def test_invalid_input_does_not_use_a_token(config, client, adapter, audit_ok, h
 # ---- Logs -----------------------------------------------------------------------------------
 
 
-def test_logs_hold_no_values_patient_or_message_text(http, adapter, audit_ok, h, caplog):
+FIXED_TIME = datetime(2026, 11, 15, 10, 0, 0, tzinfo=UTC)
+# Letters only, so no logged value can contain the reading's digits by chance.
+FIXED_CONTROL_ID = "LOGTESTCONTROLIDABCD"
+SENSITIVE = (
+    "187",  # systolic
+    "113",  # diastolic
+    "500",  # the refused diastolic
+    "SYN-000123",
+    "TESTPATIENT",
+    "SYNTHIA",
+    "PULSEBRIDGE^MR",
+    "Invalid MSH header",  # MSA-3
+    "MSH|",
+    "ORU",
+    "demo-project",  # anything from the store name
+)
+
+
+def logged_fields(caplog):
+    return [r.fields for r in caplog.records if hasattr(r, "fields")]
+
+
+def test_logs_hold_no_values_patient_or_message_text(config, client, adapter, audit_ok, h, caplog):
+    # Fixed control ID and clock: nothing random can match a sensitive value by chance.
+    http = create_app(
+        config,
+        client,
+        bucket=TokenBucket(per_minute=600, burst=100),
+        control_ids=lambda: FIXED_CONTROL_ID,
+        clock=lambda: FIXED_TIME,
+    ).test_client()
     adapter.reply(h.S4_NACK_NO_MSH)
     with caplog.at_level(logging.DEBUG):
         _r, body = post(http, systolic=187, diastolic=113)
         post(http, systolic=187, diastolic=500)  # refused
-    lines = [json.dumps(getattr(r, "fields", {})) + r.getMessage() for r in caplog.records]
-    text = "\n".join(lines)
-    for secret in (
-        "187",
-        "113",
-        "SYN-000123",
-        "TESTPATIENT",
-        "SYNTHIA",
-        "Invalid MSH header",  # MSA-3
-        "MSH|",
-        "ORU",
-        h.STORE_NAME,
-    ):
-        assert secret not in text, secret
-    send = next(
-        r.fields for r in caplog.records if getattr(r, "fields", {}).get("event") == "cuff-send"
-    )
-    assert send["ack_code"] == "AE" and send["control_id"] == body["controlId"]
-    refused = next(
-        r.fields
-        for r in caplog.records
-        if getattr(r, "fields", {}).get("event") == "request-refused"
-    )
-    assert refused["fields"] == ["diastolic"]
+    records = logged_fields(caplog)
+    for fields in records:
+        for key, value in fields.items():
+            if key == "duration_ms":  # a timing in ms, which can be any number
+                continue
+            for secret in SENSITIVE:
+                assert secret not in json.dumps(value), (key, secret)
+    assert all(secret not in r.getMessage() for r in caplog.records for secret in SENSITIVE)
+    send = next(f for f in records if f["event"] == "cuff-send")
+    assert send["control_id"] == FIXED_CONTROL_ID == body["controlId"]
+    assert send["attempt_id"] == body["attemptId"]
+    assert send["ack_code"] == "AE" and send["result"] == "rejected"
+    assert set(send) == {
+        "event",
+        "transport",
+        "result",
+        "sample",
+        "framing",
+        "control_id",
+        "ack_code",
+        "no_ack_reason",
+        "http_status",
+        "message_name_source",
+        "attempt_id",
+        "audit_recorded",
+        "audit_failure",
+        "audit_http_status",
+        "duration_ms",
+    }
+    refused = next(f for f in records if f["event"] == "request-refused")
+    assert refused == {"event": "request-refused", "http_status": 422, "fields": ["diastolic"]}
 
 
 def test_a_bug_answers_500_and_logs_the_type_only(http, monkeypatch, caplog):
@@ -603,3 +642,205 @@ def test_a_clock_stepping_back_still_records_the_attempt(config, client, adapter
     assert timedelta(0) == (
         datetime.fromisoformat(event["recorded"]) - datetime.fromisoformat(event["period"]["start"])
     )
+
+
+# ---- Replies that crash the parser, and a fuzz check -----------------------------------------
+
+
+def crash_reply_cases(h):
+    """Two ingest responses carrying ``raw``: a 400 with it as hl7Nack, a 200 with it as hl7Ack."""
+
+    def nack(raw):
+        return json_response(400, {"error": {"code": 400, "details": [{"hl7Nack": h.b64(raw)}]}})
+
+    def ok(raw):
+        name = f"{h.STORE_NAME}/messages/x="
+        return json_response(200, {"hl7Ack": h.b64(raw), "message": {"name": name}})
+
+    return nack, ok
+
+
+@pytest.mark.parametrize("where", ["mllp", "https-ack", "https-nack"])
+def test_reply_that_crashes_the_parser_is_recorded_not_a_500(http, adapter, audit_ok, h, where):
+    reply = b"MSH^~MSH|"  # T07's parse_ack raises IndexError on this (reported to T07)
+    nack, ok = crash_reply_cases(h)
+    if where == "mllp":
+        adapter.reply(reply)
+        response, body = post(http, **READING)
+    else:
+        audit_ok.add("POST", INGEST, ok(reply) if where == "https-ack" else nack(reply))
+        response, body = post(http, **READING, transport="https")
+    assert response.status_code == 200
+    assert body["result"] == "no-acknowledgment" and body["ack"]["why"] == "unreadable-reply"
+    assert base64.b64decode(body["ack"]["replyPrefixBase64"]) == reply
+    assert body["messageName"] is None
+    _id, event = only_audit_put(audit_ok, h)
+    assert details(event)["no-ack-reason"] == "unreadable-reply"
+    assert base64.b64decode(details(event)["unreadable-reply-bytes"]) == reply
+
+
+FUZZ_PIECES = [
+    b"MSH",
+    b"MSA",
+    b"PID",
+    b"|",
+    b"^",
+    b"~",
+    b"\\",
+    b"&",
+    b"\r",
+    b"\n",
+    b"AA",
+    b"AE",
+    b"AR",
+    b"CA",
+    b"ACK",
+    b"2.5.1",
+    b"9.9",
+    b"",
+    b"\x00",
+    b"\xff",
+    b"\xef\xbb\xbf",
+    b"\x0b",
+    b"\x1c",
+    b"\\E\\",
+    b"\\F\\",
+    b"#",
+    b"X" * 50,
+]
+
+
+def fuzz_replies(seed: int, count: int) -> list[bytes]:
+    rng = random.Random(seed)  # noqa: S311 - reproducible test data, not security
+    out = []
+    for _ in range(count):
+        if rng.random() < 0.5:
+            head = rng.choice([b"MSH|^~\\&|", b"MSH^~", b"MSH|", b"MSH#^~\\&#", b"MSH"])
+        else:
+            head = b""
+        body = b"".join(rng.choice(FUZZ_PIECES) for _ in range(rng.randint(0, 25)))
+        if rng.random() < 0.3:
+            body += bytes(rng.randrange(256) for _ in range(rng.randint(0, 8)))
+        out.append(head + body)
+    return out
+
+
+def test_fuzzed_replies_are_always_a_result(h):
+    from cuff_sim.outcome import AckReceived, NoAck, read_ack
+
+    for raw in [b"MSH^~MSH|", *fuzz_replies(seed=13, count=3000)]:
+        outcome = read_ack(raw)  # must not raise
+        assert isinstance(outcome, AckReceived | NoAck)
+        if isinstance(outcome, NoAck):
+            assert outcome.why == "unreadable-reply"
+            assert outcome.reply_prefix == (raw[:4096] or None)
+
+
+def test_fuzzed_replies_never_give_a_5xx_and_are_always_recorded(config, transport, h):
+    from pulsebridge_gcp import HealthcareClient
+
+    nack, ok = crash_reply_cases(h)
+    replies = fuzz_replies(seed=29, count=150)
+    responses = [ok(r) if i % 2 else nack(r) for i, r in enumerate(replies)]
+    transport.add("POST", INGEST, *responses)
+    transport.add("PUT", "", json_response(200, {}))
+    client = HealthcareClient(
+        project=h.PROJECT, location="us-central1", dataset="demo", transport=transport
+    )
+    bucket = TokenBucket(per_minute=600, burst=len(replies))
+    http = create_app(config, client, bucket=bucket).test_client()
+    for i in range(len(replies)):
+        response, body = post(http, **READING, transport="https")
+        assert response.status_code == 200, (i, replies[i])
+        puts = [r for r in transport.requests if r.method == "PUT"]
+        assert len(puts) == i + 1, (i, replies[i])  # one AuditEvent per send
+        assert body["audit"] == {"recorded": True}, (i, replies[i])
+
+
+def test_audit_build_bug_is_reported_not_raised(http, adapter, audit_ok, monkeypatch, h):
+    from cuff_sim import audit
+
+    def bug(*_a, **_k):
+        raise IndexError("SYN-000123")
+
+    monkeypatch.setattr(audit, "build_send_attempt_audit_event", bug)
+    adapter.reply(h.S4_AA)
+    response, body = post(http, **READING)
+    assert response.status_code == 200 and body["result"] == "accepted"
+    assert body["audit"] == {
+        "recorded": False,
+        "detail": "the attempt could not be expressed as an AuditEvent",
+    }
+    assert not [r for r in audit_ok.requests if r.method == "PUT"]
+
+
+# ---- Request edges --------------------------------------------------------------------------
+
+
+def test_body_over_the_size_limit_is_413_and_nothing_is_sent(http, adapter, transport):
+    response = http.post(
+        READINGS_PATH,
+        data=json.dumps({"systolic": 120, "diastolic": 80, "pad": "x" * 20000}),
+        content_type="application/json",
+    )
+    assert response.status_code == 413
+    assert response.get_json()["issue"][0]["code"] == "too-long"
+    assert not adapter.connections and not transport.requests
+
+
+def test_body_just_under_the_limit_is_read(http, adapter, transport):
+    response = http.post(
+        READINGS_PATH,
+        data=json.dumps({"systolic": 120, "diastolic": 80, "pad": "x" * 16000}),
+        content_type="application/json",
+    )
+    assert response.status_code == 422  # read and refused for the extra field, not for size
+
+
+def test_sample_names_match_exactly(http, adapter, transport):
+    for name in ("UNPARSEABLE_NO_MSH", "Unparseable_No_Msh", " unparseable_no_msh"):
+        response, _ = post(http, sendMalformed=name)
+        assert response.status_code == 422, name
+    assert not adapter.connections and not transport.requests
+
+
+def test_malformed_send_needs_no_values(http, adapter, audit_ok, h):
+    adapter.reply(h.S4_NACK_NO_MSH)
+    response, body = post(http, sendMalformed="unparseable_no_msh")
+    assert response.status_code == 200 and body["sample"] == "unparseable_no_msh"
+
+
+def test_two_ack_frames_the_first_is_used_and_a_mismatch_is_visible(
+    http, adapter, audit_ok, h, caplog
+):
+    adapter.reply_raw(
+        b"\x0b" + h.ack_for("SOMEONEELSE") + b"\x1c\r" + b"\x0b" + h.S4_NACK_NO_MSH + b"\x1c\r"
+    )
+    with caplog.at_level(logging.INFO):
+        _response, body = post(http, **READING)
+    assert body["ack"]["code"] == "AA" and body["ack"]["controlId"] == "SOMEONEELSE"
+    assert body["ack"]["controlId"] != body["controlId"]
+    send = next(f for f in logged_fields(caplog) if f["event"] == "cuff-send")
+    assert send["ack_matches_control_id"] is False
+
+
+@pytest.mark.parametrize("transport_name", ["mllp", "https"])
+def test_unexpected_send_error_is_recorded_not_a_500(
+    http, audit_ok, monkeypatch, h, caplog, transport_name
+):
+    from cuff_sim import service
+
+    def bug(*_a, **_k):
+        raise RuntimeError("SYN-000123")
+
+    monkeypatch.setattr(service, "send_mllp" if transport_name == "mllp" else "send_https", bug)
+    with caplog.at_level(logging.INFO):
+        response, body = post(http, **READING, transport=transport_name)
+    assert response.status_code == 200
+    assert body["ack"]["why"] == "connection-closed"
+    assert body["ack"]["detail"] == "the send failed unexpectedly"
+    _id, event = only_audit_put(audit_ok, h)
+    assert details(event)["no-ack-reason"] == "connection-closed"
+    send = next(f for f in logged_fields(caplog) if f["event"] == "cuff-send")
+    assert send["send_error_type"] == "RuntimeError"
+    assert "SYN-000123" not in json.dumps(logged_fields(caplog))

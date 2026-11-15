@@ -39,11 +39,8 @@ VARIABLES: dict[str, Variable] = {
     ),
     "MLLP_HOST": Variable("Host name or IP address of the MLLP adapter on the edge VM"),
     "MLLP_PORT": Variable("TCP port of the MLLP adapter, 1 to 65535", "2575"),
-    "MLLP_CONNECT_TIMEOUT_SECONDS": Variable(
-        "Seconds allowed to connect to the adapter and to write the message", "3"
-    ),
-    "MLLP_ACK_TIMEOUT_SECONDS": Variable(
-        "Seconds allowed for the whole ACK frame to arrive (one deadline)", "5"
+    "MLLP_TIMEOUT_SECONDS": Variable(
+        "One deadline for the whole MLLP exchange: connect, write and the complete ACK frame", "5"
     ),
     "HTTPS_TIMEOUT_SECONDS": Variable("Seconds allowed for one HTTPS ingest or audit write", "10"),
     "PATIENT_ID": Variable("PID-3.1: the configured patient's identifier (the setup step's id)"),
@@ -62,6 +59,21 @@ VARIABLES: dict[str, Variable] = {
 MAX_TIMEOUT_SECONDS = 60.0
 MAX_RATE_PER_MINUTE = 600
 MAX_BURST = 100
+
+# HL7v2 text values from configuration: printable ASCII without a backslash (T07's rule: MSH-18
+# is empty, so the receiver assumes ASCII, and "\\" is HL7's escape character), at most this many
+# characters. The limits are ours and below what hl7apy enforces (199 for PID-3.1 and PID-5, 20
+# for PID-3.4 and the HD.1 of MSH-3/MSH-4), so a value that is too long is refused here, by name,
+# and hl7apy never gets to raise an error that quotes it.
+TEXT_LIMITS = {
+    "PATIENT_ID": 64,  # also T31/T06's identifier, so kept short
+    "PATIENT_ASSIGNING_AUTHORITY": 20,
+    "PATIENT_FAMILY_NAME": 80,
+    "PATIENT_GIVEN_NAME": 80,
+    "SENDING_APPLICATION": 20,
+    "SENDING_FACILITY": 20,
+}
+_HL7_TEXT = re.compile(r"[\x20-\x5b\x5d-\x7e]+", re.ASCII)
 
 # A DNS host name (RFC 1123 labels); IP addresses are checked with ipaddress instead.
 _HOST_NAME = re.compile(
@@ -84,8 +96,7 @@ class ServiceConfig:
     audit_fhir_store_id: str
     mllp_host: str
     mllp_port: int
-    mllp_connect_timeout: float
-    mllp_ack_timeout: float
+    mllp_timeout: float
     https_timeout: float
     patient_id: str
     patient_assigning_authority: str
@@ -111,6 +122,8 @@ class ServiceConfig:
             values[name] = value
         if missing:
             raise ConfigError(f"missing environment variables: {', '.join(missing)}")
+        for name, limit in TEXT_LIMITS.items():
+            _text(name, values[name], limit)
         if values["AUDIT_FHIR_STORE_ID"] == values["HL7V2_STORE_ID"]:
             # Not strictly impossible (FHIR and HL7v2 stores have separate namespaces), but
             # almost certainly a copy-paste mistake in the deployment.
@@ -123,12 +136,7 @@ class ServiceConfig:
             audit_fhir_store_id=values["AUDIT_FHIR_STORE_ID"],
             mllp_host=_host("MLLP_HOST", values["MLLP_HOST"]),
             mllp_port=_int("MLLP_PORT", values["MLLP_PORT"], 1, 65535),
-            mllp_connect_timeout=_seconds(
-                "MLLP_CONNECT_TIMEOUT_SECONDS", values["MLLP_CONNECT_TIMEOUT_SECONDS"]
-            ),
-            mllp_ack_timeout=_seconds(
-                "MLLP_ACK_TIMEOUT_SECONDS", values["MLLP_ACK_TIMEOUT_SECONDS"]
-            ),
+            mllp_timeout=_seconds("MLLP_TIMEOUT_SECONDS", values["MLLP_TIMEOUT_SECONDS"]),
             https_timeout=_seconds("HTTPS_TIMEOUT_SECONDS", values["HTTPS_TIMEOUT_SECONDS"]),
             patient_id=values["PATIENT_ID"],
             patient_assigning_authority=values["PATIENT_ASSIGNING_AUTHORITY"],
@@ -160,6 +168,13 @@ def _seconds(name: str, text: str) -> float:
     if not 0 < value <= MAX_TIMEOUT_SECONDS:
         raise ConfigError(f"{name} must be a number of seconds, above 0 and at most 60")
     return value
+
+
+def _text(name: str, text: str, limit: int) -> None:
+    if len(text) > limit or not _HL7_TEXT.fullmatch(text):
+        raise ConfigError(
+            f"{name} must be 1 to {limit} characters of printable ASCII without a backslash"
+        )
 
 
 def _host(name: str, text: str) -> str:

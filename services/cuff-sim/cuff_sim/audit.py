@@ -92,6 +92,10 @@ def record_attempt(
         return AuditStatus(
             False, None, "the attempt could not be expressed as an AuditEvent", "build-failed"
         )
+    except Exception:  # noqa: BLE001 - the send already happened; never fail the request here
+        return AuditStatus(
+            False, None, "the attempt could not be expressed as an AuditEvent", "build-error"
+        )
     attempt_id = built.resource["id"]
     resource_type, _, resource_id = write["url"].partition("/")
     try:

@@ -1,8 +1,15 @@
 """Start-up validation of the configuration, and the token bucket."""
 
+import os
+import subprocess
+import sys
+import threading
+import time
+import traceback
+
 import pytest
 from cuff_sim.app import check_configuration, create_app
-from cuff_sim.config import VARIABLES, ConfigError, ServiceConfig
+from cuff_sim.config import TEXT_LIMITS, VARIABLES, ConfigError, ServiceConfig
 from cuff_sim.ratelimit import TokenBucket
 
 REQUIRED = [name for name, var in VARIABLES.items() if var.default is None]
@@ -11,7 +18,7 @@ REQUIRED = [name for name, var in VARIABLES.items() if var.default is None]
 def test_config_from_env_with_defaults(h):
     config = ServiceConfig.from_env(h.ENV)
     assert config.mllp_port == 2575
-    assert (config.mllp_connect_timeout, config.mllp_ack_timeout) == (3.0, 5.0)
+    assert config.mllp_timeout == 5.0
     assert config.https_timeout == 10.0
     assert (config.sending_application, config.sending_facility) == ("CUFFSIM", "PULSEBRIDGE")
     assert (config.rate_limit_per_minute, config.rate_limit_burst) == (6, 3)
@@ -49,13 +56,13 @@ def test_each_required_variable_is_checked(h, name):
         ("MLLP_PORT", "0"),
         ("MLLP_PORT", "65536"),
         ("MLLP_PORT", "25x"),
-        ("MLLP_ACK_TIMEOUT_SECONDS", "0"),
-        ("MLLP_ACK_TIMEOUT_SECONDS", "61"),
-        ("MLLP_ACK_TIMEOUT_SECONDS", "inf"),
-        ("MLLP_CONNECT_TIMEOUT_SECONDS", "nan"),
+        ("MLLP_TIMEOUT_SECONDS", "0"),
+        ("MLLP_TIMEOUT_SECONDS", "61"),
+        ("MLLP_TIMEOUT_SECONDS", "inf"),
+        ("MLLP_TIMEOUT_SECONDS", "nan"),
         ("HTTPS_TIMEOUT_SECONDS", "1e3"),
         ("HTTPS_TIMEOUT_SECONDS", "1e1"),  # float() reads 10.0: in range, but not plain decimal
-        ("MLLP_ACK_TIMEOUT_SECONDS", "1_0"),  # float() reads 10.0 too
+        ("MLLP_TIMEOUT_SECONDS", "1_0"),  # float() reads 10.0 too
         ("RATE_LIMIT_PER_MINUTE", "0"),
         ("RATE_LIMIT_PER_MINUTE", "601"),
         ("RATE_LIMIT_BURST", "-1"),
@@ -84,27 +91,69 @@ def test_audit_store_must_differ_from_hl7v2_store(h):
 
 
 @pytest.mark.parametrize(
-    ("name", "value", "names"),
+    ("name", "value"),
     [
-        ("PATIENT_FAMILY_NAME", "O\\BRIEN", "PATIENT_FAMILY_NAME"),  # HL7's escape character
-        ("PATIENT_GIVEN_NAME", "Zoë", "PATIENT_GIVEN_NAME"),  # not ASCII (MSH-18 empty)
-        ("SENDING_APPLICATION", "CUFF\tSIM", "SENDING_APPLICATION"),
-        ("HL7V2_STORE_ID", "main/../other", "HL7V2_STORE_ID"),
-        ("GCP_PROJECT_ID", "Demo", "GCP_PROJECT_ID"),
-        ("GCP_PROJECT_ID", "demo", "GCP_PROJECT_ID"),  # under 6 characters: T31 refuses it
-        ("AUDIT_FHIR_STORE_ID", "a b", "AUDIT_FHIR_STORE_ID"),
+        ("PATIENT_FAMILY_NAME", "O\\BRIEN"),  # HL7's escape character
+        ("PATIENT_GIVEN_NAME", "Zo\u00eb"),  # not ASCII (MSH-18 is empty)
+        ("SENDING_APPLICATION", "CUFF\tSIM"),
     ],
 )
-def test_start_up_check_refuses_values_that_cannot_work(h, name, value, names):
+def test_hl7_text_rules_are_checked_when_reading_the_environment(h, name, value):
+    with pytest.raises(ConfigError) as caught:
+        ServiceConfig.from_env(dict(h.ENV, **{name: value}))
+    assert name in str(caught.value) and value not in str(caught.value)
+
+
+@pytest.mark.parametrize(("name", "limit"), sorted(TEXT_LIMITS.items()))
+def test_text_length_limits(h, name, limit):
+    at_limit = ServiceConfig.from_env(dict(h.ENV, **{name: "A" * limit}))
+    check_configuration(at_limit)  # T07, hl7apy and T31 accept the longest allowed value
+    with pytest.raises(ConfigError) as caught:
+        ServiceConfig.from_env(dict(h.ENV, **{name: "B" * (limit + 1)}))
+    assert name in str(caught.value) and "BBBB" not in str(caught.value)
+
+
+# Values that pass the environment checks but that a library refuses at start-up. The library's
+# own error quotes the value; none of it may reach the ConfigError or its traceback.
+LIBRARY_REFUSALS = [
+    ("HL7V2_STORE_ID", "main/../other-zq7"),
+    ("GCP_PROJECT_ID", "Demo-Zq7"),
+    ("GCP_PROJECT_ID", "dzq7"),  # under 6 characters: T31 refuses it
+    ("AUDIT_FHIR_STORE_ID", "a b zq7"),
+    ("HEALTHCARE_DATASET_ID", "d" * 300 + "zq7"),
+]
+
+
+@pytest.mark.parametrize(("name", "value"), LIBRARY_REFUSALS)
+def test_start_up_errors_and_tracebacks_hold_no_configured_value(h, name, value):
     config = ServiceConfig.from_env(dict(h.ENV, **{name: value}))
     with pytest.raises(ConfigError) as caught:
         check_configuration(config)
-    assert names in str(caught.value)
-    assert value not in str(caught.value)
+    printed = "".join(traceback.format_exception(caught.value))
+    assert name in printed
+    assert "zq7" not in printed  # the marker in every bad value
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__
+
+
+def test_process_start_up_output_holds_no_configured_value(h, tmp_path):
+    # The real start-up, as gunicorn would run it: a fresh interpreter, environment only.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("GOOGLE", "GCP", "CLOUDSDK"))}
+    env.update(h.ENV, HEALTHCARE_DATASET_ID="demo-zq7-" + "x" * 300, PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.run(
+        [sys.executable, "-B", "-c", "from cuff_sim.app import create_app; create_app()"],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "ConfigError" in proc.stderr
+    assert "zq7" not in proc.stderr + proc.stdout
 
 
 def test_create_app_fails_on_bad_configuration(h, monkeypatch, client):
-    for key, value in dict(h.ENV, PATIENT_FAMILY_NAME="O\\BRIEN").items():
+    for key, value in dict(h.ENV, GCP_PROJECT_ID="Demo").items():
         monkeypatch.setenv(key, value)
     with pytest.raises(ConfigError):
         create_app(client=client)
@@ -158,3 +207,30 @@ def test_retry_after_is_at_least_one_second():
 def test_bucket_needs_positive_limits(rate, burst):
     with pytest.raises(ValueError):
         TokenBucket(per_minute=rate, burst=burst)
+
+
+def test_bucket_is_safe_across_threads():
+    # A clock that yields to other threads, so an unlocked read-modify-write would interleave
+    # and let more than `burst` sends through.
+    frozen = 1000.0
+
+    def slow_clock():
+        time.sleep(0.0005)
+        return frozen
+
+    bucket = TokenBucket(per_minute=1, burst=40, clock=slow_clock)
+    allowed = []
+    lock = threading.Lock()
+
+    def worker():
+        for _ in range(10):
+            if bucket.take() is None:
+                with lock:
+                    allowed.append(1)
+
+    threads = [threading.Thread(target=worker) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(allowed) == 40  # 160 tries, exactly the burst allowed

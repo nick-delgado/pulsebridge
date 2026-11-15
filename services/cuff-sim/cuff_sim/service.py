@@ -135,6 +135,9 @@ class CuffSimulator:
             sample = find_sample(request.sample_name, request.transport)
             if sample is None:  # parse_request already refused this; do not guess
                 raise ValueError("sample does not apply to this transport")
+            # The sample carries T07's own patient (SYN-000123), not the configured one.
+            # FOLLOW-UP (one line): when T07 offers with_patient, pass
+            # sample.with_patient(patient(self.config)) here instead of sample.
             return from_sample(sample, request.transport)
         outgoing = build_reading(
             self.config,
@@ -153,27 +156,36 @@ class CuffSimulator:
         started = time.monotonic()
         sent_at = self._clock()  # just before the first byte goes out (T31: whole milliseconds)
         message_name = source = None
-        if transport == "mllp":
-            outcome = send_mllp(
-                outgoing.wire_bytes,
-                host=self.config.mllp_host,
-                port=self.config.mllp_port,
-                connect_timeout=self.config.mllp_connect_timeout,
-                ack_timeout=self.config.mllp_ack_timeout,
-            )
-            if isinstance(outcome, AckReceived) and outcome.ack.accepted:
-                # DERIVED: the adapter's ACK does not carry the name (see derived_message_name).
-                message_name = derived_message_name(self.store_name, outgoing.payload)
-                source = NAME_DERIVED
-        else:
-            delivery = send_https(self.client, self.config.hl7v2_store_id, outgoing.payload)
-            outcome = delivery.outcome
-            if delivery.message_name is not None:
-                message_name, source = delivery.message_name, NAME_FROM_INGEST
+        log_fields: dict = {}
+        try:
+            if transport == "mllp":
+                outcome = send_mllp(
+                    outgoing.wire_bytes,
+                    host=self.config.mllp_host,
+                    port=self.config.mllp_port,
+                    timeout=self.config.mllp_timeout,
+                )
+                if isinstance(outcome, AckReceived) and outcome.ack.accepted:
+                    # DERIVED: the adapter's ACK does not carry the name (derived_message_name).
+                    message_name = derived_message_name(self.store_name, outgoing.payload)
+                    source = NAME_DERIVED
+            else:
+                delivery = send_https(self.client, self.config.hl7v2_store_id, outgoing.payload)
+                outcome = delivery.outcome
+                if delivery.message_name is not None:
+                    message_name, source = delivery.message_name, NAME_FROM_INGEST
+        except Exception as exc:  # noqa: BLE001 - see below
+            # Every expected failure is already a result. Anything else (a library bug) may
+            # strike after bytes went out, so it is still an attempt with no acknowledgment and
+            # is recorded; the exception type is logged, never its text.
+            outcome = NoAck("connection-closed", "the send failed unexpectedly")
+            message_name = source = None
+            log_fields["send_error_type"] = type(exc).__name__
 
         # The AuditEvent carries a message name only when the store itself returned it (T31:
         # "HTTPS 200 only"); the derived MLLP name stays out of the permanent record until
-        # the derivation is confirmed.
+        # the derivation is confirmed and T31 has a field for a derived name.
+        # FOLLOW-UP (one line): pass the derived name to that new field here.
         audit_name = message_name if source == NAME_FROM_INGEST else None
         audit = record_attempt(
             self.client,
@@ -191,7 +203,6 @@ class CuffSimulator:
             ),
             recorded=max(self._clock(), sent_at),
         )
-        log_fields = {}
         if isinstance(outcome, AckReceived) and outcome.ack.accepted:
             # Over a fresh connection the ACK is ours; a different MSA-2 would be worth knowing.
             log_fields["ack_matches_control_id"] = (

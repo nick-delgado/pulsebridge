@@ -19,13 +19,15 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from flask import Flask, Response, request
-from pulsebridge_fhir import FhirInputError, NotAcknowledged, SendAttempt, now_ms
+from pulsebridge_fhir import NotAcknowledged, SendAttempt, now_ms
 from pulsebridge_fhir import build_send_attempt_audit_event as _build_audit_event
 from pulsebridge_gcp import HealthcareClient, default_transport
 from pulsebridge_hl7v2 import HL7ValidationError
+from werkzeug.exceptions import RequestEntityTooLarge
 
 from cuff_sim.config import SERVICE_NAME, ConfigError, ServiceConfig
 from cuff_sim.message import build_reading, malformed_samples
@@ -38,6 +40,10 @@ READINGS_PATH = "/cuff/readings"
 SAMPLES_PATH = "/cuff/samples"
 
 FHIR_JSON = "application/fhir+json"
+
+# The largest request body accepted. A real body is under 100 bytes; anything near this is not
+# a reading. Flask answers a larger one with 413 before the body is read.
+MAX_BODY_BYTES = 16 * 1024
 
 logger = logging.getLogger("cuff_sim")
 
@@ -116,7 +122,13 @@ class _NoTransport:
 def check_configuration(config: ServiceConfig) -> None:
     """Fail at start-up, so a bad deploy fails visibly, if the configuration cannot produce a
     valid message or AuditEvent. Builds both offline, from a fixed synthetic reading; nothing is
-    sent. Messages name the variables, never their values."""
+    sent.
+
+    Every failure becomes a ``ConfigError`` that names variables only, raised ``from None``: the
+    libraries' own errors can quote the value (``pulsebridge_gcp`` names the bad id, hl7apy's
+    ``MaxLengthReached`` prints the text), and a chained exception would put that value into the
+    start-up traceback, which Cloud Run logs.
+    """
     try:
         names = HealthcareClient(
             project=config.project_id,
@@ -126,11 +138,11 @@ def check_configuration(config: ServiceConfig) -> None:
         )
         store_name = names.hl7v2_store_name(config.hl7v2_store_id)
         names.fhir_store_name(config.audit_fhir_store_id)
-    except ValueError as exc:
+    except Exception:  # noqa: BLE001 - any failure here is a configuration error
         raise ConfigError(
             "GCP_PROJECT_ID, HEALTHCARE_LOCATION, HEALTHCARE_DATASET_ID, HL7V2_STORE_ID and "
             "AUDIT_FHIR_STORE_ID do not form valid resource names"
-        ) from exc
+        ) from None
     try:
         build_reading(
             config,
@@ -139,12 +151,11 @@ def check_configuration(config: ServiceConfig) -> None:
             control_id="STARTUPCHECK",
             observed_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
-    except (ValueError, HL7ValidationError) as exc:
+    except Exception:  # noqa: BLE001
         raise ConfigError(
             "PATIENT_ID, PATIENT_ASSIGNING_AUTHORITY, PATIENT_FAMILY_NAME, PATIENT_GIVEN_NAME, "
-            "SENDING_APPLICATION and SENDING_FACILITY must be printable ASCII without a "
-            "backslash, and must form a valid HL7v2 message"
-        ) from exc
+            "SENDING_APPLICATION and SENDING_FACILITY do not form a valid HL7v2 message"
+        ) from None
     try:
         sent = now_ms()
         _build_audit_event(
@@ -159,11 +170,11 @@ def check_configuration(config: ServiceConfig) -> None:
             ),
             recorded=sent,
         )
-    except FhirInputError as exc:
+    except Exception:  # noqa: BLE001
         raise ConfigError(
             "PATIENT_ID or the HL7v2 store name (GCP_PROJECT_ID: 6 to 30 characters, starting "
             "with a letter) cannot be written into an AuditEvent"
-        ) from exc
+        ) from None
 
 
 def create_app(
@@ -171,6 +182,8 @@ def create_app(
     client: HealthcareClient | None = None,
     *,
     bucket: TokenBucket | None = None,
+    control_ids: Callable[[], str] | None = None,
+    clock: Callable[[], datetime] | None = None,
 ) -> Flask:
     """Build the app. With no arguments, configuration comes from the environment and the client
     uses Application Default Credentials (the service's own service account on Cloud Run)."""
@@ -185,11 +198,15 @@ def create_app(
             transport=default_transport(),
             timeout=config.https_timeout,
         )
-    simulator = CuffSimulator(config, client)
+    # control_ids and clock are for tests (fixed control IDs and send times); production uses
+    # T07's new_control_id and T31's now_ms.
+    extra = {k: v for k, v in (("control_ids", control_ids), ("clock", clock)) if v is not None}
+    simulator = CuffSimulator(config, client, **extra)
     bucket = bucket or TokenBucket(
         per_minute=config.rate_limit_per_minute, burst=config.rate_limit_burst
     )
     app = Flask("cuff_sim")
+    app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
 
     @app.get(SAMPLES_PATH)
     def samples() -> Response:
@@ -208,6 +225,11 @@ def create_app(
     def readings() -> Response:
         try:
             return _readings()
+        except RequestEntityTooLarge:
+            _log(logging.WARNING, "request-refused", http_status=413, fields=["body"])
+            return _operation_outcome(
+                413, [("body", f"the body must be at most {MAX_BODY_BYTES} bytes")], "too-long"
+            )
         except Exception as exc:  # noqa: BLE001 - a bug must not print content in a traceback
             _log(logging.ERROR, "bug", error_type=type(exc).__name__)
             return _operation_outcome(500, [("body", "internal error; see the logs")], "exception")
