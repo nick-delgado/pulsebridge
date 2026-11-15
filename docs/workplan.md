@@ -193,7 +193,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | todo |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6 | `services/fhir-proxy/` (except `share/`) | todo |
 | T15 | FHIR proxy: share to OpenEMR | T14, S1 | `services/fhir-proxy/share/` | todo |
-| T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | in-progress |
+| T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
 
@@ -328,6 +328,13 @@ rate limit. It also forwards cuff requests to the cuff simulator (D10).
   to the stored message and its outcome labels where the send was accepted. Rejected and
   unacknowledged attempts appear with their reason and raw ACK; a stored message with no
   AuditEvent (for example one sent straight to the adapter) is still listed.
+- AC: the routes implement, or deliberately amend, the contract the dashboard shell proposes in
+  `web/README.md` and `web/src/api/contract.ts`, and settle its open questions (whether searches
+  are pinned to the configured patient; the date-boundary rule for heart-rate windows; where the
+  heart-rate source JSON and the raw HL7v2 text of a valid send come from; where FHIR
+  transaction rows come from). Any change to the contract is reported so the dashboard's client
+  and mock can follow.
+- AC: only the login route is unauthenticated; the cuff route can answer 429 with `Retry-After`.
 - AC: unsupported search parameters return a FHIR `OperationOutcome`, not a pass-through.
 - AC: the `CapabilityStatement` lists exactly what is implemented (test compares the two).
 - AC: unauthenticated requests are rejected.
@@ -361,6 +368,9 @@ Bundle endpoint and ignores conditional create.
   (D13). It reads by id, not by search: spike S1 found the patient-and-category search returns
   placeholder Observations. The client's scopes include the reads this needs and nothing more.
 - AC: no link to OpenEMR's screens is returned; they are not reachable from the internet.
+- AC: failures follow the dashboard contract: a share refused before OpenEMR is called (for
+  example an incomplete Patient, with what is missing) is a 422 with an `OperationOutcome`;
+  OpenEMR unreachable is a 502; a failure part-way returns the steps completed so far.
 - AC: the assertion's audience comes from configuration (OpenEMR's `site_addr_oath` value).
 - AC: the trace returned to the dashboard never contains the private key, the signed assertion
   or the full token.
@@ -405,7 +415,7 @@ has no access to the store holding health data, they go to a second, separate FH
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/` | todo |
+| T17 | Dashboard: heart-rate chart and right trace panel | T16 | `web/src/heart-rate/`, and `web/package.json` and `web/package-lock.json` only to add the chart library | todo |
 | T18 | Dashboard: cuff simulator and left trace panel | T16 | `web/src/cuff/` | todo |
 | T19 | Dashboard: share action and messages log | T16 | `web/src/share/`, `web/src/messages/` | todo |
 | T20 | Module `ingestion` | T04, T05 | `infra/modules/ingestion/` | todo |
@@ -414,9 +424,15 @@ has no access to the store holding health data, they go to a second, separate FH
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | todo |
 
-**T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief.
+**T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
+task fills its own directory through the mount function and slots defined by the shell (T16) and
+follows `web/README.md`: the ownership table, the typed client, the selection store, the
+data-changed notification and the polling convention for pending outcomes. Only T17 may add a
+dependency (the chart library). A task that needs a change to the shared client, the mock, the
+contract or the shell reports it to the orchestrator instead of editing those files.
 - AC (T17): 24 h, 7 d and 30 d windows of five-minute averages; min, mean and max for the window;
-  selecting a point fills the trace panel with that roll-up window.
+  selecting a point fills the trace panel with that roll-up window. A window that is not `final`
+  is shown as provisional and is selected as not shareable, with the reason.
 - AC (T18): bounded inputs, transport toggle, "send malformed" checkbox, readings list with ACK
   code, three trace tabs; the trace shows the commit-level acknowledgment and the application-level
   outcome as two separately labelled items.
