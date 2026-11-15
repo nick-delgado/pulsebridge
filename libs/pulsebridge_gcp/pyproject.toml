@@ -14,7 +14,10 @@ requires-python = ">=3.13"
 # Exact pins (CLAUDE.md): an upgrade is a deliberate change that re-runs the tests.
 # - google-auth: Application Default Credentials and AuthorizedSession (token refresh).
 # - requests: the HTTP client AuthorizedSession is built on.
-dependencies = ["google-auth==2.62.0", "requests==2.34.2"]
+# - pulsebridge-fhir: this repository's own pure FHIR library (libs/, not on PyPI; install it from
+#   libs/ first, as every service already does). Used only by pulsebridge_gcp.stored (T35), the
+#   stored-window read. The direction is one way: pulsebridge_fhir never imports this library.
+dependencies = ["google-auth==2.62.0", "requests==2.34.2", "pulsebridge-fhir"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["pulsebridge_gcp"]

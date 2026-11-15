@@ -31,7 +31,6 @@ services/seed/
     generator.py           the synthetic person: windows in the Google Health roll-up shape
     synthetic.py           what marks the data as synthetic; which stored Patients are "ours"
     seeder.py              one run: range, cutoff, safety check, setup Bundle, batches, report
-    stored.py              read once: what is already stored (copied from health-sync, reduced)
     testing.py             test helpers: an in-memory FHIR store behind the real client
     config.py              environment variables, validated before any work
     cli.py                 pulsebridge-seed: flags, exit codes, report on stdout
@@ -195,7 +194,7 @@ Editor on the health-data store (identity module), which includes search.
   an incomplete one (or with `--force`). Later runs send only ingest Bundles, whose Patient and
   Device entries are conditional creates that match and change nothing.
 - **Read once, write what changed.** After the safety check, one search reads the heart-rate
-  windows already stored for the range (`stored.py`, following `next` links). A window is
+  windows already stored for the range (`pulsebridge_gcp.stored`, following `next` links). A window is
   written only if it is new, stored `preliminary` and now due `final`, or stored with another
   end or other values (only after a change of `--seed` or `TIME_ZONE`). As in `health-sync`:
   a window stored `final` that changed and is complete now is written **`amended`** (R4:
@@ -208,8 +207,9 @@ Editor on the health-data store (identity module), which includes search.
   that window is written and its conditional update reports the duplicate. If the search fails
   or answers something unusable, every window is written (`stored_read: failed:…`): reading
   saves writes, it is never a condition for writing. The pages are bounded by the range, so a
-  server that keeps sending `next` links cannot loop the run. This logic is **copied, reduced,
-  from `services/health-sync/health_sync/stored.py`**; a later task can move it into a library.
+  server that keeps sending `next` links cannot loop the run. This logic is **shared with
+  `health-sync`** (T35): the read is `pulsebridge_gcp.stored.stored_windows` (here with one
+  client for every page and `max_pages_for_range`), the decision `pulsebridge_fhir.stored.plan_writes`.
 - **History is not rewritten.** Values depend only on the seed, the zone and the window start,
   so a later run over an overlapping range finds the same values and skips them.
 - **`preliminary` and `final`** follow `health-sync`'s rule: `complete_before = floor(now -

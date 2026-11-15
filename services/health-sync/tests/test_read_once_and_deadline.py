@@ -10,7 +10,6 @@ from collections import Counter
 from datetime import timedelta
 
 import pytest
-from health_sync.stored import stored_windows
 from health_sync.sync import DEADLINE_STEPS, Outcome, run_sync, split_range, sync_range
 from health_sync.testing import (
     FHIR_PATH,
@@ -25,6 +24,7 @@ from health_sync.testing import (
     utc,
     window,
 )
+from pulsebridge_gcp.stored import stored_windows
 from pulsebridge_gcp.testing import json_response
 
 

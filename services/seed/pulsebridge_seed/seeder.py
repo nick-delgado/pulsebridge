@@ -15,7 +15,8 @@ Flow (the code below runs in this order):
 5. **Setup Bundle**, only when the store has no Patient yet or an incomplete one (decision D11:
    the full Patient is written once). T06's ``patient_setup_transaction``: the full synthetic
    Patient and the synthetic Device as conditional updates (``PUT Patient?identifier=…``).
-6. **Read once** (:mod:`pulsebridge_seed.stored`): one search for the heart-rate windows already
+6. **Read once** (:mod:`pulsebridge_gcp.stored`, deciding with :mod:`pulsebridge_fhir.stored`,
+   shared with health-sync): one search for the heart-rate windows already
    stored for the range; windows stored with the same values and a status that needs no change
    are not written again. If the search fails, every window is written.
 7. **Ingest Bundles**, ``BATCH_WINDOWS`` windows each: T06's ``heart_rate_transaction`` (Patient
@@ -55,6 +56,7 @@ from pulsebridge_fhir import (
     window_status,
 )
 from pulsebridge_fhir.keys import escape_search_value
+from pulsebridge_fhir.stored import StoredReadError, StoredWindow, plan_writes
 from pulsebridge_gcp import (
     ClientError,
     ConflictError,
@@ -65,11 +67,11 @@ from pulsebridge_gcp import (
     RetryableError,
     operation_outcome_summary,
 )
+from pulsebridge_gcp.stored import max_pages_for_range, stored_windows
 
 from pulsebridge_seed import synthetic
 from pulsebridge_seed.config import SeedConfig
 from pulsebridge_seed.generator import floor_to_window, generate
-from pulsebridge_seed.stored import StoredReadError, StoredWindow, plan_writes, stored_windows
 
 logger = logging.getLogger("pulsebridge_seed")
 
@@ -419,7 +421,13 @@ def _stored(
         return None
     try:
         found = stored_windows(
-            client, store, f"Patient/{patient_id}", window_range.start, window_range.end
+            lambda: client,  # one client for every page (health-sync makes one per page)
+            store,
+            f"Patient/{patient_id}",
+            window_range.start,
+            window_range.end,
+            max_pages=max_pages_for_range(window_range.start, window_range.end),
+            logger=logger,
         )
     except (HealthcareApiError, StoredReadError, ValueError) as exc:
         status = getattr(exc, "status", None)

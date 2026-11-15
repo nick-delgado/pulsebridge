@@ -26,7 +26,7 @@ services/health-sync/
   health_sync/
     google_health.py      the Google Health API client and the OAuth refresh (injectable transport)
     sync.py               one run: ranges, cutoff, window cleanup, what to write, batching, outcomes
-    stored.py             the FHIR searches: the Patient's id, stored windows, stranded windows
+    stored.py             the FHIR searches of its own: the Patient's id, stranded windows
     status.py             the stateless "is the connection working" check
     credentials.py        reads the three mounted secret files
     retry.py              bounded backoff and the run deadline
@@ -331,14 +331,18 @@ avoid rewriting it (next section), never to decide the range.
 
 ### Read once, write what changed
 
-Each run makes three FHIR searches (`stored.py`; standard R4 search parameters), each with its
+Each run makes three FHIR searches (standard R4 search parameters), each with its
 own 10 s timeout, a fresh client per page so each page's timeout is cut to the time left:
 
 1. `Patient?identifier=urn:pulsebridge:patient|<PATIENT_ID>&_elements=id`: the Patient's id;
 2. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&status=preliminary&date=lt<range start>&_summary=count`:
    stranded preliminary windows;
 3. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&date=ge<start>&date=lt<end>&_elements=identifier,status,effectivePeriod,valueQuantity,component&_count=1000`,
-   following the `next` links: what is stored for the range.
+   following the `next` links (bounded at 20 pages): what is stored for the range.
+
+The first two are `health_sync/stored.py`. The third, and the decision per window below, are
+shared with the seeder since T35: `pulsebridge_gcp.stored.stored_windows` (called with a fresh
+client per page) and `pulsebridge_fhir.stored.plan_writes`.
 
 Then each window of the roll-up is written only if it is new, its values or end changed, or it is
 stored `preliminary` and is now due for `final`. A window stored with the same values and the
