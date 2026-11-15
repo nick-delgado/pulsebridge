@@ -39,8 +39,11 @@ check_prerequisites() {
 }
 
 # A bind mount does not copy the image's files the way an empty Docker volume does, so the first
-# boot copies the image's sites directory onto the data disk. It is copied into a temporary
-# directory and moved into place, so an interrupted copy is never mistaken for a seeded directory.
+# boot copies the image's sites directory onto the data disk. The directory itself is copied
+# (cp -a sites /seed/sites), so it keeps the image's owner and mode: the hook's own umask is 077,
+# and a sites directory made by the hook would be unreadable for Apache's unprivileged user. It is
+# copied into a temporary directory and moved into place, so an interrupted copy is never mistaken
+# for a seeded directory.
 seed_sites_dir() {
   local tmp="$EDGE_DATA_DIR/.openemr-sites-seed"
   if [ -n "$(ls -A "$EDGE_OPENEMR_DIR")" ]; then
@@ -52,10 +55,13 @@ seed_sites_dir() {
   mkdir -p "$tmp"
   timeout 300 docker run --rm --network none --user 0:0 --entrypoint sh \
     --mount "type=bind,source=$tmp,target=/seed" \
-    "$OPENEMR_IMAGE" -c "cp -a $OPENEMR_SITES_TARGET/. /seed/"
-  [ -n "$(ls -A "$tmp")" ] || die "copying the image's sites directory produced nothing"
+    "$OPENEMR_IMAGE" -c "cp -a $OPENEMR_SITES_TARGET /seed/sites"
+  if [ ! -d "$tmp/sites" ] || [ -z "$(ls -A "$tmp/sites")" ]; then
+    die "copying the image's sites directory produced nothing"
+  fi
   rmdir "$EDGE_OPENEMR_DIR"
-  mv "$tmp" "$EDGE_OPENEMR_DIR"
+  mv "$tmp/sites" "$EDGE_OPENEMR_DIR"
+  rm -rf "$tmp"
   log "sites directory seeded"
 }
 

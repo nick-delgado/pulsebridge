@@ -281,6 +281,7 @@ else
 fi
 expect_eq "$(grep -c '^MaxRequestWorkers *4$' "$SB/var/lib/pulsebridge-edge/openemr/apache-lowmem.conf" || true)" 1 "Apache capped at four workers"
 if [ -s "$SB/mnt/disks/edge/openemr/default/sqlconf.php" ]; then pass "sites directory seeded from the image"; else fail "sites directory not seeded"; fi
+expect_eq "$(stat -c %a "$SB/mnt/disks/edge/openemr")" "755" "the seeded sites directory keeps the image's mode (not the hook's umask 077)"
 if [ ! -e "$SB/mnt/disks/edge/.openemr-sites-seed" ]; then pass "no seed directory left behind"; else fail "the seed directory was left behind"; fi
 expect_eq "$("$REAL_OPENSSL" x509 -in "$SB/mnt/disks/edge/openemr-tls/server.crt" -noout -ext subjectAltName | tail -n 1 | tr -d ' ')" "IPAddress:$IP" "the certificate names the VM's address"
 expect_calls '^curl .*--cacert '"$SB"'/mnt/disks/edge/openemr-tls/server\.crt .*https://10\.10\.0\.10/meta/health/readyz$' "$(calls '/meta/health/readyz$')" "every readiness poll verifies OpenEMR's certificate (--cacert)"
@@ -547,6 +548,17 @@ for code in 403 503; do
   expect_eq "$(uploads)" 1 "upload $code, next boot: one stored key"
   expect_key_removed "upload $code, next boot"
 done
+
+# -- Case: Google's endpoints hang while a client is registered ----------------------------------------
+echo "== the metadata server and Secret Manager hang during registration"
+new_sandbox
+run_hook openemr
+run_hook openemr-oauth-client "FAKE_CURL_HANG_MATCH=metadata\.google\.internal|googleapis\.com"
+expect_rc nonzero "$RC" "registration with Google's endpoints hanging"
+expect_no_hang "registration with Google's endpoints hanging"
+if [ "$(calls 'googleapis\.com|metadata\.google\.internal')" -ge 2 ]; then pass "the token and Secret Manager calls were reached and retried"; else fail "Google's endpoints were not called"; fi
+expect_eq "$(enabled_clients | wc -l)" 0 "no enabled client when the key could not be stored"
+expect_no_leak "registration with Google's endpoints hanging"
 
 # -- Case: registration without OpenEMR running --------------------------------------------------------
 echo "== registration hook with OpenEMR not running"

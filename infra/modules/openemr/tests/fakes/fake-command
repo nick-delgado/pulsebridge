@@ -19,6 +19,7 @@
 #   FAKE_HANG="docker pull"   that command hangs: under `timeout` it times out (clock advances by
 #                             the limit); WITHOUT `timeout` it is logged as HANG and fails
 #   FAKE_CURL_HANG=1          every curl call hangs until its --max-time (HANG if it has none)
+#   FAKE_CURL_HANG_MATCH=re   only curl calls whose URL matches the regex hang
 #   FAKE_NEVER_READY=1        readyz answers 503 for ever
 #   FAKE_READY_AFTER=n        readyz answers 503 for the first n polls
 #   FAKE_SETTINGS_ENV=ignored OPENEMR_SETTING_* variables have no effect (spike S2's finding)
@@ -189,11 +190,14 @@ fake_docker_run() {
         return $?
         ;;
       sh)
-        # The sites-directory seed: cp -a <image sites>/. /seed/
+        # The sites-directory seed: cp -a <image sites> /seed/sites. Like cp -a, the copy keeps the
+        # image's mode on the directory itself (0755 in the image), whatever umask the caller has.
         local seed
         seed=$(map_paths mounts /seed)
-        mkdir -p "$seed/default"
-        echo "<?php \$config = 0; // fake image sites/default/sqlconf.php" > "$seed/default/sqlconf.php"
+        [[ "${*: -1}" == *" /seed/sites" ]] || return 1
+        mkdir -p "$seed/sites/default"
+        chmod 755 "$seed/sites" "$seed/sites/default"
+        echo "<?php \$config = 0; // fake image sites/default/sqlconf.php" > "$seed/sites/default/sqlconf.php"
         return 0
         ;;
       *) return 1 ;;
@@ -337,7 +341,7 @@ fake_curl() {
   if [ "$header_stdin" = 1 ]; then
     IFS= read -r auth || true
   fi
-  if [ "${FAKE_CURL_HANG:-0}" = 1 ]; then
+  if [ "${FAKE_CURL_HANG:-0}" = 1 ] || { [ -n "${FAKE_CURL_HANG_MATCH:-}" ] && [[ "$url" =~ $FAKE_CURL_HANG_MATCH ]]; }; then
     [ -n "$max_time" ] || hang curl "$url"
     clock_add "$max_time"
     [ -n "$writeout" ] && printf '000'
