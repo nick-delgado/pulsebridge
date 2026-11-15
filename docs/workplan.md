@@ -186,9 +186,9 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
 | T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | done |
-| T09 | Synthetic data seeder | T06 | `services/seed/` | todo |
+| T09 | Synthetic data seeder | T06 | `services/seed/` | in-progress |
 | T10 | `health-sync` service | T06, S3 | `services/health-sync/` | done |
-| T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
+| T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | in-progress |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | done |
 | T14 | FHIR proxy: read API and reviewer login | T06, S6, T13, T33 | `services/fhir-proxy/` (except `share/`) | todo |
@@ -196,7 +196,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | T16 | Dashboard shell | none | `web/`, a `web` job in `.github/workflows/ci.yml`, `web-*` targets in `Makefile` | done |
 | T31 | AuditEvent builder for send attempts | T06 | `libs/pulsebridge_fhir/` | done |
 | T32 | Audit FHIR store for send attempts | T04, T05 | `infra/modules/healthcare/`, `infra/modules/identity/README.md` | done |
-| T33 | Library follow-ups from wave 3 reviews | T08, T10, T13 | `libs/pulsebridge_fhir/`, `libs/pulsebridge_hl7v2/`, `libs/pulsebridge_gcp/`, one marked line each in `services/cuff-sim/` and `services/health-sync/`, `scripts/fhir-validate-expected-warnings.json` | todo |
+| T33 | Library follow-ups from wave 3 reviews | T08, T10, T13 | `libs/pulsebridge_fhir/`, `libs/pulsebridge_hl7v2/`, `libs/pulsebridge_gcp/`, one marked line each in `services/cuff-sim/` and `services/health-sync/`, `scripts/fhir-validate-expected-warnings.json` | in-progress |
 
 **T08 FHIR validator in CI.** Runs the HL7 FHIR validator (R4, base profiles) over the example
 resources from T06.
@@ -462,8 +462,8 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T21 | Module `edge-vm` | T03, S2, S4 | `infra/modules/edge-vm/` | todo |
 | T22 | Module `phr` | T03, T04 | `infra/modules/phr/` | todo |
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | todo |
-| T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | todo |
-| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | todo |
+| T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | in-progress |
+| T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | in-progress |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
 task fills its own directory through the mount function and slots defined by the shell (T16) and
