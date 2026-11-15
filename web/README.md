@@ -819,3 +819,4 @@ rule, share failures, forwarding cuff-sim's refusals and Firebase Hosting's 60 s
 `/status` from health-sync, `lastSyncAt` as the newest heart-rate `meta.lastUpdated`, and
 store-only rows). The page follows those answers (the amendments table above). Question 6, how a
 failed share is reported, is now specified for T15 in "For T15: the share route".
+Firebase Hosting ends a rewritten request at 60 s (documented, T22); the proxy answers within 55 s.

@@ -38,12 +38,7 @@ LIBS = REPO_ROOT / "libs"
 # is neither here nor has a Dockerfile fails test_every_service_has_a_dockerfile, so a new service
 # cannot ship without an image by accident. When a task adds the Dockerfile it can leave the entry
 # (the Dockerfile is then checked like any other) or remove it.
-NO_IMAGE_YET = {
-    "fhir-proxy": (
-        "T14/T15 (FHIR proxy) not built yet. T14 adds services/fhir-proxy/Dockerfile following "
-        "services/README.md ('Adding an image'); the proxy is a Cloud Run service (T22)."
-    ),
-}
+NO_IMAGE_YET: dict[str, str] = {}
 
 # Images that run as a Cloud Run JOB, not a Cloud Run service: a command that runs to completion
 # and serves nothing (services/README.md, "Job images"). Every other image is a service, and its
@@ -610,6 +605,8 @@ MUST_BE_INCLUDED = [
     "services/v2-to-fhir/v2_to_fhir/app.py",
     "services/cuff-sim/cuff_sim/app.py",
     "services/health-sync/health_sync/app.py",
+    "services/fhir-proxy/fhir_proxy/app.py",
+    "services/fhir-proxy/README.md",
     "services/seed/pulsebridge_seed/cli.py",
     "services/seed/README.md",
 ]

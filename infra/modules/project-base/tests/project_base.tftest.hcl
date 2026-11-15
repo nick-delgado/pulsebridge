@@ -65,6 +65,8 @@ run "default_api_list_covers_stack_and_excludes_identity_platform" {
       "cloudbuild.googleapis.com",
       "iam.googleapis.com",
       "monitoring.googleapis.com",
+      "firebase.googleapis.com",
+      "firebasehosting.googleapis.com",
     ], keys(google_project_service.this))) == 0
     error_message = "The default API list is missing a service the stack needs."
   }

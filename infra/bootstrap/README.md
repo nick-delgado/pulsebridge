@@ -89,9 +89,8 @@ terraform init -migrate-state -backend-config="bucket=$(terraform output -raw st
 Keep `backend_override.tf` for later runs. To go back to local state, delete it and run
 `terraform init -migrate-state` again.
 
-Know the trade-off: the deployer has object admin on this bucket (and project-level
-`roles/storage.admin`), so once bootstrap's state lives here, the identity that bootstrap governs
-can rewrite bootstrap's state or change the bucket's versioning. Keeping bootstrap's state local
+Know the trade-off: the deployer has object admin on this bucket, so once bootstrap's state
+lives here, the identity that bootstrap governs can rewrite or delete bootstrap's state. Keeping bootstrap's state local
 (and backed up) avoids that, at the cost of it living on one machine.
 
 ## Create or adopt
@@ -107,11 +106,35 @@ can rewrite bootstrap's state or change the bucket's versioning. Keeping bootstr
   It does not touch billing, the parent, or existing IAM: role grants are additive
   (`google_project_iam_member`), never authoritative.
 
+## Firebase
+
+`add_firebase` (default `true`) adds Firebase to the project (`google_firebase_project`, in the
+`google-beta` provider), after enabling the Firebase Management API (`firebase.googleapis.com`).
+The dashboard is served by Firebase Hosting (D4, module phr), and a Hosting site can only exist
+in a Firebase project.
+
+- **Why here.** Adding Firebase needs `firebase.projects.update`. Among predefined roles only
+  owner, editor, `roles/firebase.admin` and `roles/firebase.editor` hold it, and the last two
+  cover every Firebase product. Bootstrap already runs once with the owner's credentials, so it
+  does this step, and the deployer keeps only `roles/firebasehosting.admin`.
+- **It cannot be undone.** The provider's documentation says: "Once Firebase has been added to a
+  Google Project it cannot be removed." `terraform destroy` forgets the resource; Firebase stays.
+- **It costs nothing.** Firebase itself is free; Hosting bills only storage above 10 GB and
+  transfer above 10 GB a month.
+- **Opting out.** Set `add_firebase = false`. Then Firebase Hosting is unavailable, and module
+  phr's Hosting site cannot be created, unless Firebase is added some other way later (for example
+  `firebase projects:addfirebase <project-id>` by the owner, or module phr's
+  `manage_firebase_project = true` with a deployer that holds `roles/firebase.admin`).
+- **The beta provider** is configured with `user_project_override = true` and
+  `billing_project = var.project_id`: the Firebase Management API refuses user credentials that
+  carry no quota project, so its calls are billed to the project being bootstrapped. Only
+  `firebase.tf` uses that provider.
+
 ## Deployer roles
 
 The deployer must later create the whole stack: APIs, VPC and firewall, an e2-micro, Artifact
 Registry, service accounts and their IAM bindings, Secret Manager secrets, Healthcare dataset and
-stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, and a bucket. The default `deployer_roles` is one
+stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, and the Firebase Hosting site. The default `deployer_roles` is one
 predefined admin role per product the stack uses, rather than `roles/owner` or `roles/editor`
 (which the variable's validation rejects):
 
@@ -133,10 +156,10 @@ predefined admin role per product the stack uses, rather than `roles/owner` or `
 | `roles/logging.configWriter` | log-based metrics for the ingestion alerts (created on every apply) |
 | `roles/monitoring.alertPolicyEditor` | alert policies on those metrics (only with an alert address or channel) |
 | `roles/monitoring.notificationChannelEditor` | the optional email notification channel (module ingestion's `alert_email`) |
-| `roles/storage.admin` | the dashboard bucket |
+| `roles/firebasehosting.admin` | module phr's Firebase Hosting site, and deploying the page to it (T26) |
 
-The deployer also gets `roles/storage.objectAdmin` on the state bucket itself, so it can always
-read and write state even if the list above is trimmed.
+The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only Cloud
+Storage access (the stack creates no bucket), so it can always read and write state.
 
 **What the role list does and does not limit.** For an account whose job is to create IAM,
 "least privilege" has a hard ceiling:
@@ -239,8 +262,8 @@ Bootstrap is built to be hard to destroy by accident. To really remove it, in th
    fails.
 5. Run `terraform destroy`.
    - Adopt mode: this removes the deployer account, its grants, the pool and provider and the
-     bucket. The project and its APIs stay (`disable_on_destroy = false`). The pool and provider
-     IDs stay reserved for 30 days.
+     bucket. The project and its APIs stay (`disable_on_destroy = false`), and so does Firebase
+     (it cannot be removed from a project). The pool and provider IDs stay reserved for 30 days.
    - Create mode: the destroy stops at the project, because `deletion_policy = "PREVENT"`
      refuses it. Either delete the project in the console (`gcloud projects delete`), or set
      `deletion_policy = "DELETE"`, apply, then destroy.
@@ -285,12 +308,14 @@ The section below is generated by [terraform-docs](https://terraform-docs.io/) (
 |------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.11 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | ~> 8.11 |
+| <a name="requirement_google-beta"></a> [google-beta](#requirement\_google-beta) | ~> 8.11 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
 | <a name="provider_google"></a> [google](#provider\_google) | 8.11.0 |
+| <a name="provider_google-beta"></a> [google-beta](#provider\_google-beta) | 8.11.0 |
 
 ## Modules
 
@@ -300,6 +325,7 @@ No modules.
 
 | Name | Type |
 |------|------|
+| [google_firebase_project.this](https://registry.terraform.io/providers/hashicorp/google-beta/latest/docs/resources/firebase_project) | resource |
 | [google_iam_workload_identity_pool.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool) | resource |
 | [google_iam_workload_identity_pool_provider.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool_provider) | resource |
 | [google_project.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project) | resource |
@@ -315,11 +341,12 @@ No modules.
 
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
+| <a name="input_add_firebase"></a> [add\_firebase](#input\_add\_firebase) | Add Firebase to the project (google\_firebase\_project), with the Firebase Management API enabled first; module phr's Hosting site needs it. Cannot be undone; costs nothing. false: no Firebase, so no Hosting (README, "Firebase"). | `bool` | `true` | no |
 | <a name="input_auto_create_network"></a> [auto\_create\_network](#input\_auto\_create\_network) | Only for a newly created project: keep the 'default' VPC network GCP creates automatically. Default false, because that network ships with firewall rules open to the internet (SSH, RDP, ICMP) and the stack builds its own VPC (module project-base). With false, the provider enables the Compute Engine API to delete the default network. | `bool` | `false` | no |
 | <a name="input_billing_account"></a> [billing\_account](#input\_billing\_account) | Billing account ID (format XXXXXX-XXXXXX-XXXXXX) to link to a newly created project. Required when create\_project = true; must be unset when adopting, because bootstrap does not change an existing project's billing. | `string` | `null` | no |
 | <a name="input_create_project"></a> [create\_project](#input\_create\_project) | true: create a new GCP project with var.project\_id and link var.billing\_account to it. false: adopt an existing project with var.project\_id and create nothing at project level. No default, so the choice is always explicit. | `bool` | n/a | yes |
 | <a name="input_deployer_account_id"></a> [deployer\_account\_id](#input\_deployer\_account\_id) | account\_id (the part before @) of the deployer service account that env roots and CI run as. 6-30 characters. | `string` | `"terraform-deployer"` | no |
-| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/storage.admin"<br/>]</pre> | no |
+| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin"<br/>]</pre> | no |
 | <a name="input_folder_id"></a> [folder\_id](#input\_folder\_id) | Optional numeric folder ID to create the new project under. Leave unset for a personal account. Mutually exclusive with org\_id; only used when create\_project = true. | `string` | `null` | no |
 | <a name="input_github_allowed_refs"></a> [github\_allowed\_refs](#input\_github\_allowed\_refs) | Optional list of git refs (for example ["refs/heads/main"]) allowed to obtain deployer tokens. Empty (the default) allows every branch, tag and pull-request ref in the repository; see README.md ("What the condition does not restrict"). Note that pull-request workflows run on refs/pull/N/merge, so restricting refs also blocks plan-on-PR with this identity. | `list(string)` | `[]` | no |
 | <a name="input_github_repository"></a> [github\_repository](#input\_github\_repository) | The ONE GitHub repository, as "owner/name", whose Actions workflows may impersonate the deployer service account. Matched exactly (case-sensitive) against the `repository` claim of GitHub's OIDC token. | `string` | n/a | yes |
@@ -340,6 +367,7 @@ No modules.
 | Name | Description |
 |------|-------------|
 | <a name="output_deployer_service_account_email"></a> [deployer\_service\_account\_email](#output\_deployer\_service\_account\_email) | Email of the deployer service account. GitHub Actions passes it as `service_account` to google-github-actions/auth. |
+| <a name="output_firebase_added"></a> [firebase\_added](#output\_firebase\_added) | Whether bootstrap added Firebase to the project (add\_firebase). module phr's Hosting site needs Firebase; with false, add it another way or leave the dashboard unhosted. |
 | <a name="output_project_id"></a> [project\_id](#output\_project\_id) | ID of the created or adopted project. Env roots pass it as their project\_id variable. |
 | <a name="output_project_number"></a> [project\_number](#output\_project\_number) | Numeric project number. Used in Workload Identity principal strings and some service agent emails. |
 | <a name="output_state_bucket_name"></a> [state\_bucket\_name](#output\_state\_bucket\_name) | Name of the GCS bucket for remote state. Goes in each env root's backend "gcs" block as `bucket` (with a per-env `prefix`). |

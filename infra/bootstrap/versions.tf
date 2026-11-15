@@ -14,6 +14,11 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 8.11"
     }
+    # google_firebase_project (firebase.tf) exists only in the beta provider at 8.11.
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 8.11"
+    }
   }
 }
 
@@ -24,3 +29,11 @@ terraform {
 #   default project (which it would otherwise pick up from CLOUDSDK_CORE_PROJECT and similar
 #   environment variables) is never used by accident.
 provider "google" {}
+
+# The Firebase Management API refuses calls made with user credentials that carry no quota
+# project, so the beta provider bills its calls to the project being bootstrapped (the provider
+# docs for google_firebase_project ask for user_project_override). Only firebase.tf uses it.
+provider "google-beta" {
+  user_project_override = true
+  billing_project       = var.project_id
+}
