@@ -214,7 +214,10 @@ export function createHeartRate(context: FeatureContext<HeartRateSlot>, deps: He
     const p = active === null ? undefined : points()[active];
     cursor.setAttribute('aria-valuemax', String(Math.max(1, n)));
     cursor.setAttribute('aria-valuenow', String((active ?? 0) + 1));
-    cursor.setAttribute('aria-valuetext', p ? describePoint(p) : 'No readings in this range');
+    let valueText = 'No readings in this range';
+    if (p) valueText = describePoint(p);
+    else if (n > 0) valueText = `${count(n)} windows; press an arrow key to move through them`;
+    cursor.setAttribute('aria-valuetext', valueText);
     showReadout(active);
     redrawMarks();
   };

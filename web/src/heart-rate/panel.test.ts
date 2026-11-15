@@ -291,6 +291,9 @@ describe('empty and error states', () => {
 describe('keyboard and selection', () => {
   it('moves between windows with the arrow keys and announces each in words', async () => {
     const m = await loaded();
+    expect(m.slider().getAttribute('aria-valuetext')).toBe(
+      '3 windows; press an arrow key to move through them',
+    );
     m.slider().dispatchEvent(new FocusEvent('focus'));
     expect(m.slider().getAttribute('aria-valuenow')).toBe('3');
     expect(m.slider().getAttribute('aria-valuemax')).toBe('3');
