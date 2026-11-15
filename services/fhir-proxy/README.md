@@ -404,7 +404,8 @@ provider and an audit log. The CapabilityStatement says so and claims no
 
 **Invoker bindings the proxy needs**: `roles/run.invoker` for the `fhir-proxy` service account
 on **cuff-sim** (D10, already in the identity README) **and on health-sync** (its README, "For
-T20/T22"). The proxy itself is public (`allUsers` invoker): the session token is the gate.
+T20/T22"). The proxy itself is public: Cloud Run invoker IAM check disabled
+(`invoker_iam_disabled = true`); no `allUsers` binding. The session token is the gate.
 
 **One front door.** The page reaches the proxy one way only: through the Firebase Hosting
 rewrite (`PATH_PREFIX=/api`, `PUBLIC_BASE_URL=https://<hosting domain>/api`). It must not call
@@ -418,6 +419,13 @@ header) and read the `login-failed` log lines: the `forwarded_for_entries` count
 made-up header) and which `client_address` came out tell you whether `1` or `2` is right. While
 `*.run.app` stays reachable directly, a hop count of 2 lets a direct caller choose its own key
 (the left of two entries), and then only throughput bounds its guesses (see "Reviewer login").
+
+**Possible follow-up: `TRUSTED_PROXY_CIDRS`.** A hop count cannot tell a Hosting-forwarded request
+from a direct `*.run.app` one. A setting listing Firebase Hosting's egress address ranges would:
+trust the second-from-right `X-Forwarded-For` entry only when the right-most entry, which Cloud
+Run itself appends, lies inside those ranges, and otherwise key on the right-most entry. A direct
+caller could then not choose its own key. Not built; it needs the ranges Hosting really uses
+(measured on the first deploy) and a way to keep them current.
 
 **Timeouts under Firebase Hosting's 60 s.** Hosting ends a rewritten request at 60 s
 (documented). Everything is sized to answer before that:

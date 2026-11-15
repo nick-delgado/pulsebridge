@@ -666,9 +666,7 @@ the new types: `trace.ts` takes the source tab's note and code-block label from 
    500 from cuff-sim, and 504 for a cut-off request. T14 should forward cuff-sim's status, body and
    `Retry-After` unchanged, keep its own forward timeout at least 90 s (cuff-sim's README), and
    answer 502 (not 500) when cuff-sim cannot be reached, so the page does not report a cuff-sim bug.
-   **For T22 (unverified):** Firebase Hosting's rewrite to the proxy may have a shorter timeout than
-   cuff-sim's worst case (90 s); if so, that is where a 504 `no-answer` would really come from.
-   T22 should check the limit and say what it is.
+   Hosting ends a rewritten request at 60 s (documented); the proxy answers within 55 s.
 8. **`/status` from health-sync.** health-sync answers 200 in every state. T14 should send
    `googleHealth` as `state` (the client also accepts `googleHealth` itself when `state` is absent),
    and `reason`, `notes`, `strandedPreliminary` and `checkedAt` unchanged,

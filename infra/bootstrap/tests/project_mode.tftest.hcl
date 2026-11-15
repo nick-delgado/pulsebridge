@@ -6,6 +6,9 @@
 # never applies anything; override_during = plan makes the mocked computed values (project
 # numbers, resource names) known at plan time so they can be asserted on.
 
+# google-beta (google_firebase_project) is mocked too, so no real provider ever runs.
+mock_provider "google-beta" {}
+
 mock_provider "google" {
   source          = "./tests/mocks"
   override_during = plan
@@ -152,12 +155,48 @@ run "only_bootstrap_apis_are_enabled" {
       "iamcredentials.googleapis.com",
       "sts.googleapis.com",
       "storage.googleapis.com",
+      "firebase.googleapis.com",
     ])
-    error_message = "Bootstrap must enable exactly the APIs it needs; the stack's APIs belong to module project-base."
+    error_message = "Bootstrap must enable exactly the APIs it needs (with add_firebase, the Firebase Management API); the stack's APIs belong to module project-base."
   }
 
   assert {
     condition     = alltrue([for s in google_project_service.bootstrap : s.disable_on_destroy == false && s.project == "example-project"])
     error_message = "Bootstrap APIs must be enabled on the target project and never disabled on destroy."
+  }
+}
+
+run "firebase_is_added_by_default" {
+  command = plan
+
+  variables {
+    create_project = false
+  }
+
+  assert {
+    condition     = length(google_firebase_project.this) == 1 && google_firebase_project.this[0].project == "example-project"
+    error_message = "add_firebase defaults to true: bootstrap adds Firebase to the project (module phr's Hosting site needs it)."
+  }
+  assert {
+    condition     = output.firebase_added == true
+    error_message = "firebase_added must report that Firebase was added."
+  }
+}
+
+run "firebase_opt_out" {
+  command = plan
+
+  variables {
+    create_project = false
+    add_firebase   = false
+  }
+
+  assert {
+    condition     = length(google_firebase_project.this) == 0 && !contains(keys(google_project_service.bootstrap), "firebase.googleapis.com")
+    error_message = "add_firebase = false must neither add Firebase nor enable its API."
+  }
+  assert {
+    condition     = output.firebase_added == false
+    error_message = "firebase_added must report false."
   }
 }
