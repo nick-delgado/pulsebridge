@@ -9,7 +9,8 @@ Without this, a scheduled top-up over the last few hours rewrote every window it
 every run: each window three or more times (preliminary, then final on each later run that
 still covered it), and with versioning on, each rewrite stores a new version of the Observation
 and of its Provenance. With it, a window is written when it is new, when it has become due for
-``final``, or (only after a change of seed or zone) when its values differ.
+``final``, or (only after a change of seed or zone) when its values differ: then ``amended``
+if it was already final.
 
 One search per run, R4 standard parameters, following ``next`` links::
 
@@ -175,7 +176,12 @@ class Plan:
     new: int = 0
     changed: int = 0
     finalised: int = 0
+    amended: int = 0
     withdrawn_kept: int = 0
+    # Stored final, values changed, but it would be preliminary now: not written.
+    held_final: int = 0
+    # Keys (heart_rate_key) of the windows in ``write`` to be written ``amended`` (T33).
+    amend_keys: frozenset[str] = frozenset()
 
 
 def plan_writes(
@@ -185,19 +191,28 @@ def plan_writes(
     key_of,
     status_of,
 ) -> Plan:
-    """Decide per window. ``stored=None`` (no read, or it failed) writes everything.
+    """Decide per window, as health-sync does. ``stored=None`` (no read, or it failed) writes
+    everything.
 
     - not stored: write (new);
     - stored ``entered-in-error`` or ``cancelled``: skip, whatever the values (withdrawn_kept);
     - same end and values, and stored with the status it would get now or already final: skip
       (unchanged);
+    - stored final (or amended), end or values changed, and complete now: write with status
+      ``amended`` (its key goes in ``amend_keys``). R4 observation-status ``amended``:
+      "Subsequent to being Final, the observation has been modified". Here that happens only
+      after a change of ``--seed`` or ``TIME_ZONE``;
+    - stored final, changed, but it would be ``preliminary`` now (for example
+      ``FINAL_AFTER_MINUTES`` was raised): **not written**, the stored ``final`` is kept
+      (held_final). R4 has no path from ``final`` back to ``preliminary``, the window may already
+      have been shared, and T06 refuses ``amended`` for a window that is not complete. A later
+      run writes it ``amended`` once the cutoff passes it;
     - same values, stored preliminary, now due final: write (finalised);
-    - otherwise (values differ, only after a change of seed or zone): write (changed). T06
-      writes it ``final`` or ``preliminary`` by the cutoff; ``amended`` is not available to this
-      caller (see the README).
+    - otherwise (preliminary, values changed): write (changed).
     """
     write: list[dict] = []
-    unchanged = new = changed = finalised = withdrawn = 0
+    amend_keys: set[str] = set()
+    unchanged = new = changed = finalised = amended = withdrawn = held = 0
     for item in items:
         key, end, values = key_of(item)
         if stored is None or key not in stored:
@@ -209,12 +224,30 @@ def plan_writes(
             withdrawn += 1
             continue
         same = before.values == values and before.end == end
-        if same and (before.status == status_of(item) or before.status in FINAL_STATUSES):
+        wanted = status_of(item)
+        was_final = before.status in FINAL_STATUSES
+        if same and (before.status == wanted or was_final):
             unchanged += 1
+            continue
+        if was_final and wanted != "final":
+            held += 1  # changed after final, but still filling now: never written back
             continue
         write.append(item)
         if same:
             finalised += 1
+        elif was_final:
+            amended += 1
+            amend_keys.add(key)
         else:
             changed += 1
-    return Plan(write, unchanged, new, changed, finalised, withdrawn)
+    return Plan(
+        write,
+        unchanged,
+        new,
+        changed,
+        finalised,
+        amended,
+        withdrawn,
+        held_final=held,
+        amend_keys=frozenset(amend_keys),
+    )

@@ -23,7 +23,8 @@ Five markers, from the most visible to the most machine-readable:
    so ``meta.security`` (bound to "All Security Labels") is its place, not ``meta.tag``. It is the
    one marker a search can use: ``Observation?_security=<system>|HTEST``. It is added to T06's
    output here because T06's builders take no ``meta``; it changes no request. An earlier draft
-   used ``meta.tag``; a Patient labelled either way is still recognised.
+   used ``meta.tag``; a label in either place is reported. A label never makes a stored
+   Patient acceptable on its own: the content rule in :func:`refusal_reason` decides.
 
    ``patient_for_sharing`` (T15) sends OpenEMR only the identifier, name, gender and birth date,
    so after a share the synthetic name is the only marker the clinic sees.
@@ -92,7 +93,8 @@ def data_source() -> GoogleDataSource:
 
 def has_test_label(resource: dict) -> bool:
     """``HTEST`` in ``meta.security`` (where the seeder puts it) or ``meta.tag`` (an earlier
-    draft)."""
+    draft). Information for the report only: it never makes a Patient acceptable by itself
+    (:func:`refusal_reason`)."""
     meta = resource.get("meta") if isinstance(resource, dict) else None
     if not isinstance(meta, dict):
         return False
@@ -124,50 +126,69 @@ def has_synthetic_name(resource: dict) -> bool:
     return isinstance(names, list) and bool(names) and all(_is_synthetic_name(n) for n in names)
 
 
-# What an unlabelled Patient may hold and still be recognised as one of ours: its id, meta, the
-# SYN- identifier and, at most, the synthetic name and the seeder's own invented gender and
-# birth date. Anything else (telecom, address, another identifier, a different gender or birth
-# date) looks like a real person and is refused.
-_ALLOWED_UNLABELLED = {"resourceType", "id", "meta", "identifier", "name", "gender", "birthDate"}
+# What a stored Patient may hold and still be one the seeder may write over: the server's own
+# ``id`` and ``meta``, the SYN- identifier and, at most, the synthetic name and the seeder's own
+# invented gender and birth date. Anything else (telecom, address, another identifier, a
+# different gender or birth date) looks like a real person's record.
+_ALLOWED_ELEMENTS = {"resourceType", "id", "meta", "identifier", "name", "gender", "birthDate"}
+
+NOT_SYNTHETIC = "patient-not-synthetic"
+NAME_NOT_SYNTHETIC = "patient-name-not-synthetic"
 
 
-def _only_synthetic_identifiers(resource: dict) -> bool:
+def _identifiers_are_ours(resource: dict, patient_id: str) -> bool:
+    """Every identifier a ``SYN-`` value in PulseBridge's patient system, and one of them the
+    configured patient id (a search answer about another ``SYN-`` Patient is not ours)."""
     identifiers = resource.get("identifier")
-    return (
-        isinstance(identifiers, list)
-        and bool(identifiers)
-        and all(
-            isinstance(i, dict)
-            and i.get("system") == codes.PB_PATIENT_ID
-            and isinstance(i.get("value"), str)
-            and i["value"].startswith(PATIENT_ID_PREFIX)
-            for i in identifiers
-        )
-    )
+    if not isinstance(identifiers, list) or not identifiers:
+        return False
+    for identifier in identifiers:
+        if not (
+            isinstance(identifier, dict)
+            and identifier.get("system") == codes.PB_PATIENT_ID
+            and isinstance(identifier.get("value"), str)
+            and identifier["value"].startswith(PATIENT_ID_PREFIX)
+        ):
+            return False
+    return any(i["value"] == patient_id for i in identifiers)
 
 
-def is_synthetic_patient(resource: dict) -> bool:
-    """Whether a stored Patient is one the seeder may write over.
+def refusal_reason(resource: dict, patient_id: str) -> str | None:
+    """``None`` if the stored Patient is one the seeder may write over, else the reason.
 
-    - Labelled ``HTEST`` (security label or tag): the seeder wrote it.
-    - Otherwise only if it holds nothing a real person's record would: every identifier is a
-      ``SYN-`` one in PulseBridge's system, every name (if any) is the synthetic name, gender
-      and birth date are absent or the seeder's own, and nothing else is there. This accepts the
-      identifier-only Patient that ``health-sync`` or ``v2-to-fhir`` creates by conditional
-      create when an ingest reaches the store before the seeder (D11), and a seeder Patient
-      whose label the store did not keep.
+    The same content rule applies to **every** Patient, labelled ``HTEST`` or not. A label can
+    outlive the content it described: if another writer (for example the connect script, run
+    by mistake with a ``SYN-`` id) replaces the record and the store keeps the old
+    ``meta.security``, a real name and a Google Health identifier would sit under our label.
+    So the label alone proves nothing; it is reported as information only
+    (:func:`has_test_label`).
+
+    - every identifier a ``SYN-`` value in ``urn:pulsebridge:patient``, one of them
+      ``patient_id``;
+    - gender and birth date absent or the seeder's own (``other``, 1980-01-01);
+    - nothing else beyond the server-added ``id`` and ``meta``;
+    - every name (if any) the synthetic name. When this is the only problem the reason is
+      ``patient-name-not-synthetic``: usually the cuff simulator's PID-5 was not set to the
+      synthetic name, and ``v2-to-fhir`` created the Patient with it (README, "Safety").
+
+    This accepts the identifier-only Patient ``v2-to-fhir`` or ``health-sync`` creates by
+    conditional create when an ingest reaches the store before the seeder (D11).
     """
     if not isinstance(resource, dict) or resource.get("resourceType") != "Patient":
-        return False
-    if has_test_label(resource):
-        return True
-    if not set(resource) <= _ALLOWED_UNLABELLED or not _only_synthetic_identifiers(resource):
-        return False
-    if "name" in resource and not has_synthetic_name(resource):
-        return False
+        return NOT_SYNTHETIC
+    if not set(resource) <= _ALLOWED_ELEMENTS or not _identifiers_are_ours(resource, patient_id):
+        return NOT_SYNTHETIC
     if resource.get("gender", GENDER) != GENDER:
-        return False
-    return resource.get("birthDate", BIRTH_DATE.isoformat()) == BIRTH_DATE.isoformat()
+        return NOT_SYNTHETIC
+    if resource.get("birthDate", BIRTH_DATE.isoformat()) != BIRTH_DATE.isoformat():
+        return NOT_SYNTHETIC
+    if "name" in resource and not has_synthetic_name(resource):
+        return NAME_NOT_SYNTHETIC
+    return None
+
+
+def is_synthetic_patient(resource: dict, patient_id: str) -> bool:
+    return refusal_reason(resource, patient_id) is None
 
 
 def is_complete(resource: dict) -> bool:

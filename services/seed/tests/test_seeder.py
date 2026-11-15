@@ -285,9 +285,15 @@ def test_mark_synthetic_does_not_change_requests_or_the_input():
     assert synthetic.mark_synthetic(marked) == marked  # one label, not two
 
 
-def test_a_label_in_meta_tag_is_still_recognised():
-    patient = stored_patient(meta={"tag": [dict(HTEST)]}, name=[{"family": "Rivera"}])
-    assert synthetic.is_synthetic_patient(patient)
+def test_a_label_in_meta_tag_is_still_reported():
+    assert synthetic.has_test_label({"meta": {"tag": [dict(HTEST)]}})
+    assert synthetic.has_test_label({"meta": {"security": [dict(HTEST)]}})
+
+
+def test_the_right_code_in_the_wrong_system_is_not_a_label():
+    wrong = {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HTEST"}
+    assert not synthetic.has_test_label({"meta": {"security": [wrong], "tag": [wrong]}})
+    assert not synthetic.has_test_label({"meta": {"security": [{"code": "HTEST"}]}})
 
 
 # ---- safety check -------------------------------------------------------------------------------
@@ -368,9 +374,37 @@ def test_an_identifier_only_syn_patient_is_accepted_and_completed(patient):
 @pytest.mark.parametrize(
     ("patients", "reason"),
     [
-        # A real person written by the connect script: another name, no HTEST label.
+        # Another name, no HTEST label: refused for the name alone.
         (
             [stored_patient(meta={}, name=[{"use": "official", "family": "Rivera"}])],
+            "patient-name-not-synthetic",
+        ),
+        # Labelled HTEST, but a real name: the label does not make it acceptable.
+        (
+            [stored_patient(name=[{"use": "official", "family": "Rivera", "given": ["Sam"]}])],
+            "patient-name-not-synthetic",
+        ),
+        # Labelled HTEST, with an extra secondary identifier (the connect script's Google
+        # Health user id).
+        (
+            [
+                stored_patient(
+                    identifier=stored_patient()["identifier"]
+                    + [
+                        {
+                            "use": "secondary",
+                            "system": "urn:pulsebridge:google-health-user-id",
+                            "value": "g-123",
+                        }
+                    ]
+                )
+            ],
+            "patient-not-synthetic",
+        ),
+        # A search answer whose only identifier is another SYN- value.
+        ([identifier_only(value="SYN-SOMEONE-ELSE")], "patient-not-synthetic"),
+        (
+            [stored_patient(identifier=identifier_only(value="SYN-SOMEONE-ELSE")["identifier"])],
             "patient-not-synthetic",
         ),
         # A real name beside the synthetic one: every name must be the synthetic one.
@@ -384,7 +418,7 @@ def test_an_identifier_only_syn_patient_is_accepted_and_completed(patient):
                     ],
                 )
             ],
-            "patient-not-synthetic",
+            "patient-name-not-synthetic",
         ),
         # Synthetic name, but real-looking demographics.
         ([stored_patient(meta={}, gender="female")], "patient-not-synthetic"),
@@ -419,9 +453,19 @@ def test_refuses_before_any_write(patients, reason):
     assert store.bundles() == []
 
 
+def test_a_labelled_complete_seeder_patient_is_accepted_and_reported():
+    store = store_with(stored_patient())
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert report.outcome == Outcome.SEEDED and report.safety_check == "synthetic-patient"
+    assert report.stored_patient_labelled is True
+    unlabelled = seed(store_with(stored_patient(meta={})), length=timedelta(hours=1), until=UNTIL)
+    assert unlabelled.safety_check == "synthetic-patient"
+    assert unlabelled.stored_patient_labelled is False
+
+
 def test_force_overrides_the_refusal_and_warns(caplog):
     caplog.set_level(logging.WARNING)
-    store = store_with(stored_patient(meta={}, name=[{"family": "Rivera"}]))
+    store = store_with(stored_patient(meta={}, gender="male"))
     report = seed(store, length=timedelta(hours=1), until=UNTIL, force=True)
     assert report.outcome == Outcome.SEEDED and report.safety_check == "forced"
     assert report.setup_written  # --force replaces the record
@@ -460,6 +504,34 @@ def test_force_overrides_the_refusal_and_warns(caplog):
                     "resourceType": "Bundle",
                     "type": "searchset",
                     "entry": [{"resource": {"resourceType": "Observation"}}],
+                },
+            ),
+            "safety-search-malformed-entry",
+        ),
+        # An OperationOutcome entry is allowed only with search.mode "outcome".
+        (
+            json_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [{"resource": {"resourceType": "OperationOutcome"}}],
+                },
+            ),
+            "safety-search-malformed-entry",
+        ),
+        (
+            json_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [
+                        {
+                            "resource": {"resourceType": "OperationOutcome"},
+                            "search": {"mode": "match"},
+                        }
+                    ],
                 },
             ),
             "safety-search-malformed-entry",
@@ -626,13 +698,51 @@ def test_duplicate_keys_are_written_and_withdrawn_windows_left_alone():
     assert store.observations[keys[0]]["status"] == "entered-in-error"
 
 
-def test_changed_values_are_rewritten():
-    """After a change of seed the stored windows differ and are rewritten."""
+def test_changed_final_windows_are_written_amended():
+    """After a change of seed, stored final windows differ: written "amended" (R4: modified
+    after final), counted separately, never "final" again."""
     store = fresh_store()
     seed(store, length=timedelta(hours=2), until=UNTIL)
     report = seed(store, config=make_config(seed=8), length=timedelta(hours=2), until=UNTIL)
-    assert report.windows_changed > 0
-    assert report.windows_written == report.windows_changed + report.windows_new
+    assert report.windows_amended > 20 and report.windows_changed == 0
+    assert report.windows_written == report.windows_amended + report.windows_new
+    statuses = [o["status"] for o in store.observations.values()]
+    assert statuses.count("amended") == report.windows_amended
+    assert report.windows_final == report.windows_written  # amended counts as complete
+
+
+def test_changed_preliminary_windows_are_changed_not_amended():
+    store = fresh_store()
+    seed(store, length=timedelta(hours=1), until=NOW)  # the last hour: all preliminary
+    report = seed(store, config=make_config(seed=8), length=timedelta(hours=1), until=NOW)
+    assert report.windows_changed > 0 and report.windows_amended == 0
+
+
+def test_a_changed_final_window_that_would_be_preliminary_now_is_held():
+    """FINAL_AFTER raised after windows were written final: a changed window is not written
+    back as preliminary (R4 has no path from final back); it is held for a later run."""
+    store = fresh_store()
+    seed(store, length=timedelta(hours=3), until=NOW)
+    final_before = {k for k, o in store.observations.items() if o["status"] == "final"}
+    report = seed(
+        store,
+        config=make_config(seed=8, final_after=timedelta(minutes=180)),
+        length=timedelta(hours=3),
+        until=NOW,
+    )
+    assert report.windows_held_final == len(final_before) > 0
+    assert all(store.observations[k]["status"] == "final" for k in final_before)
+    assert report.windows_amended == 0
+
+
+def test_a_stored_window_whose_end_differs_is_written():
+    store = fresh_store()
+    seed(store, length=timedelta(hours=1), until=UNTIL)
+    key = next(iter(store.observations))
+    stored = store.observations[key]
+    stored["effectivePeriod"]["end"] = stored["effectivePeriod"]["start"]
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert report.windows_written == 1 and report.windows_amended == 1
 
 
 # ---- failures -----------------------------------------------------------------------------------

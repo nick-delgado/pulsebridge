@@ -10,7 +10,8 @@ Flow (the code below runs in this order):
 4. **Safety check**, one FHIR search: ``Patient?identifier=urn:pulsebridge:patient|<id>``. It
    fails closed: an answer that is not a ``searchset`` Bundle, or that says more Patients match
    than it returned, stops the run before any write. A Patient the seeder may not write over
-   (:func:`pulsebridge_seed.synthetic.is_synthetic_patient`) refuses the run, unless ``--force``.
+   (:func:`pulsebridge_seed.synthetic.refusal_reason`, the same content rule for every Patient,
+   labelled or not) refuses the run, unless ``--force``.
 5. **Setup Bundle**, only when the store has no Patient yet or an incomplete one (decision D11:
    the full Patient is written once). T06's ``patient_setup_transaction``: the full synthetic
    Patient and the synthetic Device as conditional updates (``PUT Patient?identifier=…``).
@@ -132,6 +133,8 @@ class Report:
     windows_new: int = 0
     windows_changed: int = 0
     windows_finalised: int = 0
+    windows_amended: int = 0  # stored final, changed (after a seed or zone change): "amended"
+    windows_held_final: int = 0  # stored final, changed, but preliminary now: not written
     windows_withdrawn_kept: int = 0
     windows_written: int = 0
     windows_final: int = 0
@@ -141,6 +144,9 @@ class Report:
     setup_written: bool = False
     # not-run, no-patient, synthetic-patient (complete), synthetic-incomplete, forced, refused
     safety_check: str = "not-run"
+    # Whether the one stored Patient carries the HTEST label (information only; never a reason
+    # to accept it). None when there was no single stored Patient.
+    stored_patient_labelled: bool | None = None
     # not-attempted, ok, patient-not-found, skipped-forced, failed:<status or error type>
     stored_read: str = "not-attempted"
     fhir_status: int | None = None
@@ -163,6 +169,8 @@ class Report:
             "windows_new": self.windows_new,
             "windows_changed": self.windows_changed,
             "windows_finalised": self.windows_finalised,
+            "windows_amended": self.windows_amended,
+            "windows_held_final": self.windows_held_final,
             "windows_withdrawn_kept": self.windows_withdrawn_kept,
             "windows_written": self.windows_written,
             "windows_final": self.windows_final,
@@ -171,6 +179,7 @@ class Report:
             "bundles_written": self.bundles_written,
             "setup_written": self.setup_written,
             "safety_check": self.safety_check,
+            "stored_patient_labelled": self.stored_patient_labelled,
             "stored_read": self.stored_read,
             "fhir_status": self.fhir_status,
             "fhir_issues": self.fhir_issues,
@@ -206,9 +215,15 @@ def setup_bundle(config: SeedConfig) -> dict:
 
 
 def ingest_bundle(
-    config: SeedConfig, batch: list[dict], *, recorded: datetime, complete_before: datetime
+    config: SeedConfig,
+    batch: list[dict],
+    *,
+    recorded: datetime,
+    complete_before: datetime,
+    amended: tuple[datetime, ...] = (),
 ) -> dict:
-    """One ingest Bundle through the same T06 path health-sync uses."""
+    """One ingest Bundle through the same T06 path health-sync uses. ``amended``: the UTC
+    starts of windows to write with status ``amended`` instead of ``final`` (T33)."""
     return synthetic.mark_synthetic(
         heart_rate_transaction(
             batch,
@@ -218,6 +233,7 @@ def ingest_bundle(
             tz=config.time_zone,
             recorded=truncate_to_ms(recorded),
             complete_before=complete_before,
+            amended=amended,
             assembler=synthetic.ASSEMBLER,
         )
     )
@@ -361,12 +377,15 @@ def safety_check(
     patients = patients_in_search(found)
     if not patients:
         return SafetyResult("no-patient", None)
-    if len(patients) == 1 and synthetic.is_synthetic_patient(patients[0]):
-        complete = synthetic.is_complete(patients[0])
-        return SafetyResult(
-            "synthetic-patient" if complete else "synthetic-incomplete", patients[0]
-        )
-    reason = "patients-duplicated" if len(patients) > 1 else "patient-not-synthetic"
+    if len(patients) > 1:
+        reason = "patients-duplicated"
+    else:
+        reason = synthetic.refusal_reason(patients[0], config.patient_id)
+        if reason is None:
+            complete = synthetic.is_complete(patients[0])
+            return SafetyResult(
+                "synthetic-patient" if complete else "synthetic-incomplete", patients[0]
+            )
     if force:
         logger.warning(
             "safety check overridden with --force",
@@ -484,6 +503,8 @@ def _run(
     try:
         safety = safety_check(config, deps, client, store, force=force)
         report.safety_check = safety.state
+        if safety.patient is not None:
+            report.stored_patient_labelled = synthetic.has_test_label(safety.patient)
         if safety.state in ("no-patient", "synthetic-incomplete", "forced"):
             bundle = setup_bundle(config)
             response = _with_retries(config, deps, lambda: client.execute_bundle(store, bundle))
@@ -499,10 +520,19 @@ def _run(
         report.windows_new = plan.new
         report.windows_changed = plan.changed
         report.windows_finalised = plan.finalised
+        report.windows_amended = plan.amended
+        report.windows_held_final = plan.held_final
         report.windows_withdrawn_kept = plan.withdrawn_kept
         report.bundles_planned = -(-len(plan.write) // config.batch_windows)
         for batch in batches(plan.write, config.batch_windows):
-            bundle = ingest_bundle(config, batch, recorded=deps.now(), complete_before=cutoff)
+            amended = tuple(
+                window_from_rollup(item).start
+                for item in batch
+                if key_of(item)[0] in plan.amend_keys
+            )
+            bundle = ingest_bundle(
+                config, batch, recorded=deps.now(), complete_before=cutoff, amended=amended
+            )
             response = _with_retries(config, deps, lambda b=bundle: client.execute_bundle(store, b))
             _record_entry_statuses(report, bundle, response)
             report.bundles_written += 1
@@ -510,7 +540,7 @@ def _run(
             for entry in bundle["entry"]:
                 resource = entry["resource"]
                 if resource["resourceType"] == "Observation":
-                    if resource["status"] == "final":
+                    if resource["status"] in ("final", "amended"):
                         report.windows_final += 1
                     else:
                         report.windows_preliminary += 1

@@ -116,10 +116,10 @@ Notes:
   security labels; R4 binds it (extensibly) to "All Security Labels", and HL7's security-labels
   page lists purpose-of-use codes such as `HTEST` "test health data" among them. `meta.tag` is
   for workflow tags (an example binding, "Common Tags"); an earlier draft put `HTEST` there, and
-  a stored Patient labelled either way is still recognised. T06's builders take no `meta`, so
+  a label in either place is reported (`stored_patient_labelled`). T06's builders take no `meta`, so
   the seeder adds the label to each resource of T06's Bundle (`synthetic.mark_synthetic`); it
   changes no request URL or key. Whether Cloud Healthcare keeps `meta.security` on conditional
-  writes is not verified (no GCP call was made); the safety check does not rely on it alone.
+  writes is not verified (no GCP call was made); the safety check does not use it at all.
 - **For T15 (share to OpenEMR).** `patient_for_sharing` sends the clinic only the `PT`
   identifier, the official name, gender and birth date, and drops `meta`. After a share, the
   synthetic name (`Synthetic`, `Demo`) and the `SYN-` identifier are the only markers OpenEMR
@@ -142,24 +142,37 @@ would overwrite their demographics and mix invented readings into their chart. T
    `entry` object is never read as "no Patient". A failed search (5xx after retries, 401/403,
    404) also stops the run before any write.
    - no Patient: a fresh store; the setup Bundle writes it (`safety_check: no-patient`);
-   - one Patient the seeder may write over (`synthetic.is_synthetic_patient`):
-     - labelled `HTEST` (in `meta.security`, or `meta.tag` from an earlier draft); or
-     - unlabelled but holding nothing a real record would: every identifier a `SYN-` one in
-       `urn:pulsebridge:patient`, **every** name (if any) the synthetic name, gender and birth
-       date absent or the seeder's own (`other`, 1980-01-01), and no other element (telecom,
-       address, another identifier…). This accepts the identifier-only Patient that
-       `v2-to-fhir` (or `health-sync`) creates by conditional create when an ingest reaches the
-       store before the seeder, so that case does not lock the seeder out;
+   - one Patient the seeder may write over (`synthetic.refusal_reason`). The same content rule
+     applies to **every** Patient, labelled `HTEST` or not:
+     - every identifier is a `SYN-` value in `urn:pulsebridge:patient`, and one of them is the
+       configured `PATIENT_ID` (a search answer about another `SYN-` Patient is not ours);
+     - every name (if any) is the synthetic name;
+     - gender and birth date are absent or the seeder's own (`other`, 1980-01-01);
+     - nothing else beyond the server-added `id` and `meta` (no telecom, address, Google
+       Health identifier…).
 
-     then go on: `synthetic-patient` if it is already complete (T06 `check_complete_patient`),
-     `synthetic-incomplete` if not, and the setup Bundle completes it;
-   - anything else (a Patient with a real-looking name, a name beside the synthetic one, other
-     demographics, a non-`SYN-` identifier; or several Patients with the identifier):
-     **refuse**, exit code 4, nothing written (`refused`, reason `patient-not-synthetic` or
-     `patients-duplicated`).
+     The label is reported (`stored_patient_labelled`) but never makes a Patient acceptable by
+     itself: a label can outlive the content it described, for example if the connect script
+     were run with a `SYN-` id and the store kept the old `meta.security` over its `PUT`. The
+     rule accepts the identifier-only Patient that `v2-to-fhir` (or `health-sync`) creates by
+     conditional create when an ingest reaches the store before the seeder, so that case does
+     not lock the seeder out. Then go on: `synthetic-patient` if it is already complete (T06
+     `check_complete_patient`), `synthetic-incomplete` if not, and the setup Bundle completes it;
+   - anything else: **refuse**, exit code 4, nothing written (`refused`), with reason
+     - `patient-name-not-synthetic` when the name is the only problem. In a synthetic
+       deployment this almost always means the cuff simulator sent another PID-5: configure it
+       with `PATIENT_FAMILY_NAME=Synthetic`, `PATIENT_GIVEN_NAME=Demo` and the same `SYN-`
+       `PATIENT_ID`, then remove the wrong Patient (or use `--force`);
+     - `patient-not-synthetic` for any other content (a real-looking record, another `SYN-`
+       identifier, a Google Health identifier, other demographics);
+     - `patients-duplicated` when several Patients have the identifier.
    - `--force` writes anyway and replaces the record (it logs a `seed-forced` warning). Use it
      only to take over a store that you know holds nothing real.
 3. **This README and `--help` say** the seeder is for `use_synthetic_data = true` deployments.
+4. **Never run the Google Health connect script (T11) with a `SYN-` `PATIENT_ID`.** Its setup
+   step `PUT`s the real person's full Patient onto that identifier and replaces the synthetic
+   Patient; the seeder would then refuse (`patient-not-synthetic`), but the real record would
+   already sit on an identifier the synthetic deployment's readings point at.
 
 Why one search and not more: the Patient is the resource a wrong run would damage, and every
 heart-rate Observation of a patient refers to that Patient, so "a Patient that is not ours" is
@@ -183,10 +196,15 @@ Editor on the health-data store (identity module), which includes search.
   Device entries are conditional creates that match and change nothing.
 - **Read once, write what changed.** After the safety check, one search reads the heart-rate
   windows already stored for the range (`stored.py`, following `next` links). A window is
-  written only if it is new, stored `preliminary` and now due `final`, or stored with other
-  values (only after a change of seed or zone; it is then rewritten `final` or `preliminary`
-  by the cutoff, since T06's `heart_rate_transaction` cannot write `amended`). A window stored
-  `entered-in-error` or `cancelled` is left alone. A key stored twice counts as not stored, so
+  written only if it is new, stored `preliminary` and now due `final`, or stored with another
+  end or other values (only after a change of `--seed` or `TIME_ZONE`). As in `health-sync`:
+  a window stored `final` that changed and is complete now is written **`amended`** (R4:
+  "Subsequent to being Final, the observation has been modified"; T06's
+  `heart_rate_transaction(amended=…)`, counted in `windows_amended`); one stored `final` that
+  changed but would be `preliminary` now (for example after `FINAL_AFTER_MINUTES` was raised)
+  is **not written** (`windows_held_final`), because R4 has no path from `final` back to
+  `preliminary` and the window may already have been shared; a later run writes it `amended`.
+  A window stored `entered-in-error` or `cancelled` is left alone. A key stored twice counts as not stored, so
   that window is written and its conditional update reports the duplicate. If the search fails
   or answers something unusable, every window is written (`stored_read: failed:…`): reading
   saves writes, it is never a condition for writing. The pages are bounded by the range, so a
@@ -230,10 +248,10 @@ Logs (JSON lines) go to stderr, the report (JSON) to stdout:
  "complete_before": "2026-03-10T11:00:00Z",
  "windows_in_range": 8640, "windows_generated": 8395, "windows_absent": 245,
  "windows_unchanged": 0, "windows_new": 8395, "windows_changed": 0, "windows_finalised": 0,
- "windows_withdrawn_kept": 0,
+ "windows_amended": 0, "windows_held_final": 0, "windows_withdrawn_kept": 0,
  "windows_written": 8395, "windows_final": 8383, "windows_preliminary": 12,
  "bundles_planned": 84, "bundles_written": 84, "setup_written": true,
- "safety_check": "no-patient", "stored_read": "patient-not-found",
+ "safety_check": "no-patient", "stored_patient_labelled": null, "stored_read": "patient-not-found",
  "fhir_status": null, "fhir_issues": [],
  "entry_statuses": {"Device 200": 85, "Observation 201": 8395, "Patient 200": 84, "Patient 201": 1, "Provenance 201": 8395}}
 ```
@@ -344,9 +362,8 @@ and report for values and the identifier.
 
 ## Not verified (no GCP call was made)
 
-- That Cloud Healthcare keeps `meta.security` on conditional updates and conditional creates
-  (the safety check also recognises an unlabelled synthetic Patient, so a dropped label does
-  not lock the seeder out).
+- That Cloud Healthcare keeps `meta.security` on conditional updates and conditional creates.
+  Nothing depends on it: the safety check decides on content alone.
 - The read-once search features on Cloud Healthcare (`_elements`, `date` on `effectivePeriod`,
   `_count=1000`, `next` links on the store's own base URL); the same open point as
   `health-sync` (its README, "For T25"). If one is refused, the run writes everything. On the

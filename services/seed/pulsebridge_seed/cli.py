@@ -1,7 +1,7 @@
 """``pulsebridge-seed``: the command line, also the Cloud Run job's command (README).
 
     pulsebridge-seed --days 30                    # first seeding: the last 30 days
-    pulsebridge-seed --hours 3                    # scheduled top-up (README, "Running it")
+    pulsebridge-seed --hours 4                    # hourly top-up (README, "Re-running")
     pulsebridge-seed --days 1 --dry-run           # counts only, no requests, no GCP config
     pulsebridge-seed --days 7 --until 2026-03-09T12:00:00Z --seed 42
 
