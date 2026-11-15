@@ -1,31 +1,68 @@
 # Build context for the service images (services/*/Dockerfile), which are built from the
-# repository root. Allow-list: everything is excluded, then only what an image needs comes back.
-# Docker applies the LAST pattern that matches a path, so the exclusions after the `!` lines win.
-# tests/tooling/test_container_images.py checks this file.
+# repository root. Docker applies the LAST pattern that matches a path (or one of its parent
+# directories), so the order below matters. tests/tooling/test_container_images.py checks this
+# file, including that section 2 lists exactly what the images install.
 
-# 1. Nothing by default: .git, .worktrees, .venv, web/ (and web/node_modules), infra/ (Terraform
-#    state, plans, .terraform, tfvars), scripts/, docs/ and the root files stay out.
+# 1. Nothing by default: .git, .worktrees, .venv, web/, infra/ (Terraform state, plans,
+#    .terraform, tfvars), scripts/, docs/, the root files, tests and examples stay out.
 *
 
-# 2. The only inputs an image installs: the shared libraries and the services.
-!libs/
-!services/
+# 2. Allow-list: exactly what `pip install` needs to build each library and service, which is
+#    its pyproject.toml, its README.md (the `readme` of the package metadata) and the package
+#    directories its pyproject.toml names. A new library or service adds its own lines here.
+!libs/pulsebridge_fhir/pyproject.toml
+!libs/pulsebridge_fhir/README.md
+!libs/pulsebridge_fhir/pulsebridge_fhir/
+!libs/pulsebridge_gcp/pyproject.toml
+!libs/pulsebridge_gcp/README.md
+!libs/pulsebridge_gcp/pulsebridge_gcp/
+!libs/pulsebridge_hl7v2/pyproject.toml
+!libs/pulsebridge_hl7v2/README.md
+!libs/pulsebridge_hl7v2/pulsebridge_hl7v2/
+!libs/pulsebridge_hl7v2/samples/
+!services/cuff-sim/pyproject.toml
+!services/cuff-sim/README.md
+!services/cuff-sim/cuff_sim/
+!services/health-sync/pyproject.toml
+!services/health-sync/README.md
+!services/health-sync/health_sync/
+!services/v2-to-fhir/pyproject.toml
+!services/v2-to-fhir/README.md
+!services/v2-to-fhir/v2_to_fhir/
 
-# 3. Never inside libs/ or services/ either: secrets and key files, local environments, caches,
-#    build output and tests (images do not run tests).
+# 3. Deny-list, the second line of defence: never sent even from inside an allowed directory.
+# Secrets and key files (a service account key under its console name is
+# <project>-<12 hex>.json).
+**/.git
 **/.env
 **/.env.*
+**/*.env
+**/.envrc
+**/.netrc
+**/.pypirc
+**/id_rsa*
+**/id_dsa*
+**/id_ecdsa*
+**/id_ed25519*
 **/*.pem
 **/*.key
+**/*.crt
 **/*.p12
+**/*.pfx
+**/secrets
+**/token*.json
 **/*credentials*.json
 **/*service-account*.json
 **/*sa-key*.json
 **/client_secret*.json
+**/*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+# Terraform state, plans and variables.
 **/*.tfstate
 **/*.tfstate.*
 **/*.tfvars
+**/*.tfvars.json
 **/*.tfplan
+# Local environments, caches, build output and tests.
 **/.venv
 **/node_modules
 **/__pycache__

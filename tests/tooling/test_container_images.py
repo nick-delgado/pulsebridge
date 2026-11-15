@@ -335,8 +335,9 @@ def test_starts_with_the_readme_gunicorn_command(service: Path) -> None:
     assert env.get("PATH", "").startswith("/opt/venv/bin:"), "gunicorn comes from the venv"
     # GUNICORN_CMD_ARGS is read by gunicorn as extra arguments: it must not override the bind,
     # workers or anything else the README sets.
+    # It holds exactly two settings the README leaves at gunicorn's defaults (see the Dockerfile).
     extra = shlex.split(env.get("GUNICORN_CMD_ARGS", ""))
-    assert extra in ([], ["--no-control-socket"]), extra
+    assert extra == ["--no-control-socket", "--graceful-timeout", "8"], extra
 
 
 def test_copies_exactly_the_libraries_the_service_declares(service: Path) -> None:
@@ -355,6 +356,9 @@ def test_copies_exactly_the_libraries_the_service_declares(service: Path) -> Non
     for i in final_stage(instructions):
         if i.keyword == "COPY":
             assert "--from=" in i.args, f"the runtime stage copies only from the build: {i.args}"
+            # The venv stays owned by root and read-only to the app user, so the service cannot
+            # change its own code. --chown or --chmod would change that.
+            assert "--chown" not in i.args and "--chmod" not in i.args, i.args
 
 
 def test_installs_the_libraries_before_the_service(service: Path) -> None:
@@ -467,6 +471,29 @@ MUST_BE_EXCLUDED = [
     "services/v2-to-fhir/v2_to_fhir/__pycache__/app.cpython-313.pyc",
     "libs/pulsebridge_hl7v2/pulsebridge_hl7v2.egg-info/PKG-INFO",
     "libs/pulsebridge_hl7v2/build/lib/x.py",
+    "libs/pulsebridge_fhir/examples/heart-rate-observation.json",  # not package data
+    # Common secret names, planted beside the package (outside the allow-list) ...
+    "services/v2-to-fhir/my-project-0123456789ab.json",  # a service account key's console name
+    "services/health-sync/token.json",
+    "services/cuff-sim/secrets/client-secret",
+    "libs/pulsebridge_gcp/.envrc",
+    # ... and inside an allowed package directory, where only the deny-list stops them.
+    "services/v2-to-fhir/v2_to_fhir/my-project-0123456789ab.json",
+    "services/health-sync/health_sync/token.json",
+    "services/health-sync/health_sync/token-cache.json",
+    "services/cuff-sim/cuff_sim/secrets/client-secret",
+    "services/cuff-sim/cuff_sim/.envrc",
+    "services/cuff-sim/cuff_sim/local.env",
+    "libs/pulsebridge_gcp/pulsebridge_gcp/.netrc",
+    "libs/pulsebridge_gcp/pulsebridge_gcp/.pypirc",
+    "libs/pulsebridge_gcp/pulsebridge_gcp/id_rsa",
+    "libs/pulsebridge_gcp/pulsebridge_gcp/id_ed25519.pub",
+    "libs/pulsebridge_fhir/pulsebridge_fhir/ca.crt",
+    "libs/pulsebridge_fhir/pulsebridge_fhir/terraform.tfvars.json",
+    "libs/pulsebridge_fhir/pulsebridge_fhir/.git/config",
+    "libs/pulsebridge_hl7v2/samples/.env",
+    "services/v2-to-fhir/v2_to_fhir/sa-key.json",
+    "services/v2-to-fhir/v2_to_fhir/__pycache__/app.cpython-313.pyc",
 ]
 
 MUST_BE_INCLUDED = [
@@ -494,15 +521,56 @@ def test_dockerignore_keeps_what_the_images_install(path: str) -> None:
     assert not is_excluded(path, dockerignore_patterns()), f"{path} is needed by an image build"
 
 
-def test_dockerignore_sends_every_directory_a_dockerfile_copies() -> None:
-    # Each COPY source (a library or service directory) is sent: its pyproject.toml is not
-    # excluded. (Which files inside are left out is checked by the tests above.)
-    patterns = dockerignore_patterns()
+def build_inputs(source: str) -> set[str]:
+    """What `pip install ./<source>` reads: pyproject.toml, the metadata readme and the package
+    directories the pyproject.toml names (hatchling `packages`, or setuptools `packages`
+    mapped through `package-dir`)."""
+    data = pyproject(REPO_ROOT / source)
+    inputs = {f"{source}/pyproject.toml"}
+    readme = data["project"].get("readme")
+    if readme:
+        inputs.add(f"{source}/{readme}")
+    tool = data.get("tool", {})
+    hatch = tool.get("hatch", {}).get("build", {}).get("targets", {}).get("wheel", {})
+    for package in hatch.get("packages", []):
+        inputs.add(f"{source}/{package}")
+    setuptools = tool.get("setuptools", {})
+    package_dir = setuptools.get("package-dir", {})
+    for package in setuptools.get("packages", []):
+        inputs.add(f"{source}/{package_dir.get(package, package.replace('.', '/'))}")
+    assert len(inputs) >= 3, f"{source}: no package directories found in pyproject.toml"
+    return inputs
+
+
+def test_dockerignore_allows_exactly_what_the_images_install() -> None:
+    # The allow-list (the `!` lines) is exactly the build inputs of every COPY source: nothing a
+    # build needs is missing, and nothing else is sent. A new service or library adds its lines.
+    expected: set[str] = set()
     for d in dockerfile_dirs():
         for source in copy_sources(read_dockerfile(d / "Dockerfile")):
-            pyproject_path = f"{source}/pyproject.toml"
-            assert (REPO_ROOT / pyproject_path).is_file(), pyproject_path
-            assert not is_excluded(pyproject_path, patterns), pyproject_path
+            expected |= build_inputs(source)
+    allowed = {p.removeprefix("!").rstrip("/") for p in dockerignore_patterns() if p[0] == "!"}
+    assert allowed == expected, (
+        f"missing from .dockerignore: {sorted(expected - allowed)}; "
+        f"not needed by any image: {sorted(allowed - expected)}"
+    )
+    assert dockerignore_patterns()[0] == "*", "everything is excluded first"
+
+
+def test_dockerignore_sends_every_file_of_the_allowed_packages() -> None:
+    # Every tracked-looking file in an allowed package directory reaches the build (so a package
+    # module or package data file, such as the HL7v2 samples, cannot be dropped by a deny rule).
+    patterns = dockerignore_patterns()
+    for pattern in patterns:
+        if not pattern.startswith("!"):
+            continue
+        root = REPO_ROOT / pattern.removeprefix("!").rstrip("/")
+        files = [root] if root.is_file() else [f for f in root.rglob("*") if f.is_file()]
+        for f in files:
+            rel = f.relative_to(REPO_ROOT).as_posix()
+            if "__pycache__" in rel:
+                continue
+            assert not is_excluded(rel, patterns), f"{rel} is needed by an image build"
 
 
 def test_dockerignore_matcher_reads_patterns_like_docker() -> None:
