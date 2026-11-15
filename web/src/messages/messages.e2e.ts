@@ -88,11 +88,13 @@ test('a log row selects a cuff attempt sent in this session, and the cuff trace 
   const cuff = page.getByRole('region', { name: 'Blood pressure' });
   await cuff.getByRole('button', { name: 'Take reading' }).click();
   await expect(cuff.locator('.cuff-reading')).toHaveCount(1);
-  // Select something else, so the log's selection is a real change.
   await openLog(page);
-  // The cuff-send refresh puts the new attempt at the top (newest by send time).
-  const newest = logRows(page).first();
-  await expect(newest).toContainText('Cuff send');
+  // The log row of this send: the same clock time as the cuff row (both in the browser's zone).
+  const sentAt = (await cuff.locator('.cuff-reading time').first().textContent()) ?? '';
+  const newest = logRows(page)
+    .filter({ hasText: `, ${sentAt}` })
+    .filter({ hasText: 'Cuff send' });
+  await expect(newest).toHaveCount(1);
   await newest.getByRole('button', { name: /Select/ }).click();
   await expect(newest.getByRole('button', { name: /Select/ })).toHaveAttribute(
     'aria-pressed',
@@ -101,6 +103,29 @@ test('a log row selects a cuff attempt sent in this session, and the cuff trace 
   const trace = page.getByRole('region', { name: 'Blood-pressure trace' });
   await expect(trace.getByRole('tab', { name: 'HL7v2 as sent' })).toBeVisible();
   await expect(cuff.locator('.cuff-reading__show')).toHaveAttribute('aria-pressed', 'true');
+  expect(errors).toEqual([]);
+});
+
+test('a log row from another session fills the cuff trace from the proxy', async ({ page }) => {
+  const errors = await watchErrors(page);
+  await logIn(page);
+  await openLog(page);
+  // A seeded send: not sent in this session, so the cuff panel has no row for it.
+  const row = logRows(page)
+    .filter({ hasText: 'Accepted' })
+    .filter({ hasText: 'Observation/' })
+    .first();
+  await row.getByRole('button', { name: /Select/ }).click();
+  const cuff = page.getByRole('region', { name: 'Blood pressure' });
+  await expect(cuff.locator('.cuff-reading')).toHaveCount(0);
+  const trace = page.getByRole('region', { name: 'Blood-pressure trace' });
+  await trace.getByRole('tab', { name: 'HL7v2 as sent' }).click();
+  await expect(trace.getByRole('tabpanel')).toContainText('ORU^R01');
+  await trace.getByRole('tab', { name: 'ACK as received' }).click();
+  await expect(trace.getByRole('tabpanel')).toContainText('Not kept in the send record');
+  await trace.getByRole('tab', { name: 'FHIR as stored' }).click();
+  await expect(trace.getByRole('tabpanel')).toContainText('"resourceType": "Observation"');
+  await expect(page.locator('#share-hint')).toContainText('Selected: Cuff send at');
   expect(errors).toEqual([]);
 });
 
@@ -113,6 +138,9 @@ test('focus and scroll survive a refresh that adds rows above', async ({ page })
   await cuff.getByRole('button', { name: 'Take reading' }).click();
   await expect(cuff.locator('.cuff-reading')).toHaveCount(1);
   const scroller = page.locator('#shell-messages-log');
+  // Wait until the cuff-send refresh has put this send at the top (newest by send time).
+  const sentAt = (await cuff.locator('.cuff-reading time').first().textContent()) ?? '';
+  await expect(logRows(page).first()).toContainText(`, ${sentAt}`);
   await expect(logRows(page).first()).toContainText('Pending');
   const before = await logRows(page).count();
   // Scroll the log so some row is at the top, and focus that row's button.

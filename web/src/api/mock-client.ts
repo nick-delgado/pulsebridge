@@ -605,6 +605,11 @@ export class MockClient implements PulseBridgeApi {
     const confirmed = lookup === 'confirmed';
     return {
       ...entry,
+      // The proxy's row keeps MSH-10 of the attempt as controlId, never MSA-2 (messages.py
+      // `commit_ack`): MSA-2 is only in the send result.
+      commitAck: entry.commitAck.received
+        ? { ...entry.commitAck, controlId: null }
+        : entry.commitAck,
       messageLookup: lookup,
       application: confirmed ? entry.application : null,
       observation: confirmed ? entry.observation : null,

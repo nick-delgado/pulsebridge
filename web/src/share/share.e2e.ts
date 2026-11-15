@@ -140,6 +140,26 @@ test('?mock-share=observation-timeout: the steps so far, and that it is not know
   expect(errors).toEqual([]);
 });
 
+test("?mock-share=hosting-timeout: the hosting layer's HTML 504 never claims nothing was sent", async ({
+  page,
+}) => {
+  const errors = await watchErrors(page);
+  await logIn(page, '?mock-share=hosting-timeout');
+  await selectMappedReading(page);
+  await shareButton(page).click();
+  await page.locator('#share-send').click();
+  const alert = page.locator('#share-alert');
+  await expect(alert).toContainText(
+    'The server answered HTTP 504 without saying what happened, so it is not known what reached the clinic',
+  );
+  await expect(alert).toContainText('Sharing again is safe');
+  await expect(alert).not.toContainText('Nothing was sent');
+  await expect(page.getByRole('region', { name: 'Share trace' })).toContainText(
+    'The server sent no trace, so it is not known which requests reached OpenEMR.',
+  );
+  expect(errors).toEqual([]);
+});
+
 test('?mock-share=patient-incomplete: refused before OpenEMR, nothing sent', async ({ page }) => {
   const errors = await watchErrors(page);
   await logIn(page, '?mock-share=patient-incomplete');

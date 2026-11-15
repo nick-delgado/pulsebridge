@@ -82,6 +82,8 @@ describe('mock messages log: rows (amendments 1, 2, 5, 6, 14, 18)', () => {
     const whys = a.flatMap((e) => (e.commitAck.received ? [] : [e.commitAck.why]));
     expect(whys).toEqual(expect.arrayContaining(['timeout', 'api-error', 'unreadable-reply']));
     for (const e of a.filter((x) => x.result !== 'accepted')) expect(e.messageLookup).toBeNull();
+    // As messages.py `commit_ack`: a row never carries MSA-2 (only the send result does).
+    for (const e of a) if (e.commitAck.received) expect(e.commitAck.controlId).toBeNull();
   });
 
   it('an accepted MLLP send whose derived name the store does not have: no outcome, no Observation', () => {
