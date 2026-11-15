@@ -517,3 +517,25 @@ def test_another_time_zone_is_applied(world):
     run(world, world.config(time_zone=ZoneInfo("Asia/Kolkata")))
     (obs,) = observations(world.bundles()[0])
     assert obs["effectivePeriod"]["start"] == "2026-01-15T19:35:00+05:30"
+
+
+def test_a_malformed_fhir_answer_is_reported_as_such(world):
+    one_window(world)
+    world.fhir_transport.add("POST", FHIR_PATH, json_response(200, ["not", "a", "bundle"]))
+    report = run(world)
+    assert (report.outcome, report.reason) == (Outcome.FHIR_REJECTED, "fhir-malformed-response")
+    assert len(world.bundles()) == 1
+
+
+def test_odd_response_entries_do_not_turn_a_written_bundle_into_a_failure(world):
+    one_window(world)
+    response = {"resourceType": "Bundle", "entry": [{"response": "201"}, "x", {}, {"response": {}}]}
+    world.fhir_transport.add("POST", FHIR_PATH, json_response(200, response))
+    report = run(world)
+    assert report.outcome == Outcome.SYNCED
+    assert report.entry_statuses == {
+        "Patient ?": 1,
+        "Device ?": 1,
+        "Observation ?": 1,
+        "Provenance ?": 1,
+    }

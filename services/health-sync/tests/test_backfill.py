@@ -144,3 +144,18 @@ def test_main_reports_configuration_errors_by_name_only(monkeypatch, capsys):
         monkeypatch.delenv(name, raising=False)
     assert backfill.main(["--days", "1"]) == backfill.EXIT_USAGE
     assert "GCP_PROJECT_ID" in capsys.readouterr().err
+
+
+def test_main_contains_a_bug_and_logs_its_type_only(world, monkeypatch, capsys, caplog):
+    monkeypatch.setattr(backfill.ServiceConfig, "from_env", classmethod(lambda cls: world.config()))
+
+    def broken(*_a, **_k):
+        raise KeyError("PB-SYN-0001")
+
+    monkeypatch.setattr(backfill, "run", broken)
+    assert backfill.main(["--days", "1"]) == backfill.EXIT_FAILED
+    output = capsys.readouterr()
+    assert [r.getMessage() for r in caplog.records] == ["backfill failed: KeyError"]
+    for text in (output.out, output.err, caplog.text):
+        assert "PB-SYN-0001" not in text
+        assert "Traceback" not in text

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 
 from health_sync.app import check_startup, default_dependencies, log_report
@@ -66,7 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"health-sync-backfill: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    return run(args.days, config, default_dependencies(config))
+    try:
+        return run(args.days, config, default_dependencies(config))
+    except Exception as exc:  # noqa: BLE001 - a traceback's text could quote data
+        logging.getLogger("health_sync").error(
+            "backfill failed: %s", type(exc).__name__, extra={"fields": {"event": "bug"}}
+        )
+        return EXIT_FAILED
 
 
 if __name__ == "__main__":

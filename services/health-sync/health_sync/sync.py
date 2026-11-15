@@ -278,7 +278,8 @@ def _record_entry_statuses(report: RunReport, bundle: dict, response: dict) -> N
     if not isinstance(answers, list):
         return
     for sent, answer in zip(bundle["entry"], answers, strict=False):
-        status = answer.get("response", {}).get("status") if isinstance(answer, dict) else None
+        result = answer.get("response") if isinstance(answer, dict) else None
+        status = result.get("status") if isinstance(result, dict) else None
         code = status.split(" ", 1)[0] if isinstance(status, str) else "?"
         if not code.isdigit():
             code = "?"
@@ -432,10 +433,14 @@ def _sync_one(
             response = write_bundle(
                 deps.fhir, config.fhir_store_id, bundle, policy=policy, deadline=deadline
             )
-        except (ClientError, MalformedResponseError) as exc:
+        except MalformedResponseError as exc:
+            # A 2xx whose body is not a Bundle: the write probably happened, but the store's
+            # contract changed. A person should look; the next run rewrites the same keys.
+            raise _Stop(Outcome.FHIR_REJECTED, "fhir-malformed-response", exc.status) from None
+        except ClientError as exc:
             if isinstance(exc, ConflictError):
                 raise _Stop(Outcome.FHIR_UNAVAILABLE, "fhir-conflict", exc.status) from None
-            report.fhir_issues = operation_outcome_summary(getattr(exc, "operation_outcome", None))
+            report.fhir_issues = operation_outcome_summary(exc.operation_outcome)
             raise _Stop(Outcome.FHIR_REJECTED, "fhir-refused-bundle", exc.status) from None
         except HealthcareApiError as exc:
             # 429/5xx/network after the retries, 401/403 (IAM, possibly still propagating),

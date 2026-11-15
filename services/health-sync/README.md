@@ -68,7 +68,7 @@ ignored. The answer is the run report as JSON (counts, UTC range bounds and code
 | `google-unavailable` | 503 | Google answered 429/5xx/408 or nothing, still after the bounded retries | next scheduled run (its range overlaps) |
 | `fhir-unavailable` | 503 | FHIR store 429/5xx/network after retries, a persistent 409, or 401/403/404 (IAM or store) | next scheduled run |
 | `google-error` | 500 | Google refused the request (another 4xx, a second 401) or answered malformed JSON | needs a person; logs give the status and Google's reason code |
-| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx); its OperationOutcome is logged without free text | needs a person |
+| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx; its OperationOutcome is logged without free text), or answered 2xx with a body that is not a Bundle (`fhir-malformed-response`) | needs a person |
 | `mapping-failed` | 500 | T06 refused input that passed the window checks (a bug) | needs a person |
 
 **Why 200 for reconnect-needed.** A retry cannot fix an expired grant, and every retry would hit
@@ -150,7 +150,7 @@ Why files and not environment variables:
 
 - "When reading a volume, Cloud Run always fetches the secret value from the Secret Manager to use
   the value with the latest version"; environment variables "are resolved at instance startup
-  time" (Cloud Run docs, "Configure secrets"). The files are read at the start of **every run**,
+  time" (Cloud Run docs, "Configure secrets for services"). The files are read at the start of **every run**,
   so after the deployer reconnects, the next run (at most 15 minutes later) uses the new refresh
   token with no redeploy. That is how "read from Secret Manager at run time" is met. A test
   rewrites the file between two runs and checks the second run sends the new value.
@@ -362,7 +362,7 @@ missed runs and late phone syncs.
 | token endpoint request fields; response `access_token`, `expires_in`, `scope`, `token_type`; `invalid_grant` when "the token may have expired or has been invalidated" | Google Identity, "Using OAuth 2.0 for Web Server Applications" |
 | 7-day refresh tokens in Testing status | Google Identity, "Using OAuth 2.0 to Access Google APIs", "Refresh token expiration"; also spike S3 (`refresh_token_expires_in` 604799) |
 | 429 for rate limits ("back off and retry"); per-user limit 300 requests a minute | Google Health guide "Rate limits"; error catalogue (`RESOURCE_EXHAUSTED` 429, `MISSING_OAUTH_SCOPE` 403, `UNAUTHENTICATED` 401) |
-| Cloud Run volume secrets read the latest version on every read; env vars at start-up; no start-up check for volumes | Cloud Run docs, "Configure secrets" |
+| Cloud Run volume secrets read the latest version on every read; env vars at start-up; no start-up check for volumes | Cloud Run docs, "Configure secrets for services" |
 | `executeBundle` limits (1,000 entries may time out, 4,500 rejected, 50 MB) | Cloud Healthcare "Quotas and limits" |
 | Scheduler `attemptDeadline` default 3 min for HTTP; `retryCount = 0` waits for the next run | Cloud Scheduler REST reference |
 
