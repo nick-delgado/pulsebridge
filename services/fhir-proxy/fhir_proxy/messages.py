@@ -420,7 +420,10 @@ class MessagesLog:
     # ---- sources -------------------------------------------------------------------------
 
     def _attempts(self, count: int, cursor: Cursor | None) -> tuple[Stream, int]:
-        params = send_attempt_search_params(count=count)
+        # Rows already shown at the cursor's instant come back first (the date bound is
+        # inclusive); ask for that many more so they do not use up this page.
+        fetch = min(count + (len(cursor.seen) if cursor else 0), 1000)
+        params = send_attempt_search_params(count=fetch)
         if cursor is not None:
             params.insert(2, ("date", "le" + instant_text(cursor.before)))
         bundle = self._stores.audit_events(params)
@@ -450,7 +453,7 @@ class MessagesLog:
                 skipped += 1  # the patient pin: another patient's or another store's attempt
                 continue
             items.append(Item(record.recorded, record.id, "attempt", record))
-        truncated = len(resources) >= count or next_link(bundle) is not None
+        truncated = len(resources) >= fetch or next_link(bundle) is not None
         dated = [i.at for i in items if i.at is not None]
         frontier = min(dated) if (truncated and dated) else None
         return Stream(items, truncated, frontier, inclusive=True), skipped

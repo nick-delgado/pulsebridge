@@ -326,14 +326,37 @@ class FakeHealthcare:
         return bundle
 
 
+def _same_identifier(fake: FakeHealthcare, rtype: str, resource: dict) -> dict | None:
+    wanted = {(i.get("system"), i.get("value")) for i in resource.get("identifier", [])}
+    for (t, _), stored in fake.fhir[FHIR_STORE].items():
+        have = {(i.get("system"), i.get("value")) for i in stored.get("identifier", [])}
+        if t == rtype and wanted & have:
+            return stored
+    return None
+
+
 def apply_transaction(fake: FakeHealthcare, bundle: dict, *, prefix: str = "srv") -> dict:
     """Store an ingest Bundle as a FHIR server would: give each new resource a server id,
     rewrite ``urn:uuid`` references to ``Type/id``. Returns fullUrl -> reference."""
     ids: dict[str, str] = {}
+    existing: set[str] = set()
     for n, entry in enumerate(bundle["entry"]):
         resource = entry["resource"]
-        rid = resource.get("id") or f"{prefix}-{resource['resourceType'].lower()}-{n}"
-        ids[entry["fullUrl"]] = f"{resource['resourceType']}/{rid}"
+        rtype = resource["resourceType"]
+        request = entry.get("request", {})
+        conditional = request.get("ifNoneExist") or (
+            request.get("method") == "PUT" and "?" in request.get("url", "")
+        )
+        match = _same_identifier(fake, rtype, resource) if conditional else None
+        if match is not None:
+            # Conditional create (D11): the existing resource is kept as it is. Conditional
+            # update: the existing resource keeps its id and gets the new content.
+            ids[entry["fullUrl"]] = f"{rtype}/{match['id']}"
+            if request.get("ifNoneExist"):
+                existing.add(entry["fullUrl"])
+            continue
+        rid = resource.get("id") or f"{prefix}-{rtype.lower()}-{n}"
+        ids[entry["fullUrl"]] = f"{rtype}/{rid}"
 
     def rewrite(value: object) -> object:
         if isinstance(value, dict):
@@ -346,6 +369,8 @@ def apply_transaction(fake: FakeHealthcare, bundle: dict, *, prefix: str = "srv"
         return value
 
     for entry in bundle["entry"]:
+        if entry["fullUrl"] in existing:
+            continue
         resource = rewrite(copy.deepcopy(entry["resource"]))
         resource["id"] = ids[entry["fullUrl"]].split("/", 1)[1]
         fake.put(FHIR_STORE, resource)
