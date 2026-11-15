@@ -397,7 +397,10 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
           el(
             'p',
             { class: 'share-step__request share-mono' },
-            `${step.request.method} ${step.request.url} → ${step.response.status === 0 ? 'no answer' : String(step.response.status)}`,
+            // A reused token was never requested: no "→ no answer" line for it.
+            step.result === 'reused'
+              ? `${step.request.method} ${step.request.url}: not sent (token reused)`
+              : `${step.request.method} ${step.request.url} → ${step.response.status === 0 ? 'no answer' : String(step.response.status)}`,
             el('span', { class: 'share-step__time', text: ` · ${String(step.durationMs)} ms` }),
           ),
           step.request.query

@@ -25,8 +25,10 @@ health-sync's timeout and one store search, both capped by the request budget (5
 their sum. Any failure of the health-sync call, even an unexpected exception, is
 ``state: "unknown"`` with ``reason: "health-sync-error"``: ``/status`` never answers 5xx.
 
-``openemr`` is checked by the share extension (T15) when it is installed; until then it says
-so (``reachable: false``, ``detail: "not-checked"``).
+``openemr`` is the share extension's probe (T15, ``fhir_proxy.share.probe``), run at the same
+time as the rest: ``not-configured`` without the OpenEMR settings, otherwise a TLS handshake
+pinned to OpenEMR's certificate and its readiness endpoint, cached briefly. Without an extension
+it says ``not-checked``.
 """
 
 from __future__ import annotations
@@ -197,26 +199,49 @@ class StatusService:
             self._cached = (self._monotonic(), result)
         return result
 
+    def _openemr(self, now: datetime) -> dict:
+        """The share extension's reachability probe (T15), or ``not-checked`` without one. The
+        probe bounds itself (TLS handshake plus OpenEMR's readiness endpoint, each call capped
+        by the request budget); anything it raises or returns that is not the strip's shape is
+        ``error``: /status never answers 5xx for OpenEMR."""
+        if self.openemr_probe is None:
+            return {"reachable": False, "checkedAt": _now_text(now), "detail": "not-checked"}
+        try:
+            result = self.openemr_probe()
+        except Exception as exc:  # noqa: BLE001 - a probe failure is a state, not a 500
+            log(logging.WARNING, "openemr-probe-failed", error_type=type(exc).__name__)
+            return {"reachable": False, "checkedAt": _now_text(now), "detail": "error"}
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get("reachable"), bool)
+            or not isinstance(result.get("checkedAt", ""), str)
+            or not (result.get("detail") is None or isinstance(result.get("detail"), str))
+        ):
+            log(logging.WARNING, "openemr-probe-failed", error_type="unexpected-shape")
+            return {"reachable": False, "checkedAt": _now_text(now), "detail": "error"}
+        return {
+            "reachable": result["reachable"],
+            "checkedAt": result.get("checkedAt") or _now_text(now),
+            "detail": result.get("detail"),
+        }
+
     def summary(self) -> dict:
-        """health-sync and the store are asked at the same time, each within the request's
-        budget; a part not answered in time is unknown (``state: unknown``, counts null)."""
+        """health-sync, the store and OpenEMR's probe are asked at the same time, each within
+        the request's budget; a part not answered in time is unknown (``state: unknown``,
+        counts null, OpenEMR ``timeout``)."""
         now = self._clock()
-        watch, store = deadline.run_parallel(
-            self._outer, [lambda: self._watch(now), lambda: self._from_store(now)]
+        watch, store, openemr = deadline.run_parallel(
+            self._outer,
+            [lambda: self._watch(now), lambda: self._from_store(now), lambda: self._openemr(now)],
         )
         if not isinstance(watch, dict):
             watch = unknown_watch("health-sync-timeout", now)
         if not isinstance(store, dict):
             store = self._store_unknown(now, "timeout")
+        if not isinstance(openemr, dict):
+            openemr = {"reachable": False, "checkedAt": _now_text(now), "detail": "timeout"}
         watch = dict(watch)
         watch["lastSyncAt"] = store["lastSyncAt"]
-        openemr = {"reachable": False, "checkedAt": _now_text(now), "detail": "not-checked"}
-        if self.openemr_probe is not None:
-            try:
-                openemr = self.openemr_probe()
-            except Exception as exc:  # noqa: BLE001 - a probe failure is a state, not a 500
-                log(logging.WARNING, "openemr-probe-failed", error_type=type(exc).__name__)
-                openemr = {"reachable": False, "checkedAt": _now_text(now), "detail": "error"}
         return {
             "watchSync": watch,
             "observationCounts": store["observationCounts"],

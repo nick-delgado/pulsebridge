@@ -135,12 +135,14 @@ def create_app(
     clock: Callable[[], datetime] | None = None,
     monotonic: Callable[[], float] | None = None,
     extension_module: str = EXTENSION_MODULE,
+    extension_options: dict[str, object] | None = None,
 ) -> Flask:
     """Build the app. With no arguments, configuration comes from the environment, the
     Healthcare client uses Application Default Credentials and identity tokens come from the
     metadata server (the service's own service account on Cloud Run). ``transport`` is the
     Cloud Healthcare transport (tests pass a fake); it is always wrapped so every call honours
-    the request's time budget."""
+    the request's time budget. ``extension_options`` reaches the extension's ``register``
+    as ``proxy.options`` (tests pass the share's fake OpenEMR transport there)."""
     configure_logging()
     config = config or ServiceConfig.from_env()
     clock = clock or (lambda: datetime.now(UTC))
@@ -187,7 +189,14 @@ def create_app(
     )
     messages_log = MessagesLog(stores, patient_id=config.patient_id, executor=executor, now=clock)
 
-    context = ProxyContext(config=config, stores=stores, core_routes=CORE_ROUTES)
+    context = ProxyContext(
+        config=config,
+        stores=stores,
+        core_routes=CORE_ROUTES,
+        clock=clock,
+        monotonic=monotonic,
+        options=dict(extension_options or {}),
+    )
     load_extension(context, extension_module)
     status_service = StatusService(
         stores,

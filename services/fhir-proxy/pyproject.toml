@@ -26,6 +26,10 @@ dependencies = [
   # The session token is a JWT (RFC 7519) signed with HS256; PyJWT is the well-known library
   # docs/spikes/s6.md asks for, so the token check is not our own parser.
   "PyJWT==2.15.1",
+  # RSA for the OpenEMR client assertion (RS384, T15) and the client document's PKCS#8 key.
+  # Already installed through google-auth 2.62.0, so naming it adds nothing to the image; it is
+  # pinned here because fhir_proxy/share/ imports it directly.
+  "cryptography==50.0.2",
   # Already required by pulsebridge-gcp; named here because upstream.py uses them directly
   # (identity tokens for cuff-sim and health-sync, and the forwarding HTTP calls).
   "google-auth==2.62.0",

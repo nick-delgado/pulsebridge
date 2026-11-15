@@ -1,0 +1,5 @@
+# Copy to backend.hcl (git-ignored) and set the bucket to bootstrap's `state_bucket_name` output
+# for THIS environment's project:  terraform -chdir=infra/bootstrap output -raw state_bucket_name
+# Then: terraform init -backend-config=backend.hcl
+# The prefix is fixed in backend.tf. The value below is a placeholder, not a real bucket.
+bucket = "your-project-id-tfstate"

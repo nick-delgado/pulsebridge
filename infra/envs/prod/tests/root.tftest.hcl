@@ -1,0 +1,120 @@
+# The prod ROOT: its defaults and the settings that make it prod. Mocked providers,
+# `command = plan`, no backend. The rules shared with dev (variables.tf is identical in both
+# roots, checked by infra/envs/_stack/tests/check_env_roots.py) are tested in dev's tests; the
+# planned prod values (PREVENT, deletion protection) in infra/envs/_stack/tests/plan_scan.py.
+
+mock_provider "google" {
+  mock_data "google_project" {
+    defaults = { number = "100000000001" }
+  }
+}
+
+mock_provider "google-beta" {}
+
+# Synthetic values only (never the deployer's real patient or address).
+variables {
+  project_id                  = "example-project"
+  patient_id                  = "PAT-0001"
+  patient_assigning_authority = "EXAMPLE"
+  patient_family_name         = "Example"
+  patient_given_name          = "Pat"
+  time_zone                   = "America/New_York"
+  alert_email                 = "alerts@example.com"
+
+  v2_to_fhir_image  = "us-central1-docker.pkg.dev/example-project/pulsebridge-services/v2-to-fhir@sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  health_sync_image = "us-central1-docker.pkg.dev/example-project/pulsebridge-services/health-sync@sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  fhir_proxy_image  = "us-central1-docker.pkg.dev/example-project/pulsebridge-services/fhir-proxy@sha256:4444444444444444444444444444444444444444444444444444444444444444"
+  cuff_sim_image    = "us-central1-docker.pkg.dev/example-project/pulsebridge-services/cuff-sim@sha256:5555555555555555555555555555555555555555555555555555555555555555"
+}
+
+run "defaults_are_a_real_data_prod_stack_with_ingest_off" {
+  command = plan
+
+  assert {
+    condition     = output.environment == "prod"
+    error_message = "This root is prod."
+  }
+  assert {
+    condition     = output.health_sync_service_name == "pulsebridge-health-sync" && output.seed_job_name == null
+    error_message = "prod defaults to use_synthetic_data = false: health-sync and no seeder."
+  }
+  assert {
+    condition     = output.ingest_enabled == false && output.scheduler_job_names == []
+    error_message = "ingest_enabled defaults to false in prod too."
+  }
+}
+
+run "prod_refuses_the_reviewer_password_from_tfvars" {
+  command = plan
+
+  variables {
+    reviewer_password            = "a-synthetic-test-password-0123"
+    reviewer_password_wo_version = 1
+  }
+
+  # The password itself is refused first; the version's rules, which reference it, then do not run.
+  expect_failures = [var.reviewer_password]
+}
+
+run "prod_refuses_a_reviewer_password_version_from_tfvars" {
+  command = plan
+
+  variables {
+    reviewer_password_wo_version = 1
+  }
+
+  expect_failures = [var.reviewer_password_wo_version]
+}
+
+run "prod_refuses_a_syn_patient_with_real_data" {
+  command = plan
+
+  variables {
+    patient_id = "SYN-0001"
+  }
+
+  expect_failures = [var.patient_id]
+}
+
+run "prod_can_run_synthetic_data_if_asked" {
+  command = plan
+
+  variables {
+    use_synthetic_data  = true
+    patient_id          = "SYN-0001"
+    patient_family_name = null
+    patient_given_name  = null
+    seed_image          = "us-central1-docker.pkg.dev/example-project/pulsebridge-services/seed@sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  }
+
+  assert {
+    condition     = output.seed_job_name == "pulsebridge-seed"
+    error_message = "use_synthetic_data = true must work in prod as well (it is a default, not a lock)."
+  }
+}
+
+run "patient_check_fires_when_ingestion_and_phr_disagree" {
+  command = plan
+
+  override_module {
+    target = module.stack
+    outputs = {
+      patient_wiring = {
+        ingestion = { id = "PAT-0001", assigning_authority = "EXAMPLE" }
+        phr       = { id = "PAT-0001", assigning_authority = "OTHER" }
+      }
+    }
+  }
+
+  expect_failures = [check.one_patient_for_the_cuff_path]
+}
+
+run "prod_refuses_a_reviewer_password_even_without_a_version" {
+  command = plan
+
+  variables {
+    reviewer_password = "a-synthetic-test-password-0123"
+  }
+
+  expect_failures = [var.reviewer_password]
+}

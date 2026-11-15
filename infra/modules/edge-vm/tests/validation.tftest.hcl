@@ -130,3 +130,11 @@ run "bad_hook_name_is_rejected" {
   }
   expect_failures = [var.hooks]
 }
+
+run "negative_snapshot_days_are_rejected" {
+  command = plan
+  variables {
+    data_disk_snapshot_days = -1
+  }
+  expect_failures = [var.data_disk_snapshot_days]
+}

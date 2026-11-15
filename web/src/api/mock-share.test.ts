@@ -65,7 +65,8 @@ describe('mock share: the sequence', () => {
     const again = await c.share({ observationId: idOf(final[0]) });
     expect(again.outcome).toBe('already-shared');
     expect(again.steps.map((s) => `${s.step}:${s.result}`)).toEqual([
-      'token:ok',
+      // The first share's token is still valid: reused, no token request (as the proxy).
+      'token:reused',
       'patient-search:found',
       'encounter-search:found',
       'observation-create:already-shared',
@@ -239,5 +240,17 @@ describe('mock share: refusals and failures', () => {
     expect(r.outcome).toBe('shared');
     expect(r.readBack.observation.stored).toBeNull();
     expect(r.steps.at(-1)).toMatchObject({ step: 'observation-read', result: 'failed' });
+  });
+});
+
+describe('mock share as T15 built it', () => {
+  it('a heart-rate window is sent at its start, without a period', async () => {
+    const { c, final } = await setup();
+    const window = final.find((o) => o.effectivePeriod !== undefined);
+    if (!window) throw new Error('no heart-rate window in the mock data');
+    const result = await c.share({ observationId: idOf(window) });
+    const sent = result.readBack.observation.sent;
+    expect(sent?.effectiveDateTime).toBe(window.effectivePeriod?.start);
+    expect(sent?.effectivePeriod).toBeUndefined();
   });
 });

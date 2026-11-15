@@ -154,3 +154,44 @@ describe('status strip: the proxy as built (T19, amendments 9, 10, 11, 13, 15)',
     expect(st.root.textContent).toContain('You are still logged in');
   });
 });
+
+describe("status strip: OpenEMR's probe codes (T15)", () => {
+  const openemr = (detail: string) =>
+    status({}, { openemr: { reachable: false, checkedAt: '2026-03-10T12:00:00Z', detail } });
+  const openemrItem = (s: StatusSummary) =>
+    [...strip(s).querySelectorAll('.status-item')].find((li) => li.textContent.includes('OpenEMR'));
+
+  it.each([
+    [
+      'not-configured',
+      'Not configured',
+      'neutral',
+      'Sharing with the clinic is not set up on this server.',
+    ],
+    ['client-not-registered', 'Not registered yet', 'neutral', null],
+    ['client-document-invalid', 'Misconfigured', 'warn', null],
+    ['tls-verification-failed', 'Certificate mismatch', 'warn', null],
+    ['not-ready', 'Starting or not ready', 'warn', null],
+    ['timeout', 'Unreachable', 'warn', null],
+    ['unavailable', 'Unreachable', 'warn', null],
+  ])('%s is "%s" (%s)', (detail, words, tone, sentence) => {
+    const s = openemr(detail);
+    expect(values(s)).toContain(`OpenEMR: ${words}`);
+    expect(openemrItem(s)?.className).toContain(`status-item--${tone}`);
+    if (sentence) expect(text(s)).toContain(sentence);
+  });
+
+  it('the FHIR store keeps its own wording: a store code is never read as an OpenEMR state', () => {
+    const s = status(
+      {},
+      {
+        fhirStore: {
+          reachable: false,
+          checkedAt: '2026-03-10T12:00:00Z',
+          detail: 'not-configured',
+        },
+      },
+    );
+    expect(values(s)).toContain('FHIR store: Unreachable');
+  });
+});

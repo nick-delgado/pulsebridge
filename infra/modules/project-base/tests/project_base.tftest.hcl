@@ -41,6 +41,9 @@ override_resource {
 variables {
   # Synthetic values: no real project is involved.
   project_id = "example-project-123"
+  # Most runs pass no edge VM account; the grant needs one (a precondition), so it is off here
+  # and turned on by the runs that test it.
+  grant_edge_vm_mirror_reader = false
 }
 
 # --- APIs ----------------------------------------------------------------------------------------
@@ -362,6 +365,7 @@ run "dockerhub_mirror_can_be_turned_off" {
   variables {
     create_dockerhub_mirror       = false
     edge_vm_service_account_email = "edge-vm@example-project-123.iam.gserviceaccount.com"
+    grant_edge_vm_mirror_reader   = true
   }
 
   assert {
@@ -382,6 +386,7 @@ run "edge_vm_account_can_read_the_mirror_only" {
 
   variables {
     edge_vm_service_account_email = "edge-vm@other-identity-project.iam.gserviceaccount.com"
+    grant_edge_vm_mirror_reader   = true
   }
 
   assert {
@@ -401,11 +406,38 @@ run "edge_vm_account_can_read_the_mirror_only" {
   }
 }
 
-run "no_mirror_grant_without_an_edge_vm_account" {
+run "no_mirror_grant_when_switched_off" {
   command = plan
+
+  variables {
+    grant_edge_vm_mirror_reader = false
+  }
 
   assert {
     condition     = length(google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader) == 0
-    error_message = "No IAM binding may be created when no edge VM account is given."
+    error_message = "No IAM binding may be created when grant_edge_vm_mirror_reader is false."
   }
+}
+
+# The env roots pass module identity's email, which is unknown until the account exists. The
+# count must not depend on it, or the first plan fails with "Invalid count argument" (found in
+# T25). The harness creates the account in the same plan, so the email really is unknown here.
+run "mirror_grant_count_is_known_with_an_unknown_email" {
+  command = plan
+
+  module {
+    source = "./tests/unknown_email"
+  }
+}
+
+run "mirror_grant_without_an_account_is_refused" {
+  command = plan
+
+  variables {
+    grant_edge_vm_mirror_reader = true
+  }
+
+  # grant_edge_vm_mirror_reader defaults to true; without the account the precondition stops the
+  # plan instead of silently leaving the VM unable to pull.
+  expect_failures = [google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader]
 }

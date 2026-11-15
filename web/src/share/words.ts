@@ -59,6 +59,8 @@ export function stepResult(step: ShareStep): { text: string; tone: Tone } {
             : `Failed (HTTP ${String(step.response.status)})`,
         tone: 'error',
       };
+    case 'reused':
+      return { text: 'Token reused from the server’s memory: no request sent', tone: 'ok' };
     case 'unknown':
       return { text: 'Result not recognised by this page', tone: 'warn' };
     case 'ok':
@@ -75,12 +77,13 @@ export const NOT_SHOWN_NOTE = 'Credentials are replaced by "[not shown]".';
 /** The sentences of the confirm step. */
 export const CONFIRM_SENT = [
   'The reading itself: its code, value or values, time, category and status (final), as one FHIR Observation.',
+  'A heart rate is sent as one time, the start of its five-minute window, with a note of how its value was computed (the average of the watch’s samples); OpenEMR keeps the average only, not the minimum and maximum.',
   'Linked to the clinic’s own copy of the Patient and to an Encounter for the reading’s day, which the proxy finds and reuses, or creates.',
   'The Patient, only if the clinic does not have it yet: its patient identifier (PT), official name, gender and birth date.',
 ] as const;
 
 export const CONFIRM_LEFT_OUT =
-  'Left out: the device (the watch or the cuff), the performer (it names the Patient in this record), the reading’s identifiers, this store’s own id and metadata, and the Patient’s Google Health user id. Nothing that points back into this record goes to the clinic.';
+  'Left out: the device (the watch or the cuff), the performer (it names the Patient in this record), the reading’s identifiers, this store’s own id and metadata, and the Patient’s Google Health user id. Apart from the Patient’s PulseBridge identifier, which the clinic uses to find the Patient, nothing that points back into this record goes to the clinic.';
 
 /**
  * What a repeat share does. Spike S1 saw OpenEMR refuse a repeated BLOOD-PRESSURE reading (same
@@ -107,6 +110,11 @@ export function expectedShared(obs: Observation): Observation {
   delete copy.identifier;
   delete copy.device;
   delete copy.performer;
+  // OpenEMR reads only effectiveDateTime: a heart-rate window is sent at its start (T15).
+  if (copy.effectivePeriod?.start !== undefined && copy.effectiveDateTime === undefined) {
+    copy.effectiveDateTime = copy.effectivePeriod.start;
+  }
+  delete copy.effectivePeriod;
   copy.subject = { reference: 'Patient/<the clinic’s id for the Patient>' };
   copy.encounter = { reference: 'Encounter/<the clinic’s id for the Encounter>' };
   return copy;
@@ -118,15 +126,21 @@ export function resultHeadline(result: ShareResult): string {
     (s) => s.step === 'patient-search' && s.result === 'found',
   );
   const readBackFailed = result.readBack.observation.stored === null;
+  const create = result.steps.find((s) => s.step === 'observation-create');
+  // Without the read-back the page has only OpenEMR's word for it: say so, claim no more.
   const lead =
     result.outcome === 'shared'
-      ? 'Shared: OpenEMR stored the reading.'
+      ? readBackFailed
+        ? `OpenEMR answered that it stored the reading (HTTP ${String(create?.response.status ?? 201)}), but it could not be read back to confirm.`
+        : 'Shared: OpenEMR stored the reading.'
       : 'Already shared: OpenEMR already held this reading, so nothing new was written.';
   const patient = patientFound
     ? ' The Patient already existed there and was not created again.'
     : ' The Patient was created there for this first share.';
   const back = readBackFailed
-    ? ' Reading it back failed, so what OpenEMR stored cannot be shown.'
+    ? result.outcome === 'shared'
+      ? ''
+      : ' Reading it back failed, so what OpenEMR stored cannot be shown.'
     : ' What it stored is shown under "As stored in OpenEMR".';
   return `${lead}${patient}${back}`;
 }
@@ -147,6 +161,7 @@ export function failureSentences(error: ShareError): string[] {
       'invalid-body':
         'the request was not in the form the server expects. This is a fault in the page.',
       'share-not-configured': 'sharing with the clinic is not configured on the server.',
+      'share-busy': 'another share was in progress on the server; try again in a few seconds.',
     };
     const reason = why[error.reason] ?? `${clause(error.message)}.`;
     return [`Not shared: ${reason}`, 'Nothing was sent to the clinic.'];
@@ -173,6 +188,9 @@ export function failureSentences(error: ShareError): string[] {
   ];
   const done: string[] = [];
   if (ok('token')) done.push('an access token was issued');
+  if (steps.some((s) => s.step === 'token' && s.result === 'reused')) {
+    done.push('an access token from the server’s memory was used');
+  }
   if (ok('patient-create')) done.push('a Patient was created in OpenEMR');
   if (steps.some((s) => s.step === 'patient-search' && s.result === 'found')) {
     done.push('the Patient was found in OpenEMR');
@@ -191,8 +209,13 @@ export function failureSentences(error: ShareError): string[] {
     out.push(
       `It is not known whether OpenEMR stored the reading: its answer did not arrive. ${SAFE_AGAIN}`,
     );
-  } else {
+  } else if (observationStep.response.status >= 400 && observationStep.response.status < 500) {
     out.push('Not done: OpenEMR refused the reading, so it was not stored.');
+  } else {
+    // A 5xx, or a 2xx the proxy could not understand: OpenEMR may have stored it.
+    out.push(
+      `It is not known whether OpenEMR stored the reading (HTTP ${String(observationStep.response.status)}). ${SAFE_AGAIN}`,
+    );
   }
   return out;
 }

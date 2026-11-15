@@ -602,6 +602,8 @@ export type ShareStepName =
 /**
  * What one step achieved:
  * - `ok`: done as asked (a token, a 201, a read);
+ * - `reused`: only for `token`: an access token still valid in the proxy's memory was used, so
+ *   no token request was sent (the step has no bodies and status 0);
  * - `found` / `not-found`: a search's answer (the Patient already existed, or will be created;
  *   an Encounter will be reused, or created);
  * - `already-shared`: OpenEMR refused the Observation as a repeat of one it holds (its
@@ -611,7 +613,7 @@ export type ShareStepName =
  *   page then claims nothing about the step.
  */
 export type ShareStepResult =
-  'ok' | 'found' | 'not-found' | 'already-shared' | 'failed' | 'unknown';
+  'ok' | 'reused' | 'found' | 'not-found' | 'already-shared' | 'failed' | 'unknown';
 
 /**
  * One step of the share trace, as T14's `extensions.trace_step` builds it once T15 has applied
@@ -725,6 +727,10 @@ export type ShareFailureReason =
   | 'openemr-timeout'
   /** 503: the share is not configured on the server (T15's variables or key missing). */
   | 'share-not-configured'
+  /** 503, before OpenEMR is called: another share was in progress on this proxy instance. */
+  | 'share-busy'
+  /** 502, with the steps so far: the proxy itself failed after OpenEMR was called. */
+  | 'share-internal-error'
   /** Any other status or reason (including the gate's 503 `login-not-configured`). */
   | 'other';
 

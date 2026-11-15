@@ -100,7 +100,56 @@ VARIABLES: dict[str, Variable] = {
     "STATUS_CACHE_SECONDS": Variable(
         "How long the store-derived status (counts, newest write) is reused, 0 to 600", "60"
     ),
+    # The share to OpenEMR (T15). Optional as a group: all five or none (OPENEMR_GROUP). The names
+    # are the ones module phr passes (infra/modules/phr/fhir_proxy.tf).
+    "OPENEMR_SITE_ADDRESS": Variable(
+        "OpenEMR's site_addr_oath: https://<the edge VM's internal IP>[:port], no path (module "
+        "openemr's site_address). The base of every OpenEMR call; never taken from a request",
+        "",
+    ),
+    "OPENEMR_TOKEN_URL": Variable(
+        "OpenEMR's token endpoint, exactly OPENEMR_SITE_ADDRESS + /oauth2/default/token; also "
+        "the signed assertion's aud (spike S1)",
+        "",
+    ),
+    "OPENEMR_FHIR_BASE_URL": Variable(
+        "OpenEMR's FHIR R4 base, exactly OPENEMR_SITE_ADDRESS + /apis/default/fhir", ""
+    ),
+    "OPENEMR_SCOPES": Variable(
+        "The space-separated system/ scopes the client is registered with (module openemr's "
+        "scopes); they must cover what the share does, and the client document must list the "
+        "same set",
+        "",
+    ),
+    "OPENEMR_CLIENT_FILE": Variable(
+        "Absolute path of the mounted client document (module openemr's client secret, version "
+        "latest), read on every share",
+        "",
+    ),
+    "OPENEMR_TIMEOUT_SECONDS": Variable(
+        "Timeout of one OpenEMR request, 1 to 30 (each is also capped by the request budget)",
+        "10",
+    ),
 }
+
+OPENEMR_GROUP = (
+    "OPENEMR_SITE_ADDRESS",
+    "OPENEMR_TOKEN_URL",
+    "OPENEMR_FHIR_BASE_URL",
+    "OPENEMR_SCOPES",
+    "OPENEMR_CLIENT_FILE",
+)
+# OpenEMR's fixed paths under site_addr_oath (spike S1; module openemr's outputs).
+OPENEMR_TOKEN_PATH = "/oauth2/default/token"  # noqa: S105 - a path, not a secret
+OPENEMR_FHIR_PATH = "/apis/default/fhir"
+# What the share does with each resource type (README "Security"): search and read the Patient
+# and create it if absent; the same for the Encounter; create the Observation and read it back.
+# OpenEMR 8.5.0 reads SMART v1 suffixes `read` as read + search and `write` as create + update +
+# delete, and a SMART v2 suffix as an ordered subset of c r u d s (module openemr, "Scopes").
+SHARE_NEEDS = {"Patient": set("crs"), "Encounter": set("crs"), "Observation": set("cr")}
+_SCOPE = re.compile(
+    r"system/(Patient|Encounter|Observation)\.(read|write|(?=[cruds])c?r?u?d?s?)", re.ASCII
+)
 
 # The forward timeout must cover cuff-sim's worst case (services/cuff-sim/README.md, "Time
 # limits"): MLLP 5 + 4 x T, HTTPS 8 x T, T = its HTTPS_TIMEOUT_SECONDS. Behind Firebase Hosting
@@ -139,6 +188,30 @@ class SamplePatient:
 
 
 @dataclass(frozen=True)
+class OpenEmrSettings:
+    """Where OpenEMR is and how to reach it (T15). The client's key, ID and OpenEMR's TLS
+    certificate are NOT here: they are in the client document at ``client_file``, read on every
+    share, because a re-registration on the VM replaces them together."""
+
+    site_address: str  # https://<ip>[:port], no trailing slash: OpenEMR's site_addr_oath
+    host: str  # the IP address, without brackets
+    port: int
+    token_url: str
+    fhir_base_url: str
+    scopes: tuple[str, ...]
+    client_file: str
+    timeout: float = 10.0
+
+    @property
+    def fhir_path(self) -> str:
+        return OPENEMR_FHIR_PATH
+
+    @property
+    def token_path(self) -> str:
+        return OPENEMR_TOKEN_PATH
+
+
+@dataclass(frozen=True)
 class ServiceConfig:
     project_id: str
     location: str
@@ -168,6 +241,7 @@ class ServiceConfig:
     health_sync_timeout: float = 25.0
     request_timeout: float = 120.0
     status_cache_seconds: float = 60.0
+    openemr: OpenEmrSettings | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> ServiceConfig:
@@ -258,6 +332,7 @@ class ServiceConfig:
             health_sync_timeout=_number("HEALTH_SYNC_TIMEOUT_SECONDS", values, 1, 60),
             request_timeout=request_timeout,
             status_cache_seconds=_number("STATUS_CACHE_SECONDS", values, 0, 600),
+            openemr=openemr_settings(values),
         )
 
 
@@ -345,3 +420,98 @@ def _origins(text: str) -> tuple[str, ...]:
     if not origins:
         raise ConfigError("ALLOWED_ORIGINS must name at least one origin")
     return tuple(origins)
+
+
+def openemr_settings(values: Mapping[str, str]) -> OpenEmrSettings | None:
+    """The OpenEMR group (T15): all five variables, or none (then sharing answers 503
+    ``share-not-configured`` and the status strip says ``not-configured``). Checked here, at
+    start-up, so a wrong address fails the deploy; errors name variables, never values."""
+    given = [n for n in OPENEMR_GROUP if values.get(n)]
+    if not given:
+        return None
+    if len(given) != len(OPENEMR_GROUP):
+        missing = [n for n in OPENEMR_GROUP if n not in given]
+        raise ConfigError(f"set all or none of the OpenEMR variables; missing {', '.join(missing)}")
+
+    site = values["OPENEMR_SITE_ADDRESS"].rstrip("/")
+    try:
+        parts = urlsplit(site)
+        port = parts.port
+    except ValueError:
+        raise ConfigError("OPENEMR_SITE_ADDRESS must be https://<IP address>[:port]") from None
+    host = parts.hostname or ""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    # The edge VM's internal address (D14): a private IP literal, the form module openemr's
+    # certificate names (subject alternative name IP:<internal_ip>). A host name would need DNS
+    # the VPC does not have, and a public address would mean OpenEMR is exposed.
+    if (
+        parts.scheme != "https"
+        or address is None
+        or not address.is_private
+        or parts.username
+        or parts.password
+        or parts.path
+        or parts.query
+        or parts.fragment
+        or "*" in site
+    ):
+        raise ConfigError(
+            "OPENEMR_SITE_ADDRESS must be https://<private IP address>[:port] with no path, "
+            "query or credentials"
+        )
+    netloc = f"[{host}]" if address.version == 6 else host
+    site = f"https://{netloc}" + (f":{port}" if port is not None else "")
+    for name, path in (
+        ("OPENEMR_TOKEN_URL", OPENEMR_TOKEN_PATH),
+        ("OPENEMR_FHIR_BASE_URL", OPENEMR_FHIR_PATH),
+    ):
+        if values[name].rstrip("/") != site + path:
+            raise ConfigError(f"{name} must be OPENEMR_SITE_ADDRESS followed by {path}")
+
+    scopes = values["OPENEMR_SCOPES"].split()
+    if (
+        not scopes
+        or len(scopes) != len(set(scopes))
+        or not all(_SCOPE.fullmatch(s) for s in scopes)
+        or len(values["OPENEMR_SCOPES"]) > 512
+    ):
+        raise ConfigError(
+            "OPENEMR_SCOPES must be distinct system/Patient, system/Encounter or "
+            "system/Observation scopes (.read, .write or an ordered cruds subset)"
+        )
+    granted = scope_permissions(scopes)
+    lacking = sorted(t for t, need in SHARE_NEEDS.items() if not need <= granted.get(t, set()))
+    if lacking:
+        raise ConfigError(
+            f"OPENEMR_SCOPES does not allow what the share does on {', '.join(lacking)}"
+        )
+
+    if not values["OPENEMR_CLIENT_FILE"].startswith("/"):
+        raise ConfigError("OPENEMR_CLIENT_FILE must be an absolute path")
+    return OpenEmrSettings(
+        site_address=site,
+        host=host,
+        port=port if port is not None else 443,
+        token_url=site + OPENEMR_TOKEN_PATH,
+        fhir_base_url=site + OPENEMR_FHIR_PATH,
+        scopes=tuple(scopes),
+        client_file=values["OPENEMR_CLIENT_FILE"],
+        timeout=_number("OPENEMR_TIMEOUT_SECONDS", values, 1, 30),
+    )
+
+
+def scope_permissions(scopes: list[str] | tuple[str, ...]) -> dict[str, set[str]]:
+    """Resource type -> the letters of c r u d s the scopes grant (OpenEMR 8.5.0's reading:
+    ``read`` = r s, ``write`` = c u d; SMART v2 letters as written)."""
+    granted: dict[str, set[str]] = {}
+    for scope in scopes:
+        match = _SCOPE.fullmatch(scope)
+        if match is None:
+            continue
+        resource, suffix = match.groups()
+        letters = {"read": set("rs"), "write": set("cud")}.get(suffix, set(suffix))
+        granted.setdefault(resource, set()).update(letters)
+    return granted

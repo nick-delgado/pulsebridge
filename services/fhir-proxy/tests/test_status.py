@@ -39,10 +39,11 @@ def test_health_sync_status_is_passed_on_with_state_renamed(harness, seed_heart_
     assert "googleHealth" not in body["watchSync"]
     assert body["observationCounts"] == {"watch": 4, "cuff": 0}
     assert body["fhirStore"]["reachable"] is True
+    # The share extension (T15) is installed; with no OpenEMR settings its probe says so.
     assert body["openemr"] == {
         "reachable": False,
         "checkedAt": "2026-01-02T12:00:00Z",
-        "detail": "not-checked",
+        "detail": "not-configured",
     }
     # health-sync was called with the proxy's identity token, audience = its URL.
     (call,) = harness.sender.calls

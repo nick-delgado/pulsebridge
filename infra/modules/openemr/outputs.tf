@@ -68,6 +68,11 @@ output "client_secret_id" {
   value       = var.secret_ids.client_private_key
 }
 
+output "client_secret_name" {
+  description = "The same secret's short ID (the part after projects/<project>/secrets/), which is what module phr's openemr.client_secret_id and a Cloud Run secret volume take."
+  value       = element(split("/", var.secret_ids.client_private_key), 3)
+}
+
 output "image" {
   description = "Full OpenEMR image reference the VM pulls (through the Docker Hub mirror, by digest)."
   value       = local.image

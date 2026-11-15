@@ -482,3 +482,29 @@ describe('ids and references', () => {
     }
   });
 });
+
+describe('a reused token in the trace (T15)', () => {
+  it('shows the token step as reused, with no "no answer" request line', async () => {
+    const m = mount();
+    await toConfirm(m);
+    m.send()?.click();
+    const shared = result();
+    const token = shared.steps[0];
+    if (!token) throw new Error('no token step');
+    shared.steps[0] = {
+      ...token,
+      result: 'reused',
+      request: { ...token.request, body: null },
+      response: { status: 0, body: null },
+    };
+    m.shares[0]?.answer.resolve(shared);
+    await flush();
+    const first = m.slots.trace.querySelector('.share-step');
+    expect(first?.querySelector('.share-step__result')?.textContent).toBe(
+      'Token reused from the server’s memory: no request sent',
+    );
+    const line = first?.querySelector('.share-step__request')?.textContent ?? '';
+    expect(line).toContain('not sent (token reused)');
+    expect(line).not.toContain('no answer');
+  });
+});
