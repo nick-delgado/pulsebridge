@@ -1,5 +1,5 @@
 output "service_account_emails" {
-  description = "Service account email per workload, keyed health-sync, v2-to-fhir, cuff-sim, fhir-proxy, edge-vm, scheduler-invoker, pubsub-push (and seeder when created). Other modules use these for resource-level bindings and as the identity their resources run as."
+  description = "Service account email per workload, keyed health-sync, v2-to-fhir, cuff-sim, fhir-proxy, edge-vm, scheduler-invoker, pubsub-push (and seeder and build when created). Other modules use these for resource-level bindings and as the identity their resources run as."
   value       = { for k, sa in google_service_account.this : k => sa.email }
 }
 

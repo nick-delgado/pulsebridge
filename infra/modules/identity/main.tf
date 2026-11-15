@@ -49,16 +49,30 @@ locals {
         display_name = "PulseBridge synthetic-data seeder"
         description  = "Synthetic-data seeder (T09): writes synthetic heart-rate Observations when use_synthetic_data is on."
       }
+    } : {},
+    # T26: Cloud Build runs cloudbuild.yaml as this account (the trigger in project-base), not as
+    # the Compute Engine default account or the deployer, both of which hold far more than a build
+    # needs (services/README.md, "Who runs builds").
+    var.create_build_account ? {
+      "build" = {
+        display_name = "PulseBridge image build"
+        description  = "Cloud Build (T24, T26): builds the service images from cloudbuild.yaml and pushes them to the services repository. Writer there, reader on the Docker Hub mirror, log writer; nothing else."
+      }
     } : {}
   )
 
   # Project-level roles. Kept to the minimum: only roles with no narrower resource to bind to.
   # Cloud Run services need none here; Cloud Run collects their stdout logs itself.
-  project_roles = {
-    # The guest agent forwards the startup script's output (including the adapter crash-loop
-    # check, T21) to Cloud Logging; writing log entries is a project-level permission.
-    "edge-vm" = ["roles/logging.logWriter"]
-  }
+  project_roles = merge(
+    {
+      # The guest agent forwards the startup script's output (including the adapter crash-loop
+      # check, T21) to Cloud Logging; writing log entries is a project-level permission.
+      "edge-vm" = ["roles/logging.logWriter"]
+    },
+    # A build with a user-specified service account must send its log to Cloud Logging
+    # (cloudbuild.yaml, `logging: CLOUD_LOGGING_ONLY`), which again is project-level.
+    var.create_build_account ? { "build" = ["roles/logging.logWriter"] } : {},
+  )
 
   project_role_bindings = {
     for pair in flatten([

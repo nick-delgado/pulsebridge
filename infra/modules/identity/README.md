@@ -4,12 +4,13 @@ Who each PulseBridge workload is, and which secrets it may read (task T04).
 
 This module creates:
 
-- **one service account per workload** (seven, plus an optional eighth for the synthetic-data
-  seeder);
+- **one service account per workload** (seven, plus an optional one for the synthetic-data
+  seeder and an optional one for image builds, T26);
 - **eight Secret Manager secrets without values**, each readable only by the account that needs
   it;
 - the IAM bindings on resources it owns itself: those secrets and its own service accounts; plus
-  one project-level grant (Cloud Logging for the edge VM);
+  one project-level grant (Cloud Logging for the edge VM; a second, the same role, for the build
+  account when it exists);
 - optionally, for dev only, a `reviewer-password` version, written through the write-only
   argument `secret_data_wo` so the value never enters Terraform state.
 
@@ -72,11 +73,14 @@ on exactly that resource, for the account `module.identity.service_account_email
 | `scheduler-invoker` (synthetic data) | `roles/run.invoker` | Cloud Run job `seed` | `ingestion` (T20) | The identity in the OAuth token Scheduler uses to call `jobs.run` on the seeder job (`run.jobs.run`). health-sync and the seeder never exist together, so it holds one of the two grants. |
 | `pubsub-push` | `roles/run.invoker` | Cloud Run service `v2-to-fhir` | `ingestion` (T20) | The identity in the push subscription's OIDC token (`push_service_account_email` in T05). It can do nothing else. |
 | `seeder` (only if `create_seeder_account`) | `roles/healthcare.fhirResourceEditor` | the FHIR store | `healthcare` (T05) | T09 writes synthetic Observations. |
+| `build` (only if `create_build_account`, T26) | `roles/logging.logWriter` | the project | **this module** | Cloud Build with a user-specified service account must log to Cloud Logging (`cloudbuild.yaml`: `logging: CLOUD_LOGGING_ONLY`). |
+| `build` | `roles/artifactregistry.writer` | the services repository only | `project-base` (T26) | Push the images, read existing tags, add a tag to an existing image. |
+| `build` | `roles/artifactregistry.reader` | the Docker Hub mirror only | `project-base` (T26) | Pull (and cache) the base image. |
 | Pub/Sub service agent `service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com` (`grant_pubsub_token_creator`, default true) | `roles/iam.serviceAccountTokenCreator` | the `pubsub-push` account only | **this module** (single owner) | Lets Pub/Sub sign the push OIDC token. Required in projects created before 8 April 2021; harmless in newer ones, and scoped to one account. |
 
 In particular: no project-level `roles/owner`, `roles/editor`, admin, IAM, Secret Manager,
 Healthcare or Cloud Run role; `cuff-sim`, `v2-to-fhir`, `scheduler-invoker`, `pubsub-push` and
-`seeder` read no secret; the only write access to any secret is `edge-vm` adding versions to the
+`seeder` (and `build`) read no secret; the only write access to any secret is `edge-vm` adding versions to the
 OpenEMR key.
 
 **The risk of the OpenEMR key grant, plainly.** The VM generates the key pair and uploads the
@@ -193,8 +197,8 @@ Rules for dev (not verified against a real apply):
 ## Usage from other modules
 
 `service_account_emails` is a map keyed by the workload names (`health-sync`, `v2-to-fhir`,
-`cuff-sim`, `fhir-proxy`, `edge-vm`, `scheduler-invoker`, `pubsub-push`, and `seeder` when
-created). Its keys are known at plan time, so it can be passed whole to a module that uses
+`cuff-sim`, `fhir-proxy`, `edge-vm`, `scheduler-invoker`, `pubsub-push`, and `seeder` and
+`build` when created). Its keys are known at plan time, so it can be passed whole to a module that uses
 `for_each` over the keys it needs (a test checks this). The healthcare module (T05) takes it
 like this:
 
@@ -221,12 +225,14 @@ provider could not reach a project. `state_scan.py` removes them itself.
 ```bash
 env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT \
     -u GOOGLE_PROJECT -u GOOGLE_CREDENTIALS HOME="$(mktemp -d)" GCE_METADATA_HOST=127.0.0.1:9 \
-    sh -c 'terraform init -backend=false && terraform test'   # 27 runs, mock Google provider
+    sh -c 'terraform init -backend=false && terraform test'   # 29 runs, mock Google provider
 python3 tests/state_scan.py                                    # reviewer password absent from state
 ```
 
 - `tests/service_accounts.tftest.hcl`: exactly one account per workload; the email keys are
-  known at plan time; the only project-level grant is the edge VM's log writer; Token Creator is
+  known at plan time; the only project-level grant is the edge VM's log writer; no build account by
+  default, and with `create_build_account` exactly one (`<prefix>-build`) whose only project grant
+  is the log writer and which reads and writes no secret; Token Creator is
   on by default, can be turned off and is on the push account only; `project_id` and
   `name_prefix` validation.
 - `tests/secrets.tftest.hcl`: the eight secrets; no versions by default; the accessor bindings
@@ -279,6 +285,7 @@ No modules.
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|:--------:|
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the GCP project that holds the service accounts and secrets. | `string` | n/a | yes |
+| <a name="input_create_build_account"></a> [create\_build\_account](#input\_create\_build\_account) | Create the dedicated image-build service account ("<prefix>-build", key "build", T26): roles/logging.logWriter here; writer on the services repository and reader on the Docker Hub mirror in project-base. Nothing else. | `bool` | `false` | no |
 | <a name="input_create_seeder_account"></a> [create\_seeder\_account](#input\_create\_seeder\_account) | Create a service account for the synthetic-data seeder (task T09). Set it to the env root's use\_synthetic\_data flag, so a deployment that uses real watch data has no spare identity that can write to the FHIR store. | `bool` | `false` | no |
 | <a name="input_edge_vm_writes_openemr_key"></a> [edge\_vm\_writes\_openemr\_key](#input\_edge\_vm\_writes\_openemr\_key) | Let the edge VM's account add versions to the openemr-client-private-key secret (roles/secretmanager.secretVersionAdder) and see whether one exists (roles/secretmanager.viewer, metadata only), both on that one secret. The OpenEMR client registration script (T23) runs on the VM, generates the key pair there and uploads the private key. The VM still cannot read the key back: it is not an accessor of that secret. | `bool` | `true` | no |
 | <a name="input_grant_pubsub_token_creator"></a> [grant\_pubsub\_token\_creator](#input\_grant\_pubsub\_token\_creator) | Let the project's Pub/Sub service agent (service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com) mint OIDC tokens for the pubsub-push account. Projects created before 8 April 2021 need it; newer ones already allow it, so granting it is harmless there. On by default because it is scoped to the pubsub-push account only, never the project. This module is the only owner of this grant; the healthcare module must not also create it. | `bool` | `true` | no |
@@ -296,7 +303,7 @@ No modules.
 | <a name="output_secret_ids"></a> [secret\_ids](#output\_secret\_ids) | Secret ID (the short name, e.g. "pb-reviewer-password") per secret key. Cloud Run secret references and the scripts that add versions use this. |
 | <a name="output_secret_readers"></a> [secret\_readers](#output\_secret\_readers) | Which workloads may read each secret (the accessor bindings this module creates). Informational, for READMEs and checks in other modules. |
 | <a name="output_secret_resource_ids"></a> [secret\_resource\_ids](#output\_secret\_resource\_ids) | Full secret resource ID (projects/<project>/secrets/<secret\_id>) per secret key. |
-| <a name="output_service_account_emails"></a> [service\_account\_emails](#output\_service\_account\_emails) | Service account email per workload, keyed health-sync, v2-to-fhir, cuff-sim, fhir-proxy, edge-vm, scheduler-invoker, pubsub-push (and seeder when created). Other modules use these for resource-level bindings and as the identity their resources run as. |
+| <a name="output_service_account_emails"></a> [service\_account\_emails](#output\_service\_account\_emails) | Service account email per workload, keyed health-sync, v2-to-fhir, cuff-sim, fhir-proxy, edge-vm, scheduler-invoker, pubsub-push (and seeder and build when created). Other modules use these for resource-level bindings and as the identity their resources run as. |
 | <a name="output_service_account_members"></a> [service\_account\_members](#output\_service\_account\_members) | IAM member string ("serviceAccount:<email>") per workload, ready for the `member` argument of a `google_*_iam_member` resource. |
 | <a name="output_service_account_names"></a> [service\_account\_names](#output\_service\_account\_names) | Fully qualified service account name (projects/<project>/serviceAccounts/<email>) per workload, for bindings on the account itself such as google\_service\_account\_iam\_member. |
 <!-- END_TF_DOCS -->
