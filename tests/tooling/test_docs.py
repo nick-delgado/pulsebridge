@@ -19,6 +19,12 @@ is something a reader would trip over:
    (CLAUDE.md: images never show real health data).
 8. The setup guide carries what the acceptance criteria require it to say (T25, T28).
 
+Out of scope, on purpose: repository paths and `make` targets written in plain prose (outside
+code) are not checked, because prose names things loosely ("the `web/` directory", "make the
+change"); every path a reader is meant to type or open is written as code or as a link. Shortcut
+reference links (`[name]` with no second bracket) are not checked either; this file's two docs
+use inline links, and full or collapsed reference links (`[text][ref]`, `[ref][]`) are checked.
+
 Pure text checks: no network, no credentials.
 """
 
@@ -34,6 +40,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 README = REPO / "README.md"
 SETUP = REPO / "docs" / "setup.md"
+# Exactly these two files. A test below asserts it, so an emptied tuple cannot silently skip the
+# parametrized tests.
 DOCS = (README, SETUP)
 IMAGES = REPO / "docs" / "images"
 
@@ -83,8 +91,11 @@ def prose(text: str) -> str:
 
 
 def inline_code(text: str) -> list[str]:
-    """Contents of inline `code` spans in the prose (single or double backticks)."""
-    return [m.group(2) for m in re.finditer(r"(`+)(.+?)\1", prose(text))]
+    """Contents of inline `code` spans in the prose (single or double backticks). A span may
+    wrap onto the next line, as Markdown allows inside a paragraph; the line break reads as a
+    space."""
+    span = re.compile(r"(`+)((?:(?!\n[ \t]*\n).)+?)\1", re.S)
+    return [re.sub(r"\s*\n\s*", " ", m.group(2)) for m in span.finditer(prose(text))]
 
 
 def code_text(text: str) -> str:
@@ -121,8 +132,22 @@ LINK = re.compile(r"!?\[(?P<text>[^\]]*)\]\((?P<target>[^)\s]+)(?:\s+\"[^\"]*\")
 def links(path: Path) -> list[tuple[str, str]]:
     """(link text, target) of every Markdown link and image outside code."""
     text = prose(path.read_text(encoding="utf-8"))
-    text = re.sub(r"(`+).+?\1", "", text)  # links inside inline code are not links
-    return [(m.group("text"), m.group("target")) for m in LINK.finditer(text)]
+    text = re.sub(r"(`+)(?:(?!\n[ \t]*\n).)+?\1", "", text, flags=re.S)  # code is not a link
+    found = [(m.group("text"), m.group("target")) for m in LINK.finditer(text)]
+    # Reference-style links: [text][ref] and [ref][] use a definition "[ref]: target".
+    definitions = {
+        m.group(1).lower(): m.group(2)
+        for m in re.finditer(
+            r"^[ ]{0,3}\[([^\]]+)\]:[ \t]*<?(\S+?)>?(?:[ \t]+\"[^\"]*\")?[ \t]*$", text, re.M
+        )
+    }
+    for m in re.finditer(r"\[([^\]]+)\]\[([^\]]*)\]", text):
+        ref = (m.group(2) or m.group(1)).lower()
+        if ref not in definitions:
+            found.append((m.group(1), f"#undefined-reference:{ref}"))
+    # Each definition's target is checked once, under its reference name.
+    found.extend((ref, target) for ref, target in definitions.items())
+    return found
 
 
 # ---- 1. links and anchors ------------------------------------------------------------------------
@@ -133,12 +158,15 @@ def link_problems(doc: Path) -> list[str]:
     for _text, target in links(doc):
         if re.match(r"^[a-z][a-z0-9+.-]*:", target):  # https:, mailto:, ...
             continue
+        if target.startswith("#undefined-reference:"):
+            problems.append(f"reference link [{target.split(':', 1)[1]}] has no definition")
+            continue
         path_part, _, anchor = target.partition("#")
         dest = (doc.parent / path_part).resolve() if path_part else doc
         if not dest.exists():
             problems.append(f"{target}: {path_part} does not exist")
             continue
-        if REPO not in dest.parents and dest != REPO:
+        if path_part and REPO not in dest.parents and dest != REPO:
             problems.append(f"{target}: points outside the repository")
             continue
         if anchor:
@@ -153,6 +181,23 @@ def link_problems(doc: Path) -> list[str]:
 def test_every_relative_link_and_anchor_resolves(doc: Path) -> None:
     assert links(doc), f"{doc.name} has no links at all; the parser is broken"
     assert link_problems(doc) == []
+
+
+def test_the_checked_documents_are_the_two_top_level_docs() -> None:
+    assert DOCS == (README, SETUP)
+    assert all(doc.is_file() for doc in DOCS)
+
+
+def test_reference_links_are_checked(tmp_path: Path) -> None:
+    """The reference-link parser's control: a defined reference resolves, an undefined one and a
+    definition pointing nowhere are reported."""
+    doc = tmp_path / "x.md"
+    doc.write_text("# Top\n\nSee [ok][a], [b][] and [gone][c].\n\n[a]: #top\n[b]: missing.md\n")
+    assert dict(links(doc))["a"] == "#top"
+    problems = link_problems(doc)
+    assert len(problems) == 2, problems
+    assert any("[c] has no definition" in p for p in problems)
+    assert any("missing.md does not exist" in p for p in problems)
 
 
 def test_slug_rules_match_github() -> None:
@@ -174,6 +219,7 @@ def test_slug_rules_match_github() -> None:
 PENDING_PATHS = {
     # Being built by T27 (secret version scripts).
     "scripts/secrets/": "T27",
+    "scripts/secrets/README.md": "T27",
     "scripts/secrets/set-secret.sh": "T27",
     "scripts/secrets/set-reviewer-password.sh": "T27",
     # Being built by T26 (Terraform CI/CD).
@@ -298,9 +344,26 @@ EMAIL = re.compile(r"[A-Za-z0-9._%+${}<>-]+@[A-Za-z0-9.${}<>-]+\.[a-z]{2,}")
 HOST = re.compile(r"(?<![\w.@-])(?:[a-z0-9][a-z0-9-]*\.)+(?:com|org|net|io|app|dev|cloud|me|ai)\b")
 PROJECT_PATH = re.compile(r"projects/([a-z][a-z0-9-]{4,28}[a-z0-9])\b")
 PROJECT_FLAG = re.compile(r"--project[= ]\"?([a-z][a-z0-9-]{4,28}[a-z0-9])\b")
-NUMBER = re.compile(r"(?<![\w.:-])\d{12}(?![\w.-])")
+NUMBER = re.compile(r"(?<![\w.:-])\d{12}(?![\w-]|\.\d)")
 BUCKET = re.compile(r"gs://([a-z0-9][a-z0-9._-]{2,})")
-GITHUB_OWNER = re.compile(r"github\.com/([A-Za-z0-9-]+)/")
+GITHUB_OWNER = re.compile(r"(?<![\w.])github\.com/([A-Za-z0-9-]+)/")
+PROJECT_ID = r"([a-z][a-z0-9-]{4,28}[a-z0-9])"
+# Other places a project ID shows up: a registry path, the gcloud default, the usual variables.
+PROJECT_ELSEWHERE = (
+    (re.compile(r"docker\.pkg\.dev/" + PROJECT_ID + r"/"), "registry path"),
+    (re.compile(r"gcloud config set project[ \t]+" + PROJECT_ID + r"\b"), "gcloud config"),
+    (
+        re.compile(
+            r"\b(?:CLOUDSDK_CORE_PROJECT|GOOGLE_CLOUD_PROJECT|GCP_PROJECT_ID)=[\"']?"
+            + PROJECT_ID
+            + r"\b"
+        ),
+        "variable assignment",
+    ),
+)
+# Hosts whose first label is a project or site ID: only these exact hosts may appear.
+PROJECT_HOST_SUFFIXES = ("web.app", "firebaseapp.com", "run.app")
+ALLOWED_PROJECT_HOSTS = {"example-project.web.app", "example-project.firebaseapp.com"}
 BILLING_ACCOUNT = re.compile(r"\b[0-9A-F]{6}-[0-9A-F]{6}-[0-9A-F]{6}\b")
 
 
@@ -315,7 +378,16 @@ def identity_problems(text: str) -> list[str]:
         host = m.group(0)
         if not any(host == s or host.endswith("." + s) for s in ALLOWED_DOMAIN_SUFFIXES):
             problems.append(f"host {host!r} is not a placeholder or a known tool host")
-    for regex, what in ((PROJECT_PATH, "resource path"), (PROJECT_FLAG, "--project flag")):
+        elif (
+            any(host.endswith("." + s) for s in PROJECT_HOST_SUFFIXES)
+            and host not in ALLOWED_PROJECT_HOSTS
+        ):
+            problems.append(f"host {host!r} names a project or site that is not a placeholder")
+    for regex, what in (
+        (PROJECT_PATH, "resource path"),
+        (PROJECT_FLAG, "--project flag"),
+        *PROJECT_ELSEWHERE,
+    ):
         for m in regex.finditer(text):
             if m.group(1) not in ALLOWED_PROJECTS:
                 problems.append(f"project {m.group(1)!r} in a {what} is not a placeholder")
@@ -350,10 +422,19 @@ def test_identity_scan_catches_the_obvious_cases() -> None:
             "gs://acme-health-42_cloudbuild",
             "https://github.com/some-person/pulsebridge",
             "billing 0A1B2C-3D4E5F-6A7B8C",
+            "project number 314159265359.",
+            "https://acme-health-42.web.app",
+            "us-central1-docker.pkg.dev/acme-health-42/pulsebridge-services/x",
+            "gcloud config set project acme-health-42",
+            "CLOUDSDK_CORE_PROJECT=acme-health-42 make test",
         ]
     )
-    assert len(identity_problems(sample)) == 8
-    clean = "you@example.com <project-id> gs://<project-id>_cloudbuild https://x.web.app"
+    assert len(identity_problems(sample)) == 13, identity_problems(sample)
+    clean = (
+        "you@example.com <project-id> gs://<project-id>_cloudbuild https://<site>.web.app "
+        "https://example-project.web.app CLOUDSDK_CORE_PROJECT=<project-id> "
+        "https://api.github.com/repos/<owner>/<name> version 1.2.3"
+    )
     assert identity_problems(clean) == []
 
 
@@ -377,11 +458,18 @@ def test_every_fenced_block_is_tagged(doc: Path) -> None:
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: p.name)
 def test_shell_commands_are_in_bash_blocks(doc: Path) -> None:
     """A block that runs gcloud, terraform, npm, make or cd must be tagged bash."""
-    command = re.compile(r"^\s*(gcloud|terraform|npm|npx|make|cd|cp|source)\b", re.M)
+    command = re.compile(
+        # A command word followed by a space and an argument (so a Mermaid node named "gh" or a
+        # directory listing does not count), or a variable read, an editor call or a script.
+        r"^\s*\(?\s*(?:(?:gcloud|terraform|npm|npx|make|cd|cp|source|chmod|export|git|gh)"
+        r"[ \t]+[\w\"'$~./-]|IFS=|\"\$\{EDITOR|(?:\./)?scripts/[\w/-]+\.sh)",
+        re.M,
+    )
     wrong = [
         (line, info)
         for line, info, body in fenced_blocks(doc.read_text(encoding="utf-8"))
-        if command.search(body) and info.split()[0] not in ("bash",)
+        # Mermaid node ids (gh, cd, ...) are not commands.
+        if info != "mermaid" and command.search(body) and info.split()[0] != "bash"
     ]
     assert wrong == [], f"{doc.name}: shell commands in non-bash blocks at {wrong}"
 
@@ -404,6 +492,8 @@ DIAGRAM_NODES = (
     "Firebase Hosting",
     "fhir-proxy",
     "OpenEMR",
+    "Google OAuth",
+    "seed job",
 )
 # The data flows, as edges "from --> to" (the label between them is free text).
 DIAGRAM_EDGES = (
@@ -419,6 +509,15 @@ DIAGRAM_EDGES = (
     ("proxy", "fhir"),
     ("proxy", "cuff"),
     ("proxy", "emr"),
+    ("proxy", "hs"),
+    ("sched", "hs"),
+    ("cuff", "audit"),
+    ("v2f", "hl7"),
+    ("proxy", "audit"),
+    ("proxy", "hl7"),
+    ("goauth", "hs"),
+    ("sched", "seed"),
+    ("seed", "fhir"),
 )
 
 
