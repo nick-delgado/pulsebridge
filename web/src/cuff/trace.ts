@@ -35,6 +35,7 @@ import {
   applicationPhrase,
   commitAckPhrase,
   NO_ACK_REASON,
+  readingFromAttempt,
   type Reading,
 } from './readings';
 import { reasonText } from '../api/reasons';
@@ -53,7 +54,13 @@ export type TraceState =
   | { kind: 'loading'; summary: string }
   | { kind: 'error'; summary: string; message: string; retry: () => void }
   | { kind: 'gone'; summary: string; unreadable?: boolean }
-  | { kind: 'ready'; reading: Reading; trace: CuffAttemptTrace; summary: string };
+  | { kind: 'ready'; reading: Reading; trace: CuffAttemptTrace; summary: string }
+  /**
+   * An attempt not sent in this session (selected in the messages log): rendered from its trace
+   * alone, with no session Reading. What only a send result has (framing, MSA-2, the bytes when
+   * the proxy keeps none) is said to be unknown rather than guessed.
+   */
+  | { kind: 'attempt'; trace: CuffAttemptTrace; summary: string };
 
 export interface TracePanel {
   render(state: TraceState): void;
@@ -136,9 +143,12 @@ export function tracePanel(slot: HTMLElement, signal: AbortSignal): TracePanel {
         return;
       }
       const t = ensureTabs();
-      patch(t.panel(TRACE_TABS.hl7v2.id), hl7v2Parts(state.reading, state.trace));
-      patch(t.panel(TRACE_TABS.ack.id), ackParts(state.reading));
-      patch(t.panel(TRACE_TABS.fhir.id), fhirParts(state.reading, state.trace));
+      const fromRecord = state.kind === 'attempt';
+      const reading =
+        state.kind === 'attempt' ? readingFromAttempt('cuff-attempt', state.trace) : state.reading;
+      patch(t.panel(TRACE_TABS.hl7v2.id), hl7v2Parts(reading, state.trace, fromRecord));
+      patch(t.panel(TRACE_TABS.ack.id), ackParts(reading, fromRecord));
+      patch(t.panel(TRACE_TABS.fhir.id), fhirParts(reading, state.trace));
       if (t.root.parentNode !== body) replaceChildren(body, t.root);
     },
   };
@@ -267,9 +277,15 @@ export function messageNote(reading: Reading): string {
     : `A deliberately malformed sample (${sample}), sent as its own fixed bytes; it may not be an ORU^R01 at all. A well-formed reading is ${oru}`;
 }
 
-function hl7v2Parts(reading: Reading, trace: CuffAttemptTrace): (Part | null)[] {
+function hl7v2Parts(
+  reading: Reading,
+  trace: CuffAttemptTrace,
+  fromRecord = false,
+): (Part | null)[] {
   const message = trace.messageSent ?? reading.result.messageSent;
   const fromResult = trace.messageSent === null;
+  // From another session there is no send result to fall back on.
+  const noBytes = fromRecord && trace.messageSent === null;
   const r = reading.result;
   const nonStandard = r.framing !== null && r.framing !== 'standard';
   return [
@@ -287,12 +303,22 @@ function hl7v2Parts(reading: Reading, trace: CuffAttemptTrace): (Part | null)[] 
           text: framingNote(r.framing, r.transport),
         }),
     },
-    {
-      key: 'terminator',
-      content: terminatorNote(message),
-      build: () => el('p', { class: 'cuff-trace__note', text: terminatorNote(message) }),
-    },
-    fromResult
+    noBytes
+      ? {
+          key: 'no-bytes',
+          content: true,
+          build: () =>
+            el('p', {
+              class: 'cuff-note cuff-note--warn',
+              text: 'The message bytes are not available: this send is from another session, and the proxy keeps no bytes for a built reading that was not stored (and cannot always rebuild a sample).',
+            }),
+        }
+      : {
+          key: 'terminator',
+          content: terminatorNote(message),
+          build: () => el('p', { class: 'cuff-trace__note', text: terminatorNote(message) }),
+        },
+    fromResult && !fromRecord
       ? {
           key: 'copy',
           content: true,
@@ -303,11 +329,13 @@ function hl7v2Parts(reading: Reading, trace: CuffAttemptTrace): (Part | null)[] 
             }),
         }
       : null,
-    {
-      key: 'message',
-      content: message,
-      build: () => codeBlock(message, 'HL7v2 message as sent (ER7)'),
-    },
+    noBytes
+      ? null
+      : {
+          key: 'message',
+          content: message,
+          build: () => codeBlock(message, 'HL7v2 message as sent (ER7)'),
+        },
     {
       key: 'facts',
       content: [r.controlId, r.sentAt, messageNameFacts(reading)],
@@ -321,7 +349,7 @@ function hl7v2Parts(reading: Reading, trace: CuffAttemptTrace): (Part | null)[] 
   ];
 }
 
-function commitSection(ack: CommitAck): HTMLElement {
+function commitSection(ack: CommitAck, fromRecord = false): HTMLElement {
   if (!ack.received) {
     return section(
       COMMIT_LEVEL_LABEL,
@@ -353,7 +381,11 @@ function commitSection(ack: CommitAck): HTMLElement {
       text: `MSA-1 ${ack.code} (original acknowledgment mode): ${ACK_CODE_MEANING[ack.code]}`,
     }),
     facts([
-      ['MSA-2 (control ID acknowledged)', ack.controlId ?? 'Empty'],
+      [
+        'MSA-2 (control ID acknowledged)',
+        ack.controlId ??
+          (fromRecord ? 'Not kept in the send record (the control ID above is MSH-10)' : 'Empty'),
+      ],
       ['MSA-3 (reason)', ack.reason ?? 'None'],
     ]),
     ack.raw !== null
@@ -362,7 +394,7 @@ function commitSection(ack: CommitAck): HTMLElement {
   );
 }
 
-function ackParts(reading: Reading): Part[] {
+function ackParts(reading: Reading, fromRecord = false): Part[] {
   const app = applicationPhrase(reading);
   const reason = reading.application?.reason ?? null;
   // The ACK as the send received it: it carries MSA-2, which the attempt record does not keep.
@@ -382,7 +414,7 @@ function ackParts(reading: Reading): Part[] {
           el('p', { class: 'cuff-trace__note cuff-ack-mode', text: ACK_MODE_NOTE }),
         ),
     },
-    { key: 'commit', content: ack, build: () => commitSection(ack) },
+    { key: 'commit', content: [ack, fromRecord], build: () => commitSection(ack, fromRecord) },
     {
       key: 'application',
       content: [app, reading.application],

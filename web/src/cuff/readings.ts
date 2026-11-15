@@ -50,7 +50,12 @@ export type OutcomeLookup =
    */
   | 'message-unchecked'
   /** The outcome is accepted or error. */
-  | 'settled';
+  | 'settled'
+  /**
+   * An attempt from another session, shown from its trace: still pending when the trace was
+   * loaded. The panel does not poll it (only this session's sends are polled).
+   */
+  | 'not-polled';
 
 export interface Reading {
   /** Local key for this row (unique on the page, `cuff-` prefixed so it can be an element id). */
@@ -91,6 +96,61 @@ export function newReading(
     lookup,
     observationId: null,
     observationStatus: null,
+  };
+}
+
+/**
+ * A Reading for an attempt that was NOT sent in this session, built only from its trace (the
+ * messages log selected it). What the send result would have said and the trace does not keep
+ * is left honest: no framing (`null`, "not said"), the ACK without MSA-2 (the send record keeps
+ * MSH-10 instead), and the message bytes only when the proxy returned them. The request's
+ * pressures come from the Observation when there is one; nothing shows them for such a row.
+ */
+export function readingFromAttempt(key: string, trace: CuffAttemptTrace): Reading {
+  const a = trace.attempt;
+  const transport = a.transport ?? 'mllp';
+  const value = (code: string) =>
+    trace.observation?.component?.find((c) => c.code.coding?.some((x) => x.code === code))
+      ?.valueQuantity?.value ?? 0;
+  const request: CuffReadingRequest =
+    a.sample !== null
+      ? { transport, sendMalformed: a.sample }
+      : { systolic: value('8480-6'), diastolic: value('8462-4'), transport, sendMalformed: null };
+  const stored = a.result === 'accepted';
+  let lookup: OutcomeLookup = 'not-stored';
+  if (stored) {
+    if (a.messageLookup === 'not-found') lookup = 'message-not-found';
+    else if (a.messageLookup !== 'confirmed') lookup = 'message-unchecked';
+    else lookup = a.application?.outcome === 'pending' ? 'not-polled' : 'settled';
+  }
+  return {
+    key,
+    request,
+    result: {
+      attemptId: a.id,
+      sentAt: a.sentAt,
+      transport,
+      controlId: a.controlId,
+      sample: a.sample,
+      messageSent: trace.messageSent ?? '',
+      framing: null,
+      messageName: a.messageName ?? a.derivedMessageName,
+      messageNameSource:
+        a.messageName !== null
+          ? 'ingest-response'
+          : a.derivedMessageName !== null
+            ? 'derived-sha256-unverified'
+            : null,
+      result: a.result,
+      ack: a.commitAck,
+      audit: { recorded: true },
+    },
+    recorded: true,
+    // An unconfirmed lookup keeps "pending" with the lookup saying why, as for a session row.
+    application: stored ? (a.application ?? { outcome: 'pending', reason: null }) : null,
+    lookup,
+    observationId: trace.observation?.id ?? a.observation?.replace(/^Observation\//, '') ?? null,
+    observationStatus: trace.observation?.status ?? null,
   };
 }
 
@@ -281,6 +341,8 @@ export function applicationPhrase(r: Reading): Phrase {
     settled: 'Pending.',
     'message-not-found': 'Pending.',
     'message-unchecked': 'Pending.',
+    'not-polled':
+      'Pending when this trace was loaded: stored, not mapped yet. This send is from another session, so the page does not keep checking; select it again to check.',
   };
   return {
     label: r.lookup === 'not-recorded' ? 'Not known' : 'Pending',

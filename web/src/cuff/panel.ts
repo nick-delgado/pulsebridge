@@ -53,6 +53,7 @@ import {
   fieldMessages,
   isPending,
   newReading,
+  readingFromAttempt,
   readingSummary,
   sendFailureText,
   unshareableReason,
@@ -840,11 +841,66 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
     }
   }
 
+  // -- an attempt from another session (selected in the messages log) -------------------------
+  /** The attempt shown from its trace alone, while the selection names it; null otherwise. */
+  let remoteId: string | null = null;
+
+  /**
+   * Loads and shows the trace of an attempt this panel has no row for. The selection is marked
+   * "being checked" until the answer, then re-set from the trace (Observation, final or not),
+   * keeping the summary the other feature gave it. 404, 410 and 422 are final.
+   */
+  const loadRemote = (sel: Extract<Selection, { source: 'cuff' }>) => {
+    const id = sel.attemptId;
+    remoteId = id;
+    traceController?.abort();
+    const c = childController(signal);
+    traceController = c;
+    const summary = sel.summary;
+    trace.render({ kind: 'loading', summary });
+    setOwn({ ...sel, unshareableReason: CHECKING_REASON });
+    client.getCuffAttemptTrace(id, { signal: c.signal }).then(
+      (t) => {
+        if (c.signal.aborted || remoteId !== id) return;
+        const reading = readingFromAttempt(`cuff-attempt-${id}`, t);
+        trace.render({ kind: 'attempt', trace: t, summary });
+        setOwn({
+          source: 'cuff',
+          attemptId: id,
+          observationId: reading.observationId,
+          summary,
+          unshareableReason: unshareableReason(reading),
+        });
+      },
+      (error: unknown) => {
+        if (isAbort(error, c.signal) || error instanceof UnauthorizedError) return;
+        if (remoteId !== id) return;
+        if (isFinalTraceAnswer(error)) {
+          remoteId = null;
+          setOwn(null);
+          trace.render({ kind: 'gone', summary, unreadable: unreadableAnswer(error) });
+          return;
+        }
+        setOwn({ ...sel, unshareableReason: `could not be checked: ${errorMessage(error)}` });
+        trace.render({
+          kind: 'error',
+          summary,
+          message: errorMessage(error),
+          retry: () => {
+            const now = selection.get();
+            if (now?.source === 'cuff' && now.attemptId === id) loadRemote(now);
+          },
+        });
+      },
+    );
+  };
+
   selection.subscribe((current) => {
     const ours =
       current?.source === 'cuff'
         ? readings.find((r) => r.recorded && r.result.attemptId === current.attemptId)
         : undefined;
+    if (ours) remoteId = null;
     if (ours && !settingOwn) {
       // Another feature (for example the messages log) selected one of our rows, a different one
       // or the same one with its own values: show its trace, and until it answers, mark the
@@ -857,9 +913,14 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
       loadTrace(ours);
     } else if (ours) {
       selectedKey = ours.key;
-    } else if (selectedKey !== null) {
+    } else if (current?.source === 'cuff') {
+      // An attempt from another session: no row here, so its trace is shown from the proxy.
+      selectedKey = null;
+      if (!settingOwn) loadRemote(current);
+    } else if (selectedKey !== null || remoteId !== null) {
       // The selection moved to the watch side or was cleared: drop our highlight and trace.
       selectedKey = null;
+      remoteId = null;
       traceController?.abort();
       trace.render({ kind: 'empty' });
     }
@@ -989,7 +1050,14 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
   context.onDataChanged((kind) => {
     // 'cuff-send' is our own announcement; a sync or a share may change what is behind the
     // selected reading (for example its Observation), so re-check it before Share can use it.
-    if (kind === 'cuff-send' || selectedKey === null) return;
+    if (kind === 'cuff-send') return;
+    if (remoteId !== null) {
+      // An attempt from another session: re-check it through its trace too.
+      const current = selection.get();
+      if (current?.source === 'cuff' && current.attemptId === remoteId) loadRemote(current);
+      return;
+    }
+    if (selectedKey === null) return;
     const r = find(selectedKey);
     const sel = r ? selectionFor(r) : null;
     if (!r || !sel) return;
