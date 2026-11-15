@@ -23,6 +23,7 @@ import type {
   SendAttemptEntry,
   SentAndStored,
   ShareResult,
+  ShareQuery,
   ShareStep,
   ShareStepResult,
   Transport,
@@ -386,6 +387,19 @@ function isPathOnly(url: unknown): url is string {
   return typeof url === 'string' && /^\/(?!\/)[^?#\s]*$/.test(url);
 }
 
+/** A search step's parameters: names to a string or strings; anything else is left out. */
+function parseQuery(wire: unknown): ShareQuery | null {
+  if (!isObject(wire)) return null;
+  const out: ShareQuery = {};
+  for (const [name, value] of Object.entries(wire)) {
+    if (typeof value === 'string') out[name] = value;
+    else if (Array.isArray(value) && value.every((v) => typeof v === 'string')) {
+      out[name] = value;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 /** One trace step; null when it is not an object. Anything odd is shown as not known. */
 function parseShareStep(wire: unknown): ShareStep | null {
   if (!isObject(wire)) return null;
@@ -400,6 +414,7 @@ function parseShareStep(wire: unknown): ShareStep | null {
       method: stringOrNull(request.method) ?? '?',
       // Never a host: a url that is not a path is not shown at all.
       url: isPathOnly(request.url) ? request.url : SHARE_URL_HIDDEN,
+      query: parseQuery(request.query),
       body: request.body ?? null,
     },
     response: {
@@ -431,21 +446,22 @@ function sentAndStored<T extends Resource>(
 }
 
 /**
+ * A 200 from the share route that the page cannot read. The proxy may have done any part of
+ * the share, so this never says that nothing was sent.
+ */
+export const UNREADABLE_SHARE =
+  'The share answered, but its answer could not be read, so it is not known what reached the clinic.';
+
+/**
  * The 200 body of `POST /share`. `outcome` must be `shared` or `already-shared` (a 200 means the
  * reading is in OpenEMR); anything else throws `ApiError(502)`, so the page never reports a
  * share it cannot read as done. Read-back resources of the wrong type are null.
  */
 export function parseShareResult(wire: unknown): ShareResult {
-  if (!isObject(wire))
-    throw new ApiError(502, 'The share answered, but its result could not be read.');
+  if (!isObject(wire)) throw new ApiError(502, UNREADABLE_SHARE);
   const outcome =
     wire.outcome === 'shared' || wire.outcome === 'already-shared' ? wire.outcome : null;
-  if (outcome === null) {
-    throw new ApiError(
-      502,
-      'The share answered, but did not say whether the reading is in OpenEMR. Check the trace before sharing again.',
-    );
-  }
+  if (outcome === null) throw new ApiError(502, UNREADABLE_SHARE);
   const readBack = isObject(wire.readBack) ? wire.readBack : {};
   return {
     outcome,

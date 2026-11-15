@@ -4,6 +4,7 @@
  * must show. Synthetic data only.
  */
 import { describe, expect, it } from 'vitest';
+import { SHARE_FHIR_STEP_SECRETS, SHARE_TOKEN_STEP_SECRETS } from './contract';
 import { ShareError } from './errors';
 import { LOINC, type Observation } from './fhir';
 import { MockClient, redact, type MockClientOptions } from './mock-client';
@@ -131,18 +132,48 @@ describe('mock share: the trace hides credentials as trace_step does', () => {
     expect(token?.response.body).toMatchObject({ access_token: '[not shown]' });
   });
 
-  it('redact: at any depth, without regard to case, including the keys "code" and "token"', () => {
+  it('redact: at any depth, without regard to case, only the names it is given', () => {
     expect(
-      redact({ a: [{ Client_Assertion: 'x', code: 'y', nested: { TOKEN: 'z', keep: 1 } }] }),
+      redact({ a: [{ Client_Assertion: 'x', code: 'y', nested: { TOKEN: 'z', keep: 1 } }] }, [
+        'client_assertion',
+        'token',
+      ]),
     ).toEqual({
       a: [
-        {
-          Client_Assertion: '[not shown]',
-          code: '[not shown]',
-          nested: { TOKEN: '[not shown]', keep: 1 },
-        },
+        { Client_Assertion: '[not shown]', code: 'y', nested: { TOKEN: '[not shown]', keep: 1 } },
       ],
     });
+  });
+
+  it('the final rule: FHIR codes stay visible in FHIR steps; the token step hides OAuth codes and tokens', async () => {
+    const { c, final } = await setup();
+    const r = await c.share({ observationId: idOf(final[0]) });
+    const create = r.steps.find((s) => s.step === 'observation-create');
+    const body = create?.request.body as { code?: { coding?: { code?: string }[] } };
+    expect(body.code?.coding?.[0]?.code).toBe('8867-4');
+    expect(JSON.stringify(r.steps.slice(1))).not.toContain('[not shown]');
+    // In the token step even a generic `code` or `token` is hidden.
+    expect(SHARE_TOKEN_STEP_SECRETS).toContain('code');
+    expect(SHARE_FHIR_STEP_SECRETS).not.toContain('code');
+    expect(SHARE_FHIR_STEP_SECRETS).not.toContain('token');
+  });
+
+  it('search steps carry their parameters in query; the url stays a path and the body null', async () => {
+    const { c, final } = await setup();
+    const r = await c.share({ observationId: idOf(final[0]) });
+    const patient = r.steps.find((s) => s.step === 'patient-search');
+    expect(patient?.request).toMatchObject({
+      url: '/apis/default/fhir/Patient',
+      query: { identifier: 'SYN-000123' },
+      body: null,
+    });
+    const encounter = r.steps.find((s) => s.step === 'encounter-search');
+    // The UTC calendar day of the reading's start (the day rule in web/README.md).
+    const day = new Date(Date.parse(final[0]?.effectivePeriod?.start ?? ''))
+      .toISOString()
+      .slice(0, 10);
+    expect(encounter?.request.query).toMatchObject({ date: day });
+    expect(r.steps.find((s) => s.step === 'observation-create')?.request.query).toBeNull();
   });
 });
 
@@ -195,6 +226,12 @@ describe('mock share: refusals and failures', () => {
       if (steps.length > 0) expect(e.steps.at(-1)?.result).toBe('failed');
     },
   );
+
+  it('?mock-share=hosting-timeout: an HTML-like 504 with no steps after the clinic was changed', async () => {
+    const { c, final } = await setup({ shareFailure: 'hosting-timeout' });
+    const e = await shareError(c.share({ observationId: idOf(final[0]) }));
+    expect([e.status, e.outcome, e.steps, e.nothingSent]).toEqual([504, null, [], false]);
+  });
 
   it('?mock-share=read-back: shared, but the Observation read-back failed', async () => {
     const { c, final } = await setup({ shareFailure: 'read-back' });

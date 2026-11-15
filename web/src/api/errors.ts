@@ -84,6 +84,9 @@ export function isFinalTraceAnswer(error: unknown): boolean {
   return error instanceof ApiError && [404, 410, 422].includes(error.status);
 }
 
+/** The statuses the proxy uses for a share refused before OpenEMR is called. */
+const NOTHING_SENT_STATUSES: readonly number[] = [400, 404, 422, 503];
+
 /** The share's documented reason codes (contract.ts `ShareFailureReason`). */
 const SHARE_REASONS: readonly ShareFailureReason[] = [
   'invalid-body',
@@ -112,6 +115,21 @@ export class ShareError extends ApiError {
     readonly steps: ShareStep[],
   ) {
     super(status, message, outcome);
+  }
+
+  /**
+   * True ONLY when the proxy refused the share before calling OpenEMR: a 400, 404, 422 or 503
+   * whose body is the proxy's OperationOutcome, with no steps. Anything else (no connection, a
+   * 5xx without the steps envelope, an HTML error page from the hosting layer, a 200 the page
+   * could not read) may come after the proxy had already created a Patient, an Encounter or the
+   * reading at the clinic, so it is not known what reached it.
+   */
+  get nothingSent(): boolean {
+    return (
+      this.steps.length === 0 &&
+      this.outcome !== null &&
+      NOTHING_SENT_STATUSES.includes(this.status)
+    );
   }
 
   /** The typed error for an `ApiError` from the share route, with the steps the body carried. */

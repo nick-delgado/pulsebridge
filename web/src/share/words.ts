@@ -10,6 +10,7 @@
  */
 import type { ShareResult, ShareStep } from '../api/contract';
 import type { ShareError } from '../api/errors';
+import { UNREADABLE_SHARE } from '../api/parse';
 import type { Observation } from '../api/fhir';
 
 const STEP_TITLE: Readonly<Record<string, string>> = {
@@ -69,8 +70,7 @@ export function stepResult(step: ShareStep): { text: string; tone: Tone } {
 }
 
 /** What the trace's "[not shown]" means. */
-export const NOT_SHOWN_NOTE =
-  'Values shown as "[not shown]" were removed by the proxy before the trace left the server: the signed assertion and the access token. As the proxy’s trace helper is written today it also hides every element named "code" or "token", so FHIR codes in these bodies show as "[not shown]"; the read-back below shows them in full.';
+export const NOT_SHOWN_NOTE = 'Credentials are replaced by "[not shown]".';
 
 /** The sentences of the confirm step. */
 export const CONFIRM_SENT = [
@@ -82,8 +82,17 @@ export const CONFIRM_SENT = [
 export const CONFIRM_LEFT_OUT =
   'Left out: the device (the watch or the cuff), the performer (it names the Patient in this record), the reading’s identifiers, this store’s own id and metadata, and the Patient’s Google Health user id. Nothing that points back into this record goes to the clinic.';
 
+/**
+ * What a repeat share does. Spike S1 saw OpenEMR refuse a repeated BLOOD-PRESSURE reading (same
+ * code, Encounter and effectiveDateTime); for a heart rate (a period with components) the
+ * refusal is not verified, so the note says so rather than promising it.
+ */
 export const REPEAT_NOTE =
-  'Sharing it again creates no duplicate: the proxy finds the Patient before creating one, reuses the Encounter for that day, and OpenEMR refuses a repeated reading, which the page reports as "already shared".';
+  'Sharing it again does not create a second Patient (the proxy finds the Patient before creating one) and reuses the Encounter for that day. OpenEMR was seen refusing a repeated blood-pressure reading, which the page then reports as "already shared"; for a heart-rate reading that refusal has not been verified.';
+
+/** After an answer that does not say what happened at the clinic. */
+export const SAFE_AGAIN =
+  'Sharing again is safe: it finds and reuses the Patient and the Encounter that already exist.';
 
 /**
  * The Observation as the page expects the proxy to send it (T06, T15): no `id`, `meta`,
@@ -122,29 +131,45 @@ export function resultHeadline(result: ShareResult): string {
   return `${lead}${patient}${back}`;
 }
 
+/** A server text as a clause: trimmed, without its closing full stop. */
+function clause(text: string): string {
+  return text.trim().replace(/[.\s]+$/, '');
+}
+
 /** What happened, step by step, before a share stopped: the sentences of a failure. */
 export function failureSentences(error: ShareError): string[] {
   const steps = error.steps;
-  if (error.status === 0) {
-    return [
-      'The connection to the server failed, so it is not known whether anything was sent to the clinic.',
-      'Sharing again is safe: a repeat creates no second Patient or reading.',
-    ];
-  }
-  if (steps.length === 0) {
+  if (error.nothingSent) {
+    // Only the proxy's own refusals before OpenEMR is called (400, 404, 422, 503 with its
+    // OperationOutcome) may say that nothing was sent.
     const why: Record<string, string> = {
       'not-found': 'the reading was not found in the record (it may have been removed).',
       'invalid-body':
         'the request was not in the form the server expects. This is a fault in the page.',
       'share-not-configured': 'sharing with the clinic is not configured on the server.',
     };
-    const reason = why[error.reason] ?? `${error.message.trim().replace(/[.\s]+$/, '')}.`;
+    const reason = why[error.reason] ?? `${clause(error.message)}.`;
     return [`Not shared: ${reason}`, 'Nothing was sent to the clinic.'];
+  }
+  if (steps.length === 0) {
+    // No connection, a 5xx without the steps envelope, an HTML error page, or a 200 that could
+    // not be read: the proxy may have done any part of the share before this answer.
+    let what = clause(error.message);
+    if (error.status === 0) what = 'The connection to the server failed';
+    else if (error.message === UNREADABLE_SHARE) {
+      what = 'The share answered, but its answer could not be read';
+    } else if (error.outcome === null) {
+      what = `The server answered HTTP ${String(error.status)} without saying what happened`;
+    }
+    return [
+      `${what}, so it is not known what reached the clinic: the Patient, the Encounter or the reading may already have been created in OpenEMR.`,
+      SAFE_AGAIN,
+    ];
   }
   const ok = (name: string) => steps.some((s) => s.step === name && s.result === 'ok');
   const last = steps.at(-1);
   const out = [
-    `The share stopped at step ${String(steps.length)} (${last ? stepTitle(last) : 'unknown'}): ${error.message.trim().replace(/[.\s]+$/, '')}.`,
+    `The share stopped at step ${String(steps.length)} (${last ? stepTitle(last) : 'unknown'}): ${clause(error.message)}.`,
   ];
   const done: string[] = [];
   if (ok('token')) done.push('an access token was issued');
@@ -164,7 +189,7 @@ export function failureSentences(error: ShareError): string[] {
     out.push('The reading is in OpenEMR; only reading it back did not finish.');
   } else if (observationStep.response.status === 0) {
     out.push(
-      'It is not known whether OpenEMR stored the reading: its answer did not arrive. Sharing again is safe: a repeat in the same Encounter is refused and reported as already shared.',
+      `It is not known whether OpenEMR stored the reading: its answer did not arrive. ${SAFE_AGAIN}`,
     );
   } else {
     out.push('Not done: OpenEMR refused the reading, so it was not stored.');

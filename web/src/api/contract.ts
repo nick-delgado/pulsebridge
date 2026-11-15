@@ -614,11 +614,15 @@ export type ShareStepResult =
   'ok' | 'found' | 'not-found' | 'already-shared' | 'failed' | 'unknown';
 
 /**
- * One step of the share trace, exactly as T14's `extensions.trace_step` builds it: the request
- * to OpenEMR (method, PATH ONLY: no scheme, host or query string) and its response (status and
- * body), each body with every credential replaced by `"[not shown]"` at any depth (the key names
- * in `extensions.SECRET_KEYS`: the client assertion, tokens, ...). Bodies came from OpenEMR, so
- * they are untrusted text.
+ * One step of the share trace, as T14's `extensions.trace_step` builds it once T15 has applied
+ * the FINAL redaction rule (web/README.md, "For T15: the share route"):
+ * - `request.url` is a PATH ONLY: no scheme, no host, no query string;
+ * - `request.query` holds a search's parameters (parameter name to one value or several), or
+ *   null when the request has none; `request.body` is only a real request body (null for a GET);
+ * - credentials are replaced by `"[not shown]"`: in the token step's bodies, every OAuth
+ *   parameter (`SHARE_TOKEN_STEP_SECRETS`); in every other step, only names that cannot collide
+ *   with a FHIR element (`SHARE_FHIR_STEP_SECRETS`), so FHIR codes stay visible.
+ * Bodies came from OpenEMR, so they are untrusted text.
  */
 export interface ShareStep {
   /** A known step name, or the name the proxy sent when this page does not know it. */
@@ -626,11 +630,49 @@ export interface ShareStep {
   /** The proxy's short description, for example "Search Patient by identifier". */
   label: string;
   /** `url` is a path; the HTTP client replaces anything that is not with `SHARE_URL_HIDDEN`. */
-  request: { method: string; url: string; body: unknown };
+  request: { method: string; url: string; query: ShareQuery | null; body: unknown };
   response: { status: number; body: unknown };
   result: ShareStepResult;
   durationMs: number;
 }
+
+/** A search step's parameters: `{"identifier": "…"}`, or several values for a repeated name. */
+export type ShareQuery = Record<string, string | string[]>;
+
+/**
+ * The FINAL redaction rule for T15 (the proxy is to be changed to match). Key names are
+ * compared without regard to case, at any depth.
+ * - The token step's request and response bodies: every OAuth 2.0 / JWT bearer parameter that
+ *   carries a credential, including the generic `code` and `token`.
+ * - Every other step (FHIR bodies): only names that cannot collide with a FHIR element.
+ */
+export const SHARE_TOKEN_STEP_SECRETS = [
+  'authorization',
+  'client_secret',
+  'client_assertion',
+  'assertion',
+  'password',
+  'token',
+  'access_token',
+  'refresh_token',
+  'id_token',
+  'code',
+  'code_verifier',
+  'private_key',
+  'registration_access_token',
+] as const;
+export const SHARE_FHIR_STEP_SECRETS = [
+  'access_token',
+  'refresh_token',
+  'id_token',
+  'client_assertion',
+  'client_secret',
+  'assertion',
+  'private_key',
+  'password',
+  'authorization',
+  'registration_access_token',
+] as const;
 
 /** What the page shows for a step `url` that was not a path (so it never shows a host). */
 export const SHARE_URL_HIDDEN = '(not shown: not a path)';

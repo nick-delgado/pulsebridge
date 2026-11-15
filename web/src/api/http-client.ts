@@ -49,6 +49,7 @@ import {
   parseShareResult,
   parseShareSteps,
   parseStatus,
+  UNREADABLE_SHARE,
 } from './parse';
 import type { Session } from './session';
 
@@ -298,7 +299,16 @@ export class HttpClient implements PulseBridgeApi {
         ? ShareError.from(error)
         : error;
     }
-    if (response.ok) return parseShareResult(await response.json());
+    if (response.ok) {
+      // A 200 the page cannot read is not "nothing happened": the proxy may have done any part
+      // of the share. ShareError 502 without an OperationOutcome says exactly that.
+      try {
+        return parseShareResult(await response.json());
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        throw ShareError.from(new ApiError(502, UNREADABLE_SHARE));
+      }
+    }
     // A failure: an OperationOutcome, or (502/504 part-way) `{operationOutcome, steps}`
     // with the steps completed so far (web/README.md, "For T15: the share route").
     let body: unknown = null;

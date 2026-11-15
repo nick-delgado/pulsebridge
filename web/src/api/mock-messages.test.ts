@@ -260,14 +260,16 @@ describe('mock refusals (amendments 7, 11, 12)', () => {
     ]);
   });
 
-  it('the trace of an unreadable AuditEvent is a final 422; a store-only name is not an id (400)', async () => {
+  it('the trace of an unreadable AuditEvent is a final 422; a store-only name matches no route (404)', async () => {
     const { c } = await client();
     const e = await errorOf(c.getCuffAttemptTrace('mock-unreadable-0001'));
     expect([e.status, proxyReason(e.outcome)]).toEqual([422, 'unreadable-send-attempt']);
     const { rows } = await allRows(c, { kind: 'cuff-send', count: 50 });
     const storeOnly = sends(rows).find((r) => r.source === 'store-only');
     const bad = await errorOf(c.getCuffAttemptTrace(storeOnly?.id ?? ''));
-    expect([bad.status, proxyReason(bad.outcome)]).toEqual([400, 'invalid-id']);
+    expect([bad.status, proxyReason(bad.outcome)]).toEqual([404, 'unknown-route']);
+    const odd = await errorOf(c.getCuffAttemptTrace('..'));
+    expect([odd.status, proxyReason(odd.outcome)]).toEqual([400, 'invalid-id']);
   });
 
   it('?mock-status=not-configured: every route but login is 503 login-not-configured; the session stays', async () => {

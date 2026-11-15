@@ -424,7 +424,7 @@ function step(name: string, method: string, url: string, status: number, result:
   return {
     step: name,
     label: `label of ${name}`,
-    request: { method, url, body: { client_assertion: '[not shown]' } },
+    request: { method, url, query: null, body: { client_assertion: '[not shown]' } },
     response: { status, body: { access_token: '[not shown]' } },
     result,
     durationMs: 42,
@@ -558,6 +558,64 @@ describe('POST /share (the contract for T15)', () => {
       'OpenEMR did not answer in time.',
     ]);
     expect(share.steps.map((s) => s.step)).toEqual(['token', 'observation-create']);
+  });
+
+  it('request.query: names to a value or values; anything else left out', async () => {
+    const search = {
+      ...step('encounter-search', 'GET', '/apis/default/fhir/Encounter', 200, 'found'),
+      request: {
+        method: 'GET',
+        url: '/apis/default/fhir/Encounter',
+        query: { patient: 'p1', date: ['2026-03-10'], odd: 5, mixed: ['a', 1] },
+        body: null,
+      },
+    };
+    const result = await client(json(200, { ...SHARED, steps: [search] })).share({
+      observationId: 'x',
+    });
+    expect(result.steps[0]?.request).toEqual({
+      method: 'GET',
+      url: '/apis/default/fhir/Encounter',
+      query: { patient: 'p1', date: ['2026-03-10'] },
+      body: null,
+    });
+  });
+
+  it('a 200 that is not JSON, or not readable, is a ShareError 502 that does not say nothing was sent', async () => {
+    for (const response of [
+      new Response('<html>oops</html>', { status: 200, headers: { 'Content-Type': 'text/html' } }),
+      json(200, { outcome: 'shared-ish' }),
+    ]) {
+      const e = await rejection(client(response).share({ observationId: 'x' }));
+      expect(e).toBeInstanceOf(ShareError);
+      expect([e.status, (e as ShareError).nothingSent]).toEqual([502, false]);
+      expect(e.message).toContain('it is not known what reached the clinic');
+    }
+  });
+
+  it("the hosting layer's HTML 504: a ShareError with no OperationOutcome, not nothing-sent", async () => {
+    const e = await rejection(
+      client(
+        new Response('<!doctype html><title>504 Gateway Timeout</title>', {
+          status: 504,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+      ).share({ observationId: 'x' }),
+    );
+    expect(e).toBeInstanceOf(ShareError);
+    expect([e.status, e.outcome, (e as ShareError).steps, (e as ShareError).nothingSent]).toEqual([
+      504,
+      null,
+      [],
+      false,
+    ]);
+    // The proxy's own refusal before OpenEMR is the one case that says nothing was sent.
+    const refused = await rejection(
+      client(json(422, problem('business-rule', 'observation-not-final', 'x'))).share({
+        observationId: 'x',
+      }),
+    );
+    expect((refused as ShareError).nothingSent).toBe(true);
   });
 
   it('a network failure is a ShareError with status 0', async () => {

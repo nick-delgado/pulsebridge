@@ -1,19 +1,45 @@
 import { describe, expect, it } from 'vitest';
 import type { ShareResult, ShareStep } from '../api/contract';
 import { ShareError } from '../api/errors';
-import type { Observation } from '../api/fhir';
-import { expectedShared, failureSentences, resultHeadline, stepResult, stepTitle } from './words';
+import type { Observation, OperationOutcome } from '../api/fhir';
+import { UNREADABLE_SHARE } from '../api/parse';
+import {
+  expectedShared,
+  failureSentences,
+  NOT_SHOWN_NOTE,
+  REPEAT_NOTE,
+  resultHeadline,
+  SAFE_AGAIN,
+  stepResult,
+  stepTitle,
+} from './words';
 
 function step(name: string, result: ShareStep['result'], status = 200): ShareStep {
   return {
     step: name,
     label: `label ${name}`,
-    request: { method: 'GET', url: '/x', body: null },
+    request: { method: 'GET', url: '/x', query: null, body: null },
     response: { status, body: null },
     result,
     durationMs: 1,
   };
 }
+
+const OO: OperationOutcome = {
+  resourceType: 'OperationOutcome',
+  issue: [{ severity: 'error', code: 'invalid', diagnostics: 'x' }],
+};
+
+describe('repeat and credential notes (F5, F6)', () => {
+  it('the repeat note does not promise a refusal for a heart rate', () => {
+    expect(REPEAT_NOTE).toContain('does not create a second Patient');
+    expect(REPEAT_NOTE).toContain('for a heart-rate reading that refusal has not been verified');
+  });
+
+  it('the credential note is neutral', () => {
+    expect(NOT_SHOWN_NOTE).toBe('Credentials are replaced by "[not shown]".');
+  });
+});
 
 describe('step words', () => {
   it.each([
@@ -108,15 +134,60 @@ describe('result and failure words', () => {
       'observation-not-final',
       422,
       'Only final Observations are shared; this one is amended.',
-      null,
+      OO,
       [],
     );
     expect(failureSentences(e)).toEqual([
       'Not shared: Only final Observations are shared; this one is amended.',
       'Nothing was sent to the clinic.',
     ]);
-    const nf = new ShareError('not-found', 404, 'x', null, []);
+    const nf = new ShareError('not-found', 404, 'x', OO, []);
     expect(failureSentences(nf)[0]).toContain('the reading was not found');
+  });
+
+  // F1: only the proxy's own refusals (400, 404, 422, 503 with its OperationOutcome) say that
+  // nothing was sent. Everything else may come after the clinic was changed.
+  it.each([
+    [400, OO, true],
+    [404, OO, true],
+    [422, OO, true],
+    [503, OO, true],
+    [503, null, false], // an HTML 503 from the hosting layer
+    [500, OO, false],
+    [504, OO, false], // the proxy's own budget running out, no steps envelope
+    [504, null, false], // Firebase Hosting's HTML 504
+    [502, null, false],
+    [0, null, false], // no connection
+  ] as const)('HTTP %s (OperationOutcome: %s): nothing sent is %s', (status, outcome, nothing) => {
+    const e = new ShareError('other', status, 'The server answered.', outcome, []);
+    expect(e.nothingSent).toBe(nothing);
+    const lines = failureSentences(e).join(' ');
+    if (nothing) {
+      expect(lines).toContain('Nothing was sent to the clinic.');
+    } else {
+      expect(lines).not.toContain('Nothing was sent');
+      expect(lines).toContain('it is not known what reached the clinic');
+      expect(lines).toContain(SAFE_AGAIN);
+    }
+  });
+
+  it('an unreadable 200 says the answer could not be read, never that nothing was sent', () => {
+    const e = new ShareError('other', 502, UNREADABLE_SHARE, null, []);
+    expect(failureSentences(e)).toEqual([
+      'The share answered, but its answer could not be read, so it is not known what reached the clinic: the Patient, the Encounter or the reading may already have been created in OpenEMR.',
+      SAFE_AGAIN,
+    ]);
+  });
+
+  it('an HTML 504 names the status; a bare OperationOutcome 504 quotes the proxy', () => {
+    const html = new ShareError('other', 504, 'The server answered HTTP 504.', null, []);
+    expect(failureSentences(html)[0]).toContain(
+      'The server answered HTTP 504 without saying what happened',
+    );
+    const budget = new ShareError('other', 504, 'The request ran out of time.', OO, []);
+    expect(failureSentences(budget)[0]).toContain(
+      'The request ran out of time, so it is not known',
+    );
   });
 
   it('stopped part-way before the reading: what was done, and that the reading was not sent', () => {
@@ -163,6 +234,8 @@ describe('result and failure words', () => {
       'Not done: OpenEMR refused the reading, so it was not stored.',
     );
     const lost = new ShareError('other', 0, 'x', null, []);
-    expect(failureSentences(lost)[0]).toContain('it is not known whether anything was sent');
+    expect(failureSentences(lost)[0]).toContain(
+      'The connection to the server failed, so it is not known what reached the clinic',
+    );
   });
 });

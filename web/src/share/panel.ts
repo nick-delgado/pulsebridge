@@ -20,7 +20,7 @@
  * Every string from the server or OpenEMR is rendered as text (`el`, `codeBlock`).
  */
 import type { Observation } from '../api/fhir';
-import type { ShareResult, ShareStep } from '../api/contract';
+import type { ShareQuery, ShareResult, ShareStep } from '../api/contract';
 import { ApiError, isServiceNotConfigured, ShareError, UnauthorizedError } from '../api/errors';
 import type { FeatureContext, ShareSlot } from '../shell/features';
 import { shareableObservation, type Selection } from '../state/selection';
@@ -60,6 +60,13 @@ function childController(parent: AbortSignal): AbortController {
       { once: true, signal: c.signal },
     );
   return c;
+}
+
+/** A search step's parameters as text: `identifier=SYN-1 & date=2026-03-10`. */
+export function queryText(query: ShareQuery): string {
+  return Object.entries(query)
+    .flatMap(([name, value]) => (Array.isArray(value) ? value : [value]).map((v) => `${name}=${v}`))
+    .join(' & ');
 }
 
 function clock(ms: number, timeZone?: string): string {
@@ -333,13 +340,14 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
             ]
           : failureSentences(failure);
         setAlert(lines);
-        renderTrace(summary, failure.steps, lines[0] ?? 'The share failed.');
+        renderTrace(summary, failure.steps, lines[0] ?? 'The share failed.', failure.nothingSent);
         replaceChildren(
           slots.readback,
           placeholder('Nothing to read back: the share did not finish.'),
         );
-        // Something may have happened at the clinic (a Patient or Encounter created).
-        if (failure.steps.length > 0) context.notifyDataChanged('share');
+        // Unless the proxy refused before calling OpenEMR, something may have happened at the
+        // clinic (a Patient, an Encounter or the reading created), so the others re-check.
+        if (!failure.nothingSent) context.notifyDataChanged('share');
         renderAction();
         focusResult();
       },
@@ -359,7 +367,12 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
   }
 
   // -- the trace -------------------------------------------------------------------------------
-  function renderTrace(summary: string, steps: ShareStep[], stoppedWith: string | null): void {
+  function renderTrace(
+    summary: string,
+    steps: ShareStep[],
+    stoppedWith: string | null,
+    nothingSent = false,
+  ): void {
     const list = el('ol', {
       class: 'share-steps',
       attrs: { 'aria-label': 'Steps of the share, in order' },
@@ -387,6 +400,12 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
             `${step.request.method} ${step.request.url} → ${step.response.status === 0 ? 'no answer' : String(step.response.status)}`,
             el('span', { class: 'share-step__time', text: ` · ${String(step.durationMs)} ms` }),
           ),
+          step.request.query
+            ? el('p', {
+                class: 'share-step__query share-mono',
+                text: `Search parameters: ${queryText(step.request.query)}`,
+              })
+            : null,
           el('p', { class: 'share-hint', text: step.label }),
           el(
             'details',
@@ -408,7 +427,13 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
         text: `Share of ${summary}`,
         attrs: { tabindex: '-1' },
       }),
-      steps.length > 0 ? list : placeholder('No request reached OpenEMR.'),
+      steps.length > 0
+        ? list
+        : placeholder(
+            nothingSent
+              ? 'No request reached OpenEMR.'
+              : 'The server sent no trace, so it is not known which requests reached OpenEMR.',
+          ),
       stoppedWith ? el('p', { class: 'share-note share-note--error', text: stoppedWith }) : null,
       steps.length > 0 ? el('p', { class: 'share-hint', text: NOT_SHOWN_NOTE }) : null,
     );

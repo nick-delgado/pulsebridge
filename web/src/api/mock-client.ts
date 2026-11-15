@@ -42,6 +42,7 @@ import type {
   SendAttemptEntry,
   ShareRequest,
   ShareResult,
+  ShareQuery,
   ShareStep,
   ShareStepResult,
   UnreadableSendAttemptEntry,
@@ -54,6 +55,8 @@ import {
   MESSAGES_DEFAULT_COUNT,
   MESSAGES_MAX_COUNT,
   REACHABILITY_NOT_CHECKED,
+  SHARE_FHIR_STEP_SECRETS,
+  SHARE_TOKEN_STEP_SECRETS,
 } from './contract';
 import {
   ApiError,
@@ -473,7 +476,12 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     this.#resolve();
     await this.#settleDerivedNames();
-    // The proxy checks a path id first (a store-only row's message name is not one).
+    // A store-only row's message name has slashes, so on the real proxy the URL matches no
+    // route at all: 404 `unknown-route` (amendment table, web/README.md).
+    if (attemptId.includes('/')) {
+      throw proxyProblem(404, 'not-found', 'unknown-route', 'There is no such route.');
+    }
+    // Then the proxy checks the id is a FHIR id.
     if (!SAFE_ID.test(attemptId)) {
       throw proxyProblem(400, 'invalid', 'invalid-id', 'That is not a valid id.');
     }
@@ -822,10 +830,11 @@ export class MockClient implements PulseBridgeApi {
         'Search Patient by identifier',
         'GET',
         '/apis/default/fhir/Patient',
-        { identifier: MOCK_PATIENT_IDENTIFIER },
+        null,
         200,
         searchset(patientFound ? [emr.stored.get(`Patient/${emr.patientId ?? ''}`)] : []),
         patientFound ? 'found' : 'not-found',
+        { identifier: MOCK_PATIENT_IDENTIFIER },
       ),
     );
     if (emr.patientId === null) {
@@ -859,10 +868,11 @@ export class MockClient implements PulseBridgeApi {
         'Search Encounter for the reading’s day',
         'GET',
         '/apis/default/fhir/Encounter',
-        { patient: emr.patientId, date: day },
+        null,
         200,
         searchset(existingEncounter ? [emr.stored.get(`Encounter/${existingEncounter}`)] : []),
         existingEncounter ? 'found' : 'not-found',
+        { patient: emr.patientId, date: day },
       ),
     );
     let sentEncounter: Encounter | null = null;
@@ -1012,6 +1022,11 @@ export class MockClient implements PulseBridgeApi {
       `Observation/${observationId}`,
       failure === 'read-back',
     ) as Observation | null;
+    if (failure === 'hosting-timeout') {
+      // Everything above happened at the clinic; the page gets only the hosting layer's HTML
+      // 504, which the HTTP client turns into exactly this (no OperationOutcome, no steps).
+      throw ShareError.from(new ApiError(504, 'The server answered HTTP 504.'));
+    }
     return {
       outcome: existing === null ? 'shared' : 'already-shared',
       steps,
@@ -1640,43 +1655,32 @@ function transactionRow(
   };
 }
 
-/**
- * The key names T14's `extensions.SECRET_KEYS` replaces with "[not shown]" at any depth,
- * compared without regard to case. Copied exactly, so the mock trace is what the proxy's will
- * be. Note: the list includes `code` and `token`, so every FHIR `code` element in a step body
- * (Observation.code, each Coding.code) is hidden too; web/README.md reports this to T14/T15.
- */
-const SECRET_KEYS = new Set([
-  'authorization',
-  'client_secret',
-  'client_assertion',
-  'assertion',
-  'password',
-  'token',
-  'access_token',
-  'refresh_token',
-  'id_token',
-  'code',
-  'code_verifier',
-  'private_key',
-]);
 const NOT_SHOWN = '[not shown]';
 
-/** `extensions.redact`: a copy with every secret key's value replaced. */
-export function redact(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redact);
-  if (typeof value === 'object' && value !== null) {
-    return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [
-        k,
-        SECRET_KEYS.has(k.toLowerCase()) ? NOT_SHOWN : redact(v),
-      ]),
-    );
-  }
-  return value;
+/**
+ * `extensions.redact` under the FINAL rule for T15 (contract.ts `SHARE_TOKEN_STEP_SECRETS`,
+ * `SHARE_FHIR_STEP_SECRETS`): a copy with the value of every listed key replaced, at any depth,
+ * comparing names without regard to case.
+ */
+export function redact(value: unknown, secrets: readonly string[]): unknown {
+  const names = new Set(secrets);
+  const walk = (v: unknown): unknown => {
+    if (Array.isArray(v)) return v.map(walk);
+    if (typeof v === 'object' && v !== null) {
+      return Object.fromEntries(
+        Object.entries(v).map(([k, x]) => [k, names.has(k.toLowerCase()) ? NOT_SHOWN : walk(x)]),
+      );
+    }
+    return v;
+  };
+  return walk(value);
 }
 
-/** `extensions.trace_step`: the contract's ShareStep, bodies redacted, the url a path only. */
+/**
+ * `extensions.trace_step` with the final rule: the url a path only, a search's parameters in
+ * `query`, bodies redacted with the token step's list for the token step and the FHIR-safe list
+ * for every other step (so FHIR codes stay visible).
+ */
 function traceStep(
   name: ShareStep['step'],
   label: string,
@@ -1686,15 +1690,17 @@ function traceStep(
   status: number,
   responseBody: unknown,
   result?: ShareStepResult,
+  query: ShareQuery | null = null,
 ): ShareStep {
   if (!/^\/(?!\/)[A-Za-z0-9._~!$&'()*+,;=:@%/-]*$/.test(path)) {
     throw new Error("a trace step's url is a path with no scheme, host or query");
   }
+  const secrets = name === 'token' ? SHARE_TOKEN_STEP_SECRETS : SHARE_FHIR_STEP_SECRETS;
   return {
     step: name,
     label,
-    request: { method, url: path, body: redact(requestBody) },
-    response: { status, body: redact(responseBody) },
+    request: { method, url: path, query, body: redact(requestBody, secrets) },
+    response: { status, body: redact(responseBody, secrets) },
     result: result ?? (status >= 200 && status < 300 ? 'ok' : 'failed'),
     durationMs: 40 + (hash32(label) % 160),
   };

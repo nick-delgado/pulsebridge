@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { CallOptions, PulseBridgeApi, ShareRequest, ShareResult } from '../api/contract';
 import { ApiError, ShareError, UnauthorizedError } from '../api/errors';
-import type { Observation } from '../api/fhir';
+import type { Observation, OperationOutcome } from '../api/fhir';
+import { UNREADABLE_SHARE } from '../api/parse';
 import { deferred, type Deferred } from '../cuff/test-support';
 import { createDataChangeBus, type DataChangeKind } from '../state/data-changed';
 import { createSelectionStore, type Selection } from '../state/selection';
 import { createShare } from './panel';
+
+const OO: OperationOutcome = {
+  resourceType: 'OperationOutcome',
+  issue: [{ severity: 'error', code: 'invalid', diagnostics: 'x' }],
+};
 
 const HOSTILE = `<img src=x onerror="alert(1)">${'Z'.repeat(600)}`;
 
@@ -110,10 +116,12 @@ function result(over: Partial<ShareResult> = {}): ShareResult {
   };
   const step = (name: string, res: ShareResult['steps'][number]['result'], status = 200) => ({
     step: name,
-    label: `label ${name}`,
+    // The proxy's label is text from the server too (F9).
+    label: `label ${name} ${HOSTILE}`,
     request: {
       method: 'POST',
       url: `/apis/default/fhir/${name}`,
+      query: name.endsWith('-search') ? { identifier: 'SYN-1', date: ['2026-03-10'] } : null,
       body: { client_assertion: '[not shown]' },
     },
     response: { status, body: { note: HOSTILE } },
@@ -279,12 +287,18 @@ describe('sending', () => {
       'Selected: BP 120/80 mm[Hg] at 14:17:00, MLLP. Shared at 14:30:00 in this session.',
     );
     expect(document.activeElement?.id).toBe('share-trace-summary');
-    // OpenEMR's text is text.
+    // A search step shows its parameters (F5: request.query), never in the url.
+    expect(steps[1]?.querySelector('.share-step__query')?.textContent).toBe(
+      'Search parameters: identifier=SYN-1 & date=2026-03-10',
+    );
+    expect(steps[0]?.querySelector('.share-step__query')).toBeNull();
+    // OpenEMR's text and the proxy's labels are text.
     expect(m.slots.trace.querySelector('img')).toBeNull();
+    expect(steps[0]?.querySelector('.share-hint')?.textContent).toContain('<img src=x onerror=');
     expect(m.slots.trace.textContent).toContain('<img src=x onerror=');
   });
 
-  it('a repeat: the confirm says it was shared and that a repeat creates no duplicate; the result says already shared', async () => {
+  it('a repeat: the confirm says it was shared and that no second Patient is created; the result says already shared', async () => {
     const m = mount();
     await toConfirm(m);
     m.send()?.click();
@@ -296,7 +310,8 @@ describe('sending', () => {
     expect(m.byId('share-confirm')?.textContent).toContain(
       'You already shared this reading at 14:30:00.',
     );
-    expect(m.byId('share-confirm')?.textContent).toContain('creates no duplicate');
+    expect(m.byId('share-confirm')?.textContent).toContain('does not create a second Patient');
+    expect(m.byId('share-confirm')?.textContent).toContain('has not been verified');
     m.send()?.click();
     m.shares[1]?.answer.resolve(result({ outcome: 'already-shared' }));
     await flush();
@@ -357,7 +372,7 @@ describe('failures say what did and did not happen', () => {
         'patient-incomplete',
         422,
         'The stored Patient is incomplete: missing birthDate.',
-        null,
+        OO,
         [],
       ),
     );
@@ -401,11 +416,43 @@ describe('failures say what did and did not happen', () => {
     const m = mount();
     await toConfirm(m);
     m.send()?.click();
-    m.shares[0]?.answer.reject(new ShareError('share-not-configured', 503, 'x', null, []));
+    m.shares[0]?.answer.reject(new ShareError('share-not-configured', 503, 'x', OO, []));
     await flush();
     expect(m.byId('share-alert')?.textContent).toContain(
       'sharing with the clinic is not configured on the server',
     );
+    expect(m.notified).toEqual([]);
+  });
+
+  // F1: anything but the proxy's own refusal before OpenEMR may come after the clinic was
+  // changed: never "nothing was sent", the others are told, and sharing again is offered as safe.
+  it.each([
+    [
+      'an HTML 504 from the hosting layer',
+      new ShareError('other', 504, 'The server answered HTTP 504.', null, []),
+    ],
+    [
+      'a bare OperationOutcome 504 (the budget ran out)',
+      new ShareError('other', 504, 'The request ran out of time.', OO, []),
+    ],
+    ['a 500', new ShareError('other', 500, 'Internal error.', OO, [])],
+    ['a lost connection', new ShareError('other', 0, 'The server could not be reached.', null, [])],
+    ['an unreadable 200', new ShareError('other', 502, UNREADABLE_SHARE, null, [])],
+  ])('%s: not known what reached the clinic, notified, no "nothing sent"', async (_name, error) => {
+    const m = mount();
+    await toConfirm(m);
+    m.send()?.click();
+    m.shares[0]?.answer.reject(error);
+    await flush();
+    const alert = m.byId('share-alert')?.textContent ?? '';
+    expect(alert).toContain('it is not known what reached the clinic');
+    expect(alert).toContain('Sharing again is safe');
+    expect(alert).not.toContain('Nothing was sent');
+    expect(m.slots.trace.textContent).toContain(
+      'The server sent no trace, so it is not known which requests reached OpenEMR.',
+    );
+    expect(m.slots.trace.textContent).not.toContain('No request reached OpenEMR.');
+    expect(m.notified).toEqual(['share']);
   });
 });
 

@@ -150,7 +150,12 @@ export type MockShareFailure =
   /** 504 part-way: the Observation POST gets no answer in time. */
   | 'observation-timeout'
   /** 200, but reading the Observation back fails. */
-  | 'read-back';
+  | 'read-back'
+  /**
+   * The whole share happens at the clinic, but the hosting layer answers 504 with an HTML page
+   * (its 60 s limit) before the proxy's answer arrives: no steps, no OperationOutcome.
+   */
+  | 'hosting-timeout';
 
 export interface MockSwitches {
   lookupFailure: MockLookupFailure | null;
@@ -173,6 +178,7 @@ const SHARE_FAILURES: readonly MockShareFailure[] = [
   'encounter-refused',
   'observation-timeout',
   'read-back',
+  'hosting-timeout',
 ];
 
 /** The switches named in a page URL's query string; each is off unless spelled exactly. */
