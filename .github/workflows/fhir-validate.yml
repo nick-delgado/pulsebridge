@@ -1,0 +1,88 @@
+# FHIR validation (T08): runs the official HL7 FHIR Validator over the example resources in
+# libs/pulsebridge_fhir/examples/ as FHIR R4 (4.0.1), with codes checked by the public HL7
+# terminology server (tx.fhir.org). The script, scripts/fhir-validate.sh, explains its decisions;
+# this workflow only provides Java, a cache, and runs it.
+#
+# Separate from ci.yml because it needs Java and the network, and only means something when the
+# FHIR library, its examples or the validator setup change.
+#
+# Path filter: pull requests and pushes to main run this only when an input changes. Note: a
+# path-filtered workflow never reports a status on a pull request that touches none of the paths,
+# so if this check is ever made REQUIRED in branch protection, such pull requests would wait for
+# it forever. Before making it required, remove the `paths` filters (or add an always-running job
+# that reports success).
+#
+# Weekly schedule: catches changes that no commit causes. Every run asks tx.fhir.org afresh and
+# downloads the FHIR packages afresh (only the checksummed jar is cached), so a scheduled run sees
+# the terminology server's current answers (a new LOINC or UCUM release, a corrected value set)
+# and the newest hl7.terminology and extension packages, which the validator picks as "latest".
+# Note: GitHub disables scheduled workflows in a PUBLIC repository after 60 days without
+# repository activity, and notifies only the user who last changed the cron line. Re-enable it
+# from the Actions tab.
+#
+# No step or job may use continue-on-error, and every action is pinned to a full commit SHA (the
+# tag is in the trailing comment); tests/tooling/test_ci_workflow.py enforces both.
+
+name: FHIR validation
+
+on:
+  pull_request:
+    paths:
+      - "libs/pulsebridge_fhir/**"
+      - "scripts/fhir-validate.sh"
+      - "scripts/fhir-validate-expected-warnings.json"
+      - ".github/workflows/fhir-validate.yml"
+      - "Makefile"
+  push:
+    branches: [main]
+    paths:
+      - "libs/pulsebridge_fhir/**"
+      - "scripts/fhir-validate.sh"
+      - "scripts/fhir-validate-expected-warnings.json"
+      - ".github/workflows/fhir-validate.yml"
+      - "Makefile"
+  schedule:
+    - cron: "23 4 * * 1" # Mondays 04:23 UTC (scheduled runs use the default branch)
+  workflow_dispatch:
+
+# Least privilege for the GITHUB_TOKEN: the job only reads the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: fhir-validate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The validator jar is built for Java 17; 21 is the current LTS. Major version pinned: the
+  # validator's results do not depend on the JDK patch level.
+  JAVA_VERSION: "21"
+
+jobs:
+  validate:
+    name: HL7 FHIR Validator (R4, terminology via tx.fhir.org)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+      # The cache key is the validator version pinned in the script, so a new pin starts a new
+      # cache. The script verifies the jar's SHA-256 on every run, cached or not.
+      - name: Read the pinned validator version
+        id: pin
+        run: |
+          pin="$(scripts/fhir-validate.sh --validator-version)"
+          echo "version=${pin%% *}" >> "$GITHUB_OUTPUT"
+      # Only the jar, at the script's default cache directory. It is checksummed on every run,
+      # so a cached copy cannot drift. The FHIR package cache is NOT cached: it has no pinned
+      # checksum, and a cache saved once would freeze the "latest" terminology packages.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pulsebridge/fhir-validator/validator_cli-${{ steps.pin.outputs.version }}.jar
+          key: fhir-validator-jar-${{ runner.os }}-${{ steps.pin.outputs.version }}
+      - run: make fhir-validate
