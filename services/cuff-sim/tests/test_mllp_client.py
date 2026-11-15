@@ -122,6 +122,13 @@ def test_garbage_frame_is_unreadable_and_keeps_the_bytes(adapter):
     assert outcome.reply_prefix == b"HELLO NOT HL7"
 
 
+def test_empty_frame_is_unreadable_with_no_prefix(adapter):
+    adapter.reply(b"")
+    outcome = send(adapter.port)
+    assert outcome.why == "unreadable-reply"
+    assert outcome.reply_prefix is None  # T31 refuses an empty prefix
+
+
 def test_msh_frame_that_is_not_an_ack_is_unreadable(adapter):
     adapter.reply(MESSAGE.rstrip(b"\r"))  # an ORU, not an ACK: parse_ack refuses it
     outcome = send(adapter.port)

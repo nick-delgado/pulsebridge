@@ -51,18 +51,13 @@ TransportOutcome = AckReceived | NoAck
 def read_ack(raw: bytes) -> TransportOutcome:
     """Read reply bytes (no MLLP frame) as an ACK with T07's ``parse_ack``.
 
-    Anything ``parse_ack`` refuses, or that T31 could not store as an ACK (over 4096 bytes, not
-    starting with ``MSH``, or holding an MLLP control byte), is an ``unreadable-reply`` carrying
-    its first bytes, so the attempt is still recorded with what came back.
+    Anything ``parse_ack`` refuses, or that it accepts but T31 could not store as an ACK (over
+    4096 bytes, or holding an MLLP control byte), is an ``unreadable-reply`` carrying its first
+    bytes, so the attempt is still recorded with what came back. (T31 also requires the ACK to
+    start with ``MSH``; ``parse_ack`` already refuses anything else, such as a leading BOM.)
     """
-    prefix = raw[:MAX_ACK_BYTES] or None
-    if (
-        not raw
-        or len(raw) > MAX_ACK_BYTES
-        or not raw.startswith(b"MSH")
-        or b"\x0b" in raw
-        or b"\x1c" in raw
-    ):
+    prefix = raw[:MAX_ACK_BYTES] or None  # T31 refuses an empty prefix: an empty frame has none
+    if len(raw) > MAX_ACK_BYTES or b"\x0b" in raw or b"\x1c" in raw:
         return NoAck("unreadable-reply", "the reply is not a readable HL7v2 ACK", None, prefix)
     try:
         return AckReceived(parse_ack(raw))

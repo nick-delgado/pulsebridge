@@ -37,13 +37,14 @@ class TokenBucket:
         self._lock = threading.Lock()  # gunicorn runs several threads per instance
 
     def take(self) -> int | None:
-        """Take one token. ``None`` if allowed; otherwise the seconds to wait (at least 1)."""
+        """Take one token. ``None`` if allowed; otherwise the whole seconds to wait, rounded up
+        (so at least 1: the missing fraction of a token is always above 0)."""
         with self._lock:
             now = self._clock()
-            elapsed = max(0.0, now - self._updated)
-            self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+            # The clock is monotonic, so the elapsed time is never negative.
+            self._tokens = min(self._burst, self._tokens + (now - self._updated) * self._rate)
             self._updated = now
             if self._tokens >= 1.0:
                 self._tokens -= 1.0
                 return None
-            return max(1, math.ceil((1.0 - self._tokens) / self._rate))
+            return math.ceil((1.0 - self._tokens) / self._rate)

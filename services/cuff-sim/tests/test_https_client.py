@@ -129,3 +129,29 @@ def test_name_of_another_store_is_not_returned(client, transport, h):
     delivery = send_https(client, "main", PAYLOAD)
     assert delivery.outcome.ack.code == "AA"
     assert delivery.message_name is None
+
+
+@pytest.mark.parametrize(
+    "ack",
+    [
+        # parse_ack reads both of these, but T31 cannot store them as an ACK: over 4096 bytes,
+        # and an MLLP end-block byte inside.
+        b"MSH|^~\\&|PHR|PULSEBRIDGE|CUFFSIM|PULSEBRIDGE|20261113224607||ACK|A1|P|2.5.1\r"
+        b"MSA|AA|T1\rNTE|1||" + b"Y" * 5000,
+        b"MSH|^~\\&|PHR|PULSEBRIDGE|CUFFSIM|PULSEBRIDGE|20261113224607||ACK|A\x1c1|P|2.5.1\r"
+        b"MSA|AA|T1",
+    ],
+)
+def test_acks_t31_cannot_store_are_unreadable_with_a_bounded_prefix(client, transport, h, ack):
+    transport.add("POST", INGEST, json_response(200, accepted_body(h, ack=ack)))
+    delivery = send_https(client, "main", PAYLOAD)
+    assert delivery.outcome.why == "unreadable-reply"
+    assert delivery.outcome.reply_prefix == ack[:4096]
+    assert delivery.message_name is None
+
+
+def test_ack_with_a_leading_bom_is_unreadable(client, transport, h):
+    transport.add(
+        "POST", INGEST, json_response(200, accepted_body(h, ack=b"\xef\xbb\xbf" + h.S5_AA))
+    )
+    assert send_https(client, "main", PAYLOAD).outcome.why == "unreadable-reply"
