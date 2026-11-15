@@ -6,7 +6,8 @@
     pulsebridge-seed --days 7 --until 2026-03-09T12:00:00Z --seed 42
 
 Logs (JSON lines) go to stderr, the run report (JSON, counts only) to stdout. Exit codes:
-0 seeded or dry run; 1 a FHIR failure (re-run: every write is keyed); 2 bad arguments or
+0 seeded or dry run; 1 a FHIR failure or an unexpected error (outcome ``bug``, with the
+counts so far; re-run: every write is keyed); 2 bad arguments or
 configuration; 4 refused by the safety check (a Patient with this identifier that the seeder
 did not write).
 """
@@ -128,9 +129,12 @@ def main(argv: list[str] | None = None, deps: Dependencies | None = None) -> int
             config, deps, length=length, until=args.until, dry_run=args.dry_run, force=args.force
         )
     except Exception as exc:  # noqa: BLE001 - a traceback's text could quote data
-        logger.error("seed failed: %s", type(exc).__name__, extra={"fields": {"event": "bug"}})
-        return EXIT_FAILED
+        # Before the run started (for example no Application Default Credentials). run()
+        # itself reports its own unexpected errors as outcome "bug", with its counts.
+        report = Report(outcome=Outcome.BUG, reason=type(exc).__name__)
     level = logging.INFO if _exit_code(report) == EXIT_OK else logging.WARNING
+    if report.outcome == Outcome.BUG:
+        level = logging.ERROR
     logger.log(level, "seed run", extra={"fields": {"event": "seed-run", **report.as_dict()}})
     print(json.dumps(report.as_dict(), indent=2))
     return _exit_code(report)

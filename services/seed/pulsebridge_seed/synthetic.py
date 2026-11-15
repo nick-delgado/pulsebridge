@@ -17,11 +17,16 @@ Five markers, from the most visible to the most machine-readable:
    - ``agent`` performer ``role``: recording method ``SYNTHETIC`` (where a watch has
      ``PASSIVELY_MEASURED``), so the Device's part is "generated", not "measured";
    - ``agent`` assembler: ``PulseBridge seed (synthetic data)``.
-5. **Every resource carries the tag ``HTEST``** in ``meta.tag``: HL7 v3 ActReason ``HTEST``
-   "test health data", the code HL7 defines for data that is for testing and not about a real
-   person. ``meta.tag``'s binding is an example (R4 "Common Tags"), so any code is allowed
-   there. It is the one marker a search can use: ``Observation?_tag=<system>|HTEST``. It is
-   added to T06's output here because T06's builders take no ``meta``; it changes no request.
+5. **Every resource carries the security label ``HTEST``** in ``meta.security``: HL7 v3
+   ActReason ``HTEST`` "test health data", the code HL7 defines for data that is for testing and
+   not about a real person. R4's security-labels page lists it among the purpose-of-use labels,
+   so ``meta.security`` (bound to "All Security Labels") is its place, not ``meta.tag``. It is the
+   one marker a search can use: ``Observation?_security=<system>|HTEST``. It is added to T06's
+   output here because T06's builders take no ``meta``; it changes no request. An earlier draft
+   used ``meta.tag``; a Patient labelled either way is still recognised.
+
+   ``patient_for_sharing`` (T15) sends OpenEMR only the identifier, name, gender and birth date,
+   so after a share the synthetic name is the only marker the clinic sees.
 
 T06 limits what can be said: the Provenance ``entity`` source record type is always
 ``google-health-heart-rate-rollup`` (``heart_rate_transaction`` fixes it), which here describes
@@ -35,7 +40,14 @@ from __future__ import annotations
 import copy
 from datetime import date
 
-from pulsebridge_fhir import DeviceInput, GoogleDataSource, PatientInput
+from pulsebridge_fhir import (
+    DeviceInput,
+    FhirInputError,
+    GoogleDataSource,
+    PatientInput,
+    check_complete_patient,
+    codes,
+)
 
 PATIENT_ID_PREFIX = "SYN-"
 FAMILY = "Synthetic"
@@ -49,7 +61,7 @@ RECORDING_METHOD = "SYNTHETIC"
 ASSEMBLER = "PulseBridge seed (synthetic data)"
 
 # HL7 v3 ActReason HTEST, "test health data" (terminology.hl7.org CodeSystem v3-ActReason).
-TEST_DATA_TAG = {
+TEST_DATA_LABEL = {
     "system": "http://terminology.hl7.org/CodeSystem/v3-ActReason",
     "code": "HTEST",
     "display": "test health data",
@@ -78,38 +90,107 @@ def data_source() -> GoogleDataSource:
     return GoogleDataSource(platform=PLATFORM, recording_method=RECORDING_METHOD)
 
 
-def has_test_tag(resource: dict) -> bool:
+def has_test_label(resource: dict) -> bool:
+    """``HTEST`` in ``meta.security`` (where the seeder puts it) or ``meta.tag`` (an earlier
+    draft)."""
     meta = resource.get("meta") if isinstance(resource, dict) else None
-    tags = meta.get("tag") if isinstance(meta, dict) else None
-    return isinstance(tags, list) and any(
-        isinstance(t, dict)
-        and t.get("system") == TEST_DATA_TAG["system"]
-        and t.get("code") == TEST_DATA_TAG["code"]
-        for t in tags
+    if not isinstance(meta, dict):
+        return False
+    for element in ("security", "tag"):
+        codings = meta.get(element)
+        if isinstance(codings, list) and any(
+            isinstance(c, dict)
+            and c.get("system") == TEST_DATA_LABEL["system"]
+            and c.get("code") == TEST_DATA_LABEL["code"]
+            for c in codings
+        ):
+            return True
+    return False
+
+
+def _is_synthetic_name(name: object) -> bool:
+    return (
+        isinstance(name, dict)
+        and name.get("family") == FAMILY
+        and name.get("given") == list(GIVEN)
+        and set(name) <= {"use", "family", "given"}
     )
 
 
 def has_synthetic_name(resource: dict) -> bool:
+    """At least one name, and **every** name is the synthetic one: a Patient with a real name
+    beside a synthetic one is not ours."""
     names = resource.get("name") if isinstance(resource, dict) else None
-    return isinstance(names, list) and any(
-        isinstance(n, dict) and n.get("family") == FAMILY and n.get("given") == list(GIVEN)
-        for n in names
+    return isinstance(names, list) and bool(names) and all(_is_synthetic_name(n) for n in names)
+
+
+# What an unlabelled Patient may hold and still be recognised as one of ours: its id, meta, the
+# SYN- identifier and, at most, the synthetic name and the seeder's own invented gender and
+# birth date. Anything else (telecom, address, another identifier, a different gender or birth
+# date) looks like a real person and is refused.
+_ALLOWED_UNLABELLED = {"resourceType", "id", "meta", "identifier", "name", "gender", "birthDate"}
+
+
+def _only_synthetic_identifiers(resource: dict) -> bool:
+    identifiers = resource.get("identifier")
+    return (
+        isinstance(identifiers, list)
+        and bool(identifiers)
+        and all(
+            isinstance(i, dict)
+            and i.get("system") == codes.PB_PATIENT_ID
+            and isinstance(i.get("value"), str)
+            and i["value"].startswith(PATIENT_ID_PREFIX)
+            for i in identifiers
+        )
     )
 
 
 def is_synthetic_patient(resource: dict) -> bool:
-    """A stored Patient the seeder wrote: tagged ``HTEST``, or carrying the synthetic name (in
-    case the store does not keep ``meta.tag``, which is unverified on Cloud Healthcare)."""
-    return has_test_tag(resource) or has_synthetic_name(resource)
+    """Whether a stored Patient is one the seeder may write over.
+
+    - Labelled ``HTEST`` (security label or tag): the seeder wrote it.
+    - Otherwise only if it holds nothing a real person's record would: every identifier is a
+      ``SYN-`` one in PulseBridge's system, every name (if any) is the synthetic name, gender
+      and birth date are absent or the seeder's own, and nothing else is there. This accepts the
+      identifier-only Patient that ``health-sync`` or ``v2-to-fhir`` creates by conditional
+      create when an ingest reaches the store before the seeder (D11), and a seeder Patient
+      whose label the store did not keep.
+    """
+    if not isinstance(resource, dict) or resource.get("resourceType") != "Patient":
+        return False
+    if has_test_label(resource):
+        return True
+    if not set(resource) <= _ALLOWED_UNLABELLED or not _only_synthetic_identifiers(resource):
+        return False
+    if "name" in resource and not has_synthetic_name(resource):
+        return False
+    if resource.get("gender", GENDER) != GENDER:
+        return False
+    return resource.get("birthDate", BIRTH_DATE.isoformat()) == BIRTH_DATE.isoformat()
+
+
+def is_complete(resource: dict) -> bool:
+    """Whether the stored Patient already has the full record (T06 ``check_complete_patient``):
+    then the setup Bundle need not be sent again (D11: written once)."""
+    try:
+        check_complete_patient(resource)
+    except FhirInputError:
+        return False
+    return True
 
 
 def mark_synthetic(bundle: dict) -> dict:
-    """A copy of ``bundle`` with the ``HTEST`` tag on every entry's resource."""
+    """A copy of ``bundle`` with the ``HTEST`` security label on every entry's resource."""
     out = copy.deepcopy(bundle)
     for entry in out.get("entry", []):
         resource = entry["resource"]
-        meta = resource.setdefault("meta", {})
-        tags = meta.setdefault("tag", [])
-        if not has_test_tag(resource):
-            tags.append(dict(TEST_DATA_TAG))
+        labels = resource.setdefault("meta", {}).setdefault("security", [])
+        if not any(
+            isinstance(c, dict)
+            and c.get("system") == TEST_DATA_LABEL["system"]
+            and c.get("code") == TEST_DATA_LABEL["code"]
+            for c in labels
+        ):
+            labels.append(dict(TEST_DATA_LABEL))
     return out

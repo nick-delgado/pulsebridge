@@ -181,3 +181,87 @@ def test_floor_to_window():
     assert floor_to_window(datetime(2026, 3, 10, 8, 5, tzinfo=NY)) == datetime(
         2026, 3, 10, 12, 5, tzinfo=UTC
     )
+
+
+# ---- review follow-ups --------------------------------------------------------------------------
+
+# The values of one fixed day, pinned. If this fails because the model was changed on purpose,
+# bump MODEL_VERSION in generator.py in the same change (so old and new values never mix under
+# one seed) and update the hash. If it fails otherwise, something changed values by accident:
+# every stored window would be rewritten by the next run.
+GOLDEN_DAY_SHA256 = "f04d6a849e548ff74bf2dc1646c6aabdda0da47c4eb9db134f31ad1c49a06e31"
+
+
+def test_golden_day_is_pinned():
+    import hashlib
+
+    day = generate(1, NY, START, START + timedelta(days=1))
+    assert (len(day.items), day.absent) == (270, 18)
+    canonical = json.dumps(day.items, sort_keys=True, separators=(",", ":"))
+    assert hashlib.sha256(canonical.encode()).hexdigest() == GOLDEN_DAY_SHA256
+    # One window spelled out, so a reader sees what the hash covers.
+    assert by_start(day.items)["2026-02-01T13:40:00Z"]["heartRate"] == {
+        "beatsPerMinuteMin": 77,
+        "beatsPerMinuteAvg": 80.41,
+        "beatsPerMinuteMax": 94,
+    }
+
+
+def test_unit_is_in_zero_one():
+    from pulsebridge_seed import generator
+
+    values = [generator._unit(1, "probe", i) for i in range(20000)]
+    assert all(0.0 <= v < 1.0 for v in values)
+    assert all(v * 2**53 == int(v * 2**53) for v in values)  # exactly 53 bits, never rounded up
+
+
+def test_overlap_from_an_odd_five_minute_offset():
+    """A range that starts at 13:35 (not on the hour, not on the 30-minute drift grid) agrees
+    with a range from midnight for every shared window."""
+    odd = START + timedelta(hours=13, minutes=35)
+    late = by_start(generate(12, NY, odd, odd + timedelta(days=2)).items)
+    early = by_start(generate(12, NY, START, START + timedelta(days=2)).items)
+    shared = set(late) & set(early)
+    assert len(shared) > 250
+    assert all(late[k] == early[k] for k in shared)
+    assert min(shared) >= "2026-02-01T18:35:00Z"  # 13:35 in New York
+
+
+def _local_days(seed: int, tz: ZoneInfo, days: int) -> dict:
+    """Per local date: the list of (present, average) in time order."""
+    out: dict = {}
+    for slot in slots(seed, tz, START, START + timedelta(days=days)):
+        day = slot.start.astimezone(tz).date()
+        avg = slot.item["heartRate"]["beatsPerMinuteAvg"] if slot.item else None
+        out.setdefault(day, []).append(avg)
+    # The first and last local dates are partial; leave them out.
+    return {d: v for d, v in list(out.items())[1:-1]}
+
+
+@pytest.mark.parametrize("zone", ["Asia/Tokyo", "America/New_York"])
+def test_at_most_one_off_wrist_stretch_and_two_bouts_per_local_day(zone):
+    """The day plan is per LOCAL date: a plan keyed on the UTC date would give a local day in
+    Tokyo or New York pieces of two plans, so two charging gaps or three bouts."""
+    tz = ZoneInfo(zone)
+    days = _local_days(21, tz, 90)
+    two_bout_days = 0
+    for windows in days.values():
+        stretches = run = 0
+        for avg in windows:
+            if avg is None:
+                run += 1
+            else:
+                stretches += run >= 4
+                run = 0
+        assert stretches <= 1
+        # Exercise: runs of averages of 105 or more; missing windows do not split a run.
+        bouts, active = 0, False
+        for avg in windows:
+            if avg is None:
+                continue
+            if avg >= 105 and not active:
+                bouts += 1
+            active = avg >= 105
+        assert bouts <= 2
+        two_bout_days += bouts == 2
+    assert two_bout_days > 5  # the limit is reached, so the test can see a third

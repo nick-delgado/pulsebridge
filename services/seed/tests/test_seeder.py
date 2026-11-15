@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import logging
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -238,6 +239,14 @@ def test_the_written_period_is_the_generated_window_in_local_time():
 
 # ---- synthetic markers --------------------------------------------------------------------------
 
+# Pinned literally, not through the shared constant: a typo in TEST_DATA_LABEL would otherwise
+# be "tested" by itself. HL7 v3 ActReason HTEST, "test health data".
+HTEST = {
+    "system": "http://terminology.hl7.org/CodeSystem/v3-ActReason",
+    "code": "HTEST",
+    "display": "test health data",
+}
+
 
 def test_every_resource_is_marked_synthetic():
     store = fresh_store()
@@ -245,7 +254,9 @@ def test_every_resource_is_marked_synthetic():
     bundles = store.bundles()
     for bundle in bundles:
         for entry in bundle["entry"]:
-            assert synthetic.has_test_tag(entry["resource"]), entry["resource"]["resourceType"]
+            meta = entry["resource"]["meta"]
+            assert HTEST in meta["security"], entry["resource"]["resourceType"]
+            assert "tag" not in meta  # the label is a security label, not a tag
     patient = bundles[0]["entry"][0]["resource"]
     assert patient["identifier"][0]["value"].startswith("SYN-")
     assert patient["name"] == [{"use": "official", "family": "Synthetic", "given": ["Demo"]}]
@@ -258,7 +269,7 @@ def test_every_resource_is_marked_synthetic():
     assert agents["custodian"]["who"]["identifier"]["value"] == "PULSEBRIDGE_SYNTHETIC"
     assert agents["performer"]["role"][0]["coding"][0]["code"] == "SYNTHETIC"
     assert agents["assembler"]["who"]["display"] == "PulseBridge seed (synthetic data)"
-    # Observations keep T06's profile in meta beside the tag.
+    # Observations keep T06's profile in meta beside the label.
     observation = entries_of(bundles[1:], "Observation")[0]["resource"]
     assert observation["meta"]["profile"]
 
@@ -271,7 +282,12 @@ def test_mark_synthetic_does_not_change_requests_or_the_input():
     marked = synthetic.mark_synthetic(plain)
     assert [e["request"] for e in marked["entry"]] == [e["request"] for e in plain["entry"]]
     assert all("meta" not in e["resource"] for e in plain["entry"])
-    assert synthetic.mark_synthetic(marked) == marked  # one tag, not two
+    assert synthetic.mark_synthetic(marked) == marked  # one label, not two
+
+
+def test_a_label_in_meta_tag_is_still_recognised():
+    patient = stored_patient(meta={"tag": [dict(HTEST)]}, name=[{"family": "Rivera"}])
+    assert synthetic.is_synthetic_patient(patient)
 
 
 # ---- safety check -------------------------------------------------------------------------------
@@ -284,9 +300,32 @@ def stored_patient(**changes) -> dict:
     return patient
 
 
-def store_with(*patients: dict) -> StoreFake:
+def identifier_only(value: str = PATIENT_ID, **extra) -> dict:
+    """What v2-to-fhir's conditional create stores when an ingest reaches the store first."""
+    patient = {
+        "resourceType": "Patient",
+        "id": "v2-made",
+        "meta": {"versionId": "1"},
+        "identifier": [
+            {
+                "use": "official",
+                "type": {
+                    "coding": [
+                        {"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "PT"}
+                    ]
+                },
+                "system": "urn:pulsebridge:patient",
+                "value": value,
+            }
+        ],
+    }
+    patient.update(extra)
+    return patient
+
+
+def store_with(*patients: dict, total: int | None = None) -> StoreFake:
     store = StoreFake()
-    store.add("GET", "/fhir/Patient", patient_search(*patients))
+    store.add("GET", "/fhir/Patient", patient_search(*patients, total=total))
     return store
 
 
@@ -300,23 +339,73 @@ def test_safety_search_is_one_patient_identifier_search():
 
 
 def test_a_patient_the_seeder_wrote_is_accepted():
-    for patient in (stored_patient(), stored_patient(meta={"versionId": "3"})):  # tag dropped
+    for patient in (stored_patient(), stored_patient(meta={"versionId": "3"})):  # label dropped
         store = store_with(patient)
         report = seed(store, length=timedelta(hours=1), until=UNTIL)
         assert report.outcome == Outcome.SEEDED and report.safety_check == "synthetic-patient"
 
 
 @pytest.mark.parametrize(
+    "patient",
+    [
+        identifier_only(),
+        # v2-to-fhir with the cuff simulator's PID-5 set to the synthetic name (T22).
+        identifier_only(name=[{"use": "official", "family": "Synthetic", "given": ["Demo"]}]),
+    ],
+)
+def test_an_identifier_only_syn_patient_is_accepted_and_completed(patient):
+    """An ingest that reached the store first must not lock the seeder out: the Patient it
+    created holds nothing real, and the setup Bundle completes it."""
+    store = store_with(patient)
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert report.outcome == Outcome.SEEDED
+    assert report.safety_check == "synthetic-incomplete"
+    assert report.setup_written
+    first = store.bundles()[0]
+    assert [e["request"]["method"] for e in first["entry"]] == ["PUT", "PUT"]
+
+
+@pytest.mark.parametrize(
     ("patients", "reason"),
     [
-        # A real person written by the connect script: another name, no HTEST tag.
+        # A real person written by the connect script: another name, no HTEST label.
         (
             [stored_patient(meta={}, name=[{"use": "official", "family": "Rivera"}])],
             "patient-not-synthetic",
         ),
-        # A minimal Patient that health-sync or v2-to-fhir created on first contact.
+        # A real name beside the synthetic one: every name must be the synthetic one.
+        (
+            [
+                stored_patient(
+                    meta={},
+                    name=[
+                        {"use": "official", "family": "Synthetic", "given": ["Demo"]},
+                        {"use": "usual", "family": "Rivera", "given": ["Sam"]},
+                    ],
+                )
+            ],
+            "patient-not-synthetic",
+        ),
+        # Synthetic name, but real-looking demographics.
+        ([stored_patient(meta={}, gender="female")], "patient-not-synthetic"),
+        ([stored_patient(meta={}, birthDate="1971-06-02")], "patient-not-synthetic"),
+        (
+            [identifier_only(telecom=[{"system": "phone", "value": "555-0100"}])],
+            "patient-not-synthetic",
+        ),
+        # Identifier-only, but not a SYN- identifier in PulseBridge's system.
+        ([identifier_only(value="PB-0001")], "patient-not-synthetic"),
         (
             [{"resourceType": "Patient", "id": "x", "identifier": [{"value": PATIENT_ID}]}],
+            "patient-not-synthetic",
+        ),
+        (
+            [
+                identifier_only(
+                    identifier=identifier_only()["identifier"]
+                    + [{"system": "urn:pulsebridge:google-health-user-id", "value": "g"}]
+                )
+            ],
             "patient-not-synthetic",
         ),
         ([stored_patient(), stored_patient(id="def")], "patients-duplicated"),
@@ -330,11 +419,220 @@ def test_refuses_before_any_write(patients, reason):
     assert store.bundles() == []
 
 
-def test_force_overrides_the_refusal():
+def test_force_overrides_the_refusal_and_warns(caplog):
+    caplog.set_level(logging.WARNING)
     store = store_with(stored_patient(meta={}, name=[{"family": "Rivera"}]))
     report = seed(store, length=timedelta(hours=1), until=UNTIL, force=True)
     assert report.outcome == Outcome.SEEDED and report.safety_check == "forced"
-    assert len(store.bundles()) >= 2
+    assert report.setup_written  # --force replaces the record
+    forced = [r for r in caplog.records if getattr(r, "fields", {}).get("event") == "seed-forced"]
+    assert len(forced) == 1 and forced[0].levelno == logging.WARNING
+    assert forced[0].fields["reason"] == "patient-not-synthetic"
+
+
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [
+        (json_response(200, {}), "safety-search-not-a-bundle"),  # (an empty body reads as {})
+        (
+            json_response(200, {"resourceType": "OperationOutcome", "issue": []}),
+            "safety-search-not-a-bundle",
+        ),
+        (
+            json_response(200, {"resourceType": "Bundle", "type": "batch-response"}),
+            "safety-search-not-a-searchset",
+        ),
+        (
+            json_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": {"resource": {"resourceType": "Patient"}},
+                },
+            ),
+            "safety-search-malformed-entry",
+        ),
+        (
+            json_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [{"resource": {"resourceType": "Observation"}}],
+                },
+            ),
+            "safety-search-malformed-entry",
+        ),
+        (
+            json_response(200, {"resourceType": "Bundle", "type": "searchset", "total": "1"}),
+            "safety-search-malformed-total",
+        ),
+        (
+            json_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "total": 3,
+                    "entry": [{"resource": stored_patient()}],
+                },
+            ),
+            "safety-search-incomplete",
+        ),
+    ],
+)
+def test_an_unusable_safety_answer_fails_closed(answer, reason):
+    store = StoreFake()
+    store.add("GET", "/fhir/Patient", answer)
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert (report.outcome, report.reason) == (Outcome.FHIR_REJECTED, reason)
+    assert store.bundles() == []
+
+
+def test_an_empty_200_body_fails_closed():
+    from pulsebridge_gcp import HttpResponse
+
+    store = StoreFake()
+    store.add("GET", "/fhir/Patient", HttpResponse(status=200, body=b"", headers={}))
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert report.outcome == Outcome.FHIR_REJECTED
+    assert store.bundles() == []
+
+
+def test_a_search_outcome_entry_is_allowed():
+    outcome = {"resourceType": "OperationOutcome", "issue": []}
+    store = StoreFake()
+    store.add(
+        "GET",
+        "/fhir/Patient",
+        json_response(
+            200,
+            {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "total": 0,
+                "entry": [{"resource": outcome, "search": {"mode": "outcome"}}],
+            },
+        ),
+    )
+    assert seed(store, length=timedelta(hours=1), until=UNTIL).outcome == Outcome.SEEDED
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome"),
+    [(503, Outcome.FHIR_UNAVAILABLE), (403, Outcome.FHIR_MISCONFIGURED)],
+)
+def test_a_failed_safety_search_sends_no_bundle(status, outcome):
+    store = StoreFake()
+    store.add("GET", "/fhir/Patient", json_response(status, {}))
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert (report.outcome, report.fhir_status) == (outcome, status)
+    assert store.bundles() == []
+
+
+# ---- setup only when needed (D11: written once) --------------------------------------------------
+
+
+def test_setup_is_sent_on_the_first_run_only():
+    store = fresh_store()
+    first = seed(store, length=timedelta(hours=2), until=UNTIL)
+    assert first.setup_written and first.safety_check == "no-patient"
+    sent = len(store.bundles())
+    second = seed(
+        store,
+        length=timedelta(hours=2),
+        until=UNTIL + timedelta(hours=1),
+        now=NOW + timedelta(hours=1),
+    )
+    assert second.safety_check == "synthetic-patient" and not second.setup_written
+    for bundle in store.bundles()[sent:]:
+        for entry in bundle["entry"]:
+            if entry["resource"]["resourceType"] in ("Patient", "Device"):
+                assert entry["request"]["method"] == "POST"  # conditional create only
+
+
+# ---- read once ----------------------------------------------------------------------------------
+
+
+def test_a_second_run_over_the_same_range_writes_nothing():
+    store = fresh_store()
+    seed(store, length=DAY, until=UNTIL)
+    before = len(store.bundles())
+    report = seed(store, length=DAY, until=UNTIL)
+    assert report.stored_read == "ok"
+    assert report.windows_written == 0 and report.bundles_written == 0
+    assert report.windows_unchanged == report.windows_generated
+    assert len(store.bundles()) == before
+
+
+def test_each_window_is_written_at_most_twice_over_hourly_top_ups():
+    """Hourly runs with --hours 4 for a day: every window first appears preliminary (it ended
+    under an hour ago), is written final once, and never again."""
+    store = fresh_store()
+    writes: dict[str, list[str]] = {}
+    for hour in range(26):
+        now = NOW + timedelta(hours=hour)
+        seen = len(store.bundles())
+        seed(store, length=timedelta(hours=4), until=now, now=now)
+        for bundle in store.bundles()[seen:]:
+            for entry in entries_of([bundle], "Observation"):
+                writes.setdefault(entry["request"]["url"], []).append(entry["resource"]["status"])
+    assert writes
+    middle = [w for w in writes.values() if len(w) > 1 or w == ["final"]]
+    assert all(len(w) <= 2 for w in writes.values())
+    assert all(w in (["preliminary", "final"], ["final"]) for w in middle)
+    assert sum(1 for w in writes.values() if w == ["preliminary", "final"]) > 200
+
+
+def test_read_follows_next_links():
+    store = fresh_store()
+    seed(store, length=DAY, until=UNTIL)
+    store.page_size_cap = 50
+    report = seed(store, length=DAY, until=UNTIL)
+    assert report.windows_written == 0
+    assert len(store.calls("GET", "/fhir/Observation")) >= 6
+
+
+def test_a_failed_read_writes_everything():
+    store = fresh_store()
+    seed(store, length=timedelta(hours=2), until=UNTIL)
+    store.add("GET", "/fhir/Observation", json_response(500, {}))
+    report = seed(store, length=timedelta(hours=2), until=UNTIL)
+    assert report.stored_read == "failed:500"
+    assert report.windows_written == report.windows_generated > 0
+
+
+def test_an_unusable_read_writes_everything():
+    store = fresh_store()
+    seed(store, length=timedelta(hours=2), until=UNTIL)
+    store.add("GET", "/fhir/Observation", json_response(200, {"resourceType": "OperationOutcome"}))
+    report = seed(store, length=timedelta(hours=2), until=UNTIL)
+    assert report.stored_read == "failed:StoredReadError"
+    assert report.windows_written == report.windows_generated
+
+
+def test_duplicate_keys_are_written_and_withdrawn_windows_left_alone():
+    store = fresh_store()
+    seed(store, length=timedelta(hours=2), until=UNTIL)
+    keys = list(store.observations)
+    withdrawn = store.observations[keys[0]]
+    withdrawn["status"] = "entered-in-error"
+    duplicate = copy.deepcopy(store.observations[keys[1]])
+    store.observations[keys[1] + "-copy"] = duplicate  # same identifier stored twice
+    report = seed(store, length=timedelta(hours=2), until=UNTIL)
+    assert report.windows_withdrawn_kept == 1
+    assert report.windows_written == 1  # only the duplicated key
+    assert store.observations[keys[0]]["status"] == "entered-in-error"
+
+
+def test_changed_values_are_rewritten():
+    """After a change of seed the stored windows differ and are rewritten."""
+    store = fresh_store()
+    seed(store, length=timedelta(hours=2), until=UNTIL)
+    report = seed(store, config=make_config(seed=8), length=timedelta(hours=2), until=UNTIL)
+    assert report.windows_changed > 0
+    assert report.windows_written == report.windows_changed + report.windows_new
 
 
 # ---- failures -----------------------------------------------------------------------------------
@@ -350,6 +648,17 @@ def test_transient_failures_are_retried_with_backoff():
     assert report.outcome == Outcome.SEEDED
     assert sleeps == [1.0, 2.0]
     assert len(store.bundles()) == 2 + 2  # two failed setup attempts, setup, one data Bundle
+
+
+def test_a_conflict_is_retried():
+    store = fresh_store()
+    store.bundle_errors = [None, json_response(409, {"resourceType": "OperationOutcome"})]
+    sleeps: list[float] = []
+    report = run(
+        make_config(), deps_for(store, sleeps=sleeps), length=timedelta(hours=1), until=UNTIL
+    )
+    assert report.outcome == Outcome.SEEDED and sleeps == [1.0]
+    assert report.bundles_written == 1
 
 
 def test_retries_are_bounded():
@@ -381,3 +690,57 @@ def test_failures_are_classified_and_stop_the_run(status, outcome, reason):
     assert report.setup_written and report.bundles_written == 0
     assert len(store.bundles()) == 2  # no retry of a refusal, and the run stopped there
     assert "71.3" not in str(report.as_dict())  # the diagnostics text is not kept
+
+
+# ---- the clock ----------------------------------------------------------------------------------
+
+
+def test_a_future_until_is_refused_by_run_itself():
+    with pytest.raises(ValueError, match="later than now"):
+        seed(StoreFake(), length=DAY, until=NOW + timedelta(minutes=1))
+
+
+def test_a_backdated_until_uses_the_real_clock_for_the_cutoff():
+    """--until 30 minutes ago: windows ending in the last hour of real time are still
+    preliminary, although they end before --until."""
+    store = fresh_store()
+    until = NOW - timedelta(minutes=30)
+    report = seed(store, length=timedelta(hours=3), until=until)
+    assert report.complete_before == datetime(2026, 3, 10, 11, 0, tzinfo=UTC)
+    statuses = {
+        e["resource"]["effectivePeriod"]["end"]: e["resource"]["status"]
+        for e in entries_of(data_bundles(store), "Observation")
+    }
+    late = [
+        s
+        for end, s in statuses.items()
+        if datetime.fromisoformat(end) > datetime(2026, 3, 10, 11, 0, tzinfo=UTC)
+    ]
+    assert late and set(late) == {"preliminary"}
+
+
+def test_an_unexpected_error_is_reported_with_counts():
+    store = fresh_store()
+    store.bundle_errors = [None, KeyError("boom")]
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert (report.outcome, report.reason) == (Outcome.BUG, "KeyError")
+    assert report.windows_generated > 0 and report.setup_written
+
+
+def test_an_endless_next_chain_writes_everything():
+    """A server that always sends a next link cannot loop the run: the read gives up after a
+    bounded number of pages and every window is written."""
+    store = fresh_store()
+    seed(store, length=timedelta(hours=1), until=UNTIL)
+    base = deps_for(store).fhir.fhir_base_url("health")
+    page = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [],
+        "link": [{"relation": "next", "url": f"{base}/Observation?_page=again"}],
+    }
+    store.add("GET", "/fhir/Observation", json_response(200, page))
+    report = seed(store, length=timedelta(hours=1), until=UNTIL)
+    assert report.stored_read == "failed:StoredReadError"
+    assert report.windows_written == report.windows_generated
+    assert len(store.calls("GET", "/fhir/Observation")) <= 12 + 2 + 1

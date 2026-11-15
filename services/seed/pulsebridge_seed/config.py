@@ -69,6 +69,13 @@ class SeedConfig:
     fhir_timeout: float = 60.0
     max_attempts: int = 4
 
+    def __post_init__(self) -> None:
+        # Checked here too, not only in from_env: a SeedConfig built any other way (a test, a
+        # future caller) still cannot target a non-synthetic patient identifier.
+        parse_patient_id(self.patient_id)
+        if not 1 <= self.batch_windows <= MAX_BATCH_WINDOWS:
+            raise ConfigError(f"BATCH_WINDOWS must be between 1 and {MAX_BATCH_WINDOWS}")
+
     @classmethod
     def from_env(
         cls,
@@ -104,7 +111,7 @@ class SeedConfig:
             patient_id=parse_patient_id(values["PATIENT_ID"]),
             time_zone=parse_time_zone(values["TIME_ZONE"]),
             fhir=fhir,
-            seed=_int(optional, "SYNTHETIC_SEED", 0, MAX_SEED, digits=19),
+            seed=_int(optional, "SYNTHETIC_SEED", 0, MAX_SEED),
             final_after=timedelta(minutes=final_after),
             batch_windows=_int(optional, "BATCH_WINDOWS", 1, MAX_BATCH_WINDOWS),
             fhir_timeout=float(_int(optional, "FHIR_TIMEOUT_SECONDS", 1, 600)),
@@ -112,11 +119,12 @@ class SeedConfig:
         )
 
 
-def _int(values: Mapping[str, str], name: str, low: int, high: int, digits: int = 7) -> int:
+def _int(values: Mapping[str, str], name: str, low: int, high: int) -> int:
     text = values[name]
-    if not re.fullmatch(f"[0-9]{{1,{digits}}}", text):
+    if not re.fullmatch("[0-9]+", text):
         raise ConfigError(f"{name} must be a whole number")
-    number = int(text)
+    # A long string of digits is out of range, not "not a number"; it is never converted.
+    number = int(text) if len(text) <= len(str(high)) else high + 1
     if not low <= number <= high:
         raise ConfigError(f"{name} must be between {low} and {high}")
     return number

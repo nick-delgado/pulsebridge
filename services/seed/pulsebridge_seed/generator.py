@@ -60,7 +60,8 @@ DRIFT_STEP_SECONDS = 30 * 60
 HEART_RATE_BOUNDS = (38, 195)
 RANDOM_DROP_PROBABILITY = 0.01
 # Bump when the model changes in a way that changes values: the version is hashed into every
-# number, so old and new values never mix silently under one seed.
+# number, so old and new values never mix silently under one seed. A golden test pins the values
+# of one fixed day; when it fails because the model changed on purpose, bump this as well.
 MODEL_VERSION = "pulsebridge-seed/v1"
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -70,10 +71,12 @@ def _unit(seed: int, purpose: str, *parts: object) -> float:
     """A deterministic number in ``[0, 1)`` for ``(seed, purpose, parts)``.
 
     Canonical JSON keeps the parts apart (``("ab", "c")`` and ``("a", "bc")`` hash differently);
-    BLAKE2b gives the same digest on every machine and Python version."""
+    BLAKE2b gives the same digest on every machine and Python version. The top 53 bits are kept,
+    the precision of a float, so the result is exact and never rounds up to 1.0 (a 64-bit value
+    divided by 2**64 can)."""
     data = json.dumps([MODEL_VERSION, seed, purpose, *parts], separators=(",", ":"))
     digest = hashlib.blake2b(data.encode("utf-8"), digest_size=8).digest()
-    return int.from_bytes(digest, "big") / 2**64
+    return (int.from_bytes(digest, "big") >> 11) / 2**53
 
 
 def floor_to_window(value: datetime) -> datetime:

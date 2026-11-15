@@ -179,3 +179,47 @@ def test_logs_and_report_carry_no_values_or_patient_identifier(env, capsys, capl
     distinctive = {a for a in averages if "." in a and len(a) >= 5}
     assert distinctive
     assert not [a for a in distinctive if a in text]
+
+
+# ---- review follow-ups --------------------------------------------------------------------------
+
+
+def test_seed_config_itself_refuses_a_non_synthetic_patient():
+    from zoneinfo import ZoneInfo
+
+    with pytest.raises(ConfigError, match="must start with SYN-"):
+        SeedConfig(patient_id="PB-0001", time_zone=ZoneInfo("UTC"), fhir=None)
+
+
+@pytest.mark.parametrize("value", ["0", "1001", "99999999999999999999"])
+def test_batch_windows_out_of_range_says_between(value):
+    with pytest.raises(ConfigError, match="BATCH_WINDOWS must be between 1 and 1000"):
+        SeedConfig.from_env(dict(ENV) | {"BATCH_WINDOWS": value})
+
+
+def test_an_unexpected_error_is_logged_as_a_seed_run_with_counts(env, capsys, caplog):
+    caplog.set_level(logging.INFO)
+    store = fresh_store()
+    store.bundle_errors = [None, KeyError("a value 63.27 inside")]
+    assert main(["--hours", "1", "--until", "2026-03-10T05:00:00Z"], deps=deps_for(store)) == (
+        EXIT_FAILED
+    )
+    runs = [r for r in caplog.records if getattr(r, "fields", {}).get("event") == "seed-run"]
+    assert len(runs) == 1 and runs[0].levelno == logging.ERROR
+    assert runs[0].fields["outcome"] == "bug" and runs[0].fields["reason"] == "KeyError"
+    assert runs[0].fields["windows_generated"] > 0
+    out = capsys.readouterr()
+    assert "63.27" not in out.out + out.err
+    assert json.loads(out.out)["outcome"] == "bug"
+
+
+def test_a_failure_before_the_run_is_still_reported(env, capsys, monkeypatch):
+    import pulsebridge_seed.cli as cli
+
+    def no_credentials(_config):
+        raise RuntimeError("no default credentials")
+
+    monkeypatch.setattr(cli, "default_dependencies", no_credentials)
+    assert main(["--hours", "1"]) == EXIT_FAILED
+    report = json.loads(capsys.readouterr().out)
+    assert (report["outcome"], report["reason"]) == ("bug", "RuntimeError")
