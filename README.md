@@ -39,8 +39,10 @@ delegated to a managed mapping service:
 flowchart LR
   subgraph wearable["Wearable path"]
     watch["Pixel Watch"] --> gh["Google Health API"]
-    sched["Cloud Scheduler<br/>every 15 min"] -->|"OIDC"| hs["health-sync<br/>Cloud Run"]
-    gh -->|"rollUp, OAuth refresh token"| hs
+    sched["Cloud Scheduler"] -->|"every 15 min, OIDC"| hs["health-sync<br/>Cloud Run"]
+    gh -->|"five-minute roll-ups"| hs
+    goauth["Google OAuth<br/>token endpoint"] -->|"access token from<br/>the refresh token"| hs
+    sched -.->|"hourly, synthetic data only"| seed["seed job<br/>Cloud Run"]
   end
 
   subgraph device["Device path"]
@@ -58,6 +60,7 @@ flowchart LR
   end
   hs -->|"transaction Bundle"| fhir
   v2f -->|"transaction Bundle"| fhir
+  seed -.->|"synthetic windows"| fhir
 
   subgraph front["Presentation and sharing"]
     browser["Browser"] --> hosting["Firebase Hosting<br/>static page"]
@@ -66,6 +69,7 @@ flowchart LR
     proxy -->|"read"| audit
     proxy -->|"read"| hl7
     proxy -->|"OIDC"| cuff
+    proxy -->|"OIDC, GET /status"| hs
     proxy -->|"OAuth2 client credentials,<br/>FHIR over HTTPS :443"| emr["OpenEMR + MariaDB<br/>same e2-micro VM"]
   end
 ```
@@ -73,8 +77,10 @@ flowchart LR
 - **Wearable path.** Cloud Scheduler calls `health-sync` every 15 minutes. It asks the Google
   Health API for five-minute heart-rate roll-ups (minimum, average, maximum), maps each window
   to a FHIR `Observation` with a `Provenance`, and writes a transaction `Bundle` of conditional
-  updates, so a repeated window rewrites the same Observation. In a synthetic deployment the
-  seeder job (`services/seed`) takes its place.
+  updates, so a repeated window rewrites the same Observation. It gets each access token from
+  Google's OAuth token endpoint with the stored refresh token. In a synthetic deployment (the
+  dev default) there is no `health-sync`: Scheduler runs the seeder job (`services/seed`) hourly
+  instead, which writes invented windows (dashed in the diagram).
 - **Device path.** The cuff simulator builds an HL7v2 ORU^R01 with `hl7apy`, sends it over MLLP
   to Google's MLLP adapter on the VM (or straight to the store over HTTPS), and returns the store's
   ACK. The HL7v2 store announces each stored message on Pub/Sub; `v2-to-fhir` fetches the raw
@@ -84,7 +90,8 @@ flowchart LR
 - **Presentation.** The page and `fhir-proxy` share one origin through a Hosting rewrite.
   `fhir-proxy` is the only public service: it checks a shared reviewer password, issues an
   8-hour signed token, exposes a narrow read API with its own CapabilityStatement, forwards cuff
-  readings, and runs the share.
+  readings, asks `health-sync` for its status (real data) for the status strip, and runs the
+  share.
 - **Sharing.** The share searches for or creates the Patient and an Encounter in OpenEMR, creates
   the Observation, and reads all three back for the "As stored in OpenEMR" panel. OpenEMR's
   screens are not exposed to the internet; only Cloud Run's subnet reaches the VM, which has no
@@ -173,13 +180,18 @@ npm run dev       # mock mode on http://localhost:5173 (any non-empty password l
 >    following [docs/setup.md](docs/setup.md).
 > 2. In the dashboard, take a cuff reading, wait for the outcome "accepted", select it and
 >    **Share with clinic**; share one final heart-rate point too.
-> 3. Set `enable_iap_ssh = true` and apply, then open a temporary tunnel through IAP from your
->    machine to OpenEMR's HTTPS port on the VM's internal address
->    (`gcloud compute ssh <name_prefix>-edge-vm --zone <zone> --tunnel-through-iap --project <project-id> -- -L 8443:<edge VM internal IP>:443`;
->    not yet tried).
-> 4. Open `https://localhost:8443`, accept the self-signed certificate, log in as `admin` with
->    the `openemr-admin-password` secret's value, open the synthetic patient (Synthetic / Demo) and the
->    **Vitals** of the shared day.
+> 3. Set `enable_iap_ssh = true` and apply. Your account needs `roles/iap.tunnelResourceAccessor`,
+>    `roles/compute.osAdminLogin`, and `roles/iam.serviceAccountUser` on the VM's service account
+>    ([edge-vm README](infra/modules/edge-vm/README.md#looking-at-the-vm-without-public-access)).
+>    Then open a temporary tunnel through IAP to OpenEMR's HTTPS port, which the VM publishes on
+>    every one of its interfaces (`openemr_https_port`, 443 by default):
+>    `gcloud compute ssh <name_prefix>-edge-vm --zone <zone> --tunnel-through-iap --project <project-id> -- -L 8443:localhost:<openemr_https_port>`
+>    (not yet tried).
+> 4. Open `https://localhost:8443`, accept the self-signed certificate and log in as `admin`. The
+>    password is the `openemr-admin-password` secret's value: open it in the Google Cloud console
+>    (Secret Manager, the secret, the version's "View secret value") rather than printing it in a
+>    terminal, where it would land in scrollback and logs. Open the synthetic patient
+>    (Synthetic / Demo) and the **Vitals** of the shared day.
 > 5. Capture the vitals with the reading visible. Check the image shows only the synthetic
 >    patient, no address bar or host name, and no other data; save it as
 >    `docs/images/openemr-chart-synthetic.png`; then close the tunnel and set
