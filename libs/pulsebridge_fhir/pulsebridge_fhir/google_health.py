@@ -48,7 +48,7 @@ def parse_google_utc_offset(value: str) -> timezone:
     from configuration. FHIR and ISO 8601 offsets are whole minutes, from -14:00 to +14:00, so
     anything else is rejected rather than rounded.
     """
-    match = _GOOGLE_OFFSET.match(value) if isinstance(value, str) else None
+    match = _GOOGLE_OFFSET.fullmatch(value) if isinstance(value, str) else None
     if not match:
         raise FhirInputError(f"utcOffset {value!r} is not Google's '<seconds>s' format")
     seconds = int(match.group(2)) * (-1 if match.group(1) == "-" else 1)
@@ -63,7 +63,7 @@ def _parse_utc(point: Mapping, name: str) -> datetime:
     value = point.get(name)
     if value is None or value == "":
         raise FhirInputError(f"{WHERE}: {name} is missing")
-    if not isinstance(value, str) or not _UTC_TIME.match(value):
+    if not isinstance(value, str) or not _UTC_TIME.fullmatch(value):
         raise FhirInputError(
             f"{WHERE}: {name} {value!r} is not a UTC time in whole seconds "
             "like 2026-01-01T14:05:00Z"
@@ -81,7 +81,7 @@ def _parse_bpm(heart_rate: Mapping, name: str) -> int | float:
     # Roll-ups send JSON numbers (spike S3), but Google's raw points send beatsPerMinute as a
     # string (proto3 JSON writes int64 as a string). Accept a plain decimal string too.
     if isinstance(value, str):
-        if len(value) > 32 or not _DECIMAL.match(value):
+        if len(value) > 32 or not _DECIMAL.fullmatch(value):
             shown = repr(value) if len(value) <= 32 else f"{value[:12]!r}… ({len(value)} chars)"
             raise FhirInputError(
                 f"{WHERE}: {name} {shown} is not a number (expected ASCII digits, e.g. '72')"

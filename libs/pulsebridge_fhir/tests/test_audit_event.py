@@ -413,6 +413,18 @@ def test_sanitised_reason_reaches_both_detail_and_outcome_desc():
         (lambda: attempt(transport="tcp"), "transport 'tcp' is not one of mllp, https"),
         (lambda: attempt(control_id="A|B"), "control_id 'A|B' must be"),
         (lambda: attempt(control_id=""), "control_id '' must be"),
+        # A trailing newline: re.match with "$" would have accepted these (review minor 2).
+        (lambda: attempt(control_id="MSG-1\n"), r"control_id 'MSG-1\\n' must be"),
+        (lambda: attempt(agent="cuff-sim\n"), r"agent 'cuff-sim\\n' must be"),
+        (lambda: rejected(sample_name="unparseable_no_msh\n"), "sample_name"),
+        (
+            lambda: attempt(destination=STORE + "\n", message_name=None),
+            "destination must be an HL7v2 store",
+        ),
+        (
+            lambda: attempt(message_name=STORE + "/messages/x\n"),
+            "message_name must be <destination>/messages/<id>",
+        ),
         (lambda: attempt(control_id="X" * 65), "must be 1 to 64"),
         (lambda: attempt(control_id=None), "control_id is missing"),
         (lambda: attempt(sample_name="Not A Sample"), "sample_name 'Not A Sample'"),

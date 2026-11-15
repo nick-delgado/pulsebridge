@@ -117,7 +117,7 @@ def request_for(resource: dict, write: Write) -> dict:
         if write is not Write.UPDATE:
             raise FhirInputError(f"{rt} has no conditional-create request")
         rid = resource.get("id")
-        if not isinstance(rid, str) or not _FHIR_ID.match(rid):
+        if not isinstance(rid, str) or not _FHIR_ID.fullmatch(rid):
             raise FhirInputError(f"{rt}: id {rid!r} is not a valid FHIR id")
         return {"method": "PUT", "url": f"{rt}/{rid}"}
     system = _IDENTITY_SYSTEMS.get(rt)
@@ -326,7 +326,7 @@ def _complete_official_names(patient: dict) -> list[dict]:
 
 
 def _is_full_date(value: object) -> bool:
-    if not isinstance(value, str) or not _FULL_DATE.match(value):
+    if not isinstance(value, str) or not _FULL_DATE.fullmatch(value):
         return False
     try:
         date.fromisoformat(value)  # rejects 1980-13-45

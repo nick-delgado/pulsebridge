@@ -323,7 +323,7 @@ def _not_ours(why: str) -> FhirInputError:
 
 
 def _instant(value: object, name: str) -> datetime:
-    if not isinstance(value, str) or not _INSTANT.match(value):
+    if not isinstance(value, str) or not _INSTANT.fullmatch(value):
         raise _not_ours(f"{name} is not a FHIR instant")
     try:
         return datetime.fromisoformat(value)
@@ -451,7 +451,7 @@ def parse_send_attempt(resource: object) -> SendAttemptRecord:
         )
     else:
         status = _string(details, DETAIL_HTTP_STATUS)
-        if status is not None and not _HTTP_STATUS.match(status):
+        if status is not None and not _HTTP_STATUS.fullmatch(status):
             raise _not_ours("http-status is not a three-digit number")
         result = NotAcknowledged(
             why=_string(details, DETAIL_NO_ACK_REASON, required=True),

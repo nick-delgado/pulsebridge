@@ -255,10 +255,10 @@ class SourceInfo:
             if value is None:
                 continue
             _require_text(where, name, value)
-            if not _TOKEN.match(value):
+            if not _TOKEN.fullmatch(value):
                 raise FhirInputError(f"{where}: {name} {value!r} must be an upper-case token")
         _require_text(where, "record_type", self.record_type)
-        if not re.match(r"^[a-z0-9]+(-[a-z0-9]+)*$", self.record_type):
+        if not re.fullmatch(r"^[a-z0-9]+(-[a-z0-9]+)*$", self.record_type):
             raise FhirInputError(
                 f"{where}: record_type {self.record_type!r} must be lower-case words joined by '-'"
             )
@@ -468,7 +468,7 @@ class SendAttempt:
         if self.sample_name is not None and (
             not isinstance(self.sample_name, str)
             or len(self.sample_name) > 64
-            or not _SAMPLE_NAME.match(self.sample_name)
+            or not _SAMPLE_NAME.fullmatch(self.sample_name)
         ):
             raise FhirInputError(
                 f"{where}: sample_name {self.sample_name!r} must be a sample name such as "
@@ -479,7 +479,7 @@ class SendAttempt:
                 raise FhirInputError(
                     f"{where}: control_id is missing; only a malformed sample may lack one"
                 )
-        elif not isinstance(self.control_id, str) or not _CONTROL_ID.match(self.control_id):
+        elif not isinstance(self.control_id, str) or not _CONTROL_ID.fullmatch(self.control_id):
             raise FhirInputError(
                 f"{where}: control_id {self.control_id!r} must be 1 to 64 letters, digits, "
                 "'.', '_' or '-'"
@@ -497,11 +497,13 @@ class SendAttempt:
             raise FhirInputError(f"{where}: api-error happens only over https")
         # The same rule T06 applies to the identifier it writes, so the reference always matches.
         PatientInput(self.patient_id)
-        if not isinstance(self.agent, str) or not _SERVICE_NAME.match(self.agent):
+        if not isinstance(self.agent, str) or not _SERVICE_NAME.fullmatch(self.agent):
             raise FhirInputError(
                 f"{where}: agent {self.agent!r} must be a service name such as cuff-sim"
             )
-        if not isinstance(self.destination, str) or not _HL7V2_STORE_NAME.match(self.destination):
+        if not isinstance(self.destination, str) or not _HL7V2_STORE_NAME.fullmatch(
+            self.destination
+        ):
             raise FhirInputError(
                 f"{where}: destination must be an HL7v2 store name, "
                 "projects/<p>/locations/<l>/datasets/<d>/hl7V2Stores/<s>"
@@ -516,7 +518,7 @@ class SendAttempt:
             if (
                 not isinstance(self.message_name, str)
                 or not self.message_name.startswith(prefix)
-                or not _MESSAGE_ID.match(self.message_name[len(prefix) :])
+                or not _MESSAGE_ID.fullmatch(self.message_name[len(prefix) :])
             ):
                 raise FhirInputError(
                     f"{where}: message_name must be <destination>/messages/<id> in the same store"
