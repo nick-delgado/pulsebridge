@@ -419,6 +419,17 @@ run "no_mirror_grant_when_switched_off" {
   }
 }
 
+# The env roots pass module identity's email, which is unknown until the account exists. The
+# count must not depend on it, or the first plan fails with "Invalid count argument" (found in
+# T25). The harness creates the account in the same plan, so the email really is unknown here.
+run "mirror_grant_count_is_known_with_an_unknown_email" {
+  command = plan
+
+  module {
+    source = "./tests/unknown_email"
+  }
+}
+
 run "mirror_grant_without_an_account_is_refused" {
   command = plan
 
@@ -429,15 +440,4 @@ run "mirror_grant_without_an_account_is_refused" {
   # grant_edge_vm_mirror_reader defaults to true; without the account the precondition stops the
   # plan instead of silently leaving the VM unable to pull.
   expect_failures = [google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader]
-}
-
-# The env roots pass module identity's email, which is unknown until the account exists. The
-# count must not depend on it, or the first plan fails with "Invalid count argument" (found in
-# T25). The harness creates the account in the same plan, so the email really is unknown here.
-run "mirror_grant_count_is_known_with_an_unknown_email" {
-  command = plan
-
-  module {
-    source = "./tests/unknown_email"
-  }
 }
