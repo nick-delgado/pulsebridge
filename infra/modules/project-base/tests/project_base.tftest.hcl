@@ -441,3 +441,206 @@ run "mirror_grant_without_an_account_is_refused" {
   # plan instead of silently leaving the VM unable to pull.
   expect_failures = [google_artifact_registry_repository_iam_member.dockerhub_mirror_edge_vm_reader]
 }
+
+# --- Image builds (T26) ----------------------------------------------------------------------------
+
+run "services_repository_has_a_cleanup_policy" {
+  command = plan
+
+  # Tags are immutable, so without a policy every release stays forever. DELETE old versions, but
+  # KEEP the newest ten of each image whatever their age (KEEP wins over DELETE).
+  assert {
+    condition = (
+      length(google_artifact_registry_repository.services.cleanup_policies) == 2 &&
+      one([for p in google_artifact_registry_repository.services.cleanup_policies : p if p.action == "DELETE"]).condition[0].older_than == "7776000s" &&
+      one([for p in google_artifact_registry_repository.services.cleanup_policies : p if p.action == "DELETE"]).condition[0].tag_state == "ANY" &&
+      one([for p in google_artifact_registry_repository.services.cleanup_policies : p if p.action == "KEEP"]).most_recent_versions[0].keep_count == 10
+    )
+    error_message = "The services repository must delete versions older than 90 days but keep the newest 10 of each image."
+  }
+
+  assert {
+    condition     = google_artifact_registry_repository.services.cleanup_policy_dry_run == false && google_artifact_registry_repository.services.docker_config[0].immutable_tags == true
+    error_message = "The cleanup policy must act (not dry run) by default, and tags must stay immutable."
+  }
+}
+
+run "cleanup_policy_follows_its_variables" {
+  command = plan
+
+  variables {
+    services_keep_recent_versions   = 3
+    services_delete_older_than_days = 30
+    services_cleanup_dry_run        = true
+  }
+
+  assert {
+    condition = (
+      one([for p in google_artifact_registry_repository.services.cleanup_policies : p if p.action == "DELETE"]).condition[0].older_than == "2592000s" &&
+      one([for p in google_artifact_registry_repository.services.cleanup_policies : p if p.action == "KEEP"]).most_recent_versions[0].keep_count == 3 &&
+      google_artifact_registry_repository.services.cleanup_policy_dry_run == true
+    )
+    error_message = "The cleanup policy must use services_delete_older_than_days, services_keep_recent_versions and services_cleanup_dry_run."
+  }
+}
+
+run "rejects_keeping_fewer_than_two_versions" {
+  command = plan
+
+  variables {
+    services_keep_recent_versions = 1
+  }
+
+  expect_failures = [var.services_keep_recent_versions]
+}
+
+run "no_build_grants_or_trigger_by_default" {
+  command = plan
+
+  assert {
+    condition = (
+      length(google_artifact_registry_repository_iam_member.services_build_writer) == 0 &&
+      length(google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader) == 0 &&
+      length(google_cloudbuild_trigger.images_on_tag) == 0 &&
+      output.build_trigger_name == null
+    )
+    error_message = "Without the build variables there must be no build grant and no trigger."
+  }
+}
+
+run "build_account_writes_services_and_reads_the_mirror_only" {
+  command = plan
+
+  variables {
+    build_service_account_email         = "pb-build@example-project-123.iam.gserviceaccount.com"
+    grant_build_account_registry_access = true
+  }
+
+  assert {
+    condition = (
+      google_artifact_registry_repository_iam_member.services_build_writer[0].repository == "pulsebridge-services" &&
+      google_artifact_registry_repository_iam_member.services_build_writer[0].role == "roles/artifactregistry.writer" &&
+      google_artifact_registry_repository_iam_member.services_build_writer[0].member == "serviceAccount:pb-build@example-project-123.iam.gserviceaccount.com"
+    )
+    error_message = "The build account must be writer on the services repository."
+  }
+
+  assert {
+    condition = (
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader[0].repository == "pulsebridge-dockerhub" &&
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader[0].role == "roles/artifactregistry.reader" &&
+      google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader[0].member == "serviceAccount:pb-build@example-project-123.iam.gserviceaccount.com"
+    )
+    error_message = "The build account must be reader (not writer) on the Docker Hub mirror."
+  }
+
+  assert {
+    condition     = output.build_account_registry_grants == tolist(["pulsebridge-dockerhub=roles/artifactregistry.reader", "pulsebridge-services=roles/artifactregistry.writer"])
+    error_message = "The build account must have exactly these two repository grants."
+  }
+
+  assert {
+    condition     = length(google_cloudbuild_trigger.images_on_tag) == 0
+    error_message = "The trigger is opt-in: no trigger without build_trigger_repository."
+  }
+}
+
+run "build_grants_without_an_account_are_refused" {
+  command = plan
+
+  variables {
+    grant_build_account_registry_access = true
+  }
+
+  expect_failures = [
+    google_artifact_registry_repository_iam_member.services_build_writer,
+    google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader,
+  ]
+}
+
+run "trigger_runs_cloudbuild_yaml_as_the_build_account_on_release_tags" {
+  command = plan
+
+  variables {
+    build_service_account_email         = "pb-build@example-project-123.iam.gserviceaccount.com"
+    grant_build_account_registry_access = true
+    build_trigger_repository            = "projects/example-project-123/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  assert {
+    condition = (
+      google_cloudbuild_trigger.images_on_tag[0].location == "us-central1" &&
+      google_cloudbuild_trigger.images_on_tag[0].filename == "cloudbuild.yaml" &&
+      google_cloudbuild_trigger.images_on_tag[0].service_account == "projects/example-project-123/serviceAccounts/pb-build@example-project-123.iam.gserviceaccount.com" &&
+      google_cloudbuild_trigger.images_on_tag[0].repository_event_config[0].repository == "projects/example-project-123/locations/us-central1/connections/github/repositories/pulsebridge" &&
+      google_cloudbuild_trigger.images_on_tag[0].repository_event_config[0].push[0].tag == "^v[0-9]+\\.[0-9]+\\.[0-9]+$" &&
+      google_cloudbuild_trigger.images_on_tag[0].repository_event_config[0].push[0].branch == null
+    )
+    error_message = "The trigger must run cloudbuild.yaml as the build account, in the repository's region, on release tags only."
+  }
+
+  assert {
+    condition = google_cloudbuild_trigger.images_on_tag[0].substitutions == tomap({
+      _REGION           = "us-central1"
+      _REPOSITORY       = "pulsebridge-services"
+      _DOCKERHUB_MIRROR = "pulsebridge-dockerhub"
+    })
+    error_message = "The trigger must pass this module's region and repository IDs to cloudbuild.yaml."
+  }
+}
+
+run "trigger_without_mirror_pulls_from_docker_hub" {
+  command = plan
+
+  variables {
+    create_dockerhub_mirror             = false
+    build_service_account_email         = "pb-build@example-project-123.iam.gserviceaccount.com"
+    grant_build_account_registry_access = true
+    build_trigger_repository            = "projects/example-project-123/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  assert {
+    condition     = google_cloudbuild_trigger.images_on_tag[0].substitutions["_DOCKERHUB_MIRROR"] == "" && length(google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader) == 0
+    error_message = "Without the mirror the build pulls from Docker Hub (empty _DOCKERHUB_MIRROR) and gets no mirror grant."
+  }
+}
+
+run "trigger_without_the_build_account_is_refused" {
+  command = plan
+
+  variables {
+    build_trigger_repository = "projects/example-project-123/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  expect_failures = [google_cloudbuild_trigger.images_on_tag]
+}
+
+run "trigger_repository_in_another_region_is_refused" {
+  command = plan
+
+  variables {
+    build_trigger_repository = "projects/example-project-123/locations/europe-west1/connections/github/repositories/pulsebridge"
+  }
+
+  expect_failures = [var.build_trigger_repository]
+}
+
+run "trigger_repository_in_another_project_is_refused" {
+  command = plan
+
+  variables {
+    build_trigger_repository = "projects/other-project-456/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  expect_failures = [var.build_trigger_repository]
+}
+
+run "malformed_trigger_repository_is_refused" {
+  command = plan
+
+  variables {
+    build_trigger_repository = "github.com/example/pulsebridge"
+  }
+
+  expect_failures = [var.build_trigger_repository]
+}

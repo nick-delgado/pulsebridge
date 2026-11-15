@@ -96,3 +96,16 @@ output "dockerhub_mirror_url" {
   description = "Registry path of the Docker Hub pull-through cache, or null when it is not created. Official images live under `library/`, e.g. <url>/library/mariadb@sha256:..."
   value       = var.create_dockerhub_mirror ? "${google_artifact_registry_repository.dockerhub[0].location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.dockerhub[0].repository_id}" : null
 }
+
+output "build_trigger_name" {
+  description = "Name of the Cloud Build trigger that builds the images on a release tag, or null when build_trigger_repository is not set (T26)."
+  value       = one(google_cloudbuild_trigger.images_on_tag[*].name)
+}
+
+output "build_account_registry_grants" {
+  description = "The build account's repository grants (T26), as \"<repository>=<role>\": empty without grant_build_account_registry_access."
+  value = sort(concat(
+    [for g in google_artifact_registry_repository_iam_member.services_build_writer : "${g.repository}=${g.role}"],
+    [for g in google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader : "${g.repository}=${g.role}"],
+  ))
+}
