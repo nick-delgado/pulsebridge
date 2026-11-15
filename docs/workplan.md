@@ -187,7 +187,7 @@ missing MLLP end byte demonstrates the no-acknowledgment path.
 | --- | --- | --- | --- | --- |
 | T08 | FHIR validator in CI | T06 | `.github/workflows/fhir-validate.yml`, `scripts/fhir-validate.sh` | done |
 | T09 | Synthetic data seeder | T06 | `services/seed/` | todo |
-| T10 | `health-sync` service | T06, S3 | `services/health-sync/` | in-progress |
+| T10 | `health-sync` service | T06, S3 | `services/health-sync/` | done |
 | T11 | Google Health connect flow | S3, T04 | `scripts/connect-google-health/` | todo |
 | T12 | `v2-to-fhir` service | T06, T07, S5 | `services/v2-to-fhir/`, `libs/pulsebridge_gcp/` | done |
 | T13 | Cuff simulator backend | T07, T31 | `services/cuff-sim/` | in-progress |
@@ -216,11 +216,13 @@ Bundle.
 - AC: idempotent on re-delivery (conditional update keyed on patient, code and window start).
 - AC: writes with `heart_rate_transaction` from T06 (an ingest Bundle: Patient and Device are
   created only if absent, never overwritten, D11), passes an IANA time zone from configuration,
-  and passes a cutoff so windows inside the range it will re-request are `preliminary` and
-  become `final` on the next run.
-- AC: the first real write confirms that the store resolves in-Bundle references to a Patient
-  that already existed; if it does not, switch to the fixed-ID fallback described in the T06
-  README and record the result.
+  and passes a cutoff so a window is `preliminary` until 60 minutes after it ended and `final`
+  after that. Any run 60 to 175 minutes after a window ended finalises it, so about seven
+  missed runs are tolerated; a longer outage is recovered with the backfill.
+- AC: each run reads what is stored once and writes only windows that are new or changed; if
+  the read fails or time is short it writes everything. A window is never skipped wrongly.
+- The check that the store resolves in-Bundle references to a Patient that already existed
+  needs a deployed stack; it moved to T29.
 - AC: a day of data is about 580 Bundle entries; the backfill batches its writes.
 - AC: each run re-requests a range that overlaps the previous run, and a window that was only
   partly synced is updated on the next run, not skipped.
@@ -454,6 +456,11 @@ OIDC invoker bindings.
 - AC: services scale to zero and are not publicly invocable; images are referenced by digest.
 - AC: `v2-to-fhir` gets the environment variables listed in its README, and Pub/Sub pushes to
   its `/pubsub/hl7v2` route; a bad store ID stops the service starting, so it fails the deploy.
+- AC: `health-sync` is configured as its README's "For T20" section says: the three Google
+  Health secrets mounted as files (version `latest`, one directory each), `max_instance_count
+  = 1`, Scheduler `retry_count = 0` and `attempt_deadline = 180s`, a request timeout of at
+  least 180 s, `fhir-proxy` allowed to invoke it (for `/status`), and log-based alerts on a
+  failed run and on "reconnect needed".
 - AC: there is a documented way to replay the dead-letter subscription. A message whose
   notification was dead-lettered (for example because a role was missing) stays "pending"
   until it is replayed; the README says how to find and replay such messages.
@@ -560,6 +567,11 @@ GIF, architecture, standards map, deploy, what this is not.
 **T29 End-to-end smoke test.** Simulated cuff reading through MLLP to the FHIR store, then shared
 to OpenEMR, asserted from the APIs.
 - AC: runs against a deployed dev stack with one command.
+- AC: runs the first-sync checks in the `health-sync` README ("For T25"): the Patient entry
+  answers 200, not 201 (the store resolved the existing Patient; if not, switch to the
+  fixed-ID fallback in the T06 README and record the result); the second run reports
+  `stored_read: ok` and `windows_unchanged > 0` (so Cloud Healthcare supports the searches
+  the service relies on); `/status` answers quickly.
 
 **T30 Public demo domain.** Map the dashboard to a subdomain; the domain is a variable.
 - AC: TLS works; nothing about the author's domain is hardcoded outside `tfvars`.
