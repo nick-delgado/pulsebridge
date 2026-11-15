@@ -31,6 +31,14 @@
 #   warning (one not on that list) fails the run, unless --allow-new-warnings is given: otherwise
 #   a new warning would scroll past in a green CI log and never be read. INFORMATION issues are
 #   listed and never fail.
+# * Files. Every *.json file under the directory is validated, in any letter case (X.JSON too),
+#   sub-directories included. Anything else there (a symbolic link, a file that is not .json, a
+#   hidden file) fails the run (exit 2): a resource saved under the wrong name must not be
+#   skipped without anyone noticing.
+# * Expected warnings are matched on the message id, quoted text (so a look-alike code does not
+#   match) and the exact resource type and element path, normalised so that the in-Bundle form
+#   Bundle.entry[N].resource/*Type/id*/.path and the standalone form Type.path are the same.
+#   An issue with a severity outside fatal/error/warning/information counts as an error.
 # * The validator is pinned: VALIDATOR_VERSION and its SHA-256. The jar is downloaded once into a
 #   cache directory and verified against the SHA-256 on every run, so a corrupted or swapped jar
 #   in the cache is refused, not used. To update the pin, see `--help`.
@@ -45,13 +53,18 @@
 set -euo pipefail
 
 # ---- Pinned validator ----------------------------------------------------------------------------
-# To update: pick a release at https://github.com/hapifhir/org.hl7.fhir.core/releases (prefer one
-# that is at least two weeks old), download its validator_cli.jar, compute `sha256sum` of it,
-# put both values here, run `make fhir-validate`, and review any change in the issues reported.
-# The GitHub release page shows each asset's SHA-256 digest; compare it with yours.
+# Current pin, chosen on 2026-11-15: 7.0.4, built 2026-11-02 (about 12 days old then). The newest
+# release, 7.0.6, was one day old; an older release has had time for regressions to be reported.
+# To update: pick a release at https://github.com/hapifhir/org.hl7.fhir.core/releases, preferably
+# one at least two weeks old, download its validator_cli.jar, compute `sha256sum` of it, put both
+# values here, run `make fhir-validate`, and review any change in the issues reported. The GitHub
+# release page shows each asset's SHA-256 digest; compare it with yours.
 readonly VALIDATOR_VERSION="7.0.4"
 readonly VALIDATOR_SHA256="43e29fa8822d670740a909c395ca5b70a3d07fbaa8936f8dedc6a98b007f555b"
 VALIDATOR_URL="https://github.com/hapifhir/org.hl7.fhir.core/releases/download/${VALIDATOR_VERSION}/validator_cli.jar"
+# curl may use HTTPS only, also after a redirect (GitHub redirects release downloads). The tests
+# set this to "=file" to serve a stand-in jar from disk.
+CURL_PROTO="=https"
 
 readonly FHIR_VERSION="4.0.1"
 readonly DEFAULT_TX="https://tx.fhir.org"
@@ -77,7 +90,7 @@ profiles each resource declares in meta.profile. Displays of coded values are ch
 Options:
   --offline              No terminology server (-tx n/a): structure only; codes, units and value
                          set membership are NOT checked. Use when there is no network.
-  --tx URL               Terminology server, laid out like tx.fhir.org (R4 under URL/r4).
+  --tx URL               Terminology server base (https), laid out like tx.fhir.org (R4 at URL/r4).
                          Default: ${DEFAULT_TX}. It receives every code in the files: never use
                          a public server with real patient data.
   --expected FILE        Expected-warnings file (default: scripts/fhir-validate-expected-warnings.json).
@@ -102,6 +115,20 @@ EOF
 }
 
 log() { printf '%s\n' "$*" >&2; }
+
+# Temporary paths removed on exit, including an interrupted run (Ctrl-C, a cancelled CI job).
+# Kept in variables, not spliced into the trap text, so any characters in TMPDIR are safe.
+WORK_DIR=""
+PART_FILE=""
+cleanup() {
+  if [ -n "$PART_FILE" ]; then rm -f -- "$PART_FILE"; fi
+  if [ -n "$WORK_DIR" ]; then rm -rf -- "$WORK_DIR"; fi
+}
+install_cleanup_traps() {
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
 die() {
   local code="$1"
   shift
@@ -135,33 +162,41 @@ verify_sha256() {
   fi
 }
 
-# ensure_validator CACHE_DIR: make sure the pinned jar is in the cache and matches its SHA-256;
-# print its path. A cached jar is re-verified on every run; a mismatch is refused, not replaced,
-# so a tampered cache is noticed (delete the file to force a fresh download).
+# ensure_validator CACHE_DIR: make sure the pinned jar is in the cache and matches its SHA-256,
+# and set VALIDATOR_JAR to its path (empty on failure). A cached jar is re-verified on every run;
+# a mismatch is refused, not replaced, so a tampered cache is noticed (delete the file to force
+# a fresh download). Runs in the calling shell, not a subshell, so the cleanup trap can remove a
+# partial download if the run is interrupted.
+VALIDATOR_JAR=""
 ensure_validator() {
-  local cache="$1" jar tmp
+  local cache="$1" jar
+  VALIDATOR_JAR=""
   jar="$cache/validator_cli-${VALIDATOR_VERSION}.jar"
   mkdir -p "$cache"
   if [ ! -f "$jar" ]; then
     log "Downloading FHIR Validator ${VALIDATOR_VERSION} to $jar"
-    tmp="$jar.part.$$"
-    if ! curl -fsSL --retry 3 --retry-delay 5 -o "$tmp" "$VALIDATOR_URL"; then
-      rm -f "$tmp"
+    PART_FILE="$jar.part.$$"
+    if ! curl -fsSL --proto "$CURL_PROTO" --proto-redir "$CURL_PROTO" --retry 3 --retry-delay 5 \
+      -o "$PART_FILE" "$VALIDATOR_URL"; then
+      rm -f -- "$PART_FILE"
+      PART_FILE=""
       log "fhir-validate: could not download $VALIDATOR_URL"
       return 2
     fi
-    if ! verify_sha256 "$tmp" "$VALIDATOR_SHA256"; then
-      rm -f "$tmp"
+    if ! verify_sha256 "$PART_FILE" "$VALIDATOR_SHA256"; then
+      rm -f -- "$PART_FILE"
+      PART_FILE=""
       log "fhir-validate: the downloaded jar does not match the pinned SHA-256; refusing to use it"
       return 2
     fi
-    mv "$tmp" "$jar"
+    mv -- "$PART_FILE" "$jar"
+    PART_FILE=""
   elif ! verify_sha256 "$jar" "$VALIDATOR_SHA256"; then
     log "fhir-validate: the cached jar does not match the pinned SHA-256; refusing to use it."
     log "  Delete $jar to download it again."
     return 2
   fi
-  printf '%s\n' "$jar"
+  VALIDATOR_JAR="$jar"
 }
 
 # check_java: the validator needs Java ${MIN_JAVA_MAJOR} or newer.
@@ -195,9 +230,10 @@ check_java() {
 
 # probe_tx URL: is the terminology server answering? Bounded retry with a doubling delay.
 probe_tx() {
-  local tx="${1%/}" attempt=1 delay="$TX_RETRY_SECONDS"
+  local tx="$1" attempt=1 delay="$TX_RETRY_SECONDS"
   while :; do
-    if curl -fsS -o /dev/null --max-time 30 -H 'Accept: application/fhir+json' "$tx/r4/metadata"; then
+    if curl -fsS --proto '=https' --proto-redir '=https' -o /dev/null --max-time 30 \
+      -H 'Accept: application/fhir+json' "$tx/r4/metadata"; then
       return 0
     fi
     if [ "$attempt" -ge "$TX_ATTEMPTS" ]; then
@@ -219,10 +255,20 @@ tx_failure_in_log() {
   grep -q -E "Unable to connect to terminology server|Error fetching the server's capability statement|TerminologyServiceException" "$1"
 }
 
-# list_json_files DIR: every *.json file under DIR, sorted, one per line.
+# list_json_files DIR: every *.json file under DIR (any case: X.JSON too), sorted, one per line.
+# Nothing is skipped silently: anything else in the directory tree (a symbolic link, a file that
+# is not .json, a device or pipe) is listed and the function fails, because a resource saved
+# under the wrong name would otherwise never be validated. Sub-directories are searched.
 list_json_files() {
-  local dir="$1" found
-  found="$(find "$dir" -type f -name '*.json')"
+  local dir="$1" found other
+  other="$(find "$dir" -mindepth 1 \( -type l -o \( -type f ! -iname '*.json' \) -o \( ! -type f ! -type d \) \) -print)"
+  if [ -n "$other" ]; then
+    log "fhir-validate: $dir holds entries that would not be validated (only regular *.json"
+    log "  files and directories are allowed; symbolic links are refused):"
+    printf '%s\n' "$other" | LC_ALL=C sort | sed 's/^/  /' >&2
+    return 2
+  fi
+  found="$(find "$dir" -type f -iname '*.json' -print)"
   [ -n "$found" ] || return 0
   printf '%s\n' "$found" | LC_ALL=C sort
 }
@@ -273,8 +319,20 @@ ID_EXT = "http://hl7.org/fhir/StructureDefinition/operationoutcome-message-id"
 LINE_EXT = "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-line"
 COL_EXT = "http://hl7.org/fhir/StructureDefinition/operationoutcome-issue-col"
 
-ENTRY_KEYS = {"id", "message_id", "text_contains", "location_contains", "when", "status", "reason"}
+ENTRY_KEYS = {"id", "message_id", "text_contains", "locations", "when", "status", "reason"}
 WHEN_VALUES = {"always", "terminology"}  # "terminology": expected only when a server is used
+SEVERITIES = {"fatal", "error", "warning", "information"}  # R4 issue-severity, a required binding
+
+# Inside a Bundle the validator writes a location as
+#   Bundle.entry[3].resource/*Provenance/<id or null>*/.agent[0].role[0].coding[0].system
+# and for a standalone file as Provenance.agent[0].role[0].coding[0].system. Expected entries
+# name the second form (resource type plus element path), so one entry covers both.
+IN_BUNDLE = re.compile(r"^Bundle\.entry\[\d+\]\.resource/\*([A-Za-z]+)/[^*]*\*/(.*)$")
+
+
+def normalise_location(location):
+    m = IN_BUNDLE.match(location)
+    return m.group(1) + m.group(2) if m else location
 
 
 class SetupError(Exception):
@@ -320,6 +378,18 @@ def load_expected(path):
             raise SetupError(f"{where} ({entry['id']}): 'text_contains' must be a list of strings")
         if not entry.get("message_id") and not contains:
             raise SetupError(f"{where} ({entry['id']}) needs 'message_id' or 'text_contains'")
+        locations = entry.get("locations")
+        if (
+            not isinstance(locations, list)
+            or not locations
+            or not all(isinstance(s, str) and s for s in locations)
+        ):
+            # Every entry is tied to resource types and elements, so a look-alike warning on
+            # another element (or another resource type) is NEW, not swallowed.
+            raise SetupError(
+                f"{where} ({entry['id']}) needs 'locations': the resource type and element "
+                "path(s) the warning is expected on, for example 'Patient.identifier[0].type'"
+            )
         if entry.get("when", "always") not in WHEN_VALUES:
             raise SetupError(f"{where} ({entry['id']}): 'when' must be one of {sorted(WHEN_VALUES)}")
     return entries
@@ -330,8 +400,9 @@ def matches(entry, issue):
         return False
     if not all(s in issue["text"] for s in entry.get("text_contains", [])):
         return False
-    loc = entry.get("location_contains")
-    return not loc or loc in issue["location"]
+    # Exact match on the normalised location; a substring would let component[1] match
+    # component[10] and Patient match RelatedPerson's paths.
+    return normalise_location(issue["location"]) in entry["locations"]
 
 
 def outcomes_in(report):
@@ -343,7 +414,13 @@ def outcomes_in(report):
 
 
 def gh_escape(text):
+    """Escape a workflow-command message (GitHub's rules for the text after '::')."""
     return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def gh_escape_property(text):
+    """Escape a workflow-command property such as file=: also ':' and ','."""
+    return gh_escape(text).replace(":", "%3A").replace(",", "%2C")
 
 
 def main(argv):
@@ -386,7 +463,7 @@ def main(argv):
         counts = {"error": 0, "warning": 0, "information": 0}
         lines = []
         for raw in oo.get("issue", []):
-            sev = raw.get("severity", "error")
+            sev = raw.get("severity")
             issue = {
                 "message_id": ext_value(raw, ID_EXT) or "",
                 "text": (raw.get("details") or {}).get("text") or raw.get("diagnostics") or "",
@@ -397,7 +474,14 @@ def main(argv):
             not_checked = issue["message_id"] in TX_NOT_CHECKED_IDS or bool(
                 TX_NOT_CHECKED_TEXT.search(issue["text"])
             )
-            if sev in ("fatal", "error"):
+            if sev not in SEVERITIES:
+                # Fail closed: a severity this script does not know (missing, "Warning") is
+                # counted as an error rather than guessed to be harmless.
+                counts["error"] += 1
+                totals["error"] += 1
+                tag = f"ERROR (unknown severity {sev!r})"
+                annotate = "error"
+            elif sev in ("fatal", "error"):
                 counts["error"] += 1
                 totals["error"] += 1
                 tag = sev.upper()
@@ -429,7 +513,8 @@ def main(argv):
             lines.append(f"  {tag}: {pos} {issue['location']}{mid}\n      {issue['text']}")
             if on_github and annotate:
                 gh_line = f",line={line}" if line else ""
-                print(f"::{annotate} file={shown}{gh_line}::{gh_escape(tag + ': ' + issue['text'])}")
+                gh_file = gh_escape_property(shown)
+                print(f"::{annotate} file={gh_file}{gh_line}::{gh_escape(tag + ': ' + issue['text'])}")
         status = "FAIL" if counts["error"] else "ok"
         print(
             f"{status:4} {shown}: {counts['error']} error(s), {counts['warning']} warning(s), "
@@ -545,13 +630,20 @@ main() {
     die 2 "--offline and --tx contradict each other"
   fi
   case "$tx" in
-    http://* | https://*) ;;
-    *) die 2 "--tx must be an http(s) URL, got '$tx' (use --offline for no server)" ;;
+    https://*) ;;
+    *) die 2 "--tx must be an https URL, got '$tx' (use --offline for no server)" ;;
+  esac
+  # The server base, without trailing slashes. The R4 endpoint is <base>/r4, which the probe adds
+  # and the validator adds for tx.fhir.org; a URL that already ends in /r4 is refused rather than
+  # probed as /r4/r4.
+  while [ "${tx%/}" != "$tx" ]; do tx="${tx%/}"; done
+  case "$tx" in
+    */r4 | */R4) die 2 "--tx takes the server base, without /r4 (got '$tx')" ;;
   esac
   command -v python3 > /dev/null 2>&1 || die 2 "python3 is needed to read the validator's report"
 
   local file_list
-  file_list="$(list_json_files "$dir")"
+  file_list="$(list_json_files "$dir")" || exit 2
   [ -n "$file_list" ] || die 2 "no *.json files under $dir"
   local -a files=()
   local f
@@ -572,16 +664,17 @@ main() {
   if [ "$mode" = "terminology" ]; then
     probe_tx "$tx" || exit 3
   fi
-  local jar
-  jar="$(ensure_validator "$cache")" || exit 2
+  install_cleanup_traps
+  ensure_validator "$cache" || exit 2
+  local jar="$VALIDATOR_JAR"
 
   local work rc=0
-  work="$(mktemp -d "${TMPDIR:-/tmp}/fhir-validate.XXXXXX")"
-  # shellcheck disable=SC2064 # expand $work now: it is local to this function
-  trap "rm -rf '$work'" EXIT
+  WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fhir-validate.XXXXXX")"
+  work="$WORK_DIR"
 
   # -Duser.home points the validator's FHIR package cache (~/.fhir/packages) into our cache
-  # directory, so CI can cache it next to the jar and a developer's own ~/.fhir is not touched.
+  # directory, so a developer's own ~/.fhir is not touched. CI caches only the jar (which is
+  # checksummed); the packages have no pinned checksum, so CI downloads them fresh each run.
   # A fresh -txCache per run: every run really asks the terminology server, so a change on the
   # server (a LOINC release, a fixed value set) is seen instead of a stale cached answer.
   # -check-display Check: a Coding's display must match the code system's (LOINC, UCUM, DICOM).
