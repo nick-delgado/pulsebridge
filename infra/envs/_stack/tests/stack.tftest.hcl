@@ -368,7 +368,7 @@ run "real_ingest_off" {
     error_message = "The secret prefix and names must match module identity's."
   }
   assert {
-    condition     = strcontains(output.next_steps, "connect-google-health/connect.sh") && !strcontains(output.next_steps, "gcloud run jobs execute") && strcontains(output.next_steps, "10. Second apply")
+    condition     = strcontains(output.next_steps, "&& ../../../scripts/connect-google-health/connect.sh") && !strcontains(output.next_steps, "gcloud run jobs execute") && strcontains(output.next_steps, "10. Second apply")
     error_message = "Real data, ingest off: next_steps must say connect Google Health, then the second apply, and not the seeding."
   }
   assert {
