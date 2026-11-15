@@ -54,6 +54,8 @@ def test_each_required_variable_is_checked(h, name):
         ("MLLP_ACK_TIMEOUT_SECONDS", "inf"),
         ("MLLP_CONNECT_TIMEOUT_SECONDS", "nan"),
         ("HTTPS_TIMEOUT_SECONDS", "1e3"),
+        ("HTTPS_TIMEOUT_SECONDS", "1e1"),  # float() reads 10.0: in range, but not plain decimal
+        ("MLLP_ACK_TIMEOUT_SECONDS", "1_0"),  # float() reads 10.0 too
         ("RATE_LIMIT_PER_MINUTE", "0"),
         ("RATE_LIMIT_PER_MINUTE", "601"),
         ("RATE_LIMIT_BURST", "-1"),

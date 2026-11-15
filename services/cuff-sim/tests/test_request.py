@@ -35,11 +35,14 @@ def test_bounds_are_inclusive(systolic, diastolic):
     assert parse_request({"systolic": systolic, "diastolic": diastolic}).systolic == systolic
 
 
-@pytest.mark.parametrize("bad", [120.0, "120", True, None, [120], {"v": 120}, 1e3])
-def test_non_integers_are_refused(bad):
+@pytest.mark.parametrize("bad", [120.0, "120", True, False, [120], {"v": 120}, 1e3])
+@pytest.mark.parametrize("name", ["systolic", "diastolic"])
+def test_non_integers_are_refused(name, bad):
+    body = {"systolic": 120, "diastolic": 80, name: bad}
     with pytest.raises(RequestError) as caught:
-        parse_request({"systolic": bad, "diastolic": 80})
-    assert "systolic" in fields_of(caught.value)
+        parse_request(body)
+    # The type error itself, not a side effect such as True (== 1) failing systolic > diastolic.
+    assert caught.value.issues == [(name, "must be a whole number of mm[Hg]")]
 
 
 @pytest.mark.parametrize(("systolic", "diastolic"), [(80, 80), (80, 120)])

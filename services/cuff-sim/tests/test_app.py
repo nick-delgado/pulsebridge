@@ -449,6 +449,22 @@ def test_recording_failure_does_not_change_the_result(
     assert "audit-write-failed" in events
 
 
+def test_unexpected_audit_write_error_is_reported_not_raised(
+    http, adapter, audit_ok, monkeypatch, h
+):
+    from pulsebridge_gcp import HealthcareClient
+
+    def explode(*_a, **_k):
+        raise RuntimeError("SYN-000123")
+
+    monkeypatch.setattr(HealthcareClient, "put_resource", explode)
+    adapter.reply(h.S4_AA)
+    response, body = post(http, **READING)
+    assert response.status_code == 200 and body["result"] == "accepted"
+    assert body["audit"] == {"recorded": False, "detail": "the audit store write failed"}
+    assert body["attemptId"]
+
+
 def test_audit_build_failure_is_reported_not_raised(http, adapter, audit_ok, monkeypatch, h):
     from cuff_sim import audit
 
