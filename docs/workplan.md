@@ -665,12 +665,17 @@ needed before T18 and T19 start.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/` | in-progress |
+| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (offline part merged; deploy part open) |
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml`, `.tflint.hcl` | todo |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` | todo |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md` | todo |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
+
+**T25 status.** The offline part is merged: the roots, the shared composition `infra/envs/_stack`,
+the runbook and the 116-item first-deploy checklist in `infra/envs/README.md`, all tested against
+mocked providers only. Open, and needing a session with credentials and the user's go-ahead:
+every AC that says "reaches a working stack", "destroy", "first boot" or "checklist".
 
 **T25 Env roots.** `dev` and `prod` wire the modules; each has `backend.tf` and
 `terraform.tfvars.example`; `use_synthetic_data` switches the wearable source.
@@ -703,6 +708,10 @@ needed before T18 and T19 start.
 - AC: outputs give everything the connect script and the seeder need (FHIR location, dataset
   and store IDs, the secret name prefix), and one `patient_id` variable feeds every service
   and both scripts.
+
+**T26 carried from T25.** Plans show `alert_email` (module `ingestion` uses it in a `for_each`,
+so it cannot be sensitive): give `ingestion` a separate bool so the address can be sensitive, or
+do not post it in pull-request plans. The patient ID and name are sensitive already.
 
 **T26 Terraform CI/CD.** `fmt -check`, `validate`, `tflint`, `trivy config`, plan posted on pull
 requests, apply to dev on merge, manual gate for prod, nightly destroy test for dev (see D1).
