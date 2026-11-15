@@ -74,8 +74,18 @@ VARIABLES: dict[str, Variable] = {
         "Timeout of one Cloud Healthcare API request (FHIR or HL7v2), 1 to 30", "10"
     ),
     "CUFF_FORWARD_TIMEOUT_SECONDS": Variable(
-        "Timeout of a forwarded cuff request, 90 to 3000; keep below REQUEST_TIMEOUT_SECONDS",
-        "95",
+        "Timeout of a forwarded cuff request, 10 to 3000; below Firebase Hosting's 60 s by "
+        "default; at least 10 s below REQUEST_TIMEOUT_SECONDS",
+        "55",
+    ),
+    "REQUEST_BUDGET_SECONDS": Variable(
+        "Overall time budget of every other request (all upstream calls together), 5 to 3000; "
+        "below Firebase Hosting's 60 s by default",
+        "50",
+    ),
+    "PUBLIC_BASE_URL": Variable(
+        "The base URL the dashboard reaches the proxy at (https://.../api behind the Firebase "
+        "Hosting rewrite); its path must equal PATH_PREFIX. Used for Bundle.entry.fullUrl"
     ),
     "SAMPLES_FORWARD_TIMEOUT_SECONDS": Variable(
         "Timeout of the forwarded sample list, 1 to 60", "15"
@@ -92,7 +102,10 @@ VARIABLES: dict[str, Variable] = {
     ),
 }
 
-MIN_CUFF_FORWARD_SECONDS = 90  # cuff-sim's README: "at least 90 s"
+# The forward timeout must cover cuff-sim's worst case (services/cuff-sim/README.md, "Time
+# limits"): MLLP 5 + 4 x T, HTTPS 8 x T, T = its HTTPS_TIMEOUT_SECONDS. Behind Firebase Hosting
+# (60 s) that means T = 6 there (48 s) and 55 s here; the README says how to raise both.
+MIN_CUFF_FORWARD_SECONDS = 10
 # The forward must end before Cloud Run cuts the proxy's own request off, with room to answer.
 REQUEST_TIMEOUT_MARGIN_SECONDS = 10
 
@@ -148,7 +161,9 @@ class ServiceConfig:
     login_failures_total: int = 60
     login_window_seconds: int = 60
     fhir_timeout: float = 10.0
-    cuff_forward_timeout: float = 95.0
+    cuff_forward_timeout: float = 55.0
+    request_budget: float = 50.0
+    public_base_url: str = "https://proxy.example.test"
     samples_forward_timeout: float = 15.0
     health_sync_timeout: float = 25.0
     request_timeout: float = 120.0
@@ -196,11 +211,17 @@ class ServiceConfig:
 
         request_timeout = _number("REQUEST_TIMEOUT_SECONDS", values, 30, 3600)
         forward = _number("CUFF_FORWARD_TIMEOUT_SECONDS", values, MIN_CUFF_FORWARD_SECONDS, 3000)
-        if forward + REQUEST_TIMEOUT_MARGIN_SECONDS > request_timeout:
-            raise ConfigError(
-                "CUFF_FORWARD_TIMEOUT_SECONDS must be at least "
-                f"{REQUEST_TIMEOUT_MARGIN_SECONDS} s below REQUEST_TIMEOUT_SECONDS"
-            )
+        budget = _number("REQUEST_BUDGET_SECONDS", values, 5, 3000)
+        for name, value in (
+            ("CUFF_FORWARD_TIMEOUT_SECONDS", forward),
+            ("REQUEST_BUDGET_SECONDS", budget),
+        ):
+            if value + REQUEST_TIMEOUT_MARGIN_SECONDS > request_timeout:
+                raise ConfigError(
+                    f"{name} must be at least {REQUEST_TIMEOUT_MARGIN_SECONDS} s below "
+                    "REQUEST_TIMEOUT_SECONDS"
+                )
+        public_base_url = _public_base_url(values["PUBLIC_BASE_URL"], values["PATH_PREFIX"])
         health_sync_url = values["HEALTH_SYNC_URL"] or None
         return cls(
             project_id=values["GCP_PROJECT_ID"],
@@ -231,6 +252,8 @@ class ServiceConfig:
             login_window_seconds=int(_number("LOGIN_WINDOW_SECONDS", values, 10, 3600, whole=True)),
             fhir_timeout=_number("FHIR_TIMEOUT_SECONDS", values, 1, 30),
             cuff_forward_timeout=forward,
+            request_budget=budget,
+            public_base_url=public_base_url,
             samples_forward_timeout=_number("SAMPLES_FORWARD_TIMEOUT_SECONDS", values, 1, 60),
             health_sync_timeout=_number("HEALTH_SYNC_TIMEOUT_SECONDS", values, 1, 60),
             request_timeout=request_timeout,
@@ -283,6 +306,22 @@ def _is_ip(host: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _public_base_url(text: str, prefix: str) -> str:
+    """``https://host[:port]`` plus exactly ``PATH_PREFIX`` (no trailing slash): the base of
+    ``Bundle.entry.fullUrl``. Taken from configuration, never from ``Host`` or forwarded headers,
+    which the caller controls."""
+    try:
+        parts = urlsplit(text.rstrip("/"))
+    except ValueError:
+        raise ConfigError("PUBLIC_BASE_URL must be an https URL") from None
+    if parts.path != prefix:
+        raise ConfigError("PUBLIC_BASE_URL's path must equal PATH_PREFIX")
+    origin = _service_url("PUBLIC_BASE_URL", f"{parts.scheme}://{parts.netloc}")
+    if parts.query or parts.fragment:
+        raise ConfigError("PUBLIC_BASE_URL must be an https URL with no query")
+    return origin + prefix
 
 
 def _service_url(name: str, text: str) -> str:

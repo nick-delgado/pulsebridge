@@ -5,7 +5,12 @@ eight threads, ``--timeout 0``, and ``fhir_proxy.app:create_app()``.
 
 Order of checks on every request (``before_request``):
 
-1. ``OPTIONS`` is a CORS preflight: answered here, without a token, for known routes only.
+0. The request's time budget starts (``fhir_proxy.deadline``): ``CUFF_FORWARD_TIMEOUT_SECONDS``
+   for the cuff send, ``REQUEST_BUDGET_SECONDS`` for everything else. No upstream call starts
+   after it is spent.
+1. ``OPTIONS`` is a CORS preflight, answered here without a token: ``204`` for a known route
+   from an allowed origin with its method and headers, and the same ``403`` for anything else,
+   an unknown path included (so a preflight cannot list the routes either).
 2. A token in the query string (``access_token=``, RFC 6750 section 2.3) is refused, whatever
    else the request carries: query strings end up in request logs.
 3. Every route except ``POST /auth/login`` needs a valid session token in
@@ -28,10 +33,11 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from flask import Flask, Response, g, request
-from pulsebridge_gcp import HealthcareApiError, HealthcareClient, default_transport
+from pulsebridge_gcp import HealthcareApiError, HealthcareClient, NotFoundError, default_transport
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
-from fhir_proxy import capability, search, traces
+from fhir_proxy import capability, deadline, search, traces
+from fhir_proxy.bodies import MAX_BODY_BYTES, read_body, too_large
 from fhir_proxy.client_address import client_address
 from fhir_proxy.config import ServiceConfig
 from fhir_proxy.errors import FHIR_JSON, Problem, upstream_problem
@@ -63,11 +69,10 @@ from fhir_proxy.upstream import (
 
 SOFTWARE_VERSION = "0.1.0"
 JSON_TYPE = "application/json"
-# cuff-sim's own limit (MAX_BODY_BYTES): a larger body could never be a reading.
-MAX_BODY_BYTES = 16 * 1024
 MAX_LOGIN_BYTES = 1024
 MAX_PASSWORD_CHARS = 1024
-_BEARER = re.compile(r"Bearer ([A-Za-z0-9._-]{1,2048})", re.ASCII)
+# RFC 9110 section 11.1: the auth scheme name is case-insensitive.
+_BEARER = re.compile(r"(?i:bearer) ([A-Za-z0-9._-]{1,2048})", re.ASCII)
 ALLOWED_REQUEST_HEADERS = ("authorization", "content-type")
 EXPOSED_HEADERS = "Retry-After, WWW-Authenticate"
 PREFLIGHT_MAX_AGE = "600"
@@ -121,7 +126,7 @@ def _is_json_request() -> bool:
 
 def create_app(
     config: ServiceConfig | None = None,
-    client: HealthcareClient | None = None,
+    transport: object | None = None,
     *,
     id_tokens: IdTokenSource | None = None,
     send: HttpSender | None = None,
@@ -131,19 +136,22 @@ def create_app(
 ) -> Flask:
     """Build the app. With no arguments, configuration comes from the environment, the
     Healthcare client uses Application Default Credentials and identity tokens come from the
-    metadata server (the service's own service account on Cloud Run)."""
+    metadata server (the service's own service account on Cloud Run). ``transport`` is the
+    Cloud Healthcare transport (tests pass a fake); it is always wrapped so every call honours
+    the request's time budget."""
     configure_logging()
     config = config or ServiceConfig.from_env()
     clock = clock or (lambda: datetime.now(UTC))
     monotonic = monotonic or time.monotonic
-    if client is None:
-        client = HealthcareClient(
-            project=config.project_id,
-            location=config.location,
-            dataset=config.dataset_id,
-            transport=default_transport(),
-            timeout=config.fhir_timeout,
-        )
+    client = HealthcareClient(
+        project=config.project_id,
+        location=config.location,
+        dataset=config.dataset_id,
+        transport=deadline.DeadlineTransport(transport or default_transport()),
+        timeout=config.fhir_timeout,
+    )
+    executor = ThreadPoolExecutor(max_workers=16)
+    started_on = datetime.now(UTC).date().isoformat()
     stores = Stores(
         client,
         fhir_store=config.fhir_store_id,
@@ -173,30 +181,31 @@ def create_app(
         samples_timeout=config.samples_forward_timeout,
         health_sync_timeout=config.health_sync_timeout,
     )
-    messages_log = MessagesLog(
-        stores, patient_id=config.patient_id, executor=ThreadPoolExecutor(max_workers=8), now=clock
-    )
+    messages_log = MessagesLog(stores, patient_id=config.patient_id, executor=executor, now=clock)
 
-    context = ProxyContext(config=config, stores=stores)
+    context = ProxyContext(config=config, stores=stores, core_routes=CORE_ROUTES)
     load_extension(context, extension_module)
     status_service = StatusService(
         stores,
         upstream.health_sync_caller(),
         cache_seconds=config.status_cache_seconds,
         openemr_probe=context.openemr_probe,
+        executor=executor,
         clock=clock,
         monotonic=monotonic,
     )
 
     prefix = config.path_prefix
-    app = Flask("fhir_proxy")
-    app.config["MAX_CONTENT_LENGTH"] = MAX_BODY_BYTES
+    app = Flask("fhir_proxy", static_folder=None)
+    # Not Werkzeug's limit: it lets a chunked body through truncated (fhir_proxy.bodies).
+    app.config["MAX_CONTENT_LENGTH"] = None
     app.json.sort_keys = False  # type: ignore[attr-defined]
     routes: list[Route] = list(CORE_ROUTES) + [route for route, _ in context.routes]
     app.extensions["pulsebridge_routes"] = routes
     app.extensions["pulsebridge_stores"] = stores
     app.extensions["pulsebridge_messages_log"] = messages_log
-    public_endpoints = {r.endpoint for r in routes if r.public}
+    # Fixed by the core table: an extension can never make a route public (or replace login).
+    public_endpoints = {r.endpoint for r in CORE_ROUTES if r.public}
     methods_by_rule = {f"{prefix}{r.path}": r.method for r in routes}
 
     # ---- the gate ----------------------------------------------------------------------------
@@ -227,8 +236,6 @@ def create_app(
 
     def _preflight() -> Response:
         rule = request.url_rule
-        if rule is None:
-            raise Problem(404, "not-found", "unknown-route", "There is no such route.")
         origin = request.headers.get("Origin")
         wanted_method = request.headers.get("Access-Control-Request-Method", "")
         wanted_headers = {
@@ -236,9 +243,10 @@ def create_app(
             for h in request.headers.get("Access-Control-Request-Headers", "").split(",")
             if h.strip()
         }
-        allowed_method = methods_by_rule.get(rule.rule)
+        allowed_method = None if rule is None else methods_by_rule.get(rule.rule)
         if (
-            origin not in config.allowed_origins
+            allowed_method is None
+            or origin not in config.allowed_origins
             or wanted_method != allowed_method
             or not wanted_headers <= set(ALLOWED_REQUEST_HEADERS)
         ):
@@ -253,6 +261,12 @@ def create_app(
     @app.before_request
     def gate() -> Response | None:
         g.started = time.monotonic()
+        budget = (
+            config.cuff_forward_timeout
+            if request.endpoint == "cuff_readings"
+            else config.request_budget
+        )
+        deadline.start(budget)
         if request.method == "OPTIONS":
             return _preflight()
         if any(name in request.args for name in QUERY_TOKEN_NAMES):
@@ -303,15 +317,7 @@ def create_app(
         if isinstance(error, RequestEntityTooLarge):
             # The same shape cuff-sim answers (code too-long, field body), so the dashboard's
             # CuffSendError reads it as "too-large" whichever side refused.
-            return _problem_response(
-                Problem(
-                    413,
-                    "too-long",
-                    "too-large",
-                    f"The body must be at most {MAX_BODY_BYTES} bytes.",
-                    expression=["body"],
-                )
-            )
+            return _problem_response(too_large(MAX_BODY_BYTES))
         texts = {
             404: ("not-found", "unknown-route", "There is no such route."),
             405: ("not-supported", "method-not-allowed", "This method is not allowed here."),
@@ -335,41 +341,54 @@ def create_app(
         address = client_address(
             request.headers.get("X-Forwarded-For"), request.remote_addr, config.trusted_proxy_hops
         )
-        wait = limiter.retry_after(address)
-        if wait is not None:
+
+        def throttled(wait: int) -> Problem:
             log(logging.WARNING, "login-rate-limited", client_address=address, retry_after=wait)
-            raise Problem(
+            return Problem(
                 429,
                 "throttled",
                 "rate-limited",
                 "Too many failed logins; wait and try again.",
                 headers={"Retry-After": str(wait)},
             )
-        if not _is_json_request():
-            raise Problem(415, "not-supported", "unsupported-media-type", "Send application/json.")
-        data = request.get_data(cache=False)
-        if len(data) > MAX_LOGIN_BYTES:
-            raise Problem(413, "too-long", "too-large", "The login body is too large.")
+
+        # The per-address limit comes first: a blocked address learns nothing more. The slot is
+        # reserved now, so concurrent attempts from one address count (login_limit.py).
+        slot, wait = limiter.begin(address)
+        if slot is None:
+            raise throttled(wait)
+        wrong = False
         try:
-            body = _strict_json(data)
-        except (UnicodeDecodeError, ValueError):
-            body = None
-        if (
-            not isinstance(body, dict)
-            or set(body) != {"password"}
-            or not isinstance(body["password"], str)
-            or not 1 <= len(body["password"]) <= MAX_PASSWORD_CHARS
-        ):
-            raise Problem(
-                400,
-                "invalid",
-                "invalid-body",
-                'The body must be {"password": "..."}.',
-                expression=["password"],
-            )
-        actual = _current_password()
-        if not passwords_match(body["password"], actual):
-            limiter.record_failure(address)
+            if not _is_json_request():
+                raise Problem(
+                    415, "not-supported", "unsupported-media-type", "Send application/json."
+                )
+            data = read_body(MAX_LOGIN_BYTES)
+            try:
+                body = _strict_json(data)
+            except (UnicodeDecodeError, ValueError):
+                body = None
+            if (
+                not isinstance(body, dict)
+                or set(body) != {"password"}
+                or not isinstance(body["password"], str)
+                or not 1 <= len(body["password"]) <= MAX_PASSWORD_CHARS
+            ):
+                raise Problem(
+                    400,
+                    "invalid",
+                    "invalid-body",
+                    'The body must be {"password": "..."}.',
+                    expression=["password"],
+                )
+            actual = _current_password()
+            wrong = not passwords_match(body["password"], actual)
+        finally:
+            if not wrong:
+                limiter.succeeded(slot)  # a correct password or no guess at all: slot given back
+        if wrong:
+            # The instance-wide total limits failures only: it never stops a correct password.
+            total_wait = limiter.failed(slot)
             entries_count = len(
                 [p for p in (request.headers.get("X-Forwarded-For") or "").split(",") if p.strip()]
             )
@@ -379,6 +398,8 @@ def create_app(
                 client_address=address,
                 forwarded_for_entries=entries_count,
             )
+            if total_wait is not None:
+                raise throttled(total_wait)
             raise Problem(
                 401,
                 "login",
@@ -401,6 +422,7 @@ def create_app(
             prefix=prefix,
             ttl_hours=config.session_ttl_seconds / 3600,
             software_version=SOFTWARE_VERSION,
+            date=started_on,
         )
         return _json(statement, content_type=FHIR_JSON)
 
@@ -431,11 +453,34 @@ def create_app(
             "resourceType": "Bundle",
             "type": "searchset",
             "link": links,
-            # entry.fullUrl is left out: the store's would name the project and dataset, and
-            # the proxy has no read route for it to point at instead.
-            "entry": [{"resource": r, "search": {"mode": "match"}} for r in found],
+            # R4: fullUrl SHALL be present for a search result. It names the resource at the
+            # proxy (PUBLIC_BASE_URL, from configuration, never from Host), where the read
+            # route answers it; the store's own URL would name the project and dataset.
+            "entry": [
+                {
+                    "fullUrl": f"{config.public_base_url}/fhir/Observation/{r['id']}",
+                    "resource": r,
+                    "search": {"mode": "match"},
+                }
+                for r in found
+                if isinstance(r.get("id"), str)
+            ],
         }
         return _json(result, content_type=FHIR_JSON)
+
+    def read_observation(observation_id: str) -> Response:
+        observation_id = _checked_id(observation_id)
+        try:
+            refs = stores.patient_references()
+            resource = stores.read("Observation", observation_id)
+        except NotFoundError:
+            resource = None
+        except HealthcareApiError as exc:
+            raise upstream_problem(exc, "the FHIR store") from None
+        if resource is None or not stores.is_ours(resource, refs):
+            # Another patient's Observation answers exactly like a missing one.
+            raise Problem(404, "not-found", "not-found", "The Observation was not found.")
+        return _json(resource, content_type=FHIR_JSON)
 
     def _checked_id(value: str) -> str:
         if not SAFE_ID.fullmatch(value):
@@ -548,7 +593,7 @@ def create_app(
         return _forwarded(upstream.cuff_samples, "samples")
 
     def cuff_readings() -> Response:
-        body = request.get_data(cache=False)
+        body = read_body(MAX_BODY_BYTES)  # read completely, or 413: never forward a part
         content_type = request.headers.get("Content-Type")
         return _forwarded(lambda: upstream.cuff_reading(body, content_type), "readings")
 
@@ -557,6 +602,7 @@ def create_app(
         "status": status,
         "metadata": metadata,
         "search_observations": search_observations,
+        "read_observation": read_observation,
         "heart_rate_trace": heart_rate_trace,
         "cuff_attempt_trace": cuff_attempt_trace,
         "messages": messages,

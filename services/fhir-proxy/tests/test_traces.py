@@ -265,3 +265,12 @@ def test_hl7_helpers_never_raise_on_hostile_bytes(data: bytes) -> None:
         hl7.observation_identifier(data, "PB-SYN-0001"), str
     )
     hl7.control_id(data)
+
+
+def test_a_provenance_that_does_not_point_back_is_not_returned(harness, seed_heart_rate) -> None:
+    seed_heart_rate(datetime(2026, 1, 1, 14, 5, tzinfo=UTC), 1)
+    (obs_id,) = _observation_ids(harness, "8867-4")
+    (prov,) = [r for (t, _), r in harness.fake.fhir[FHIR_STORE].items() if t == "Provenance"]
+    prov["target"] = [{"reference": "Observation/somebody-elses"}]
+    body = harness.get(f"/trace/heart-rate/{obs_id}").get_json()
+    assert "Provenance" not in [e["resource"]["resourceType"] for e in body["resources"]["entry"]]

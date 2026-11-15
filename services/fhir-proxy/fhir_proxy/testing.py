@@ -16,12 +16,13 @@ import copy
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from pulsebridge_gcp import HealthcareClient, HttpResponse
+from pulsebridge_gcp import HttpResponse, TimedOutError
 from pulsebridge_hl7v2 import Patient
 from pulsebridge_hl7v2.samples import load as load_sample
 
@@ -45,6 +46,7 @@ OTHER_PASSWORD = "rotated-synthetic-password-for-tests-only"  # noqa: S105 - syn
 ORIGIN = "https://dashboard.example.test"
 CUFF_URL = "https://cuff-sim.example.test"
 HEALTH_URL = "https://health-sync.example.test"
+PUBLIC_BASE = "https://proxy.example.test"
 SAMPLE_PATIENT = SamplePatient("PULSEBRIDGE", "TESTPATIENT", "SYNTHIA")
 EXAMPLES = Path(__file__).resolve().parents[3] / "libs" / "pulsebridge_fhir" / "examples"
 START = datetime(2026, 1, 2, 12, 0, tzinfo=UTC)
@@ -129,6 +131,10 @@ class FakeHealthcare:
     failures: list[tuple[str, str, object]] = field(default_factory=list)
     updated: int = 0
     page_size_override: int | None = None
+    # (method, path regex, seconds): answer slowly, to test the request budget.
+    delays: list[tuple[str, str, float]] = field(default_factory=list)
+    # A store that ignores the subject pin, to test the proxy's own post-filter.
+    ignore_subject: bool = False
 
     # -- seeding --
 
@@ -179,6 +185,11 @@ class FakeHealthcare:
         if urlsplit(url).query:
             pairs += parse_qsl(urlsplit(url).query)
         self.requests.append((method, path, pairs))
+        for delay_method, pattern, seconds in self.delays:
+            if delay_method == method and re.search(pattern, path):
+                time.sleep(min(seconds, timeout))
+                if seconds > timeout:
+                    raise TimedOutError(f"{method} {path}", None)
         for fail_method, pattern, response in self.failures:
             if fail_method == method and re.search(pattern, path):
                 if isinstance(response, BaseException):
@@ -240,8 +251,8 @@ class FakeHealthcare:
                 "_elements",
                 "_page_token",
             },
-            "AuditEvent": {"type", "subtype", "date", "_sort", "_count"},
-            "Provenance": {"recorded", "_sort", "_count"},
+            "AuditEvent": {"type", "subtype", "date", "_sort", "_count", "_page_token"},
+            "Provenance": {"recorded", "_sort", "_count", "_include"},
         }[rtype]
         if not (set(params) <= allowed):
             raise AssertionError(f"unexpected {rtype} search parameters {set(params)}")
@@ -254,7 +265,7 @@ class FakeHealthcare:
                     f"{i.get('system')}|{i.get('value')}" in wanted for i in r.get("identifier", [])
                 )
             ]
-        if "subject" in params:
+        if "subject" in params and not self.ignore_subject:
             refs = params["subject"][0].split(",")
             resources = [r for r in resources if r.get("subject", {}).get("reference") in refs]
         if "code" in params:
@@ -314,6 +325,13 @@ class FakeHealthcare:
                 for r in page
             ],
         }
+        if params.get("_include") == ["Provenance:target"]:
+            for r in page:
+                for target in r.get("target", []):
+                    kind, _, rid = target.get("reference", "").partition("/")
+                    found = self.fhir[store].get((kind, rid))
+                    if found is not None:
+                        bundle["entry"].append({"resource": found, "search": {"mode": "include"}})
         if start + count < len(resources):
             query = [(k, v) for k, v in pairs if k != "_page_token"]
             query.append(("_page_token", str(start + count)))
@@ -409,7 +427,25 @@ class FakeSender:
             raise AssertionError(f"no fake upstream for {url}")
         if isinstance(response, BaseException):
             raise response
+        if callable(response):
+            return response(timeout=timeout, body=body)
         return response
+
+
+def slow_answer(seconds: float, status: int, answer_body: object):  # noqa: ANN201
+    """A fake upstream answer that takes ``seconds``, honouring the caller's timeout as
+    ``requests`` would (a timeout is ``UpstreamTimeout``)."""
+    from fhir_proxy.upstream import UpstreamTimeout
+
+    payload = json.dumps(answer_body).encode()
+
+    def answer(*, timeout: float, body: bytes | None) -> tuple:  # noqa: ARG001
+        time.sleep(min(seconds, timeout))
+        if seconds > timeout:
+            raise UpstreamTimeout()
+        return status, {"content-type": "application/json"}, payload
+
+    return answer
 
 
 class FakeIdTokens:
@@ -468,23 +504,27 @@ def make_config(tmp_path: Path, **overrides: object) -> ServiceConfig:
         sample_patient=SAMPLE_PATIENT,
         password_cache_seconds=0,
         status_cache_seconds=60,
+        fhir_timeout=5,
     )
     values.update(overrides)
+    values.setdefault("public_base_url", PUBLIC_BASE + str(values.get("path_prefix", "")))
     return ServiceConfig(**values)
 
 
-def build_harness(tmp_path: Path, extension_module: str = "fhir_proxy.share", **overrides):
+def build_harness(
+    tmp_path: Path,
+    extension_module: str = "fhir_proxy.share",
+    sender: FakeSender | None = None,
+    **overrides,
+):
     config = make_config(tmp_path, **overrides)
     fake = FakeHealthcare()
-    sender = FakeSender()
+    sender = sender or FakeSender()
     tokens = FakeIdTokens()
     clock = Clock()
-    client = HealthcareClient(
-        project=PROJECT, location=LOCATION, dataset=DATASET, transport=fake, timeout=5
-    )
     app = create_app(
         config,
-        client,
+        fake,
         id_tokens=tokens,
         send=sender,
         clock=clock,
@@ -515,3 +555,32 @@ class LogCapture(logging.Handler):
 
     def events(self) -> list[dict]:
         return [json.loads(line) for line in self.lines if line.startswith("{")]
+
+
+class EchoSender(FakeSender):
+    """cuff-sim answering with the length and SHA-256 of the body it received, so a test can see
+    exactly what was forwarded."""
+
+    def __call__(self, method, url, *, headers, body, timeout):  # noqa: ANN001
+        import hashlib
+
+        self.calls.append(
+            {
+                "method": method,
+                "url": url,
+                "headers": dict(headers),
+                "body": body,
+                "timeout": timeout,
+            }
+        )
+        answer = {"received": len(body or b""), "sha256": hashlib.sha256(body or b"").hexdigest()}
+        return 200, {"content-type": "application/json"}, json.dumps(answer).encode()
+
+
+def gunicorn_test_app():  # noqa: ANN201
+    """A WSGI app for a test that runs a real gunicorn on 127.0.0.1 (synthetic config, fake
+    stores, cuff-sim replaced by :class:`EchoSender`). The directory comes from the
+    ``FHIR_PROXY_TEST_DIR`` environment variable; nothing else is read from the environment."""
+    import os
+
+    return build_harness(Path(os.environ["FHIR_PROXY_TEST_DIR"]), sender=EchoSender()).app

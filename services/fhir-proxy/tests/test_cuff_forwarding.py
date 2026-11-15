@@ -54,7 +54,9 @@ def test_body_is_forwarded_byte_for_byte_with_the_proxys_identity(harness) -> No
         call["headers"]["Authorization"] == "Bearer fake-identity-token-for-cuff-sim.example.test"
     )
     assert harness.tokens.audiences == [CUFF_URL]
-    assert call["timeout"] >= 90
+    # The forward timeout (55 s by default: below Firebase Hosting's 60 s), minus what the
+    # request already used.
+    assert 50 < call["timeout"] <= 55
     # The reviewer's session token never leaves the proxy.
     assert harness.auth()["Authorization"] not in json.dumps(call["headers"])
 
@@ -237,3 +239,13 @@ def test_requests_sender_unreachable() -> None:
         port = probe.getsockname()[1]
     with pytest.raises(UpstreamError, match="unreachable"):
         requests_sender()("POST", f"http://127.0.0.1:{port}/x", headers={}, body=b"{}", timeout=2)
+
+
+@pytest.mark.parametrize("status", [401, 403, 404, 502, 503])
+def test_json_typed_cloud_run_errors_are_mapped_not_passed_through(harness, status: int) -> None:
+    harness.sender.answer(
+        "/cuff/readings", status, {"error": {"message": "cuff-sim.example.test said no"}}
+    )
+    response = _post(harness, b"{}")
+    assert response.status_code == 502
+    assert "cuff-sim.example.test" not in response.get_data(as_text=True)

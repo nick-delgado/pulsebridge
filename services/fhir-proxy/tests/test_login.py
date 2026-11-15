@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import timedelta
 
 import pytest
@@ -194,15 +195,17 @@ def test_total_limit_across_addresses(tmp_path) -> None:
 def test_limiter_retry_after_rounds_up() -> None:
     now = [0.0]
     limiter = LoginLimiter(per_address=2, total=100, window_seconds=60, monotonic=lambda: now[0])
-    limiter.record_failure("a")
+    slot, _ = limiter.begin("a")
+    limiter.failed(slot)
     now[0] = 10.5
-    limiter.record_failure("a")
-    assert limiter.retry_after("b") is None
-    assert limiter.retry_after("a") == 50  # the first failure ages out at 60.0
+    slot, _ = limiter.begin("a")
+    limiter.failed(slot)
+    assert limiter.begin("b")[1] is None
+    assert limiter.begin("a") == (None, 50)  # the first failure ages out at 60.0
     now[0] = 59.9
-    assert limiter.retry_after("a") == 1
+    assert limiter.begin("a") == (None, 1)
     now[0] = 60.0
-    assert limiter.retry_after("a") is None
+    assert limiter.begin("a")[0] is not None
 
 
 # ---- X-Forwarded-For -------------------------------------------------------------------------
@@ -246,3 +249,78 @@ def test_trusted_hops_setting_reaches_the_limiter(tmp_path) -> None:
         _login(h, "wrong", xff="203.0.113.1, 35.191.0.1")
     assert _login(h, "wrong", xff="203.0.113.77, 35.191.0.1").status_code == 401
     assert _login(h, "wrong", xff="203.0.113.1, 35.191.0.1").status_code == 429
+
+
+# ---- the total limit never locks out a correct password (review M1) ------------------------------
+
+
+def test_total_limit_reached_a_correct_password_still_gets_in(tmp_path) -> None:
+    h = build_harness(tmp_path, login_failures_total=60)
+    # 60 failures from 12 different /64s: about one a second would keep this up for good.
+    for n in range(60):
+        assert _login(h, "wrong", xff=f"2001:db8:{n // 5}::1").status_code == 401
+    assert _login(h, PASSWORD, xff="2001:db8:ffff::1").status_code == 200
+    wrong = _login(h, "wrong", xff="2001:db8:fffe::1")
+    assert wrong.status_code == 429 and wrong.headers["Retry-After"].isdigit()
+    # The refused guess was not counted again: once the window passes, the total is clear.
+    h.clock.advance(61)
+    assert _login(h, "wrong", xff="2001:db8:fffe::1").status_code == 401
+
+
+def test_the_per_address_limit_still_comes_before_the_password(tmp_path) -> None:
+    h = build_harness(tmp_path, login_failures_total=60)
+    for _ in range(5):
+        _login(h, "wrong", xff="203.0.113.8")
+    assert _login(h, PASSWORD, xff="203.0.113.8").status_code == 429
+
+
+def test_concurrent_attempts_from_one_address_cannot_pass_the_limit(harness, monkeypatch) -> None:
+    import threading
+
+    from fhir_proxy import app as app_module
+
+    real = app_module.passwords_match
+    # Under a correct limiter only 5 reach the check, so the barrier gives up after 2 s.
+    gate = threading.Barrier(12, timeout=2)
+
+    def slow_match(a: str, b: str) -> bool:
+        with contextlib.suppress(threading.BrokenBarrierError):
+            gate.wait()  # requests that passed the limit wait here together before any records
+        return real(a, b)
+
+    monkeypatch.setattr(app_module, "passwords_match", slow_match)
+    statuses: list[int] = []
+
+    def attempt() -> None:
+        client = harness.app.test_client()
+        response = client.post(
+            "/auth/login", json={"password": "wrong"}, headers={"X-Forwarded-For": "203.0.113.9"}
+        )
+        statuses.append(response.status_code)
+
+    threads = [threading.Thread(target=attempt) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+    assert sorted(statuses) == [401] * 5 + [429] * 7
+
+
+def test_a_malformed_body_does_not_use_up_a_slot(harness) -> None:
+    for _ in range(10):
+        harness.client.post(
+            "/auth/login",
+            data=b"nope",
+            content_type="application/json",
+            headers={"X-Forwarded-For": "203.0.113.10"},
+        )
+    assert _login(harness, PASSWORD, xff="203.0.113.10").status_code == 200
+
+
+def test_bearer_scheme_is_case_insensitive(harness) -> None:
+    token = harness.login()
+    for scheme in ("bearer", "BEARER", "BeArEr"):
+        response = harness.client.get(
+            "/fhir/metadata", headers={"Authorization": f"{scheme} {token}"}
+        )
+        assert response.status_code == 200, scheme

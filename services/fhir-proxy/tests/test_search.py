@@ -216,3 +216,48 @@ def test_store_failures_are_bounded_reasons(harness, patient) -> None:
     response = harness.get(f"/fhir/Observation?{HR}")
     assert response.status_code == 502 and _reason(response) == "upstream-refused"
     assert "example-project" not in response.get_data(as_text=True)
+
+
+def test_search_results_have_a_full_url_at_the_proxy(harness, seed_heart_rate) -> None:
+    seed_heart_rate(DAY_START, 2)
+    bundle = harness.get(f"/fhir/Observation?{HR}").get_json()
+    for entry in bundle["entry"]:
+        assert entry["fullUrl"] == (
+            f"https://proxy.example.test/fhir/Observation/{entry['resource']['id']}"
+        )
+        # The fullUrl resolves: the read route answers it.
+        path = entry["fullUrl"].removeprefix("https://proxy.example.test")
+        assert harness.get(path).get_json()["id"] == entry["resource"]["id"]
+
+
+def test_read_route_is_pinned_to_the_patient(harness, patient) -> None:  # noqa: ARG001
+    harness.fake.put(
+        FHIR_STORE,
+        {
+            "resourceType": "Observation",
+            "id": "other",
+            "subject": {"reference": "Patient/someone-else"},
+            "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+        },
+    )
+    assert harness.get("/fhir/Observation/other").status_code == 404
+    assert harness.get("/fhir/Observation/missing").status_code == 404
+
+
+def test_the_proxy_filters_even_if_the_store_ignores_the_pin(
+    harness, patient, seed_heart_rate
+) -> None:  # noqa: ARG001
+    seed_heart_rate(DAY_START, 2)
+    harness.fake.put(
+        FHIR_STORE,
+        {
+            "resourceType": "Observation",
+            "id": "leak",
+            "subject": {"reference": "Patient/someone-else"},
+            "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+            "effectivePeriod": {"start": "2026-01-01T05:00:00Z", "end": "2026-01-01T05:05:00Z"},
+        },
+    )
+    harness.fake.ignore_subject = True
+    ids = [e["resource"]["id"] for e in harness.get(f"/fhir/Observation?{HR}").get_json()["entry"]]
+    assert "leak" not in ids and len(ids) == 2

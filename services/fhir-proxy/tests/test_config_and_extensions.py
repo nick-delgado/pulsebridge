@@ -18,6 +18,7 @@ ENV = {
     "REVIEWER_PASSWORD_FILE": "/secrets/reviewer-password",
     "ALLOWED_ORIGINS": "https://dashboard.example.test",
     "CUFF_SIM_URL": "https://cuff-sim.example.test",
+    "PUBLIC_BASE_URL": "https://proxy.example.test",
 }
 
 
@@ -25,7 +26,9 @@ def test_defaults() -> None:
     config = ServiceConfig.from_env(ENV)
     assert config.session_ttl_seconds == 28800
     assert config.trusted_proxy_hops == 1
-    assert config.cuff_forward_timeout == 95 and config.request_timeout == 120
+    assert config.cuff_forward_timeout == 55 and config.request_timeout == 120
+    assert config.request_budget == 50  # under Firebase Hosting's 60 s
+    assert config.public_base_url == "https://proxy.example.test"
     assert config.login_failures_per_address == 5 and config.login_window_seconds == 60
     assert config.health_sync_url is None and config.sample_patient is None
 
@@ -42,7 +45,11 @@ def test_defaults() -> None:
         ({"CUFF_SIM_URL": "http://cuff-sim.example.test"}, "CUFF_SIM_URL"),
         ({"CUFF_SIM_URL": "https://user:pw@cuff-sim.example.test"}, "CUFF_SIM_URL"),
         ({"CUFF_SIM_URL": "https://cuff-sim.example.test/path"}, "CUFF_SIM_URL"),
-        ({"CUFF_FORWARD_TIMEOUT_SECONDS": "60"}, "CUFF_FORWARD_TIMEOUT_SECONDS"),
+        ({"CUFF_FORWARD_TIMEOUT_SECONDS": "5"}, "CUFF_FORWARD_TIMEOUT_SECONDS"),
+        ({"REQUEST_BUDGET_SECONDS": "115"}, "REQUEST_BUDGET_SECONDS"),
+        ({"PUBLIC_BASE_URL": "http://proxy.example.test"}, "PUBLIC_BASE_URL"),
+        ({"PUBLIC_BASE_URL": "https://proxy.example.test/api"}, "PUBLIC_BASE_URL"),
+        ({"PUBLIC_BASE_URL": "https://proxy.example.test/?q=1"}, "PUBLIC_BASE_URL"),
         ({"CUFF_FORWARD_TIMEOUT_SECONDS": "115"}, "CUFF_FORWARD_TIMEOUT_SECONDS"),
         ({"SESSION_TTL_SECONDS": "1e9"}, "SESSION_TTL_SECONDS"),
         ({"TRUSTED_PROXY_HOPS": "9"}, "TRUSTED_PROXY_HOPS"),
@@ -117,6 +124,120 @@ def test_trace_step_never_shows_secrets() -> None:
             "x",
             method="GET",
             path="https://openemr.example.test/x",
+            request_body=None,
+            status=200,
+            response_body=None,
+            result="ok",
+            duration_ms=1,
+        )
+
+
+def _extension(tmp_path, monkeypatch, body: str, name: str):  # noqa: ANN001, ANN202
+    package = tmp_path / "ext" / name
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "from fhir_proxy.routes import Route\n"
+        "def handler():\n"
+        "    return {'replaced': True}\n"
+        "def register(proxy):\n" + body
+    )
+    monkeypatch.syspath_prepend(str(tmp_path / "ext"))
+    return name
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        (
+            "    proxy.add_route(Route('POST', '/auth/login', 'login2', 'view', 'x'), handler)\n",
+            "exist",
+        ),
+        (
+            "    proxy.add_route(Route('GET', '/other', 'login', 'view', 'x'), handler)\n",
+            "endpoint",
+        ),
+        (
+            "    proxy.add_route(Route('GET', '/other', 'status', 'view', 'x'), handler)\n",
+            "endpoint",
+        ),
+        (
+            "    proxy.add_route(Route('GET', '/open', 'open', 'login', 'x'), handler)\n",
+            "session-token",
+        ),
+        (
+            "    proxy.add_route(Route('POST', '/share', 'share', 'view', 'x'), handler)\n"
+            "    proxy.add_route(Route('POST', '/share', 'share2', 'view', 'x'), handler)\n",
+            "exist",
+        ),
+        (
+            "    proxy.add_route(Route('POST', '/share', 'share', 'view', 'x'), handler)\n"
+            "    proxy.add_route(Route('GET', '/share-b', 'share', 'view', 'x'), handler)\n",
+            "endpoint",
+        ),
+    ],
+)
+def test_an_extension_cannot_replace_or_open_routes(tmp_path, monkeypatch, line, message) -> None:
+    name = _extension(tmp_path, monkeypatch, line, f"ext_{abs(hash(line)) % 10**8}")
+    with pytest.raises(ValueError, match=message):
+        build_harness(tmp_path, extension_module=name)
+
+
+def test_the_public_set_comes_from_the_core_routes_only(tmp_path, monkeypatch) -> None:
+    from fhir_proxy.extensions import ProxyContext
+
+    # Even a context that skipped add_route's checks could not make a route public.
+    real = ProxyContext.add_route
+    monkeypatch.setattr(
+        ProxyContext, "add_route", lambda self, route, handler: self.routes.append((route, handler))
+    )
+    name = _extension(
+        tmp_path,
+        monkeypatch,
+        "    proxy.add_route(Route('GET', '/open', 'open', 'login', 'x'), handler)\n",
+        "ext_public",
+    )
+    h = build_harness(tmp_path, extension_module=name)
+    monkeypatch.setattr(ProxyContext, "add_route", real)
+    assert h.client.get("/open").status_code == 401
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "Authorization",
+        "client_secret",
+        "CLIENT_ASSERTION",
+        "password",
+        "Token",
+        "refresh_token",
+        "code",
+    ],
+)
+def test_trace_step_redacts_every_secret_key_whatever_its_case(key: str) -> None:
+    step = trace_step(
+        "token",
+        "x",
+        method="POST",
+        path="/oauth2/default/token",
+        request_body={key: "sekrit-value", "nested": [{key: "sekrit-value"}]},
+        status=200,
+        response_body={key: "sekrit-value"},
+        result="ok",
+        duration_ms=1,
+    )
+    assert "sekrit-value" not in str(step)
+
+
+@pytest.mark.parametrize(
+    "path", ["https://openemr.example.test/x", "/x?code=abc", "//evil.example.test/x", "x", "/a#b"]
+)
+def test_trace_step_path_has_no_scheme_host_or_query(path: str) -> None:
+    with pytest.raises(ValueError):
+        trace_step(
+            "x",
+            "x",
+            method="GET",
+            path=path,
             request_body=None,
             status=200,
             response_body=None,

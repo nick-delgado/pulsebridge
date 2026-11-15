@@ -55,6 +55,15 @@ CORE_ROUTES: tuple[Route, ...] = (
     ),
     Route(
         "GET",
+        "/fhir/Observation/<observation_id>",
+        "read_observation",
+        "fhir",
+        "Observation read by id, pinned to the configured patient (what entry.fullUrl names)",
+        interaction="read",
+        resource_type="Observation",
+    ),
+    Route(
+        "GET",
         "/trace/heart-rate/<observation_id>",
         "heart_rate_trace",
         "view",

@@ -426,7 +426,10 @@ def test_bad_messages_queries_are_refused(harness, query: str) -> None:
 def test_count_is_capped(harness) -> None:
     _rows(harness, "?count=999")
     (call,) = harness.fake.calls("GET", "/AuditEvent$")
-    assert ("_count", "50") in call[2]
+    # 50 rows at most; the audit search reads twice that, because a page is ordered by send
+    # time and a row is shown only once nothing unread can come before it.
+    assert ("_count", "100") in call[2]
+    assert harness.get("/messages?count=999").status_code == 200
 
 
 def test_cursor_round_trip() -> None:
@@ -462,3 +465,134 @@ def test_a_message_name_outside_our_store_is_never_fetched_directly(harness) -> 
     log = harness.app.extensions["pulsebridge_messages_log"]
     assert log.lookups([other]) == {other: Lookup("failed")}
     assert harness.fake.calls("GET", "/messages/") == []
+
+
+# ---- review fixes -------------------------------------------------------------------------------
+
+
+def test_transaction_rows_are_pinned_to_the_configured_patient(harness, seed_heart_rate) -> None:
+    seed_heart_rate(datetime(2026, 1, 1, 5, 0, tzinfo=UTC), 2)
+    # Another patient's Observation and its Provenance, written by health-sync at another time.
+    harness.fake.put(
+        "main",
+        {
+            "resourceType": "Observation",
+            "id": "other-obs",
+            "subject": {"reference": "Patient/someone-else"},
+            "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+        },
+    )
+    harness.fake.put(
+        "main",
+        {
+            "resourceType": "Provenance",
+            "id": "other-prov",
+            "recorded": "2026-01-03T09:00:00+00:00",
+            "target": [{"reference": "Observation/other-obs"}],
+            "agent": [{"who": {"display": "PulseBridge health-sync"}}],
+        },
+    )
+    rows = _rows(harness, "?kind=fhir-transaction")["entries"]
+    assert len(rows) == 1
+    text = str(rows)
+    assert "other-obs" not in text and "other-prov" not in text
+    assert "2026-01-03T09:00" not in text
+
+
+def test_attempts_are_ordered_by_send_time_not_recorded_time(harness) -> None:
+    from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
+
+    def attempt(cid: str, sent: datetime, recorded: datetime) -> str:
+        built = build_send_attempt_audit_event(
+            SendAttempt(
+                sent_at=sent,
+                transport="mllp",
+                control_id=cid,
+                result=Acknowledged(code="AE", raw_ack=b"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|AE|"),
+                patient_id="PB-SYN-0001",
+                agent="cuff-sim",
+                destination=STORE_NAME,
+            ),
+            recorded=recorded,
+        )
+        harness.fake.put(AUDIT_STORE, built.resource)
+        return built.resource["id"]
+
+    t = lambda m, s=0: datetime(2026, 1, 1, 15, m, s, tzinfo=UTC)  # noqa: E731
+    # A was sent first but recorded last (its send waited for a timeout); B the other way.
+    a = attempt("MSG-A", t(0), t(1, 30))
+    b = attempt("MSG-B", t(1), t(1, 5))
+    page = _rows(harness)
+    assert [r["id"] for r in page["entries"]] == [b, a]
+    # Paging one at a time keeps the same order.
+    first = _rows(harness, "?count=1")
+    assert [r["id"] for r in first["entries"]] == [b]
+    second = _rows(harness, f"?count=1&cursor={first['nextCursor']}")
+    assert [r["id"] for r in second["entries"]] == [a]
+
+
+def test_a_wrong_derived_name_is_matched_by_time_and_listed_once(harness, map_into_store) -> None:
+    from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
+
+    sent = datetime(2026, 1, 1, 16, 0, tzinfo=UTC)
+    data = sample_bytes("valid_bp_reading")
+    real_name = f"{STORE_NAME}/messages/cmVhbC1uYW1l"
+    harness.fake.add_message(
+        real_name,
+        data,
+        labels=map_into_store(real_name, data),
+        create_time="2026-01-01T16:00:00.400000Z",
+        patient_ids=["PB-SYN-0001"],
+    )
+    built = build_send_attempt_audit_event(
+        SendAttempt(
+            sent_at=sent,
+            transport="mllp",
+            control_id="SYN-VALID-0001",  # the sample's own MSH-10
+            result=Acknowledged(code="AA", raw_ack=b"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|AA|X"),
+            patient_id="PB-SYN-0001",
+            agent="cuff-sim",
+            destination=STORE_NAME,
+            derived_message_name=f"{STORE_NAME}/messages/d3JvbmctcnVsZQ==",
+        ),
+        recorded=sent,
+    )
+    harness.fake.put(AUDIT_STORE, built.resource)
+    rows = _rows(harness, "?kind=cuff-send")["entries"]
+    assert len(rows) == 1  # not an attempt row plus a store-only duplicate
+    (row,) = rows
+    assert row["messageLookup"] == "matched-by-time"
+    assert row["matchedMessageName"] == real_name
+    assert row["messageName"] is None  # never presented as the store's answer
+    assert row["application"] == {"outcome": "accepted", "reason": None}
+    assert row["observation"].startswith("Observation/")
+
+
+def test_two_candidates_are_not_matched(harness) -> None:
+    from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
+
+    sent = datetime(2026, 1, 1, 16, 0, tzinfo=UTC)
+    data = sample_bytes("valid_bp_reading")
+    for n in (1, 2):
+        harness.fake.add_message(
+            f"{STORE_NAME}/messages/Y2FuZGlkYXRl{n}",
+            data,
+            create_time=f"2026-01-01T16:00:0{n}.000000Z",
+            patient_ids=["PB-SYN-0001"],
+        )
+    built = build_send_attempt_audit_event(
+        SendAttempt(
+            sent_at=sent,
+            transport="mllp",
+            control_id="SYN-VALID-0001",
+            result=Acknowledged(code="AA", raw_ack=b"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|AA|X"),
+            patient_id="PB-SYN-0001",
+            agent="cuff-sim",
+            destination=STORE_NAME,
+            derived_message_name=f"{STORE_NAME}/messages/d3JvbmctcnVsZQ==",
+        ),
+        recorded=sent,
+    )
+    harness.fake.put(AUDIT_STORE, built.resource)
+    row = _by_id(_rows(harness))[built.resource["id"]]
+    assert row["messageLookup"] == "not-found" and row["matchedMessageName"] is None

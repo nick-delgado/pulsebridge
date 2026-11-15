@@ -15,8 +15,6 @@ def _concrete(rule: str) -> str:
 def _routes(harness) -> list[tuple[str, str]]:  # noqa: ANN001
     out = []
     for rule in harness.app.url_map.iter_rules():
-        if rule.endpoint == "static":
-            continue
         for method in rule.methods - {"HEAD", "OPTIONS"}:
             out.append((method, _concrete(rule.rule)))
     return sorted(out)
@@ -144,11 +142,16 @@ def test_preflight_refused_for_other_origins_methods_and_headers(harness, header
     assert "Access-Control-Allow-Origin" not in response.headers
 
 
-def test_preflight_for_an_unknown_path_is_404(harness) -> None:
-    response = harness.client.options(
+def test_preflight_for_an_unknown_path_looks_like_any_refusal(harness) -> None:
+    unknown = harness.client.options(
         "/nope", headers={"Origin": ORIGIN, "Access-Control-Request-Method": "GET"}
     )
-    assert response.status_code == 404
+    refused = harness.client.options(
+        "/status",
+        headers={"Origin": "https://evil.example.test", "Access-Control-Request-Method": "GET"},
+    )
+    assert unknown.status_code == refused.status_code == 403
+    assert unknown.get_data() == refused.get_data()
 
 
 def test_actual_responses_carry_cors_only_for_the_allowed_origin(harness) -> None:

@@ -20,9 +20,9 @@ it when it expires (Google's ID tokens last an hour).
 - any other status from cuff-sim's side (Cloud Run's 401/403 when the invoker binding is
   missing, 404, 502, 503) is a ``502``: the simulator could not be used; Cloud Run's own ``504``
   (cuff-sim's request timeout) is a ``504``, because the attempt may have been sent;
-- no connection is a ``502``; no answer within the timeout (default 95 s, at least 90 s, below
-  the proxy's own request timeout) is a ``504``. Each with an OperationOutcome from the proxy,
-  never cuff-sim's text or URL.
+- no connection is a ``502``; no answer within the timeout (``CUFF_FORWARD_TIMEOUT_SECONDS``,
+  default 55 s: below Firebase Hosting's 60 s, README "For T22") is a ``504``. Each with an
+  OperationOutcome from the proxy, never cuff-sim's text or URL.
 
 No redirect is followed (a redirect could carry the identity token elsewhere), and an answer
 larger than 256 KiB is refused.
@@ -36,6 +36,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
+
+from fhir_proxy import deadline
 
 PASSTHROUGH_STATUSES = (200, 400, 413, 422, 429, 500)
 MAX_RESPONSE_BYTES = 256 * 1024
@@ -211,6 +213,12 @@ class Upstream:
         content_type: str | None,
         timeout: float,
     ) -> tuple[int, dict[str, str], bytes]:
+        # Every call ends within the request's budget (fhir_proxy.deadline): the cuff route's
+        # budget is the forward timeout; every other route's is REQUEST_BUDGET_SECONDS.
+        try:
+            timeout = deadline.capped(timeout)
+        except deadline.BudgetExhausted:
+            raise UpstreamTimeout() from None
         # Audience: the receiving service's URL, which Cloud Run accepts for its invoker check.
         headers = {
             "Authorization": f"Bearer {self._tokens.token(base)}",

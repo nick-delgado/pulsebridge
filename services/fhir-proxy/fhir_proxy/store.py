@@ -193,6 +193,10 @@ class Stores:
     def audit_events(self, params: list[tuple[str, str]]) -> dict:
         return self.client.search(self.audit_store, "AuditEvent", params)
 
+    def next_audit_page(self, bundle: dict) -> dict | None:
+        """The next page of an audit-store search; the link must stay inside that store."""
+        return self.client.next_page(self.audit_store, bundle)
+
     def read_audit_event(self, resource_id: str) -> dict:
         if not SAFE_ID.fullmatch(resource_id):
             raise ValueError("not a FHIR id")

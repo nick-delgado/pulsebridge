@@ -16,7 +16,14 @@ The rest comes from the FHIR store, in three cheap searches, reused for
   only windows that changed, so this moves only when there is new data (README, open question 9).
 - ``observationCounts``: ``_summary=count`` for heart rate (watch) and the blood-pressure panel
   (cuff), for the configured patient.
-- ``fhirStore``: reachable when those searches answered.
+- ``fhirStore``: reachable when those searches answered. When they did not (an error, or the
+  request's time budget ran out), the counts are ``null`` ("not known", never 0) and
+  ``lastSyncAt`` is null.
+
+health-sync and the three searches run at the same time, so the worst case is the slower of
+health-sync's timeout and one store search, both capped by the request budget (50 s), not
+their sum. Any failure of the health-sync call, even an unexpected exception, is
+``state: "unknown"`` with ``reason: "health-sync-error"``: ``/status`` never answers 5xx.
 
 ``openemr`` is checked by the share extension (T15) when it is installed; until then it says
 so (``reachable: false``, ``detail: "not-checked"``).
@@ -29,10 +36,12 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import Executor, ThreadPoolExecutor
 from datetime import UTC, datetime
 
 from pulsebridge_gcp import HealthcareApiError
 
+from fhir_proxy import deadline
 from fhir_proxy.errors import reachability_reason
 from fhir_proxy.logs import log
 from fhir_proxy.messages import instant_text
@@ -95,6 +104,7 @@ class StatusService:
         *,
         cache_seconds: float,
         openemr_probe: Callable[[], dict] | None = None,
+        executor: Executor | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -102,6 +112,7 @@ class StatusService:
         self._health_sync = health_sync
         self._cache_seconds = cache_seconds
         self.openemr_probe = openemr_probe
+        self._executor = executor or ThreadPoolExecutor(max_workers=4)
         self._clock = clock
         self._monotonic = monotonic
         self._lock = threading.Lock()
@@ -118,7 +129,23 @@ class StatusService:
         except UpstreamError as exc:
             log(logging.WARNING, "health-sync-status", outcome=exc.reason, http_status=exc.status)
             return unknown_watch(f"health-sync-{exc.reason}", now)
+        except Exception as exc:  # noqa: BLE001 - /status never answers 5xx for health-sync
+            log(
+                logging.WARNING,
+                "health-sync-status",
+                outcome="error",
+                error_type=type(exc).__name__,
+            )
+            return unknown_watch("health-sync-error", now)
         return normalise_health_sync(body, now)
+
+    def _store_unknown(self, now: datetime, detail: str) -> dict:
+        # Counts are null ("not known"), never 0, when the store could not be asked.
+        return {
+            "lastSyncAt": None,
+            "observationCounts": {"watch": None, "cuff": None},
+            "fhirStore": {"reachable": False, "checkedAt": _now_text(now), "detail": detail},
+        }
 
     def _from_store(self, now: datetime) -> dict:
         with self._lock:
@@ -129,13 +156,24 @@ class StatusService:
         try:
             refs = self._stores.patient_references()
             if refs:
-                counts = {
-                    "watch": self._stores.count_observations(HEART_RATE, refs),
-                    "cuff": self._stores.count_observations(BLOOD_PRESSURE_PANEL, refs),
-                }
-                newest = self._stores.newest_write(HEART_RATE, refs)
+                # The three searches are independent: run them at once, within the budget.
+                parts = deadline.run_parallel(
+                    self._executor,
+                    [
+                        lambda: self._stores.count_observations(HEART_RATE, refs),
+                        lambda: self._stores.count_observations(BLOOD_PRESSURE_PANEL, refs),
+                        lambda: self._stores.newest_write(HEART_RATE, refs),
+                    ],
+                )
+                for part in parts:
+                    if part is deadline.NOT_FINISHED:
+                        raise deadline.BudgetExhausted("status searches")
+                    if isinstance(part, BaseException):
+                        raise part
+                counts = {"watch": parts[0], "cuff": parts[1]}
+                newest = parts[2]
             else:
-                counts, newest = {"watch": 0, "cuff": 0}, None
+                counts, newest = {"watch": 0, "cuff": 0}, None  # no Patient yet: truly no data
             parsed = parse_instant(newest) if newest else None
             result = {
                 "lastSyncAt": None if parsed is None else instant_text(parsed),
@@ -145,20 +183,23 @@ class StatusService:
         except (HealthcareApiError, ValueError) as exc:
             reason = reachability_reason(exc)
             log(logging.WARNING, "fhir-store-status", outcome=reason, error_type=type(exc).__name__)
-            # Not cached: the next load tries again.
-            return {
-                "lastSyncAt": None,
-                "observationCounts": {"watch": 0, "cuff": 0},
-                "fhirStore": {"reachable": False, "checkedAt": checked, "detail": reason},
-            }
+            return self._store_unknown(now, reason)  # not cached: the next load tries again
         with self._lock:
             self._cached = (self._monotonic(), result)
         return result
 
     def summary(self) -> dict:
+        """health-sync and the store are asked at the same time, each within the request's
+        budget; a part not answered in time is unknown (``state: unknown``, counts null)."""
         now = self._clock()
-        watch = self._watch(now)
-        store = self._from_store(now)
+        watch, store = deadline.run_parallel(
+            self._executor, [lambda: self._watch(now), lambda: self._from_store(now)]
+        )
+        if not isinstance(watch, dict):
+            watch = unknown_watch("health-sync-timeout", now)
+        if not isinstance(store, dict):
+            store = self._store_unknown(now, "timeout")
+        watch = dict(watch)
         watch["lastSyncAt"] = store["lastSyncAt"]
         openemr = {"reachable": False, "checkedAt": _now_text(now), "detail": "not-checked"}
         if self.openemr_probe is not None:

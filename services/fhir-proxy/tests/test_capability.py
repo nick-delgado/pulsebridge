@@ -29,13 +29,20 @@ def test_capability_statement_equals_the_routes(harness) -> None:
             served.add((match.group(1), "search-type"))
         if re.fullmatch(r"/fhir/([A-Z][A-Za-z]+)/<[^>]+>", rule.rule):
             served.add((rule.rule.split("/")[2], "read"))
-    assert implemented_interactions(statement) == served == {("Observation", "search-type")}
+    assert (
+        implemented_interactions(statement)
+        == served
+        == {
+            ("Observation", "search-type"),
+            ("Observation", "read"),
+        }
+    )
     # Every other route is named in the documentation, and nothing that is not a route is.
     documented = set(re.findall(r"`(GET|POST) ([^`]+)`", statement["rest"][0]["documentation"]))
     others = {
         (method, rule.rule)
         for rule in harness.app.url_map.iter_rules()
-        if not rule.rule.startswith("/fhir/") and rule.endpoint != "static"
+        if not rule.rule.startswith("/fhir/")
         for method in rule.methods - {"HEAD", "OPTIONS"}
     }
     assert documented == others
@@ -44,7 +51,7 @@ def test_capability_statement_equals_the_routes(harness) -> None:
 def test_search_parameters_equal_what_the_validator_accepts(harness) -> None:
     (resource,) = _statement(harness)["rest"][0]["resource"]
     declared = {p["name"]: p["type"] for p in resource["searchParam"]}
-    assert declared == search.SEARCH_PARAMETERS
+    assert declared == search.SEARCH_PARAMETERS == {"code": "token", "date": "date"}
     # Every declared parameter is accepted, and an undeclared standard one is refused.
     for name, value in {
         "code": "http://loinc.org|8867-4",
@@ -68,3 +75,27 @@ def test_security_is_stated_truthfully(harness) -> None:
     assert "shared demo password" in security["description"]
     assert "8 hours" in security["description"]
     assert "SMART-on-FHIR" not in str(_statement(harness))
+
+
+def test_result_parameters_are_not_search_params_and_the_date_is_the_start_date(harness) -> None:
+    from datetime import UTC, datetime
+
+    statement = _statement(harness)
+    (resource,) = statement["rest"][0]["resource"]
+    names = {p["name"] for p in resource["searchParam"]}
+    assert names == {"code", "date"}
+    assert "_sort" in resource["documentation"] and "_count" in resource["documentation"]
+    assert statement["date"] == datetime.now(UTC).date().isoformat()
+
+
+def test_both_login_mentions_carry_the_prefix(tmp_path) -> None:
+    from fhir_proxy.testing import build_harness
+
+    h = build_harness(tmp_path, path_prefix="/api")
+    token = h.client.post("/api/auth/login", json={"password": h.password_file.read_text().strip()})
+    auth = {"Authorization": f"Bearer {token.get_json()['token']}"}
+    description = h.client.get("/api/fhir/metadata", headers=auth).get_json()["rest"][0][
+        "security"
+    ]["description"]
+    assert description.count("/api/auth/login") == 2
+    assert " /auth/login" not in description

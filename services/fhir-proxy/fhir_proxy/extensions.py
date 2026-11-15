@@ -1,6 +1,7 @@
 """Where T15's share to OpenEMR plugs in, without editing the rest of the proxy.
 
-T15 adds the package ``fhir_proxy/share/`` with one function in its ``__init__.py``:
+T15 adds the package ``services/fhir-proxy/fhir_proxy/share/`` (tests under
+``services/fhir-proxy/tests/share/``) with one function in its ``__init__.py``:
 
 ```python
 def register(proxy: ProxyContext) -> None:
@@ -12,13 +13,16 @@ def register(proxy: ProxyContext) -> None:
 ``create_app`` imports it if it exists and calls ``register`` once at start-up. What the share
 code gets from :class:`ProxyContext`:
 
-- ``add_route``: the route goes into the same route table as every other, so it is behind the
-  same session-token check (only ``POST /auth/login`` is public, and an extension cannot add a
-  public route), gets CORS, the security headers and the error handling, and appears in the
-  CapabilityStatement's route list.
+- ``add_route``: the route joins the same route table, so it is behind the same session-token
+  check, gets CORS, the security headers, the request budget and the error handling, and appears
+  in the CapabilityStatement's route list. The public routes are fixed by the core table (login
+  only): an extension cannot add a public route, reuse a core endpoint name, or register a
+  method and path that already exist.
 - ``stores``: read access to the health-data store with the patient pin
   (``stores.patient_references()``, ``stores.read(...)``, ``stores.is_ours(...)``).
 - ``config``: the proxy's validated configuration (T15 adds its own variables in its package).
+- ``read_body(limit)`` (``fhir_proxy.bodies``): the request body, read completely or refused
+  with 413; never ``request.get_data()``, which a chunked body can truncate silently.
 - ``Problem`` (``fhir_proxy.errors``): raise it for a refusal; it becomes an OperationOutcome
   with the given status (422 before OpenEMR is called, 502 if OpenEMR is unreachable).
 - ``trace_step`` (below): one step of the share trace in the dashboard's ``ShareStep`` shape,
@@ -30,7 +34,8 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
 from fhir_proxy.config import ServiceConfig
@@ -38,17 +43,35 @@ from fhir_proxy.routes import Route
 from fhir_proxy.store import Stores
 
 EXTENSION_MODULE = "fhir_proxy.share"
-# Keys whose values never reach a trace, at any depth (OAuth 2.0 and JWT bearer assertion names).
+# Keys whose values never reach a trace, at any depth, compared without regard to case: OAuth 2.0
+# (RFC 6749) and JWT bearer assertion (RFC 7523) parameter names, HTTP credentials, passwords.
 SECRET_KEYS = frozenset(
-    {"client_assertion", "access_token", "refresh_token", "id_token", "assertion", "private_key"}
+    {
+        "authorization",
+        "client_secret",
+        "client_assertion",
+        "assertion",
+        "password",
+        "token",
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "code",
+        "code_verifier",
+        "private_key",
+    }
 )
 NOT_SHOWN = "[not shown]"
+_PATH = re.compile(r"/[A-Za-z0-9._~!$&'()*+,;=:@%/-]*", re.ASCII)
 
 
 def redact(value: object) -> object:
     """A copy of a JSON value with every secret key's value replaced by ``[not shown]``."""
     if isinstance(value, dict):
-        return {k: (NOT_SHOWN if k in SECRET_KEYS else redact(v)) for k, v in value.items()}
+        return {
+            k: (NOT_SHOWN if isinstance(k, str) and k.lower() in SECRET_KEYS else redact(v))
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [redact(v) for v in value]
     return value
@@ -66,10 +89,11 @@ def trace_step(
     result: str,
     duration_ms: int,
 ) -> dict:
-    """One ``ShareStep`` (web/src/api/contract.ts). ``path`` must be a path only, never a URL
-    with a host: OpenEMR's screens are not reachable and its host is not the page's business."""
-    if not path.startswith("/") or "//" in path:
-        raise ValueError("a trace step's url is a path")
+    """One ``ShareStep`` (web/src/api/contract.ts). ``path`` is a path only: no scheme or host
+    (OpenEMR's host is not the page's business), and no query string, which could carry a
+    credential such as an authorization code."""
+    if not _PATH.fullmatch(path) or path.startswith("//"):
+        raise ValueError("a trace step's url is a path with no scheme, host or query")
     return {
         "step": step,
         "label": label,
@@ -84,12 +108,22 @@ def trace_step(
 class ProxyContext:
     config: ServiceConfig
     stores: Stores
+    core_routes: tuple[Route, ...] = ()
     routes: list[tuple[Route, Callable]] = field(default_factory=list)
     openemr_probe: Callable[[], dict] | None = None
+
+    def _taken(self) -> Iterable[Route]:
+        yield from self.core_routes
+        yield from (route for route, _ in self.routes)
 
     def add_route(self, route: Route, handler: Callable) -> None:
         if route.public:
             raise ValueError("an extension cannot add a route without the session-token check")
+        for other in self._taken():
+            if other.endpoint == route.endpoint:
+                raise ValueError("an extension cannot reuse an endpoint name")
+            if (other.method, other.path) == (route.method, route.path):
+                raise ValueError("an extension cannot register a method and path that exist")
         self.routes.append((route, handler))
 
     def set_openemr_probe(self, probe: Callable[[], dict]) -> None:

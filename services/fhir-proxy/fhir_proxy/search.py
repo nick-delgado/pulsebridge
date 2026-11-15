@@ -50,13 +50,14 @@ MAX_COUNT = 1000
 DEFAULT_COUNT = 100
 SORTS = ("date", "-date")
 
-# The names the search accepts, in the order the CapabilityStatement lists them.
+# The search criteria, as the CapabilityStatement lists them (rest.resource.searchParam).
 SEARCH_PARAMETERS: dict[str, str] = {
     "code": "token",
     "date": "date",
-    "_sort": "special",
-    "_count": "number",
 }
+# Result parameters (R4 search.html section 3.1.1.5: they shape the result, they are not
+# criteria), declared in the CapabilityStatement's documentation rather than as searchParam.
+RESULT_PARAMETERS = ("_sort", "_count")
 # Paging is a parameter of the proxy's own links, not a search criterion; declared separately.
 PAGE_TOKEN = "_page_token"  # noqa: S105 - a parameter name, not a secret
 
@@ -146,7 +147,7 @@ def parse_observation_query(pairs: Sequence[tuple[str, str]]) -> ObservationQuer
     page_token = None
     seen: set[str] = set()
     for name, value in pairs:
-        if name not in SEARCH_PARAMETERS and name != PAGE_TOKEN:
+        if name not in SEARCH_PARAMETERS and name not in RESULT_PARAMETERS and name != PAGE_TOKEN:
             shown = _name_for_message(name)
             if ":" in name or "." in name:
                 why = "modifiers and chained parameters are not supported"

@@ -67,8 +67,10 @@ def test_last_sync_at_is_the_newest_heart_rate_write(harness, seed_heart_rate) -
     expected = datetime.fromisoformat(newest).astimezone(UTC)
     got = datetime.fromisoformat(_status(harness)["watchSync"]["lastSyncAt"])
     assert got == expected
-    (search,) = harness.fake.calls("GET", "/Observation$")[-1:]
-    assert ("_sort", "-_lastUpdated") in search[2] and ("_count", "1") in search[2]
+    newest_searches = [
+        c for c in harness.fake.calls("GET", "/Observation$") if ("_sort", "-_lastUpdated") in c[2]
+    ]
+    assert newest_searches and ("_count", "1") in newest_searches[-1][2]
 
 
 def test_store_part_is_cached_for_a_short_time(harness, seed_heart_rate) -> None:
@@ -157,5 +159,16 @@ def test_fhir_store_unreachable_is_reported_not_raised(harness, patient) -> None
         "checkedAt": "2026-01-02T12:00:00Z",
         "detail": "permission-denied",
     }
-    assert body["observationCounts"] == {"watch": 0, "cuff": 0}
+    # Not known, never 0, when the store could not be asked.
+    assert body["observationCounts"] == {"watch": None, "cuff": None}
+    assert body["watchSync"]["lastSyncAt"] is None
     assert body["watchSync"]["state"] == "connected"
+
+
+@pytest.mark.parametrize("error", [ValueError("x"), RuntimeError("y"), KeyError("z")])
+def test_any_exception_from_health_sync_is_unknown_never_500(harness, error) -> None:
+    harness.sender.routes["/status"] = error
+    response = harness.get("/status")
+    assert response.status_code == 200
+    watch = response.get_json()["watchSync"]
+    assert watch["state"] == "unknown" and watch["reason"] == "health-sync-error"

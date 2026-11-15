@@ -6,9 +6,15 @@ What it says, and why:
 
 - ``kind: instance`` (R4: "describes an actual running instance of software"), ``fhirVersion:
   4.0.1``, ``format: json`` only (the proxy never answers XML).
-- One ``rest`` entry in ``server`` mode with one resource, ``Observation``, one interaction,
-  ``search-type``, and the search parameters :mod:`fhir_proxy.search` accepts. No ``read``,
-  ``create`` or any write: the proxy is read-only, and the dashboard needs nothing else.
+- One ``rest`` entry in ``server`` mode with one resource, ``Observation``, two interactions,
+  ``search-type`` and ``read`` (both pinned to the configured patient; ``read`` is what each
+  search result's ``fullUrl`` names), and the search criteria :mod:`fhir_proxy.search` accepts
+  (``code``, ``date``). ``_sort`` and ``_count`` are result parameters, not criteria, so they are
+  described in the resource's ``documentation`` rather than as ``searchParam``. No ``create`` or
+  any write: the proxy is read-only.
+- ``date`` is required by R4 ("the date (and optionally time) when the capability statement was
+  published or last changed"). It is the date this instance started: the statement describes a
+  running instance (``kind: instance``) and changes only when a new revision starts.
 - **Security, stated truthfully.** R4 ``rest.security.service`` is bound (extensibly) to
   ``restful-security-service``, whose codes are OAuth, SMART-on-FHIR, NTLM, Basic, Kerberos and
   Certificates. None describes this login, so no code from that set is claimed (in particular
@@ -33,9 +39,12 @@ SEARCH_PARAMETER_DOCS = {
     "a full instant with a time zone. On a Period, gt matches a period that ends after the "
     "value and lt one that starts before it (R4 prefix rules), so gt<start>&lt<end> returns "
     "the windows overlapping (start, end).",
-    "_sort": "date or -date.",
-    "_count": "1 to 1000; follow link next for further pages.",
 }
+RESULT_PARAMETER_DOCS = (
+    "Result parameters: _sort (date or -date; default date) and _count (1 to 1000; default "
+    "100); follow link next for further pages. On a boundary instant, ge and le include a "
+    "period that ends or starts exactly there; gt and lt do not."
+)
 SEARCH_PARAMETER_DEFINITIONS = {
     "code": "http://hl7.org/fhir/SearchParameter/clinical-code",
     "date": "http://hl7.org/fhir/SearchParameter/clinical-date",
@@ -43,7 +52,7 @@ SEARCH_PARAMETER_DEFINITIONS = {
 
 
 def capability_statement(
-    routes: Iterable[Route], *, prefix: str, ttl_hours: float, software_version: str
+    routes: Iterable[Route], *, prefix: str, ttl_hours: float, software_version: str, date: str
 ) -> dict:
     routes = list(routes)
     fhir = [r for r in routes if r.kind == "fhir"]
@@ -54,7 +63,12 @@ def capability_statement(
             continue
         entry = resources.setdefault(
             route.resource_type,
-            {"type": route.resource_type, "interaction": [], "searchParam": []},
+            {
+                "type": route.resource_type,
+                "documentation": RESULT_PARAMETER_DOCS,
+                "interaction": [],
+                "searchParam": [],
+            },
         )
         entry["interaction"].append({"code": route.interaction})
         if route.interaction == "search-type":
@@ -72,7 +86,7 @@ def capability_statement(
     return {
         "resourceType": "CapabilityStatement",
         "status": "active",
-        "date": "2026-11-15",
+        "date": date,
         "kind": "instance",
         "software": {"name": "PulseBridge fhir-proxy", "version": software_version},
         "implementation": {
@@ -96,7 +110,8 @@ def capability_statement(
                     ],
                     "description": "Every request except POST "
                     f"{prefix}/auth/login needs Authorization: Bearer <token>. The token comes "
-                    "from POST /auth/login with the one shared demo password, is an HS256 JWT "
+                    f"from POST {prefix}/auth/login with the one shared demo password, is an "
+                    "HS256 JWT "
                     f"valid for {hours} hours, and carries no user identity, no scopes and no "
                     "launch context. Changing the password ends every session. Every search is "
                     "limited to the one configured patient.",
