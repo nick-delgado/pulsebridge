@@ -5,6 +5,8 @@ mock_provider "google" {}
 
 variables {
   project_id = "example-project-123"
+  # The default grant_edge_vm_mirror_reader = true needs the edge VM's account.
+  edge_vm_service_account_email = "pb-edge-vm@example-project-123.iam.gserviceaccount.com"
 }
 
 run "accepts_defaults" {

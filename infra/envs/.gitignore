@@ -1,0 +1,20 @@
+# Per-deployment files that name the deployer's own project, bucket or people. They are created
+# from the committed *.example files and must never be committed. (*.tfvars, state and plan files
+# are already ignored by the repository's .gitignore; listed again here so this directory is safe
+# on its own.)
+terraform.tfvars
+*.tfvars
+*.tfvars.json
+backend.hcl
+*.tfbackend
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+
+# The page deploy's generated file, if someone writes it here instead of web/.
+firebase.json
+
+# Lock files belong to ROOT modules only (dev, prod). _stack is a child module: the lock file
+# `terraform init` creates there in tests is not committed.
+_stack/.terraform.lock.hcl

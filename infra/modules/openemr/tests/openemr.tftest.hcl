@@ -57,6 +57,24 @@ run "connection_settings_for_fhir_proxy" {
     condition     = output.client_secret_id == "projects/example-project-123/secrets/pb-openemr-client-private-key"
     error_message = "fhir-proxy must be pointed at the client key secret."
   }
+
+  assert {
+    condition     = output.client_secret_name == "pb-openemr-client-private-key"
+    error_message = "client_secret_name must be the short secret ID that module phr and a Cloud Run secret volume take."
+  }
+}
+
+run "null_scopes_mean_the_default" {
+  command = plan
+
+  variables {
+    scopes = null
+  }
+
+  assert {
+    condition     = output.scopes == "system/Patient.read system/Patient.write system/Encounter.read system/Encounter.write system/Observation.read system/Observation.write"
+    error_message = "scopes = null must give spike S1's six default scopes (nullable = false), not null."
+  }
 }
 
 run "non_default_https_port" {

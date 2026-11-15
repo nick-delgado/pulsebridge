@@ -422,3 +422,42 @@ run "logging_agent_can_be_switched_off" {
     error_message = "enable_cloud_logging = false must turn the COS logging agent off."
   }
 }
+
+# ---- data disk snapshots ----------------------------------------------------------------------
+
+run "no_snapshot_schedule_by_default" {
+  command = plan
+
+  assert {
+    condition     = length(google_compute_resource_policy.data_snapshots) == 0 && length(google_compute_disk_resource_policy_attachment.data_snapshots) == 0
+    error_message = "data_disk_snapshot_days = 0 (default) must create no snapshot schedule."
+  }
+}
+
+run "seven_day_snapshot_schedule_on_the_data_disk" {
+  command = plan
+
+  variables {
+    data_disk_snapshot_days = 7
+  }
+
+  assert {
+    condition = (
+      length(google_compute_resource_policy.data_snapshots) == 1 &&
+      google_compute_resource_policy.data_snapshots[0].region == "us-central1" &&
+      google_compute_resource_policy.data_snapshots[0].snapshot_schedule_policy[0].schedule[0].daily_schedule[0].days_in_cycle == 1 &&
+      google_compute_resource_policy.data_snapshots[0].snapshot_schedule_policy[0].retention_policy[0].max_retention_days == 7 &&
+      google_compute_resource_policy.data_snapshots[0].snapshot_schedule_policy[0].retention_policy[0].on_source_disk_delete == "KEEP_AUTO_SNAPSHOTS"
+    )
+    error_message = "data_disk_snapshot_days = 7 must create one daily schedule in the VM's region, keeping 7 days and keeping snapshots when the disk is deleted."
+  }
+  assert {
+    condition = (
+      length(google_compute_disk_resource_policy_attachment.data_snapshots) == 1 &&
+      google_compute_disk_resource_policy_attachment.data_snapshots[0].disk == google_compute_disk.data.name &&
+      google_compute_disk_resource_policy_attachment.data_snapshots[0].name == google_compute_resource_policy.data_snapshots[0].name &&
+      google_compute_disk_resource_policy_attachment.data_snapshots[0].zone == "us-central1-a"
+    )
+    error_message = "The schedule must be attached to the module's data disk, in its zone."
+  }
+}

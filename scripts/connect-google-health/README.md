@@ -125,7 +125,7 @@ client ID never appears in the terminal.
 | `--location` | `HEALTHCARE_LOCATION` | required* | dataset region |
 | `--dataset` | `HEALTHCARE_DATASET_ID` | required* | dataset id |
 | `--fhir-store` | `FHIR_STORE_ID` | required* | the main FHIR store (not the audit store) |
-| `--patient-id` | `PATIENT_ID` | required* | must equal `health-sync`'s and `v2-to-fhir`'s `PATIENT_ID` |
+| `--patient-id` | `PATIENT_ID` | required* | must equal `health-sync`'s and `v2-to-fhir`'s `PATIENT_ID`; a value starting with `SYN-` (a synthetic deployment's patient) is refused, even with `--skip-patient` |
 | `--family-name`, `--given-name` | `PATIENT_FAMILY_NAME`, `PATIENT_GIVEN_NAME` | required* | official name |
 | `--gender` | `PATIENT_GENDER` | required* | `male`, `female`, `other`, `unknown` (FHIR R4 administrative gender) |
 | `--birth-date` | `PATIENT_BIRTH_DATE` | required* | `YYYY-MM-DD` |

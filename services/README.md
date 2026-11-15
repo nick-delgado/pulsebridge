@@ -264,7 +264,9 @@ pasted unchanged. The block is printed only by a build that succeeded, and then 
 every service, each digest read back from the registry. A failed build prints no block. It may
 still have pushed some images (see "A failed release"), so do not take digests from the
 `=== <service>` lines of a failed build. To get the block from a finished build:
-`gcloud builds log <BUILD_ID> | sed -n '/BEGIN tfvars/,/END tfvars/p'`.
+`gcloud builds log <BUILD_ID> | sed -n '/BEGIN tfvars/,/END tfvars/{//!p}'` (the lines between the
+markers, without them). If the log prefixes each line with its build step (`Step #0 - "...": `),
+delete that prefix before pasting; whether it does is not verified.
 
 | Substitution | Default | Meaning |
 | --- | --- | --- |

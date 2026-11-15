@@ -121,6 +121,18 @@ variable "data_disk_size_gb" {
   }
 }
 
+variable "data_disk_snapshot_days" {
+  description = "Daily snapshots of the data disk (MariaDB and OpenEMR's site files), kept this many days. 0 (default): no snapshot schedule. Above 0: a snapshot schedule resource policy attached to the disk, which keeps its snapshots when the disk is deleted (KEEP_AUTO_SNAPSHOTS), so they OUTLIVE a terraform destroy and are billed as snapshot storage until deleted (README, \"Snapshots of the data disk\"). The env roots pass 7 in prod and 0 in dev."
+  type        = number
+  default     = 0
+  nullable    = false
+
+  validation {
+    condition     = var.data_disk_snapshot_days >= 0 && var.data_disk_snapshot_days <= 365 && floor(var.data_disk_snapshot_days) == var.data_disk_snapshot_days
+    error_message = "data_disk_snapshot_days must be a whole number from 0 (no snapshots) to 365."
+  }
+}
+
 variable "disk_type" {
   description = "Persistent disk type for both disks. pd-standard is the only type the free tier covers; pd-balanced is faster (spike S2 suspected the slow disk for the 5-minute OpenEMR first boot) but billed."
   type        = string

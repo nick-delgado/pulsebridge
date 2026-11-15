@@ -220,6 +220,17 @@ def load_config(argv: list[str], env: Mapping[str, str]) -> Config:
         raise UsageError("--port must be 0 (random) or 1 to 65535")
     if not 10 <= args.timeout <= 3600:
         raise UsageError("--timeout must be 10 to 3600 seconds")
+    # SYN- identifiers belong to synthetic deployments (use_synthetic_data = true, the seeder's
+    # patient). Connecting a real Google Health account would PUT the real person's Patient onto
+    # the synthetic identifier (services/seed/README.md, "Safety"), so refuse it before anything
+    # is stored or any browser opens. Checked even with --skip-patient: a synthetic deployment has
+    # no health-sync to use the token either.
+    if (_value(args, env, "patient_id") or "").startswith("SYN-"):
+        raise UsageError(
+            "--patient-id / PATIENT_ID starts with SYN-, which marks a synthetic deployment "
+            "(use_synthetic_data = true). Never connect a real Google Health account to a "
+            "synthetic patient: use the real deployment's PATIENT_ID (terraform output setup_env)."
+        )
 
     fhir = demographics = None
     if not args.skip_patient:

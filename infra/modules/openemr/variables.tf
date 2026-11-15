@@ -157,6 +157,8 @@ variable "scopes" {
     verified on OpenEMR 8.5.0. A change registers a new client on the next boot.
   EOT
   type        = list(string)
+  # null means the default below (a caller passing null gets these, not null).
+  nullable = false
   default = [
     "system/Patient.read",
     "system/Patient.write",
