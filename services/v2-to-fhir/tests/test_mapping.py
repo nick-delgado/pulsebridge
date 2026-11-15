@@ -555,6 +555,19 @@ def test_an_unexpected_exception_becomes_mapping_failed_without_logging_content(
     assert "TESTPATIENT" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "failure", [IndexError("list index"), AttributeError("x"), RecursionError()]
+)
+def test_any_hl7apy_failure_while_parsing_is_unparseable(monkeypatch, failure):
+    # pulsebridge_hl7v2.parse_er7 turns hl7apy's own exceptions into HL7ParseError; anything
+    # else hl7apy might raise on odd bytes must still be "unparseable", not a mapper bug.
+    def parse(_raw):
+        raise failure
+
+    monkeypatch.setattr(mapping, "parse_er7", parse)
+    assert run(load("valid_bp_reading").payload).reason is Reason.UNPARSEABLE_BY_MAPPER
+
+
 def test_a_fhir_builder_refusal_becomes_fhir_input_rejected(monkeypatch):
     def refuse(*_args, **_kwargs):
         raise FhirInputError("patient: family has leading or trailing whitespace")

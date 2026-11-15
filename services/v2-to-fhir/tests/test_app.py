@@ -67,12 +67,18 @@ def test_only_post_on_the_push_path(http):
     assert http.post("/").status_code == 404
 
 
-def test_a_handler_bug_answers_500_and_does_not_crash_the_worker(http, monkeypatch):
+def test_a_handler_bug_answers_500_and_does_not_crash_the_worker(http, monkeypatch, caplog):
     def broken(*_args, **_kwargs):
         raise KeyError("SYN-000123")
 
     monkeypatch.setattr(app_module, "handle_push", broken)
-    assert http.post(PUSH_PATH, json=ENVELOPE).status_code == 500
+    with caplog.at_level(logging.ERROR):
+        assert http.post(PUSH_PATH, json=ENVELOPE).status_code == 500
+    # Logged by type only: Flask's own handler would print the traceback, with the exception
+    # text, which can quote message content.
+    assert [r.fields["event"] for r in caplog.records if hasattr(r, "fields")] == ["bug"]
+    assert "KeyError" in caplog.text
+    assert "SYN-000123" not in caplog.text
     monkeypatch.undo()
     assert http.post(PUSH_PATH, json=ENVELOPE).status_code == 204  # the app still serves
 

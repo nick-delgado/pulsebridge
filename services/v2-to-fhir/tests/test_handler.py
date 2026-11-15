@@ -336,6 +336,8 @@ def test_reprocessing_after_an_error_replaces_the_stale_reason(push, transport):
         {"message": {"data": ""}},
         {"message": {"data": "%%%not-base64"}},
         {"message": {"data": b64(b"\xff\xfe")}},  # not UTF-8
+        # Base64 with a stray character: a lenient decoder would skip it and read a valid name.
+        {"message": {"data": b64(NAME.encode())[:8] + "!" + b64(NAME.encode())[8:]}},
         {"message": {"data": b64(NAME.encode()), "attributes": ["msgType"]}},
     ],
 )
