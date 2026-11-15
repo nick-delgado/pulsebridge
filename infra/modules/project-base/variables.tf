@@ -58,6 +58,7 @@ variable "enabled_apis" {
     "iam.googleapis.com",                  # service accounts
     "iamcredentials.googleapis.com",       # short-lived tokens: OIDC for Scheduler/Pub/Sub push, Workload Identity Federation
     "logging.googleapis.com",              # Cloud Run and VM logs
+    "monitoring.googleapis.com",           # alert policies and charts of the ingestion log-based metrics (free to enable)
     "pubsub.googleapis.com",               # HL7v2 ingest notifications to v2-to-fhir
     "run.googleapis.com",                  # Cloud Run services
     "secretmanager.googleapis.com",        # OAuth client, refresh token, reviewer password, DB and OpenEMR keys
