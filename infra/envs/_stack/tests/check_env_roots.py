@@ -235,6 +235,22 @@ PROJECT_PATH = re.compile(r"projects/([a-z][a-z0-9-]{4,28}[a-z0-9])\b")
 NUMBER = re.compile(r"(?<![\w.:-])\d{12}(?![\w-]|\.\d)")
 
 
+def email_is_placeholder(addr: str) -> bool:
+    """An address may appear under infra/envs only if it names nobody real: a template
+    (`<...>`, `${...}`), example.com/org, a service account in an allowed placeholder project, or
+    a Google-managed service agent of an allowed synthetic project number."""
+    domain = addr.split("@", 1)[1]
+    if any(c in addr for c in "<${") or domain in ("example.com", "example.org"):
+        return True
+    if domain.endswith(".iam.gserviceaccount.com") and domain.split(".")[0] in ALLOWED_PROJECTS:
+        return True
+    # A service agent (service-<project number>@gcp-sa-<service>...) names its project by number,
+    # so only an allowed number makes it a placeholder (T36). NUMBER does not catch the number
+    # here (it is glued to "service-"), so this is the only check on it.
+    agent = re.fullmatch(r"service-(\d{12})@gcp-sa-[a-z0-9-]+\.iam\.gserviceaccount\.com", addr)
+    return bool(agent) and agent.group(1) in ALLOWED_NUMBERS
+
+
 def check_patterns() -> None:
     """Positive controls: the patterns must find what they are for, or the scan below passes
     vacuously. A host inside a URL (after "//"), a 12-digit number at the end of a sentence."""
@@ -255,6 +271,12 @@ def check_patterns() -> None:
     # And no false positive on a decimal or a longer number.
     if NUMBER.findall(f"{number}4 and {number}.5"):
         fail("pattern self-check: NUMBER matches a 13-digit number or a decimal")
+    # Service agents (T36): one of a synthetic project passes, one of any other number does not.
+    agent_domain = "@gcp-sa-pubsub" + ".iam.gserviceaccount.com"
+    if not email_is_placeholder("service-100000000001" + agent_domain):
+        fail("pattern self-check: a synthetic project's service agent is refused")
+    if email_is_placeholder(f"service-{number}" + agent_domain):
+        fail("pattern self-check: a service agent of a non-placeholder project number is accepted")
 
 
 def check_no_hardcoded_identity() -> None:
@@ -265,19 +287,7 @@ def check_no_hardcoded_identity() -> None:
         text = path.read_text(errors="replace")
         for m in EMAIL.finditer(text):
             addr = m.group(0)
-            domain = addr.split("@", 1)[1]
-            placeholder = any(c in addr for c in "<${") or domain in ("example.com", "example.org")
-            sa = (
-                domain.endswith(".iam.gserviceaccount.com")
-                and domain.split(".")[0] in ALLOWED_PROJECTS
-            )
-            # A Google-managed service agent (service-<project number>@gcp-sa-<service>...) names
-            # a project by its number, so it is a placeholder only with an allowed number (T36).
-            agent = re.fullmatch(
-                r"service-(\d{12})@gcp-sa-[a-z0-9-]+\.iam\.gserviceaccount\.com", addr
-            )
-            agent_ok = bool(agent) and agent.group(1) in ALLOWED_NUMBERS
-            if not (placeholder or sa or agent_ok):
+            if not email_is_placeholder(addr):
                 fail(f"{rel}: email address {addr!r} is not a placeholder")
         for m in HOST.finditer(text):
             host = m.group(0)
