@@ -5,12 +5,18 @@ Google Cloud project **you** own, and back to nothing when you are done. It assu
 a terminal and git, but not necessarily Google Cloud, Terraform, FHIR or HL7v2: each term is
 explained the first time it appears.
 
-> **Honest status.** Nothing in this repository has been deployed end to end yet. Every module,
-> service and script was built and tested offline (against mocked cloud providers and fake
-> services), and the deploy procedure below has **not yet been verified on a real project**. The
-> runbook's [master checklist](../infra/envs/README.md#master-checklist) lists every assumption a
-> first deployment has to confirm, in the order you will meet them. If a step below does not
-> behave as described, that checklist is where the answer is recorded.
+> **Honest status.** Every module, service and script was built and tested offline (against
+> mocked cloud providers and fake services). The procedure below has since been run **once**, on
+> 16 November 2026, on a new **dev** project with **synthetic data**, steps 1 to 3.10: it reached
+> a working stack (the VM's first boot, the image build, the applies, the first seeding, the
+> page, a reviewer login, cuff readings over MLLP and HTTPS, and shares of a blood pressure and a
+> heart rate to OpenEMR), and its corrections are in the steps below. What that run did not
+> touch is **not yet verified on a real project**: your own watch data (Step 2 and the connect
+> script), prod, the first-deploy measurements of 3.11, alerts firing, patching, password
+> rotation, teardown and CI. The runbook's
+> [master checklist](../infra/envs/README.md#master-checklist) lists every assumption in the order
+> you will meet them and records what the dev run confirmed. If a step below does not behave as
+> described, that checklist is where the answer is recorded.
 
 The authoritative, step-by-step procedure is the **runbook** in
 [`infra/envs/README.md`](../infra/envs/README.md#the-runbook). This guide explains each step
@@ -172,7 +178,13 @@ gcloud auth login                              # gcloud commands, as you
 gcloud auth application-default login          # Terraform and the scripts, as you (ADC)
 ```
 
-Never use a service account key file for this.
+Never use a service account key file for this. (An automated session that only has a service
+account key from **another** project needs extra settings, because Google then bills quota to
+that other project: bootstrap's
+[Running it from a service account in another project](../infra/bootstrap/README.md#running-it-from-a-service-account-in-another-project)
+and the runbook's
+[Running the env roots from a service account in another project](../infra/envs/README.md#running-the-env-roots-from-a-service-account-in-another-project).
+A person logged in as themselves does not need any of it.)
 
 Your ADC also needs a **quota project**: an existing project, with the Cloud Billing and Service
 Usage APIs enabled, that Google bills the first API calls against while the new project does not
@@ -298,7 +310,10 @@ read [Deployer roles](../infra/bootstrap/README.md#deployer-roles).
 brand-new project the first apply may stop with "API has not been used in project ... or it is
 disabled": wait a minute and run `terraform apply` again; it continues where it stopped.
 Runbook: [step 1](../infra/envs/README.md#1-bootstrap-the-project-once-per-project-owner).
-*Not yet verified on a real project* (checklist A13, A14).
+On the 16 November dev deploy bootstrap adopted an existing project and ended with
+`firebase_added = true`, run from a service account key rather than a person's login; creating a
+project, and Workload Identity Federation, are *not yet verified on a real project* (checklist
+A13, A14).
 
 ### Roles you need, and the roles the deployer gets
 
@@ -440,7 +455,7 @@ the state ([What a plan shows](../infra/envs/README.md#what-a-plan-shows)).
 **Worked when:** init says `Successfully configured the backend "gcs"` and `git status` shows no
 change to `.terraform.lock.hcl`. Runbook:
 [step 2](../infra/envs/README.md#2-configure-the-backend-and-initialise-deployer-or-owner).
-*Not yet verified on a real project.*
+Done once on the 16 November dev deploy.
 
 ### 3.2 First targeted apply: APIs, network, registry
 
@@ -458,7 +473,7 @@ pushed to it (3.6). Terraform warns that targeting is in effect; that is expecte
 
 **Worked when:** `gcloud artifacts repositories list --project <project-id>` shows both
 repositories. Runbook: [step 3](../infra/envs/README.md#3-first-targeted-apply-apis-network-registry-deployer).
-*Not yet verified on a real project* (A1).
+Confirmed on the 16 November dev deploy (A1).
 
 ### 3.3 Second targeted apply: identities and empty secrets
 
@@ -487,9 +502,16 @@ these names**: if you create a secret by hand under another name, nothing will r
 | `pb-openemr-db-password` | the VM | you (3.4) |
 | `pb-openemr-admin-password` | the VM | you (3.4) |
 
-**Worked when:** `gcloud secrets list --project <project-id>` shows the eight secrets. Runbook:
+This step also creates the project's **Pub/Sub service agent** (the Google-managed account Pub/Sub
+uses inside your project) before granting it the right to sign the push subscription's tokens.
+On a new project that agent may not exist yet; on the 16 November dev deploy the grant failed
+until it was created, which is why the module now creates it.
+
+**Worked when:** `gcloud secrets list --project <project-id>` shows the eight secrets and the
+apply ends without error. Runbook:
 [step 4](../infra/envs/README.md#4-second-targeted-apply-identities-and-empty-secrets-deployer).
-*Not yet verified on a real project* (A2).
+Confirmed on the 16 November dev deploy (A2), apart from the agent, which was then created by
+hand; the module creating it is new since (A22).
 
 ### 3.4 Secret values
 
@@ -528,8 +550,9 @@ The runbook's [step 5](../infra/envs/README.md#5-secret-versions-deployer-script
 exact commands. Never type a secret on a command line, where it would stay in your shell history.
 
 **Worked when:** `gcloud secrets versions list <prefix>-db-root-password --project <project-id>`
-shows version 1 `enabled`, and the same for each secret you set. *Not yet verified on a real
-project.*
+shows version 1 `enabled`, and the same for each secret you set. On the 16 November dev deploy
+the three VM passwords were generated this way before the VM's first boot, and the dev reviewer
+password was set with the script before the full apply.
 
 ### 3.5 The edge VM and its first boot
 
@@ -538,7 +561,8 @@ terraform apply -target=module.stack.module.edge_vm
 ```
 
 **What and why.** This creates the e2-micro VM, its data disk and its internal address. On first
-boot (about **15 minutes**, mostly pulling OpenEMR's 3.6 GB image) it mounts the disk, starts the
+boot (about **20 minutes** on the 16 November dev deploy, 12.5 of them pulling OpenEMR's 3.6 GB
+image) it mounts the disk, starts the
 **MLLP adapter** (Google's open-source program that receives MLLP and forwards each message to the
 HL7v2 store), MariaDB and OpenEMR, then **registers `fhir-proxy` as an OAuth client of OpenEMR**
 and stores that client's private key in `pb-openemr-client-private-key`. That is why the VM comes
@@ -560,8 +584,10 @@ shows; set it back to `false` afterwards.
 `hook openemr-oauth-client: ok`, and `gcloud secrets versions list
 <prefix>-openemr-client-private-key --project <project-id>` shows one version. Runbook:
 [step 6](../infra/envs/README.md#6-targeted-apply-of-the-edge-vm-and-its-first-boot-deployer-with-a-shell-on-the-vm)
-and checklist items E1 to E19, then O1 to O21. *Not yet verified on a real project.* If the
-image pulls fail, the fallback is `enable_cloud_nat = true`, which is **billed hourly**.
+and checklist items E1 to E19, then O1 to O21. On the 16 November dev deploy every step ended
+`ok`, with no Cloud NAT (the serial port output above was enough to follow it); the reboot,
+patching and crash checks are still open. If the image pulls fail, the fallback is
+`enable_cloud_nat = true`, which is **billed hourly**.
 
 ### 3.6 Build the container images
 
@@ -577,8 +603,10 @@ registry from 3.2. The build ends by printing a `BEGIN tfvars` block: five lines
 are referenced **by digest** (the hash of their exact bytes), so an apply always deploys exactly
 what was built; the roots refuse an image given by tag. `<BUILD_ID>` is printed by `gcloud
 builds submit` as it starts (the `ID` column, and in the build's console link); `gcloud builds
-list --project <project-id> --limit=1` shows it too. If `gcloud builds log` prefixes each line
-with `Step #0 - "...": `, delete that prefix (not verified whether it does).
+list --project <project-id> --limit=1` shows it too. `gcloud builds log` prints the block without
+any step prefix (seen on the 16 November dev deploy), so it pastes as it is. A build started by
+hand runs as Cloud Build's default account, which in a new project is the **Compute Engine
+default service account**, unless you pass `--service-account` (runbook step 7).
 
 `gcloud builds submit` also creates a bucket `gs://<project-id>_cloudbuild` that `terraform
 destroy` does not remove. Instead of building by hand you can let a Cloud Build **trigger** build
@@ -587,8 +615,8 @@ on every release tag, as an opt-in build account that can only push images (the 
 
 **Worked when:** you have five `<name>_image = "...@sha256:..."` lines. Runbook:
 [step 7](../infra/envs/README.md#7-build-the-images-the-build-trigger-or-the-owner-by-hand) and
-[`services/README.md`](../services/README.md#build-in-cloud-build). *Not yet verified on a real
-project* (C1 to C7).
+[`services/README.md`](../services/README.md#build-in-cloud-build). Confirmed by hand on the 16
+November dev deploy (C1 to C5); the trigger and tagging an existing image are not (C6, C7, CI13).
 
 ### 3.7 First full apply, ingest off
 
@@ -610,7 +638,8 @@ and `terraform output push_enabled` is `false`. Real data: if it stops at
 `google_cloud_run_v2_service.health_sync` on a secret error, run the connect script (3.8) now and
 apply again. Then run checklist item E8's `AA` test (a test message through the MLLP adapter must
 get `AA`; the VM's ingest grant on the store is created by this apply). Runbook: [step 8](../infra/envs/README.md#8-first-full-apply-ingest-off-deployer).
-*Not yet verified on a real project* (A8 to A11, A19).
+Confirmed on the 16 November dev deploy with synthetic data (A10, A11, A19); the real-data
+health-sync case is not (A8).
 
 ### 3.8 The setup step: write the Patient (exactly one of the two)
 
@@ -690,7 +719,7 @@ was off wait in the subscription (up to 7 days) and are delivered now.
 
 **Worked when:** `terraform output scheduler_job_names` lists one job and `push_enabled` is
 `true`. Runbook: [step 10](../infra/envs/README.md#10-second-apply-ingest-on-deployer).
-*Not yet verified on a real project.*
+Confirmed on the 16 November dev deploy.
 
 ### 3.10 Deploy the dashboard
 
@@ -713,7 +742,8 @@ environment it does this after every apply, with the same `firebase-tools` versi
 
 **Worked when:** `terraform output -raw dashboard_url` (`https://<site>.web.app`) shows the login
 page. Runbook: [step 11](../infra/envs/README.md#11-deploy-the-page-deployer-after-every-apply).
-*Not yet verified on a real project* (P12).
+Confirmed on the 16 November dev deploy, with an Owner's credentials; that the deployer's
+Hosting role alone is enough is *not yet verified on a real project* (P12).
 
 ### 3.11 First-deploy checks
 
@@ -724,7 +754,10 @@ policy, the time limits) and
 alerts) are first-deployment checks, listed in the master checklist's tables
 [The front door (steps 11 and 12)](../infra/envs/README.md#the-front-door-steps-11-and-12) and
 [The setup step and ingestion (steps 9, 10 and 13)](../infra/envs/README.md#the-setup-step-and-ingestion-steps-9-10-and-13). Please record what you find there:
-that is how this project's open assumptions get closed. The end-to-end smoke test (T29,
+that is how this project's open assumptions get closed. Most of them read log lines, which the
+deployer cannot do: run those as the project's owner or with `roles/logging.viewer`. The 16
+November dev deploy did not do the hop measurement (P1), so `trusted_proxy_hops` is still at its
+default. The end-to-end smoke test (T29,
 [step 14](../infra/envs/README.md#14-end-to-end-t29)) is not built yet.
 
 ## Step 4: log in as a reviewer
@@ -757,8 +790,8 @@ Set the password one of two ways, **never both** in one environment:
   reviewer_password_wo_version is greater than 0". That is why the script is the simpler route.
 
 Open `terraform output -raw dashboard_url` and enter the password. **It worked** when the
-dashboard replaces the login page and the status strip fills in (*not yet verified on a real
-project*, checklist P2). Give it to reviewers through
+dashboard replaces the login page and the status strip fills in (confirmed on the 16 November dev
+deploy, checklist P2). Give it to reviewers through
 a private channel; to take access away, rotate it
 ([Rotating the reviewer password](#rotating-the-reviewer-password)).
 
@@ -812,8 +845,9 @@ You can try the page locally with no cloud at all: `cd web && npm ci && npm run 
   credentials grant** with `private_key_jwt`), the Patient search or create, the Encounter search
   or create, the Observation create, and the read-backs. **As stored in OpenEMR** shows what
   OpenEMR actually kept, read back from its FHIR API, beside what was sent. A heart-rate window
-  is sent at its start time, and OpenEMR keeps the average only (from reading OpenEMR 8.5.0's
-  source; not yet verified against a live OpenEMR).
+  is sent at its start time, and OpenEMR keeps the average only (read from OpenEMR 8.5.0's
+  source, and confirmed against a live OpenEMR 8.5.0 on the 16 November dev deploy: it accepted the
+  reading and kept the average only, without its components).
 
   ![The share trace in mock mode: the token request, Patient search and create, Encounter search and create, for a synthetic patient, against the mock OpenEMR](images/share-trace-mock.png)
 

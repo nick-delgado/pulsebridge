@@ -250,10 +250,23 @@ Terraform roots `validate` and plan against mocked providers in every scenario (
 synthetic data, ingest off or on, dev and prod). The spikes ran against real Google, OpenEMR and
 MLLP services before the build.
 
-**Awaiting the first real deployment:** nothing has yet been deployed end to end. The runbook's
-[master checklist](infra/envs/README.md#master-checklist) lists every assumption that deployment
-must confirm, in order (bootstrap and WIF, the image build, the VM's first boot, OpenEMR's OAuth
-client, the front door, ingestion, the alerts, teardown, and CI/CD's first run). The Terraform
-CI/CD workflows exist but stay switched off until their repository variables are set
-([CI/CD](infra/envs/README.md#cicd-t26)); the end-to-end smoke test (T29) and a custom domain for the demo (T30) are in
-progress or planned ([`docs/workplan.md`](docs/workplan.md)), as is the OpenEMR screenshot above.
+**Deployed once, to dev, with synthetic data (16 November 2026).** A new dev project was
+bootstrapped and taken through the runbook's steps 1 to 11. That confirmed, on real Google
+services and a real OpenEMR 8.5.0: the edge VM's first boot (every step `ok`, about 20 minutes),
+the image build, the targeted and full applies, the first seeding (8,365 synthetic heart-rate
+windows), ingest on, the page on Firebase Hosting with the reviewer login and the chart (no
+console errors), cuff readings over MLLP and over HTTPS (`AA`, mapped to final Observations), and
+shares of a blood pressure and a heart rate to OpenEMR (`shared`, then `already-shared` on
+repeat). The deploy found four code problems, each now fixed with a test (a gcloud warning the
+secret script misread, alert filters without a resource type, a FHIR count Cloud Healthcare
+refuses, the Pub/Sub service agent missing on a new project), and gaps in the runbook, now
+documented ([findings](infra/envs/README.md#findings-for-the-modules)).
+
+**Not yet verified:** the real-data path (a Pixel Watch through the Google Health API, the
+connect script, health-sync) and prod; and on dev, the hop measurement for the front door,
+alerts firing, patching the VM, password rotation, `terraform destroy`, and CI/CD's first run.
+The runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's
+result and lists what is still open. The Terraform CI/CD workflows exist but stay switched off
+until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)); the
+end-to-end smoke test (T29) and a custom domain for the demo (T30) are in progress or planned
+([`docs/workplan.md`](docs/workplan.md)), as is the OpenEMR screenshot above.

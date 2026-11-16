@@ -106,9 +106,10 @@ exists. Then the Token Creator grant is made (`depends_on`). Details:
 - **Lifecycle.** The resource cannot be updated, imported or really destroyed: `terraform
   destroy` only drops it from state, and the agent stays, as every service agent does.
 - **Not verified:** which permission `generateServiceIdentity` checks (Google's reference names
-  only the OAuth scope). The deployer holds `roles/serviceusage.serviceUsageAdmin`; on the dev
-  deploy the agent was created by hand with another identity, so a deployer-only run is the first
-  real test (checklist A22).
+  only the OAuth scope). The deployer holds `roles/serviceusage.serviceUsageAdmin`, which is
+  expected to cover it; on the dev deploy the agent was created by hand outside Terraform, so the
+  next apply as the deployer is the first real test (checklist A22). If it is refused, run step 4
+  of the runbook as the owner once.
 
 **On a project that is already deployed** (the dev project of 16 November, where the agent was
 created by hand and the grant exists), the next apply shows **one resource to add**,

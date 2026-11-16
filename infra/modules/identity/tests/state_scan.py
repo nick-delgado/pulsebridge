@@ -277,12 +277,10 @@ def main() -> int:
         # member string does not reference that resource, so only `depends_on` orders them; the
         # state records each resource's dependencies.
         agent = "google_project_service_identity.pubsub"
-        for r in resources:
-            if r["type"] == "google_service_account_iam_member" and "pubsub_token_creator" in r[
-                "address"
-            ]:
-                if agent not in (r.get("depends_on") or []):
-                    failures.append(f"{run}: {r['address']} does not depend on {agent}")
+        grants = [r for r in resources if "pubsub_token_creator" in r["address"]]
+        for r in grants:
+            if agent not in (r.get("depends_on") or []):
+                failures.append(f"{run}: {r['address']} does not depend on {agent}")
         print(f"{run}: resource types {sorted(types)}")
 
     # Belt and braces: no form of the dummy anywhere in the module runs' output stream either.

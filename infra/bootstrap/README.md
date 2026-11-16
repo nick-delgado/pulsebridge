@@ -40,6 +40,36 @@ On a brand-new project, a freshly enabled API can take a minute to become usable
 apply fails with "API has not been used in project ... or it is disabled", wait and run
 `terraform apply` again; it continues from where it stopped.
 
+### Running it from a service account in another project
+
+The procedure above assumes **a person with their own Google login**. A person never meets what
+follows. An automated session that holds a **service account key** whose account lives in a
+different project (its "home project"; a cloud agent session is in this situation) does: Google
+charges API quota, and the "is this API enabled?" check, to the **caller's** project unless the
+call names another one. On the first dev bootstrap (16 November 2026) the first apply stopped
+with `Identity and Access Management (IAM) API has not been used in project <home project
+number> before or it is disabled`: the number was the key's home project, not the new one, so
+waiting and re-running (the advice above) does not help.
+
+What worked: tell the `google` provider to bill its calls to the project being bootstrapped. The
+beta provider already does (`billing_project`, see "Firebase"); the `google` provider reads the
+same two settings from the environment:
+
+```bash
+USER_PROJECT_OVERRIDE=true GOOGLE_BILLING_PROJECT=<project-id> terraform plan
+USER_PROJECT_OVERRIDE=true GOOGLE_BILLING_PROJECT=<project-id> terraform apply
+```
+
+This sends the header `x-goog-user-project: <project-id>` on each call, so the caller needs
+`serviceusage.services.use` on that project (Owner has it) and the API must be enabled **there**.
+For a project that does not exist yet (`create_project = true`), the very first calls (creating
+the project, linking billing) cannot be billed to it; give the key's home project the Cloud
+Billing and Service Usage APIs, or create the project first and adopt it. Not verified: the
+dev bootstrap adopted an existing project.
+
+The env roots then need one more step for this kind of caller (infra/envs/README.md, "Running
+the env roots from a service account in another project").
+
 Then:
 
 - Env roots: copy the root's `backend.hcl.example` to `backend.hcl` (git-ignored), set `bucket =
@@ -176,6 +206,25 @@ Storage access (the stack creates no bucket), so it can always read and write st
   adding once the identity and other modules' role lists are stable.
 
 Change the list with `deployer_roles` in `terraform.tfvars`.
+
+**What the deployer cannot do, on purpose: read logs.** None of the roles above includes
+`logging.logEntries.list`, so the deployer cannot read Cloud Logging (the runbook's checks that
+read a log line, such as the seeder's `seed-run` outcome or fhir-proxy's `login-failed` lines,
+need the owner or `roles/logging.viewer`; the first dev deploy confirmed it). It is left out
+deliberately: CI's deployer has no need to read logs, and an apply identity that cannot read
+them is one less way for request details to leak from a CI job. A person who wants to run those checks
+as the deployer adds the role for that session (`deployer_roles`, a real IAM change at the next
+bootstrap apply) or runs them as the owner. The VM's first-boot lines need no log access:
+`gcloud compute instances get-serial-port-output` works with the deployer's compute roles.
+
+**Service agents.** Module identity creates the Pub/Sub service agent with
+`google_project_service_identity` (Service Usage `services.generateServiceIdentity`). Google's
+reference names no IAM permission for that method; the deployer's
+`roles/serviceusage.serviceUsageAdmin` is expected to cover it, but that is **not verified** (on
+the first dev deploy the agent was created by hand, outside Terraform, before this resource
+existed). If the deployer is refused, run that one
+step as the owner: `terraform apply -target=module.stack.module.identity` (infra/envs/README.md,
+step 4).
 
 ## Workload Identity Federation
 
