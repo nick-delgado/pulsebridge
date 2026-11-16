@@ -21,6 +21,17 @@ resource "google_healthcare_dataset" "this" {
 
   # DELETE in dev (destroyed nightly, nothing billable may remain); PREVENT in prod.
   deletion_policy = var.deletion_policy
+
+  lifecycle {
+    # Checks the API is in the caller's list and, because Terraform adds a dependency for every
+    # reference (conditions included), orders the dataset, and the stores inside it, after the
+    # API's enablement on a fresh project. This replaces the stack's former module-level
+    # depends_on on project-base (T38), which also deferred the module's data source.
+    precondition {
+      condition     = contains(var.enabled_apis, "healthcare.googleapis.com")
+      error_message = "enabled_apis must include healthcare.googleapis.com (module project-base's enabled_apis output)."
+    }
+  }
 }
 
 # ---------------------------------------------------------------------------------------------

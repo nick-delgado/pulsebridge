@@ -34,6 +34,15 @@ override_resource {
   }
 }
 
+# T38: module healthcare's Healthcare service agent (google-beta), likewise.
+override_resource {
+  target = module.healthcare.google_project_service_identity.healthcare
+  values = {
+    email  = "service-100000000001@gcp-sa-healthcare.iam.gserviceaccount.com"
+    member = "serviceAccount:service-100000000001@gcp-sa-healthcare.iam.gserviceaccount.com"
+  }
+}
+
 # ---- producers: identity (generated pattern: <prefix>-<key> accounts and secrets) ------------
 
 override_resource {
@@ -310,6 +319,25 @@ variables {
   health_sync_ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
 }
 
+# ---- T38: the service agents' grants, on a new project ----------------------------------------
+
+# The first plan on a new project: identity's Pub/Sub service agent and healthcare's Healthcare
+# agent are still to be created, yet the three grants' members are known (a plan-time assertion
+# on an unknown value fails with "Unknown condition value"). A plan run changes no state, so this
+# runs against the empty state, as a real first plan does.
+run "new_project_agent_grant_members_known_at_plan" {
+  command = plan
+
+  assert {
+    condition = module.healthcare.service_agent_grant_members == {
+      healthcare_agent_publisher         = "serviceAccount:service-100000000001@gcp-sa-healthcare.iam.gserviceaccount.com"
+      pubsub_agent_dead_letter_publisher = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+      pubsub_agent_ingest_subscriber     = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+    error_message = "On a new project the agent grants' members must be known at plan and be the agents of the project number."
+  }
+}
+
 # ---- scenario runs (also read by tests/plan_scan.py; keep the names in step) ---------------
 
 run "real_ingest_off" {
@@ -473,6 +501,69 @@ run "prod_settings" {
     condition     = output.environment == "prod" && strcontains(output.setup_env, "PulseBridge prod")
     error_message = "The environment name must reach the outputs."
   }
+}
+
+# ---- T38: an unrelated project-base change does not touch healthcare's agent grants --------
+
+# These plan runs start from the state prod_settings applied (plan runs change no state) and
+# repeat its settings, so the only difference is in project-base. Before T38 the stack gave module
+# healthcare `depends_on = [module.project_base]`: healthcare's data.google_project was then read
+# only at apply, the members became unknown, and the plan replaced all three grants (dev, 16
+# November). The assertions below need the members at plan time and equal to what was applied.
+# tests/plan_scan.py additionally checks these runs' plans: no healthcare resource is replaced
+# and no data source is deferred.
+
+run "enabling_an_api_keeps_the_agent_grants" {
+  command = plan
+
+  variables {
+    environment                         = "prod"
+    protect_from_destroy                = true
+    allow_reviewer_password_from_tfvars = false
+    enable_iap_ssh                      = true # one more API (iap) and one more firewall rule
+  }
+
+  assert {
+    # Not vacuous: the plan really enables one more API in project-base.
+    condition     = contains(module.project_base.enabled_apis, "iap.googleapis.com")
+    error_message = "This run must change project-base (enable iap.googleapis.com) to test anything."
+  }
+  assert {
+    condition = module.healthcare.service_agent_grant_members == {
+      healthcare_agent_publisher         = "serviceAccount:service-100000000001@gcp-sa-healthcare.iam.gserviceaccount.com"
+      pubsub_agent_dead_letter_publisher = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+      pubsub_agent_ingest_subscriber     = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+    error_message = "Enabling an API must leave the agent grants' members known at plan and unchanged, or the grants are replaced."
+  }
+}
+
+# Another project-base resource changing (Cloud NAT: a router and a NAT gateway, no new API).
+run "another_project_base_change_keeps_the_agent_grants" {
+  command = plan
+
+  variables {
+    environment                         = "prod"
+    protect_from_destroy                = true
+    allow_reviewer_password_from_tfvars = false
+    enable_cloud_nat                    = true
+  }
+
+  assert {
+    condition     = module.project_base.cloud_nat_enabled
+    error_message = "This run must change project-base (add Cloud NAT) to test anything."
+  }
+  assert {
+    condition = module.healthcare.service_agent_grant_members == {
+      healthcare_agent_publisher         = "serviceAccount:service-100000000001@gcp-sa-healthcare.iam.gserviceaccount.com"
+      pubsub_agent_dead_letter_publisher = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+      pubsub_agent_ingest_subscriber     = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+    error_message = "A project-base change must leave the agent grants' members known at plan and unchanged."
+  }
+
+  # The stack's cost warning for Cloud NAT (checks.tf) fires, as it should.
+  expect_failures = [check.cloud_nat_is_billed_hourly]
 }
 
 # ---- the reviewer password from tfvars: dev only -------------------------------------------

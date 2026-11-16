@@ -2,19 +2,58 @@
 # account), never project-level, and always additive (_iam_member), so it cannot remove
 # bindings other modules make on the same resources.
 
-data "google_project" "this" {
-  project_id = var.project_id
-}
+# No data source here (T38). The module used to read data.google_project itself for the project
+# number. The stack calls this module with nothing that defers a read now, but any data source
+# inside a module whose call has `depends_on` is read only at apply whenever anything it depends
+# on has a pending change; the number then becomes "(known after apply)", and because `member`
+# forces replacement, every agent grant was planned for replacement when an unrelated API was
+# enabled (dev, 16 November). Taking the number as an input value removes the hazard: an input
+# that is known at plan stays known, whatever the module call depends on.
 
 locals {
-  # Google-managed service agents. They exist once the API is enabled (module project-base).
-  healthcare_service_agent = "service-${data.google_project.this.number}@gcp-sa-healthcare.iam.gserviceaccount.com"
-  pubsub_service_agent     = "service-${data.google_project.this.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+  # Google-managed service agents (a service agent is a Google-managed service account that a
+  # Google service acts as inside the project). Addresses follow Google's documented pattern
+  # service-<project number>@gcp-sa-<service>.iam.gserviceaccount.com.
+  healthcare_service_agent = "service-${var.project_number}@gcp-sa-healthcare.iam.gserviceaccount.com"
+  # From module identity, which creates this agent; the variable's validation checks it is the
+  # pattern above for this project number.
+  pubsub_service_agent = var.pubsub_service_agent_email
 }
 
 # ---------------------------------------------------------------------------------------------
 # Service agents
 # ---------------------------------------------------------------------------------------------
+
+# Make sure the Cloud Healthcare service agent exists before it is granted anything. Google
+# creates some service agents lazily, on first use, rather than when the API is enabled; the
+# Pub/Sub one did not exist on a new project (module identity README, T36). The Healthcare one
+# did exist on the dev deploy right after the API was enabled (checklist A6), but nothing Google
+# publishes that this repo could check promises it, so the module asks for it explicitly, the same
+# way module identity does for Pub/Sub. Service Usage's services.generateServiceIdentity creates
+# the agent if missing and returns it if it exists, so on a project where it exists this only adds
+# a state entry. Beta provider only. It cannot be updated, imported or really destroyed (destroy
+# drops it from state; the agent stays, as every service agent does).
+resource "google_project_service_identity" "healthcare" {
+  provider = google-beta
+
+  project = var.project_id
+  service = "healthcare.googleapis.com"
+
+  lifecycle {
+    # The reference to var.enabled_apis is also what orders this after the API's enablement:
+    # Terraform adds a dependency for every reference, including those in conditions.
+    precondition {
+      condition     = contains(var.enabled_apis, "healthcare.googleapis.com")
+      error_message = "enabled_apis must include healthcare.googleapis.com (module project-base's enabled_apis output)."
+    }
+    postcondition {
+      # An empty or null email proves nothing either way (the API does not promise one for every
+      # service), so only a different address fails the apply.
+      condition     = self.email == null ? true : contains(["", local.healthcare_service_agent], self.email)
+      error_message = "The Healthcare service agent Google returned is not service-<project number>@gcp-sa-healthcare.iam.gserviceaccount.com, the address the publisher grant assumes."
+    }
+  }
+}
 
 # The Cloud Healthcare service agent publishes the HL7v2 store's notifications. Publisher on
 # this one topic only. Spike S5 found the project-level roles/healthcare.serviceAgent (added
@@ -24,11 +63,22 @@ resource "google_pubsub_topic_iam_member" "healthcare_agent_publisher" {
   project = var.project_id
   topic   = google_pubsub_topic.ingest.name
   role    = "roles/pubsub.publisher"
-  member  = "serviceAccount:${local.healthcare_service_agent}"
+  # Built from the project number (known at plan), NOT from the service identity's `member`
+  # attribute, which is "(known after apply)" while that resource is new: `member` forces
+  # replacement, so the deployed grant would be destroyed and re-created for nothing.
+  member = "serviceAccount:${local.healthcare_service_agent}"
+
+  # Because the member does not reference the service identity, the order is stated here. A
+  # resource-level depends_on only orders the two; it makes no value unknown.
+  depends_on = [google_project_service_identity.healthcare]
 }
 
 # Dead-lettering is done by the Pub/Sub service agent: it must publish to the dead-letter
-# topic and acknowledge (subscriber) the original on the source subscription.
+# topic and acknowledge (subscriber) the original on the source subscription. Both grants take
+# the address from var.pubsub_service_agent_email; in the stack that is module identity's output,
+# which is declared to depend on identity's google_project_service_identity.pubsub, so these
+# grants are created after the agent in a single apply. The value itself is built from the
+# project number, so it is known at plan.
 resource "google_pubsub_topic_iam_member" "pubsub_agent_dead_letter_publisher" {
   project = var.project_id
   topic   = google_pubsub_topic.dead_letter.name
