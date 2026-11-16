@@ -169,38 +169,38 @@ npm ci
 npm run dev       # mock mode on http://localhost:5173 (any non-empty password logs in)
 ```
 
-## OpenEMR chart: screenshot to come
+## OpenEMR chart
 
-> **Placeholder.** Reviewers cannot open OpenEMR themselves (its screens are deliberately not
-> exposed, decision D13), so this section is meant to show a shared reading in the real OpenEMR
-> chart. It is still open: dev has been deployed (see [Status](#status)), but the capture needs a
-> person logged in to OpenEMR through an IAP tunnel, as below, and has not been done yet.
->
-> How it will be captured, **with synthetic data only**:
->
-> 1. Deploy `dev` with `use_synthetic_data = true` (patient `SYN-...`, name Synthetic / Demo),
->    following [docs/setup.md](docs/setup.md).
-> 2. In the dashboard, take a cuff reading, wait for the outcome "accepted", select it and
->    **Share with clinic**; share one final heart-rate point too.
-> 3. Set `enable_iap_ssh = true` and apply. Your account needs `roles/iap.tunnelResourceAccessor`,
->    `roles/compute.osAdminLogin`, and `roles/iam.serviceAccountUser` on the VM's service account
->    ([edge-vm README](infra/modules/edge-vm/README.md#looking-at-the-vm-without-public-access)).
->    Then open a temporary tunnel through IAP to OpenEMR's HTTPS port, which the VM publishes on
->    every one of its interfaces (`openemr_https_port`, 443 by default):
->    `gcloud compute ssh <name_prefix>-edge-vm --zone <zone> --tunnel-through-iap --project <project-id> -- -L 8443:localhost:<openemr_https_port>`
->    (not yet tried).
-> 4. Open `https://localhost:8443`, accept the self-signed certificate and log in as `admin`. The
->    password is the `openemr-admin-password` secret's value: open it in the Google Cloud console
->    (Secret Manager, the secret, the version's "View secret value") rather than printing it in a
->    terminal, where it would land in scrollback and logs. Open the synthetic patient
->    (Synthetic / Demo) and the **Vitals** of the shared day.
-> 5. Capture the vitals with the reading visible. Check the image shows only the synthetic
->    patient, no address bar or host name, and no other data; save it as
->    `docs/images/openemr-chart-synthetic.png`; then close the tunnel and set
->    `enable_iap_ssh = false` again.
+Reviewers cannot open OpenEMR themselves (its screens are deliberately not exposed, decision
+D13), so this is a shared reading in the real OpenEMR chart on the `dev` deployment. The patient
+is synthetic (`SYN-0001`, Synthetic / Demo). The blood-pressure reading came from the simulated
+cuff as an HL7v2 message and the pulse from the seeded heart-rate data; both were sent with
+**Share with clinic**, which writes them to OpenEMR's FHIR API.
 
-Until then, the dashboard's own "As stored in OpenEMR" panel, shown here against the page's
-mock OpenEMR, is the closest view:
+![OpenEMR's Vitals screen for the synthetic patient: BP systolic 128 and diastolic 82 mmHg in one column, pulse 91 per minute in another](docs/images/openemr-chart-synthetic.png)
+
+How it was captured, **with synthetic data only**:
+
+1. Deploy `dev` with `use_synthetic_data = true`, following [docs/setup.md](docs/setup.md).
+2. In the dashboard, take a cuff reading, wait for the outcome "accepted", select it and
+   **Share with clinic**; share one final heart-rate point too.
+3. Set `enable_iap_ssh = true` and apply. Your account needs `roles/iap.tunnelResourceAccessor`,
+   `roles/compute.osAdminLogin`, and `roles/iam.serviceAccountUser` on the VM's service account
+   ([edge-vm README](infra/modules/edge-vm/README.md#looking-at-the-vm-without-public-access));
+   a project Owner already has them. Then open a temporary tunnel through IAP to OpenEMR's HTTPS
+   port (`openemr_https_port`, 443 by default):
+   `gcloud compute ssh <name_prefix>-edge-vm --zone <zone> --tunnel-through-iap --project <project-id> -- -N -L 8443:localhost:<openemr_https_port>`
+4. Open `https://localhost:8443`, accept the self-signed certificate and log in as `admin`. The
+   password is the `openemr-admin-password` secret's value: open it in the Google Cloud console
+   (Secret Manager, the secret, the version's "View secret value") rather than printing it in a
+   terminal, where it would land in scrollback and logs. Open the synthetic patient and its
+   **Vitals**.
+5. Capture the vitals with the reading visible. Check the image shows only the synthetic
+   patient, no address bar or host name, and no other data; then close the tunnel and set
+   `enable_iap_ssh = false` again.
+
+The dashboard's own "As stored in OpenEMR" panel, shown here against the page's mock OpenEMR,
+is the PulseBridge side of the same exchange:
 
 ![The share trace in mock mode, against the page's mock OpenEMR, for a synthetic patient](docs/images/share-trace-mock.png)
 
@@ -270,4 +270,4 @@ The runbook's [master checklist](infra/envs/README.md#master-checklist) records 
 result and lists what is still open. The Terraform CI/CD workflows exist but stay switched off
 until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)); the
 end-to-end smoke test (T29) and a custom domain for the demo (T30) are in progress or planned
-([`docs/workplan.md`](docs/workplan.md)), as is the OpenEMR screenshot above.
+([`docs/workplan.md`](docs/workplan.md)).
