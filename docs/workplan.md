@@ -704,7 +704,11 @@ dev deploy showed. The OpenEMR screenshot is not part of T36: it needs a person 
 Applied to dev on 16 November as the deployer: one resource added, nothing changed or destroyed,
 so the deployer can create the agent (checklist A22). Follow-ups not yet assigned to a task: module healthcare grants roles to the Pub/Sub
 agent without depending on its creation (a single full apply on a new project can race; a re-run
-fixes it); `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
+fixes it), and because healthcare reads the project inside a module that depends on project-base,
+enabling any new API (seen with `enable_iap_ssh = true` on dev, 16 November) makes a full plan
+replace healthcare's three agent grants although nothing about them changed (avoided on dev with a
+targeted apply of the two IAP resources; IAP SSH is on in dev until the OpenEMR screenshot is
+taken); `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
 `pipefail`, which can fail falsely and, in its negative checks, pass falsely.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
