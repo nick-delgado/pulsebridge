@@ -223,8 +223,6 @@ PENDING_PATHS = {
 GENERATED_PATHS = {
     # Written by the page deploy from Terraform's firebase_json output; git-ignored.
     "web/firebase.json",
-    # The OpenEMR chart screenshot, captured on the first real deploy (README placeholder).
-    "docs/images/openemr-chart-synthetic.png",
 }
 
 ROOT_FILES = (
