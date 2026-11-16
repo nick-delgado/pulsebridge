@@ -670,7 +670,7 @@ needed before T18 and T19 start.
 | T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (dev deployed 16 Nov: runbook steps 1 to 11 done; the full checklist, destroy test and prod remain) |
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml` and `ci.yml`'s Terraform job, `.tflint.hcl`, the Makefile's `tf-lint`/`tf-scan`, `infra/envs/ci/`, and what its ACs needed in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/`, `infra/envs/`, plus README corrections from the T28 review | in-progress (offline part merged; first real run open) |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
-| T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | in-progress (offline part merged; the real OpenEMR screenshot needs a deploy) |
+| T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | done |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
 
@@ -707,8 +707,8 @@ agent without depending on its creation (a single full apply on a new project ca
 fixes it), and because healthcare reads the project inside a module that depends on project-base,
 enabling any new API (seen with `enable_iap_ssh = true` on dev, 16 November) makes a full plan
 replace healthcare's three agent grants although nothing about them changed (avoided on dev with a
-targeted apply of the two IAP resources; IAP SSH is on in dev until the OpenEMR screenshot is
-taken); `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
+targeted apply of the two IAP resources; IAP SSH was turned off again the same day, after the
+OpenEMR screenshot was taken); `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
 `pipefail`, which can fail falsely and, in its negative checks, pass falsely.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
