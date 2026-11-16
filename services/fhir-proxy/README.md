@@ -823,7 +823,7 @@ notes, and must be confirmed on the first deployment (T25):
   60 s timeout in practice.
 - Cloud Healthcare FHIR search: `gt`/`lt` on `effectivePeriod` (the proxy re-applies R4's rule,
   but cannot add windows the store left out); `_sort=date` on Observation; reusing a
-  `_page_token` from a `next` link with the proxy's own parameter order; `_summary=count` giving
+  `_page_token` from a `next` link with the proxy's own parameter order; `_total=accurate&_count=0` (not `_summary=count`, which Cloud Healthcare refuses: found on the first deploy) giving
   `total`; `_sort=-_lastUpdated` with `_elements=id,meta` returning `meta.lastUpdated`;
   identifier OR lists; AuditEvent `type`/`subtype`/`date`/`_sort=-date` (T31 flagged these);
   Provenance `recorded` search and sort, and `_include=Provenance:target`. **Indexing delay**: Cloud Healthcare indexes

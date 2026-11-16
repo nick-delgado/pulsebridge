@@ -162,6 +162,10 @@ run "seeder_alerts" {
     error_message = "With synthetic data there must be the seeder-run and Scheduler-attempt metrics, each with a policy."
   }
   assert {
+    condition     = google_monitoring_alert_policy.this["seed-run-failed"].conditions[0].condition_threshold[0].filter == "metric.type=\"logging.googleapis.com/user/pulsebridge-seed-run-failed\" AND resource.type=\"cloud_run_job\"" && google_monitoring_alert_policy.this["scheduler-attempt-failed"].conditions[0].condition_threshold[0].filter == "metric.type=\"logging.googleapis.com/user/pulsebridge-scheduler-attempt-failed\" AND resource.type=\"cloud_scheduler_job\""
+    error_message = "An alert's metric filter must name the resource type of the log entries it counts: Cloud Monitoring refuses it otherwise (first real apply)."
+  }
+  assert {
     condition     = google_logging_metric.this["seed-run-failed"].filter == "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"pulsebridge-seed\" AND jsonPayload.event=\"seed-run\" AND severity>=WARNING"
     error_message = "The seeder metric must count the seeder job's unsuccessful seed-run lines."
   }

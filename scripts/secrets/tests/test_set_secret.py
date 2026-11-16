@@ -265,6 +265,28 @@ def test_existing_version_refused_without_replace(sandbox, fake):
     assert r.add_calls() == []
 
 
+def test_a_gcloud_warning_about_the_filter_is_not_a_version(sandbox, fake):
+    # Real gcloud, on a secret with no versions, prints this to standard error and nothing to
+    # standard output (seen on the first real run). It must read as "no version".
+    sandbox.set("versions", "")
+    sandbox.set(
+        "list_stderr",
+        "WARNING: The following filter keys were not present in any resource : state\n",
+    )
+    value = fake(20)
+    r = sandbox.run(SCRIPT, "db-root-password", stdin=value.encode())
+    assert r.rc == 0, r.err
+    assert r.stored == [value.encode()]
+
+
+def test_standard_output_that_is_not_a_version_is_not_a_version(sandbox, fake):
+    sandbox.set("versions", "Listed 0 items.\n")
+    value = fake(20)
+    r = sandbox.run(SCRIPT, "db-root-password", stdin=value.encode())
+    assert r.rc == 0, r.err
+    assert r.stored == [value.encode()]
+
+
 def test_existing_version_with_replace_adds(sandbox, fake):
     sandbox.set("versions", "projects/123/secrets/pbt-db-root-password/versions/1\n")
     value = fake(20)

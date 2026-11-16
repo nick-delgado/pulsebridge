@@ -253,9 +253,9 @@ run "alert_policies_with_channel" {
     condition = alltrue([
       for k, p in google_monitoring_alert_policy.this :
       p.notification_channels == tolist(["projects/example-project/notificationChannels/123"]) &&
-      p.conditions[0].condition_threshold[0].filter == "metric.type=\"logging.googleapis.com/user/${google_logging_metric.this[k].name}\""
+      p.conditions[0].condition_threshold[0].filter == "metric.type=\"logging.googleapis.com/user/${google_logging_metric.this[k].name}\" AND resource.type=\"${k == "scheduler-attempt-failed" ? "cloud_scheduler_job" : "cloud_run_revision"}\""
     ])
-    error_message = "Each policy must notify the channel and watch its own log metric."
+    error_message = "Each policy must notify the channel and watch its own log metric, with the resource type Cloud Monitoring requires in the filter."
   }
   assert {
     condition = alltrue([

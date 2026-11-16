@@ -499,6 +499,8 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | done |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
+| T36 | First-deploy follow-ups | T25 | `infra/modules/identity/`, `infra/bootstrap/README.md`, `infra/envs/README.md`, `docs/setup.md`, `README.md` | in-progress |
+| T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -665,12 +667,47 @@ needed before T18 and T19 start.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (offline part merged; deploy part open) |
+| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (dev deployed 16 Nov: runbook steps 1 to 11 done; the full checklist, destroy test and prod remain) |
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml` and `ci.yml`'s Terraform job, `.tflint.hcl`, the Makefile's `tf-lint`/`tf-scan`, `infra/envs/ci/`, and what its ACs needed in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/`, `infra/envs/`, plus README corrections from the T28 review | in-progress (offline part merged; first real run open) |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | in-progress (offline part merged; the real OpenEMR screenshot needs a deploy) |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
+
+**First dev deploy (16 November).** A new dev project was bootstrapped and runbook steps 1 to 11
+were run with synthetic data. Working end to end: edge VM first boot (all steps ok, about 13
+minutes), image build, full apply, first seeding (8,365 windows), ingest on, page deploy, reviewer
+login, heart-rate search and trace, cuff readings over MLLP and HTTPS (`AA`, mapped to final
+Observations), share of a blood pressure and a heart rate to the real OpenEMR 8.5.0 (`shared`,
+then `already-shared` on repeat). Fixed on the way, each with a test: `set-secret.sh` read a
+gcloud warning as an existing version; alert policies needed `resource.type` in the metric
+filter; fhir-proxy counted with `_summary`, which Cloud Healthcare refuses.
+
+**T36 First-deploy follow-ups.** From the dev deploy; each needs code or docs:
+- AC: module `identity` creates the Pub/Sub service agent (`google_project_service_identity`)
+  before granting it token-creator; on a new project the grant failed until the agent was
+  created by hand.
+- AC: bootstrap and the env roots document running from a service account in another project:
+  API quota and `iamcredentials` are charged to the key's home project, so bootstrap needed
+  `USER_PROJECT_OVERRIDE`/`GOOGLE_BILLING_PROJECT`, and provider impersonation
+  (`deployer_service_account_email`) did not work; a token minted with `x-goog-user-project` did.
+- AC: the runbook says the deployer cannot read logs (its "worked when" checks that read logs
+  need the owner or `roles/logging.viewer`), that `gcloud builds log` has no step prefix, and
+  that a by-hand build runs as the Compute default service account.
+- AC: the master checklist records what the dev deploy confirmed (E, O, I, P and C items) and
+  what is still unchecked (hop measurement, alerts firing, destroy, patching, rotation).
+- AC: the README's OpenEMR screenshot (T28) is taken from the dev deployment.
+
+**T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
+between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
+windows from 12:00 to 12:40 UTC (a modelled charging gap), and marks a window preliminary only
+within 30 minutes of a sync run. Acceptance: every browser test runs on a controlled page clock
+(`web/e2e/clock.ts`); the suites pass at any instant and zone; explicit tests cover "no provisional
+window" and "a sync run that wrote nothing"; the mock agrees with `contract.ts` (no transaction row
+for a run that wrote nothing; `lastSyncAt` is the newest heart-rate write). Reviewed (pass with
+notes) and merged. Notes left open: the mock keeps a window in the row of the run that first wrote
+it after a later run finalised it, which the real proxy would not; `mock-dst.e2e.ts` pins its own
+clock instead of using the shared fixture.
 
 **T25 status.** The offline part is merged: the roots, the shared composition `infra/envs/_stack`,
 the runbook and the 116-item first-deploy checklist in `infra/envs/README.md`, all tested against

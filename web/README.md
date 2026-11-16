@@ -367,6 +367,19 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
 - **Browser tests:** `*.e2e.ts` inside your directory (Playwright picks up `src/**/*.e2e.ts`).
   They run against the built mock page; fail on any console error, as `e2e/shell.e2e.ts` does.
   The shell's keyboard test checks only the order of areas, so your controls do not break it.
+  Import `test` and `expect` from `e2e/clock.ts`, not from `@playwright/test` (below).
+- **Browser tests and the clock.** The mock runs inside the page, so what it returns depends on
+  the page's clock: no heart-rate windows in the daily 12:00-12:40 UTC charging gap, windows
+  `preliminary` only within 30 minutes of the last sync run (minute 2, 17, 32, 47), and a
+  health-sync run during the gap that writes nothing (so no transaction row). `e2e/clock.ts`
+  therefore installs a fake page clock in every test (`page.clock.install`): it starts at
+  `DEFAULT_CLOCK` (2026-06-10 09:20 UTC) and then runs at the real rate, timers included. A test
+  about one situation pins its own start with `test.use({ clockAt })`, as the charging-gap tests
+  do with `CHARGING_GAP_CLOCK`. Read the page's time with `pageNow(page)`, never the runner's
+  `Date.now()`. The browser's zone is UTC unless `PULSEBRIDGE_E2E_TZ` names another. To check
+  that the tests which do not pin a time hold at another time of day or in another zone:
+  `PULSEBRIDGE_E2E_NOW=2026-11-16T12:50:00Z PULSEBRIDGE_E2E_TZ=America/New_York npx playwright test`
+  (after `npm run build:mock`).
 - Every test is break-checked (CLAUDE.md): break the implementation, see the test fail, restore.
 - Use synthetic data only. Never paste real readings into a test.
 
@@ -425,7 +438,10 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
   adapter, with no hint and transport `null`); two unreadable rows (one with id `""` and no
   time, sorted last); transaction rows from health-sync, v2-to-fhir (one per mapped cuff
   message), the seeder and an unknown writer, `httpStatus` always null, resources only
-  Observations and Provenances. Order is newest first by send time (store-only rows by
+  Observations and Provenances. A health-sync row lists what that run wrote (new windows, and
+  windows it finalised: `heartRateWritesAt`); a run that wrote nothing (during the charging gap)
+  has no row, because the proxy builds rows from Provenances, and `lastSyncAt` stays at the
+  newest run that wrote something. Order is newest first by send time (store-only rows by
   createTime), ties by id. Pages are 25 rows by default, at most 50, cut BEFORE the kind and
   outcome filters, so a filtered page can be short or empty while `nextCursor` is set; the
   outcome filter matches only rows with that outcome. The cursor is opaque and a foreign one is

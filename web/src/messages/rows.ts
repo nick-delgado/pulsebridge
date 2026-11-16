@@ -65,12 +65,43 @@ export function sortTime(e: MessagesLogEntry): string | null {
   return e.recordedAt;
 }
 
-/** "10 Mar, 14:17:05" in `timeZone` (the browser's own when undefined); the ISO text if unreadable. */
+/** The UTC offset in force at `ms` in `timeZone`, in minutes east of UTC (the tz database's). */
+function offsetMinutes(ms: number, timeZone?: string): number {
+  const name =
+    new Intl.DateTimeFormat('en-US', {
+      timeZoneName: 'longOffset',
+      ...(timeZone ? { timeZone } : {}),
+    })
+      .formatToParts(ms)
+      .find((p) => p.type === 'timeZoneName')?.value ?? 'GMT';
+  // "GMT-04:00", "GMT+05:30", or plain "GMT" for a zero offset.
+  const m = /^GMT([+-])(\d{2}):(\d{2})$/.exec(name);
+  return m ? (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3])) : 0;
+}
+
+/**
+ * True when the wall-clock time of `ms` in `timeZone` happens twice: in the hour a clock goes
+ * back (America/New_York, 1 November 2026: 01:30 EDT and 01:30 EST are an hour apart). The other
+ * instant with the same wall time is `ms` moved by the difference between the two offsets.
+ */
+function wallTimeRepeats(ms: number, timeZone?: string): boolean {
+  const here = offsetMinutes(ms, timeZone);
+  const around = [-6, 6].map((h) => offsetMinutes(ms + h * 3_600_000, timeZone));
+  return around.some(
+    (other) => other !== here && offsetMinutes(ms + (here - other) * 60_000, timeZone) === other,
+  );
+}
+
+/**
+ * "10 Mar, 14:17:05" in `timeZone` (the browser's own when undefined); the ISO text if
+ * unreadable. In the repeated hour after a clock goes back the time alone is ambiguous, so the
+ * offset is added: "1 Nov, 01:30:00 (UTC-05:00)".
+ */
 export function logTime(iso: string | null, timeZone?: string): string {
   if (iso === null) return 'time unknown';
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return iso;
-  return new Intl.DateTimeFormat('en-GB', {
+  const text = new Intl.DateTimeFormat('en-GB', {
     day: '2-digit',
     month: 'short',
     hour: '2-digit',
@@ -79,6 +110,11 @@ export function logTime(iso: string | null, timeZone?: string): string {
     hourCycle: 'h23',
     ...(timeZone ? { timeZone } : {}),
   }).format(ms);
+  if (!wallTimeRepeats(ms, timeZone)) return text;
+  const off = offsetMinutes(ms, timeZone);
+  const abs = Math.abs(off);
+  const hhmm = `${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+  return `${text} (UTC${off < 0 ? '-' : '+'}${hhmm})`;
 }
 
 const WRITER: Readonly<Record<FhirTransactionEntry['writer'], string>> = {
@@ -272,11 +308,21 @@ export function rowFacts(e: MessagesLogEntry): Fact[] {
     {
       term: 'Resources',
       label: resourceCount(e.resources),
-      detail: '',
-      tone: 'neutral',
+      detail: e.resources.length === 0 ? NO_RESOURCES_NOTE : '',
+      tone: e.resources.length === 0 ? 'warn' : 'neutral',
     },
   ];
 }
+
+/**
+ * What an empty resource list means. The proxy builds every transaction row from the Provenances
+ * that transaction wrote (contract.ts, FhirTransactionEntry), and each ingest Bundle writes a
+ * Provenance per Observation, so a row always has something to list. A sync run that found
+ * nothing to write (the watch on its charger) writes no Bundle and so has no row at all. An
+ * empty list is therefore missing information, and is not shown as "it wrote nothing".
+ */
+export const NO_RESOURCES_NOTE =
+  'The log lists no resources for this transaction. Each row comes from the Provenance records a transaction wrote, so this means the references are missing here, not that the transaction wrote nothing.';
 
 function unreadableFacts(e: UnreadableSendAttemptEntry): Fact[] {
   return [

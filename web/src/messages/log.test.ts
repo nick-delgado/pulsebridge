@@ -201,6 +201,23 @@ describe('rendering every row kind', () => {
     expect(m.slots.log.textContent).toContain('<img src="x" onerror="alert(1)">');
   });
 
+  it('a transaction row with no resources says the list is missing, not that nothing was written', async () => {
+    const m = mount();
+    await m.answer(page([transaction({ resources: [] }), transaction({ id: 'tx-2' })]));
+    const [empty, full] = m.rows();
+    expect(empty?.textContent).toContain('None listed');
+    expect(empty?.textContent).toContain('the references are missing here');
+    empty?.querySelector<HTMLButtonElement>('.log-row__expand')?.click();
+    await flush();
+    expect(empty?.textContent).not.toContain('as references in the FHIR store');
+    expect(empty?.querySelector('.log-resources')).toBeNull();
+    // A row with resources lists them, with no such note.
+    full?.querySelector<HTMLButtonElement>('.log-row__expand')?.click();
+    await flush();
+    expect(full?.textContent).not.toContain('the references are missing here');
+    expect(full?.querySelectorAll('.log-resources li')).toHaveLength(4);
+  });
+
   it('ids are generated with the log- prefix (never a server id) and unique; ARIA references resolve', async () => {
     const m = mount();
     await m.answer(page(ALL));

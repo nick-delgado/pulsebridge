@@ -1,8 +1,19 @@
-import { expect, test, type Page } from '@playwright/test';
+import {
+  CHARGING_GAP_CLOCK,
+  DEFAULT_CLOCK,
+  expect,
+  pageNow,
+  test,
+  type Page,
+} from '../../e2e/clock';
 
 /**
  * Browser tests for the heart-rate area, against the BUILT mock page (synthetic data only), so
  * they run the real uPlot canvas under the page's Content-Security-Policy.
+ *
+ * The page's clock is set for every test (e2e/clock.ts). Tests that need recent watch data, with
+ * provisional windows at the end, pin DEFAULT_CLOCK; the "watch on the charger" tests pin
+ * CHARGING_GAP_CLOCK; the rest hold at any time of day (PULSEBRIDGE_E2E_NOW moves them).
  */
 
 /** Console errors, uncaught exceptions and CSP violations (reported both ways, to be sure). */
@@ -41,28 +52,71 @@ async function windowCount(page: Page): Promise<number> {
   return Number((match?.[1] ?? '0').replaceAll(',', ''));
 }
 
-test('the chart renders the mock data with statistics and a text summary', async ({ page }) => {
-  const errors = await watchErrors(page);
-  await logIn(page);
-  const canvas = watchSide(page).locator('.hr-chart canvas');
-  await expect(canvas).toBeVisible();
-  const box = await canvas.boundingBox();
-  expect(box && box.width > 200 && box.height > 150).toBe(true);
+test.describe('recent watch data: the newest windows are provisional', () => {
+  // 09:20 UTC: the last sync run (09:17) wrote windows up to 09:15, and every window ending after
+  // 08:47 is still preliminary. Pinned: at other times (the charging gap) there are none.
+  test.use({ clockAt: DEFAULT_CLOCK });
 
-  await expect(summary(page)).toContainText('last 24 hours');
-  const n = await windowCount(page);
-  // 24 h of five-minute windows is 288; the mock leaves out about 40 minutes of "charging".
-  expect(n).toBeGreaterThan(250);
-  expect(n).toBeLessThanOrEqual(288);
-  const stats = watchSide(page)
-    .getByRole('definition')
-    .filter({ hasText: /\/min$/ });
-  await expect(stats).toHaveCount(3);
-  await expect(watchSide(page)).toContainText('mean of the five-minute averages');
-  await expect(watchSide(page)).toContainText(/\d+ provisional/);
-  await expect(watchSide(page)).toContainText('Times as recorded by the watch (UTC+00:00).');
-  await expect(watchSide(page).getByText('Provisional: not final yet')).toBeVisible();
-  expect(errors).toEqual([]);
+  test('the chart renders the mock data with statistics and a text summary', async ({ page }) => {
+    const errors = await watchErrors(page);
+    await logIn(page);
+    const canvas = watchSide(page).locator('.hr-chart canvas');
+    await expect(canvas).toBeVisible();
+    const box = await canvas.boundingBox();
+    expect(box && box.width > 200 && box.height > 150).toBe(true);
+
+    await expect(summary(page)).toContainText('last 24 hours');
+    const n = await windowCount(page);
+    // 24 h of five-minute windows is 288; the mock leaves out about 40 minutes of "charging".
+    expect(n).toBeGreaterThan(250);
+    expect(n).toBeLessThanOrEqual(288);
+    const stats = watchSide(page)
+      .getByRole('definition')
+      .filter({ hasText: /\/min$/ });
+    await expect(stats).toHaveCount(3);
+    await expect(watchSide(page)).toContainText('mean of the five-minute averages');
+    await expect(watchSide(page)).toContainText(/\d+ provisional/);
+    await expect(watchSide(page)).toContainText('Times as recorded by the watch (UTC+00:00).');
+    await expect(watchSide(page).getByText('Provisional: not final yet')).toBeVisible();
+    expect(errors).toEqual([]);
+  });
+
+  test('keyboard selection: Share stays disabled for a provisional window, enabled for a final one', async ({
+    page,
+  }) => {
+    const errors = await watchErrors(page);
+    await logIn(page);
+    await expect(summary(page)).toContainText('five-minute windows');
+    const share = page.getByRole('button', { name: 'Share with clinic' });
+
+    // Reach the chart with Tab from the range buttons, and see the focus ring.
+    await page.getByRole('button', { name: 'Show the last 30 days' }).focus();
+    await page.keyboard.press('Tab');
+    await expect(slider(page)).toBeFocused();
+    const outline = await slider(page).evaluate((el) => getComputedStyle(el).outlineStyle);
+    expect(outline).toBe('solid');
+
+    // The newest window is preliminary (the mock's last 30 minutes).
+    await page.keyboard.press('End');
+    await expect(slider(page)).toHaveAttribute(
+      'aria-valuetext',
+      /provisional \(status preliminary\)/,
+    );
+    await page.keyboard.press('Enter');
+    await expect(share).toBeDisabled();
+    await expect(page.locator('#share-hint')).toContainText('still provisional');
+    await expect(watchSide(page).getByRole('region', { name: 'Selected reading' })).toContainText(
+      'provisional (status preliminary)',
+    );
+
+    // The oldest window is final.
+    await page.keyboard.press('Home');
+    await expect(slider(page)).toHaveAttribute('aria-valuetext', /; final$/);
+    await page.keyboard.press('Enter');
+    await expect(share).toBeEnabled();
+    await expect(page.locator('#share-hint')).toContainText('Selected: Heart rate');
+    expect(errors).toEqual([]);
+  });
 });
 
 test('switching ranges loads 7 and 30 days', async ({ page }) => {
@@ -91,43 +145,6 @@ test('switching ranges loads 7 and 30 days', async ({ page }) => {
   for (let i = 0; i < 20; i++) await page.keyboard.press('ArrowLeft');
   await expect(slider(page)).toHaveAttribute('aria-valuenow', String(month - 20));
   expect(Date.now() - t0).toBeLessThan(5000);
-  expect(errors).toEqual([]);
-});
-
-test('keyboard selection: Share stays disabled for a provisional window, enabled for a final one', async ({
-  page,
-}) => {
-  const errors = await watchErrors(page);
-  await logIn(page);
-  await expect(summary(page)).toContainText('five-minute windows');
-  const share = page.getByRole('button', { name: 'Share with clinic' });
-
-  // Reach the chart with Tab from the range buttons, and see the focus ring.
-  await page.getByRole('button', { name: 'Show the last 30 days' }).focus();
-  await page.keyboard.press('Tab');
-  await expect(slider(page)).toBeFocused();
-  const outline = await slider(page).evaluate((el) => getComputedStyle(el).outlineStyle);
-  expect(outline).toBe('solid');
-
-  // The newest window is preliminary (the mock's last 30 minutes).
-  await page.keyboard.press('End');
-  await expect(slider(page)).toHaveAttribute(
-    'aria-valuetext',
-    /provisional \(status preliminary\)/,
-  );
-  await page.keyboard.press('Enter');
-  await expect(share).toBeDisabled();
-  await expect(page.locator('#share-hint')).toContainText('still provisional');
-  await expect(watchSide(page).getByRole('region', { name: 'Selected reading' })).toContainText(
-    'provisional (status preliminary)',
-  );
-
-  // The oldest window is final.
-  await page.keyboard.press('Home');
-  await expect(slider(page)).toHaveAttribute('aria-valuetext', /; final$/);
-  await page.keyboard.press('Enter');
-  await expect(share).toBeEnabled();
-  await expect(page.locator('#share-hint')).toContainText('Selected: Heart rate');
   expect(errors).toEqual([]);
 });
 
@@ -240,7 +257,8 @@ test('a click selects the window under the pointer', async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1100 });
   await logIn(page);
   await expect(summary(page)).toContainText('last 24 hours');
-  const loadedAt = Date.now(); // the page's range ends at its own Date.now(), within a second
+  // The page's range ends at its own Date.now() when it loaded: read the page's clock, not ours.
+  const loadedAt = await pageNow(page);
   const over = watchSide(page).locator('.hr-chart .u-over');
   const box = await over.boundingBox();
   if (!box) throw new Error('no plot');
@@ -285,17 +303,23 @@ test('a click on the left edge of the plot is not swallowed: it selects the wind
   const errors = await watchErrors(page);
   await logIn(page);
   await expect(summary(page)).toContainText('last 24 hours');
-  const loadedAt = Date.now();
   const box = await watchSide(page).locator('.hr-chart .u-over').boundingBox();
   if (!box) throw new Error('no plot');
-  const pageX = Math.ceil(box.x);
-  await page.mouse.click(pageX, box.y + box.height / 2);
-  // The time at the edge, and the window containing it (whose middle is the nearest). Allow
-  // for the page's clock differing from ours by up to three seconds.
-  const FIVE_MIN = 5 * 60_000;
-  const edge = loadedAt - 24 * 3600_000 + ((pageX - box.x) / box.width) * 24 * 3600_000;
-  const allowed = [edge - 3000, edge, edge + 3000].map((t) => Math.floor(t / FIVE_MIN) * FIVE_MIN);
-  expect(allowed).toContain(Date.parse(await tracedStart(page)));
+  await page.mouse.click(Math.ceil(box.x), box.y + box.height / 2);
+  // The window nearest the left edge is the oldest one in range, whatever the time of day: the
+  // window containing the edge time, or, when that falls in the charging gap, the first one
+  // after it. Home on the chart's slider selects exactly that window.
+  const clicked = await tracedStart(page);
+  expect(clicked).not.toBe('');
+  await slider(page).focus();
+  await page.keyboard.press('End');
+  await page.keyboard.press('Enter');
+  await expect.poll(() => tracedStart(page)).not.toBe(clicked);
+  await page.keyboard.press('Home');
+  await page.keyboard.press('Enter');
+  await expect
+    .poll(() => tracedStart(page), { message: 'Home selects the window the click selected' })
+    .toBe(clicked);
   expect(errors).toEqual([]);
 });
 
@@ -306,4 +330,46 @@ test('uPlot draws no legend of its own (the page writes its own key and readout)
   await expect(watchSide(page).locator('.hr-chart canvas')).toBeVisible();
   await expect(page.locator('.u-legend')).toHaveCount(0);
   await expect(watchSide(page).getByRole('list', { name: 'Chart key' })).toBeVisible();
+});
+
+test.describe('watch on the charger: no provisional window, the newest data 50 minutes old', () => {
+  // 12:50 UTC: the mock's daily charging gap left out the windows from 12:00, and the 12:47 run
+  // had nothing to write. A real state (the watch on its charger), so the page must say it
+  // plainly rather than imply recent or provisional data.
+  test.use({ clockAt: CHARGING_GAP_CLOCK });
+
+  test('statistics say none provisional; the summary names the final 11:55 window as latest', async ({
+    page,
+  }) => {
+    const errors = await watchErrors(page);
+    await logIn(page);
+    await expect(summary(page)).toContainText('last 24 hours');
+    await expect(summary(page)).toContainText(
+      /to Mon 16 Nov 2026, 11:55–12:00 \(UTC\+00:00\)\. Latest: \d+(\.\d)? beats\/min, final\./,
+    );
+    const windows = watchSide(page).getByRole('definition').filter({ hasText: 'provisional' });
+    await expect(windows).toHaveText('none provisional');
+    await expect(watchSide(page)).not.toContainText(/\d+ provisional/);
+    // The status strip: the newest write was the 12:32 run (it finalised 11:45-12:00), not the
+    // 12:47 run that wrote nothing.
+    await expect(page.getByRole('region', { name: 'System status' })).toContainText(
+      'Newest watch data: 18 min ago',
+    );
+    expect(errors).toEqual([]);
+  });
+
+  test('the newest window is final, so it can be shared', async ({ page }) => {
+    const errors = await watchErrors(page);
+    await logIn(page);
+    await expect(summary(page)).toContainText('five-minute windows');
+    await slider(page).focus();
+    await page.keyboard.press('End');
+    await expect(slider(page)).toHaveAttribute('aria-valuetext', /11:55–12:00.*; final$/);
+    await page.keyboard.press('Enter');
+    await expect(page.getByRole('button', { name: 'Share with clinic' })).toBeEnabled();
+    await expect(watchSide(page).getByRole('region', { name: 'Selected reading' })).toContainText(
+      'Mon 16 Nov 2026, 11:55–12:00 (UTC+00:00)',
+    );
+    expect(errors).toEqual([]);
+  });
 });
