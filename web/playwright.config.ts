@@ -1,6 +1,6 @@
 import { defineConfig, devices } from '@playwright/test';
 
-// Node's `process`, declared here rather than adding @types/node for three reads.
+// Node's `process`, declared here rather than adding @types/node for four reads.
 declare const process: { env: Record<string, string | undefined> };
 const CI = Boolean(process.env.CI);
 
@@ -21,6 +21,9 @@ export default defineConfig({
   use: {
     baseURL: 'http://127.0.0.1:4173',
     trace: 'off',
+    // The browser's zone, fixed so a run does not depend on the machine's: UTC unless
+    // PULSEBRIDGE_E2E_TZ names an IANA zone. The page's clock is set per test (e2e/clock.ts).
+    timezoneId: process.env.PULSEBRIDGE_E2E_TZ || 'UTC',
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {

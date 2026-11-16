@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from './clock';
 
 /** Collects console errors and uncaught exceptions, including CSP violations. */
 function watchErrors(page: Page): string[] {

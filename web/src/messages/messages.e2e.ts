@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { CHARGING_GAP_CLOCK, expect, test, type Page } from '../../e2e/clock';
 
 /**
  * Browser tests for the messages log, against the BUILT mock page (synthetic data only), under
@@ -391,4 +391,30 @@ test('ids on the whole page are unique, and every ARIA reference resolves', asyn
   });
   expect(problems).toEqual([]);
   expect(errors).toEqual([]);
+});
+
+test.describe('watch on the charger: a sync run that wrote nothing', () => {
+  // 12:50 UTC (e2e/clock.ts): the 12:47 run found nothing new and nothing to finalise, so it
+  // wrote no Bundle and no Provenance. The proxy builds transaction rows from Provenances, so
+  // there is no row for it; the newest health-sync row is the 12:32 run, which finalised windows.
+  test.use({ clockAt: CHARGING_GAP_CLOCK });
+
+  test('no row for the empty run; every health-sync row lists what it wrote', async ({ page }) => {
+    const errors = await watchErrors(page);
+    await logIn(page);
+    await openLog(page);
+    await page.getByLabel('Kind').selectOption('fhir-transaction');
+    const syncRows = logRows(page).filter({ hasText: 'health-sync' });
+    await expect(syncRows.first()).toContainText('16 Nov, 12:32:00');
+    await expect(logRows(page).filter({ hasText: '12:47:00' })).toHaveCount(0);
+    await expect(page.locator('#shell-messages-log')).not.toContainText('None listed');
+    const newest = syncRows.first();
+    await expect(newest).toContainText('3 Observations, 3 Provenances');
+    await newest.getByRole('button', { name: 'Show what it wrote' }).click();
+    await expect(newest).toContainText(
+      `Observation/mock-hr-${String(Date.parse('2026-11-16T11:55:00Z'))}`,
+    );
+    await expect(newest).toContainText('Provenance/');
+    expect(errors).toEqual([]);
+  });
 });

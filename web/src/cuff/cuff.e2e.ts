@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '../../e2e/clock';
 
 /**
  * Browser tests for the cuff area, against the BUILT mock page (synthetic data only), under the
