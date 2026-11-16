@@ -150,18 +150,33 @@ sv_require_secret() { # sv_require_secret <secret id>
 }
 
 # Prints the name of the newest enabled version, or nothing when there is none. Exits on a gcloud
-# failure: "could not tell" must not be read as "none".
+# failure: "could not tell" must not be read as "none". Only standard output is the answer: on a
+# secret with no versions real gcloud writes a warning about the filter to standard error ("filter
+# keys were not present in any resource"), which must not be read as a version (found on the first
+# real run). A line counts only if it looks like a version: a number, or a path ending in one.
 sv_enabled_version() { # sv_enabled_version <secret id>
-  local secret="$1" out rc=0
+  local secret="$1" out rc=0 line
   out="$(sv_gcloud secrets versions list "$secret" --project="$sv_project" \
     --filter='state:ENABLED' --sort-by='~createTime' --limit=1 --format='value(name)' \
-    --quiet </dev/null 2>&1)" || rc=$?
+    --quiet </dev/null 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     sv_err "gcloud could not list the versions of '$secret' (exit code $rc). gcloud said:"
-    builtin printf '%s\n' "$out" >&2
+    sv_gcloud secrets versions list "$secret" --project="$sv_project" \
+      --filter='state:ENABLED' --limit=1 --format='value(name)' --quiet </dev/null 2>&1 >/dev/null | head -n 20 >&2 || true
     sv_die "$SV_EXIT_FAILED" "Nothing was written."
   fi
-  builtin printf '%s' "$out"
+  while IFS= read -r line; do
+    case "$line" in
+      *[!0-9]*/versions/*[!0-9]* | '') ;;
+      */versions/[0-9]* | [0-9]*)
+        case "${line##*/}" in
+          *[!0-9]*) ;;
+          *) builtin printf '%s' "$line"; return 0 ;;
+        esac ;;
+    esac
+  done <<EOF_VERSIONS
+$out
+EOF_VERSIONS
 }
 
 # Generate a random value into sv_value. The only random source is `tr -dc` over /dev/urandom
