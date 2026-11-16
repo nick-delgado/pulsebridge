@@ -22,6 +22,7 @@ locals {
   alerts = merge(
     local.deploy_health_sync ? {
       "health-sync-failed-run" = {
+        resource = "cloud_run_revision"
         # The README's filter: a run that answered 5xx needs a person (permissions, a missing
         # store, a refused Bundle); 503s (Google or FHIR down for a whole run) are included and
         # the policy auto-closes when runs succeed again. Plus the sync handler's own exception
@@ -35,6 +36,7 @@ locals {
         doc         = "A health-sync run answered HTTP 5xx or crashed. Read its `sync-run` (or `bug`) log line: `outcome` and `reason` say which (services/health-sync/README.md, \"What Scheduler sees\")."
       }
       "health-sync-not-connected" = {
+        resource = "cloud_run_revision"
         # Both outcomes answer 200 at WARNING and need the deployer: reconnect-needed (refresh
         # token expired or revoked, client refused, scope missing) and not-configured (a secret
         # file missing, empty or unusable, for example after a secret version was disabled).
@@ -47,6 +49,7 @@ locals {
     } : {},
     local.deploy_seeder ? {
       "seed-run-failed" = {
+        resource = "cloud_run_job"
         # The seeder logs its run report as event "seed-run" at WARNING (exit 1, 2, 3 or 4) or
         # ERROR (outcome bug) when it did not succeed (pulsebridge_seed/cli.py), to stderr.
         filter      = "${local.seed_scope} AND jsonPayload.event=\"seed-run\" AND severity>=WARNING"
@@ -58,6 +61,7 @@ locals {
     } : {},
     {
       "scheduler-attempt-failed" = {
+        resource = "cloud_scheduler_job"
         # Failures that write no line of the service's own: ingress refusal, a 403 from IAM, a
         # 504 at the request timeout, a crash-looping container, a refused jobs.run call.
         # Cloud Scheduler logs every attempt as resource cloud_scheduler_job (labels
@@ -132,7 +136,10 @@ resource "google_monitoring_alert_policy" "this" {
 
     condition_threshold {
       # Log-based metrics appear in Monitoring as logging.googleapis.com/user/<metric name>.
-      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.this[each.key].name}\""
+      # Cloud Monitoring refuses a metric filter with no resource type ("must specify a restriction
+      # on resource.type"; found on the first real apply). A log-based metric is written against
+      # the resource type of the log entries it counts.
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.this[each.key].name}\" AND resource.type=\"${each.value.resource}\""
       comparison      = "COMPARISON_GT"
       threshold_value = 0
       duration        = "0s"
