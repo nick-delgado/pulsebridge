@@ -500,6 +500,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
 | T36 | First-deploy follow-ups | T25 | `infra/modules/identity/`, `infra/bootstrap/README.md`, `infra/envs/README.md`, `docs/setup.md`, `README.md` | in-progress |
+| T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -696,6 +697,17 @@ filter; fhir-proxy counted with `_summary`, which Cloud Healthcare refuses.
 - AC: the master checklist records what the dev deploy confirmed (E, O, I, P and C items) and
   what is still unchecked (hop measurement, alerts firing, destroy, patching, rotation).
 - AC: the README's OpenEMR screenshot (T28) is taken from the dev deployment.
+
+**T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
+between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
+windows from 12:00 to 12:40 UTC (a modelled charging gap), and marks a window preliminary only
+within 30 minutes of a sync run. Acceptance: every browser test runs on a controlled page clock
+(`web/e2e/clock.ts`); the suites pass at any instant and zone; explicit tests cover "no provisional
+window" and "a sync run that wrote nothing"; the mock agrees with `contract.ts` (no transaction row
+for a run that wrote nothing; `lastSyncAt` is the newest heart-rate write). Reviewed (pass with
+notes) and merged. Notes left open: the mock keeps a window in the row of the run that first wrote
+it after a later run finalised it, which the real proxy would not; `mock-dst.e2e.ts` pins its own
+clock instead of using the shared fixture.
 
 **T25 status.** The offline part is merged: the roots, the shared composition `infra/envs/_stack`,
 the runbook and the 116-item first-deploy checklist in `infra/envs/README.md`, all tested against
