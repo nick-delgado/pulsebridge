@@ -217,6 +217,10 @@ run "pubsub_service_agent_is_created_in_the_project" {
 run "pubsub_token_creator_member_is_the_literal_agent_known_at_plan" {
   command = plan
 
+  # A fresh state, in which the service identity is new (as on the deployed dev project, where it
+  # is not in state yet): its computed attributes are then unknown in the plan.
+  state_key = "service_identity_new"
+
   assert {
     condition     = google_service_account_iam_member.pubsub_token_creator[0].member == "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
     error_message = "The Token Creator member must be serviceAccount:service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com, known at plan time."
