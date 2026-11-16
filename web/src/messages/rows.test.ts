@@ -125,6 +125,11 @@ describe('other row facts', () => {
     expect(fact(rowFacts(transaction({ httpStatus: 200 })), 'HTTP status')?.label).toBe('200');
     expect(writerText('unknown')).toBe('a writer the proxy does not recognise');
     expect(resourceCount(['Observation/a'])).toBe('1 Observation');
+    expect(fact(facts, 'Resources')?.detail).toBe('');
+    // Every row comes from a Provenance, so an empty list is missing information (T37).
+    const empty = fact(rowFacts(transaction({ resources: [] })), 'Resources');
+    expect(empty).toMatchObject({ label: 'None listed', tone: 'warn' });
+    expect(empty?.detail).toContain('not that the transaction wrote nothing');
   });
 
   it('unreadable rows: the problem, and "None" for an empty id', () => {

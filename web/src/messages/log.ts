@@ -34,6 +34,7 @@ import {
   isProblemRow,
   LOG_SCOPE,
   logTime,
+  NO_RESOURCES_NOTE,
   plural,
   resourceCount,
   rowFacts,
@@ -341,17 +342,22 @@ export function createMessagesLog(
       view.expand.setAttribute('aria-expanded', String(open));
       view.expand.textContent = open ? 'Hide what it wrote' : 'Show what it wrote';
       view.wrote.hidden = !open;
+      // An empty list is missing information (rows.ts, NO_RESOURCES_NOTE): say so, no empty list.
       replaceChildren(
         view.wrote,
-        el('p', {
-          class: 'log-hint',
-          text: `${resourceCount(e.resources)}, as references in the FHIR store:`,
-        }),
-        el(
-          'ul',
-          { class: 'log-resources' },
-          ...e.resources.map((r) => el('li', { class: 'log-mono', text: r })),
-        ),
+        ...(e.resources.length === 0
+          ? [el('p', { class: 'log-hint', text: NO_RESOURCES_NOTE })]
+          : [
+              el('p', {
+                class: 'log-hint',
+                text: `${resourceCount(e.resources)}, as references in the FHIR store:`,
+              }),
+              el(
+                'ul',
+                { class: 'log-resources' },
+                ...e.resources.map((r) => el('li', { class: 'log-mono', text: r })),
+              ),
+            ]),
       );
     }
   };

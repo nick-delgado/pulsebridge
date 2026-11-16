@@ -48,9 +48,10 @@ export const PRELIMINARY_MS = 30 * 60 * 1000;
 /**
  * The mock's health-sync schedule: a run every 15 minutes (brief, "Ingestion, wearable"), at
  * minute 2, 17, 32 and 47 of each hour. Data reaches the store only at a run, so the mock's
- * heart-rate windows, their `preliminary`/`final` status and the status strip's last sync time
- * all move together, once per run. That is what lets the status strip see a new sync during a
- * session and announce it (`notifyDataChanged('sync')`).
+ * heart-rate windows, their `preliminary`/`final` status and the status strip's newest-write
+ * time all move together, once per run that writes something (heartRateWritesAt). That is what
+ * lets the status strip see a new sync during a session and announce it
+ * (`notifyDataChanged('sync')`).
  */
 export const SYNC_INTERVAL_MS = 15 * 60 * 1000;
 export const SYNC_OFFSET_MS = 2 * 60 * 1000;
@@ -394,6 +395,48 @@ export function heartRateObservations(
     if (window) out.push(heartRateObservation(window, syncMs, timeZone));
   }
   return out;
+}
+
+/**
+ * The heart-rate Observations the sync run at `syncMs` WROTE, oldest first. health-sync writes
+ * only windows that changed (contract.ts, `lastSyncAt`), and in the mock a window changes twice:
+ * - it is new: it ended since the previous run (end in (syncMs - 15 min, syncMs]), written
+ *   `preliminary`;
+ * - it became final: it was within PRELIMINARY_MS of the previous run but is not of this one
+ *   (end in (syncMs - 15 min - 30 min, syncMs - 30 min]), rewritten `final`.
+ * A run can write nothing: while the watch is on the charger (the daily gap in syntheticRollUp)
+ * there is nothing new and nothing left to finalise. Such a run writes no Bundle, so no
+ * Provenance, and the proxy (which derives transaction rows from Provenances) lists no row for it.
+ */
+export function heartRateWritesAt(syncMs: number, timeZone: string | null = null): Observation[] {
+  const endsIn = (o: Observation, after: number, upTo: number) => {
+    const end = Date.parse(o.effectivePeriod?.end ?? '');
+    return end > after && end <= upTo;
+  };
+  // Every window ending in (syncMs - 45 min, syncMs], as the store holds it after this run.
+  const recent = heartRateObservations(
+    syncMs - SYNC_INTERVAL_MS - PRELIMINARY_MS,
+    syncMs,
+    syncMs,
+    timeZone,
+  );
+  return recent.filter(
+    (o) =>
+      endsIn(o, syncMs - SYNC_INTERVAL_MS, syncMs) ||
+      endsIn(o, syncMs - SYNC_INTERVAL_MS - PRELIMINARY_MS, syncMs - PRELIMINARY_MS),
+  );
+}
+
+/**
+ * The newest sync run at or before `nowMs` that wrote something (the proxy's `lastSyncAt`, the
+ * time of the newest heart-rate write), or null if none did in the last day. While the watch is
+ * on the charger this stays put although runs continue every 15 minutes.
+ */
+export function lastHeartRateWrite(nowMs: number): number | null {
+  for (let run = lastSyncRun(nowMs), i = 0; i < 96; i++, run -= SYNC_INTERVAL_MS) {
+    if (heartRateWritesAt(run).length > 0) return run;
+  }
+  return null;
 }
 
 export function bloodPressureObservation(

@@ -272,11 +272,21 @@ export function rowFacts(e: MessagesLogEntry): Fact[] {
     {
       term: 'Resources',
       label: resourceCount(e.resources),
-      detail: '',
-      tone: 'neutral',
+      detail: e.resources.length === 0 ? NO_RESOURCES_NOTE : '',
+      tone: e.resources.length === 0 ? 'warn' : 'neutral',
     },
   ];
 }
+
+/**
+ * What an empty resource list means. The proxy builds every transaction row from the Provenances
+ * that transaction wrote (contract.ts, FhirTransactionEntry), and each ingest Bundle writes a
+ * Provenance per Observation, so a row always has something to list. A sync run that found
+ * nothing to write (the watch on its charger) writes no Bundle and so has no row at all. An
+ * empty list is therefore missing information, and is not shown as "it wrote nothing".
+ */
+export const NO_RESOURCES_NOTE =
+  'The log lists no resources for this transaction. Each row comes from the Provenance records a transaction wrote, so this means the references are missing here, not that the transaction wrote nothing.';
 
 function unreadableFacts(e: UnreadableSendAttemptEntry): Fact[] {
   return [

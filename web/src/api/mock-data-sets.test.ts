@@ -8,6 +8,8 @@ import { LOINC } from './fhir';
 import { MockClient } from './mock-client';
 import {
   formatInZone,
+  heartRateWritesAt,
+  lastHeartRateWrite,
   lastSyncRun,
   MOCK_DATA_SETS,
   mockDataSetFromSearch,
@@ -139,5 +141,63 @@ describe('mock sync schedule', () => {
     const id = before.find((o) => o.status === 'preliminary')?.id;
     expect(id).toBeDefined();
     expect(after.find((o) => o.id === id)?.status).toBe('final');
+  });
+
+  it('each window is written twice: new (preliminary) at one run, final at a later one', () => {
+    // A day of runs on an ordinary day. Every window that ends well inside the day is written
+    // exactly twice: first preliminary, then final. Nothing else is rewritten.
+    const first = lastSyncRun(Date.parse('2026-06-10T00:10:00Z'));
+    const writes = new Map<string, string[]>();
+    for (let run = first; run < first + 24 * 3600_000; run += SYNC_INTERVAL_MS) {
+      for (const o of heartRateWritesAt(run)) {
+        writes.set(o.id ?? '', [...(writes.get(o.id ?? '') ?? []), o.status]);
+      }
+    }
+    const middle = [...writes].filter(([id]) => {
+      const start = Number(id.replace('mock-hr-', ''));
+      return start > first + 3600_000 && start < first + 22 * 3600_000;
+    });
+    expect(middle.length).toBeGreaterThan(200);
+    for (const [id, statuses] of middle) expect(statuses, id).toEqual(['preliminary', 'final']);
+  });
+
+  it('on the charger: a run with nothing to write writes nothing, and lastSyncAt stays put', async () => {
+    // The daily gap leaves out the windows 12:00-12:45 UTC. At the 12:47 run nothing is new and
+    // nothing is left to finalise (the 11:55 window became final at 12:32).
+    const at = (t: string) => Date.parse(`2026-11-16T${t}:00Z`);
+    expect(heartRateWritesAt(at('12:47'))).toEqual([]);
+    expect(heartRateWritesAt(at('12:32')).map((o) => o.effectivePeriod?.start)).toEqual([
+      '2026-11-16T11:45:00.000Z',
+      '2026-11-16T11:50:00.000Z',
+      '2026-11-16T11:55:00.000Z',
+    ]);
+    expect(lastHeartRateWrite(at('12:50'))).toBe(at('12:32'));
+    // The first windows after the gap (12:45-13:00) arrive with the 13:02 run.
+    expect(lastHeartRateWrite(at('13:05'))).toBe(at('13:02'));
+
+    sessionStorage.clear();
+    const now = at('12:50');
+    const client = new MockClient({
+      session: new Session(sessionStorage, () => now),
+      onUnauthorized: () => undefined,
+      now: () => now,
+      latencyMs: 0,
+    });
+    await client.login('x');
+    expect((await client.getStatus()).watchSync.lastSyncAt).toBe('2026-11-16T12:32:00.000Z');
+    const page = await client.listMessages({ kind: 'fhir-transaction', count: 50 });
+    const runs = page.entries.filter(
+      (e) => e.kind === 'fhir-transaction' && e.writer === 'health-sync',
+    );
+    // The last eight runs are 11:02 to 12:47; the 12:47 run wrote no Provenance, so no row.
+    expect(runs.map((r) => r.recordedAt)).toEqual(
+      ['12:32', '12:17', '12:02', '11:47', '11:32', '11:17', '11:02'].map((t) =>
+        new Date(at(t)).toISOString(),
+      ),
+    );
+    for (const r of runs) {
+      if (r.kind === 'fhir-transaction')
+        expect(r.resources.length, r.recordedAt).toBeGreaterThan(0);
+    }
   });
 });

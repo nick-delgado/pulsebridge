@@ -82,6 +82,8 @@ import {
   HOSTILE_REFUSED_SYSTOLIC,
   heartRateObservation,
   heartRateObservations,
+  heartRateWritesAt,
+  lastHeartRateWrite,
   lastSyncRun,
   MOCK_DATA_SETS,
   MOCK_SAMPLES,
@@ -273,6 +275,7 @@ export class MockClient implements PulseBridgeApi {
     await this.#authorised(options.signal);
     const now = this.#now();
     const sync = this.#lastSync();
+    const written = lastHeartRateWrite(now);
     const checkedAt = new Date(now).toISOString();
     const mode = this.options.statusMode ?? null;
     if (mode === 'counts-unknown') {
@@ -303,8 +306,10 @@ export class MockClient implements PulseBridgeApi {
         // usually null ("not known") between runs; the strip must cope with that.
         strandedPreliminary: null,
         checkedAt,
-        // The proxy writes it in UTC with milliseconds (amendment 13), as toISOString does.
-        lastSyncAt: new Date(sync).toISOString(),
+        // The proxy writes it in UTC with milliseconds (amendment 13), as toISOString does. It is
+        // the newest heart-rate WRITE, not the last run: a run that wrote nothing (the watch on
+        // the charger) does not move it (contract.ts).
+        lastSyncAt: written === null ? null : new Date(written).toISOString(),
       },
       observationCounts: {
         watch: heartRateObservations(now - 30 * 864e5, now, sync).length,
@@ -1506,10 +1511,13 @@ export class MockClient implements PulseBridgeApi {
       problem: 'the AuditEvent has no id and no recorded time',
     });
 
-    // health-sync runs every 15 minutes (brief, "Ingestion, wearable"): the last eight runs.
+    // health-sync runs every 15 minutes (brief, "Ingestion, wearable"): the last eight runs,
+    // each listing what it wrote. A run that wrote nothing (the watch on the charger) wrote no
+    // Provenance, so the proxy, which derives these rows from Provenances, has no row for it.
     for (let i = 0; i < 8; i++) {
       const at = lastSyncRun(now) - 15 * i * min;
-      const ids = heartRateObservations(at - 30 * min, at, at, this.#zone).slice(-3);
+      const ids = heartRateWritesAt(at, this.#zone);
+      if (ids.length === 0) continue;
       this.#transactions.push(
         transactionRow(
           `mock-tx-${String(i)}`,
