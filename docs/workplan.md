@@ -701,8 +701,8 @@ filter; fhir-proxy counted with `_summary`, which Cloud Healthcare refuses.
 T36 outcome: reviewed (pass with notes) and merged. Module identity now creates the Pub/Sub
 service agent before the Token Creator grant; the runbook, checklist and READMEs record what the
 dev deploy showed. The OpenEMR screenshot is not part of T36: it needs a person and stays with T28.
-Not yet applied to dev (expected plan: one resource added, nothing replaced; unconfirmed until a
-real plan). Follow-ups not yet assigned to a task: module healthcare grants roles to the Pub/Sub
+Applied to dev on 16 November as the deployer: one resource added, nothing changed or destroyed,
+so the deployer can create the agent (checklist A22). Follow-ups not yet assigned to a task: module healthcare grants roles to the Pub/Sub
 agent without depending on its creation (a single full apply on a new project can race; a re-run
 fixes it); `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
 `pipefail`, which can fail falsely and, in its negative checks, pass falsely.
