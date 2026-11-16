@@ -266,8 +266,8 @@ every service, each digest read back from the registry. A failed build prints no
 still have pushed some images (see "A failed release"), so do not take digests from the
 `=== <service>` lines of a failed build. To get the block from a finished build:
 `gcloud builds log <BUILD_ID> | sed -n '/BEGIN tfvars/,/END tfvars/{//!p}'` (the lines between the
-markers, without them). If the log prefixes each line with its build step (`Step #0 - "...": `),
-delete that prefix before pasting; whether it does is not verified.
+markers, without them). The log does not prefix the lines with a build step (seen on the first
+dev deploy, 16 November 2026), so the block pastes unchanged.
 
 | Substitution | Default | Meaning |
 | --- | --- | --- |
@@ -336,6 +336,11 @@ not the `terraform-deployer` (which has far more power than a build needs). It n
 
 It needs no Secret Manager, Healthcare, Cloud Run or IAM roles. It deploys nothing: the deploy is
 a Terraform apply, as the deployer, with the digests from the log.
+
+**A build started by hand without `--service-account`** does not use this account: it runs as
+Cloud Build's default, which on a new project is the Compute Engine default service account
+(seen on the first dev deploy). Pass `--service-account` to use the build account (with the
+source-bucket caveat in "Build in Cloud Build").
 
 **The account and the trigger exist since T26, both opt-in.** Module identity creates the build
 account (`create_build_account`, the env roots' `create_build_service_account`) with the log
@@ -410,18 +415,29 @@ script was run in the pinned builder image against a local registry, with the re
 a first run, a re-run of the same tag (every image reused, nothing rebuilt) and a new tag on
 the same commit (tag added, same digests). The local registry does not enforce immutable tags,
 so refused pushes and recovery from a failed push were checked with the fake docker in
-`tests/tooling/test_cloudbuild.py`, not against Artifact Registry. To confirm on the first real
-build:
+`tests/tooling/test_cloudbuild.py`, not against Artifact Registry.
+
+**Confirmed by the first real build** (16 November 2026, dev, a `gcloud builds submit` by hand
+with `TAG_NAME=v0.1.0`; five new images and the block printed. With synthetic data the apply
+deployed four of them: `seed` (the job and its Scheduler job), `v2-to-fhir`, `cuff-sim` and
+`fhir-proxy`; the `health-sync` image was built but not deployed or exercised):
 
 - `automapSubstitutions` exposes the built-in `PROJECT_ID`, `TAG_NAME` and `COMMIT_SHA` to the
   `script` as well as the `_` substitutions.
 - The step's docker client is already authenticated to `<region>-docker.pkg.dev` for both the
-  push and `docker buildx imagetools inspect`.
+  push and `docker buildx imagetools inspect` (the digests in the block are read back with it).
 - The default `MUST_MATCH` substitution check accepts substitutions that only the script uses.
 - `gcloud builds submit` accepts `TAG_NAME` and `COMMIT_SHA` as `--substitutions`.
-- `roles/artifactregistry.reader` is enough to pull through the remote repository and cache new
-  images.
+- `gcloud builds log` prints the block with no step prefix.
+- Pulling through the Docker Hub remote repository works (the base image came from the mirror).
+  The build ran as the Compute Engine default account, not the build account, so that
+  `roles/artifactregistry.reader` alone is enough was shown by the edge VM instead, whose account
+  pulled MariaDB and OpenEMR through the mirror with only that role.
+
+**Still to confirm:**
+
 - Artifact Registry accepts `docker buildx imagetools create --prefer-index=false` (adding a tag
-  to an existing manifest) on a repository with immutable tags, and keeps the digest.
-- A manual `gcloud builds submit` with a user-specified build account needs read access to the
-  source bucket.
+  to an existing manifest) on a repository with immutable tags, and keeps the digest. The first
+  build built every image fresh, so this path did not run.
+- A build as the build account (the trigger, or `--service-account`): its three roles are enough,
+  and a manual `gcloud builds submit` with it needs read access to the source bucket.
