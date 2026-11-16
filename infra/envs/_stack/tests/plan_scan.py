@@ -693,7 +693,9 @@ def check_agent_grants_kept(plans: dict) -> list[str]:
         if not changes:
             failures.append(f"{run}: the plan changes nothing, so it tests nothing")
         elif expected is not None and set(changes) != expected:
-            failures.append(f"{run}: changes {sorted(changes)}, expected exactly {sorted(expected)}")
+            failures.append(
+                f"{run}: changes {sorted(changes)}, expected exactly {sorted(expected)}"
+            )
         elif expected is None and any(not a.startswith("module.project_base.") for a in changes):
             outside = sorted(a for a in changes if not a.startswith("module.project_base."))
             failures.append(f"{run}: changes outside project-base: {outside}")
