@@ -221,3 +221,93 @@ variable "labels" {
   type        = map(string)
   default     = {}
 }
+
+# ---------------------------------------------------------------------------------------------
+# Image builds (T26): the build account's repository grants, the cleanup policy, the trigger
+# ---------------------------------------------------------------------------------------------
+
+variable "build_service_account_email" {
+  description = "Email of the image-build service account (module identity's \"build\" account, T26). With grant_build_account_registry_access it gets roles/artifactregistry.writer on the services repository and roles/artifactregistry.reader on the Docker Hub mirror, those two repositories only; the build trigger runs as it. null: no build account."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.build_service_account_email == null || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z0-9-]+\\.iam\\.gserviceaccount\\.com$", var.build_service_account_email))
+    error_message = "build_service_account_email must be a service account email such as \"pb-build@my-project.iam.gserviceaccount.com\", or null."
+  }
+}
+
+variable "grant_build_account_registry_access" {
+  description = "Grant build_service_account_email writer on the services repository and reader on the Docker Hub mirror (when it exists). A plain bool, like grant_edge_vm_mirror_reader, so the grants' count is known at plan time while the account's email is not; a precondition requires the email. Default false."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "build_trigger_repository" {
+  description = "Opt-in Cloud Build trigger (T26): the full resource name of a 2nd-gen Cloud Build repository, projects/<project>/locations/<region>/connections/<connection>/repositories/<repository>, which you create once in the console by connecting GitHub (it needs the Cloud Build GitHub App and your GitHub login, so Terraform cannot do it). Its location must be var.region. When set, a trigger runs cloudbuild.yaml as the build account on every tag matching build_trigger_tag_pattern. null (default): no trigger."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.build_trigger_repository == null || can(regex("^projects/[a-z][a-z0-9-]{4,28}[a-z0-9]/locations/[a-z0-9-]+/connections/[A-Za-z0-9_-]+/repositories/[A-Za-z0-9._-]+$", coalesce(var.build_trigger_repository, "x")))
+    error_message = "build_trigger_repository must look like projects/<project>/locations/<region>/connections/<connection>/repositories/<repository>."
+  }
+
+  validation {
+    # A trigger on a 2nd-gen repository must be in the repository's region (Cloud Build docs,
+    # "Build repositories from GitHub").
+    condition     = var.build_trigger_repository == null || try(split("/", var.build_trigger_repository)[3] == var.region, false)
+    error_message = "build_trigger_repository must be in var.region: a 2nd-gen trigger lives in its repository's region."
+  }
+
+  validation {
+    condition     = var.build_trigger_repository == null || try(split("/", var.build_trigger_repository)[1] == var.project_id, false)
+    error_message = "build_trigger_repository must be in this project (var.project_id)."
+  }
+}
+
+variable "build_trigger_tag_pattern" {
+  description = "RE2 regular expression of the git tags that start a build (cloudbuild.yaml: \"Meant to run on a git tag\"). Default: release tags like v1.2.3."
+  type        = string
+  default     = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
+  nullable    = false
+}
+
+variable "build_trigger_approval_required" {
+  description = "Triggered builds wait for a manual approval in the Cloud Build console (roles/cloudbuild.builds.approver) before they run. Default true: anyone who can push a v* tag can otherwise publish images. Set false once a GitHub tag ruleset limits who may create v* tags."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "services_keep_recent_versions" {
+  description = "Cleanup policy of the services repository: the newest N versions of each image are always kept (a KEEP policy, which wins over DELETE). Keep it above the number of releases you might roll back to: Cloud Run pulls an image again when it starts a new instance, so an image a revision still uses must not be deleted."
+  type        = number
+  default     = 10
+  nullable    = false
+
+  validation {
+    condition     = var.services_keep_recent_versions >= 2 && floor(var.services_keep_recent_versions) == var.services_keep_recent_versions
+    error_message = "services_keep_recent_versions must be a whole number of at least 2 (the deployed release and the one before)."
+  }
+}
+
+variable "services_delete_older_than_days" {
+  description = "Cleanup policy of the services repository: versions older than this many days are deleted, unless the KEEP policy keeps them."
+  type        = number
+  default     = 90
+  nullable    = false
+
+  validation {
+    condition     = var.services_delete_older_than_days >= 1 && floor(var.services_delete_older_than_days) == var.services_delete_older_than_days
+    error_message = "services_delete_older_than_days must be a whole number of days, at least 1."
+  }
+}
+
+variable "services_cleanup_dry_run" {
+  description = "true: Artifact Registry only logs what the cleanup policy would delete (useful the first week, to check the policy); false (default): it deletes."
+  type        = bool
+  default     = false
+  nullable    = false
+}

@@ -73,21 +73,32 @@ locals {
     },
   )
 
-  # Where alerts go: channels passed in, plus the email channel made here.
-  alert_channels_requested = length(var.notification_channels) > 0 || var.alert_email != null
+  # Where alerts go: channels passed in, plus the email channel made here. Decided by the plain
+  # bool, never by `alert_email != null`: alert_email is sensitive, and a value derived from a
+  # sensitive one is sensitive too, which Terraform refuses in for_each and count.
+  alert_channels_requested = length(var.notification_channels) > 0 || var.create_alert_email_channel
   alert_channels           = concat(var.notification_channels, google_monitoring_notification_channel.email[*].name)
 }
 
 resource "google_monitoring_notification_channel" "email" {
-  count = var.alert_email == null ? 0 : 1
+  count = var.create_alert_email_channel ? 1 : 0
 
   project      = var.project_id
   display_name = "PulseBridge ${var.name_prefix} alerts"
   type         = "email"
+  # The address is sensitive, so the plan shows `labels = (sensitive value)`; the channel's
+  # display name carries no address.
   labels = {
     email_address = var.alert_email
   }
   user_labels = var.labels
+
+  lifecycle {
+    precondition {
+      condition     = var.alert_email != null
+      error_message = "create_alert_email_channel is true but alert_email is null: give the address, or set create_alert_email_channel = false."
+    }
+  }
 }
 
 resource "google_logging_metric" "this" {

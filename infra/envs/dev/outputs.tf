@@ -103,6 +103,16 @@ output "openemr" {
   value       = module.stack.openemr
 }
 
+output "build_service_account_email" {
+  description = "The image-build service account (T26), or null."
+  value       = module.stack.build_service_account_email
+}
+
+output "build_trigger_name" {
+  description = "The Cloud Build trigger on release tags (T26), or null."
+  value       = module.stack.build_trigger_name
+}
+
 output "image_variable_names" {
   description = "The tfvars names the image build prints."
   value       = module.stack.image_variable_names

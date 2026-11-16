@@ -228,6 +228,31 @@ resource "google_artifact_registry_repository" "services" {
     immutable_tags = true
   }
 
+  # Cleanup policy (T26). Immutable tags mean nothing ever replaces an image, so without a policy
+  # every release stays forever (about 100 MB each, services/README.md "Cost"). Artifact Registry
+  # applies the policies to each package (image) separately, and a KEEP policy wins over a
+  # DELETE policy: a version is deleted only when it is older than the limit AND not among the
+  # newest services_keep_recent_versions of its image. The newest ones must stay because Cloud Run
+  # pulls the image by digest again whenever it starts an instance.
+  cleanup_policy_dry_run = var.services_cleanup_dry_run
+
+  cleanup_policies {
+    id     = "delete-older-than-limit"
+    action = "DELETE"
+    condition {
+      tag_state  = "ANY"
+      older_than = "${var.services_delete_older_than_days * 86400}s"
+    }
+  }
+
+  cleanup_policies {
+    id     = "keep-most-recent"
+    action = "KEEP"
+    most_recent_versions {
+      keep_count = var.services_keep_recent_versions
+    }
+  }
+
   depends_on = [google_project_service.this]
 }
 
@@ -258,9 +283,9 @@ resource "google_artifact_registry_repository" "dockerhub" {
 
 # Read access to the Docker Hub mirror for the edge VM's service account (T21), so the VM can pull
 # MariaDB and OpenEMR through it. The grant lives here because this module owns the repository
-# (a binding lives in the module that owns the resource). It is the only IAM binding in this
-# module, it is on this one repository only, and it exists when the mirror exists and
-# grant_edge_vm_mirror_reader is true. Additive `_iam_member`, so other readers are left alone.
+# (a binding lives in the module that owns the resource). It is on this one repository only, and
+# it exists when the mirror exists and grant_edge_vm_mirror_reader is true. (The build account's
+# two grants, at the end of this file, follow the same pattern.) Additive `_iam_member`, so other readers are left alone.
 #
 # The count is decided by two plain bools, never by "is the email set": a service account's
 # email is unknown until the account is created, so `email != null` would be unknown on a root's
@@ -279,6 +304,107 @@ resource "google_artifact_registry_repository_iam_member" "dockerhub_mirror_edge
     precondition {
       condition     = var.edge_vm_service_account_email != null
       error_message = "grant_edge_vm_mirror_reader is true but edge_vm_service_account_email is null: pass the edge VM's account (module identity), or set grant_edge_vm_mirror_reader = false when no edge VM is deployed."
+    }
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Image builds (T26)
+# ---------------------------------------------------------------------------------------------
+
+# The build account (module identity's "build") may push to the services repository and pull the
+# base image through the Docker Hub mirror: those two repositories, nothing else (services/README.md,
+# "Who runs builds"). Like the edge VM's grant above, the count is a plain bool and a precondition
+# checks the email, which is unknown on a root's first plan.
+resource "google_artifact_registry_repository_iam_member" "services_build_writer" {
+  count = var.grant_build_account_registry_access ? 1 : 0
+
+  project    = var.project_id
+  location   = google_artifact_registry_repository.services.location
+  repository = google_artifact_registry_repository.services.repository_id
+  # writer: push, read tags (the build's plan phase) and add a tag to an existing manifest. It
+  # cannot delete images or change the repository; the cleanup policy deletes.
+  role   = "roles/artifactregistry.writer"
+  member = "serviceAccount:${var.build_service_account_email}"
+
+  lifecycle {
+    precondition {
+      condition     = var.build_service_account_email != null
+      error_message = "grant_build_account_registry_access is true but build_service_account_email is null: pass module identity's build account, or set the bool to false."
+    }
+  }
+}
+
+resource "google_artifact_registry_repository_iam_member" "dockerhub_mirror_build_reader" {
+  count = var.create_dockerhub_mirror && var.grant_build_account_registry_access ? 1 : 0
+
+  project    = var.project_id
+  location   = google_artifact_registry_repository.dockerhub[0].location
+  repository = google_artifact_registry_repository.dockerhub[0].repository_id
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${var.build_service_account_email}"
+
+  lifecycle {
+    precondition {
+      condition     = var.build_service_account_email != null
+      error_message = "grant_build_account_registry_access is true but build_service_account_email is null."
+    }
+  }
+}
+
+# A Cloud Build trigger: on every git tag matching build_trigger_tag_pattern, Cloud Build fetches
+# that commit from GitHub through the 2nd-gen repository connection and runs cloudbuild.yaml AS
+# THE BUILD ACCOUNT (service_account), not as Cloud Build's default account. Opt-in: the
+# connection is made once by hand (it needs the Cloud Build GitHub App), so with
+# build_trigger_repository = null nothing is created.
+resource "google_cloudbuild_trigger" "images_on_tag" {
+  count = var.build_trigger_repository == null ? 0 : 1
+
+  project     = var.project_id
+  location    = var.region # a 2nd-gen trigger lives in its repository's region
+  name        = "${var.name_prefix}-images-on-tag"
+  description = "Builds and pushes every services/*/Dockerfile image on a release tag (cloudbuild.yaml). Created by project-base (T26)."
+
+  repository_event_config {
+    repository = var.build_trigger_repository
+    push {
+      tag = var.build_trigger_tag_pattern
+    }
+  }
+
+  filename = "cloudbuild.yaml"
+
+  # Each triggered build waits until someone with roles/cloudbuild.builds.approver approves it in
+  # the console (T26 review, m6): a pushed tag alone does not publish images. Turn off with
+  # build_trigger_approval_required = false once a tag ruleset protects v* tags.
+  approval_config {
+    approval_required = var.build_trigger_approval_required
+  }
+
+  # The build account, as projects/<project>/serviceAccounts/<email>. With a user-specified
+  # account the build log must go to Cloud Logging only, which cloudbuild.yaml sets.
+  service_account = "projects/${var.project_id}/serviceAccounts/${var.build_service_account_email}"
+
+  # cloudbuild.yaml's own defaults are this module's defaults; passing this module's actual values
+  # keeps the build right when a root changes the region or a repository ID. An empty mirror means
+  # "pull the base image from Docker Hub directly" (cloudbuild.yaml, _DOCKERHUB_MIRROR).
+  substitutions = {
+    _REGION           = var.region
+    _REPOSITORY       = google_artifact_registry_repository.services.repository_id
+    _DOCKERHUB_MIRROR = var.create_dockerhub_mirror ? google_artifact_registry_repository.dockerhub[0].repository_id : ""
+  }
+
+  # The build must be able to push and pull from its first run.
+  depends_on = [
+    google_artifact_registry_repository_iam_member.services_build_writer,
+    google_artifact_registry_repository_iam_member.dockerhub_mirror_build_reader,
+    google_project_service.this,
+  ]
+
+  lifecycle {
+    precondition {
+      condition     = var.build_service_account_email != null && var.grant_build_account_registry_access
+      error_message = "build_trigger_repository is set, but the build account or its registry grants are not: set build_service_account_email and grant_build_account_registry_access = true (module identity's create_build_account)."
     }
   }
 }

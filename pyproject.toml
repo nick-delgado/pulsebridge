@@ -15,6 +15,7 @@ requires-python = ">=3.13"
 # Exact pins so every machine and CI run uses the same tool versions.
 [dependency-groups]
 dev = [
+  "cel-python==0.5.0", # tests/tooling/test_wif_truth_table.py evaluates bootstrap's CEL (T26)
   "pre-commit==4.7.0",
   "pytest==9.2.0",
   "pyyaml==6.0.3", # tests/tooling/test_ci_workflow.py parses the CI workflow
@@ -49,7 +50,8 @@ select = [
 [tool.pytest.ini_options]
 # Repository-level tooling tests live in tests/; each library and service keeps its tests next to
 # its code (libs/<name>/tests, services/<name>/tests). Paths that do not exist yet are skipped.
-# scripts/connect-google-health (T11) is a deployer-run tool with its own tests.
-testpaths = ["tests", "libs", "services", "scripts/connect-google-health"]
+# scripts/connect-google-health (T11) and scripts/secrets (T27) are deployer-run tools with their
+# own tests.
+testpaths = ["tests", "libs", "services", "scripts/connect-google-health", "scripts/secrets"]
 # importlib mode lets several packages each have a tests/ directory with same-named test modules.
 addopts = ["--import-mode=importlib", "-ra", "--strict-markers"]

@@ -278,8 +278,9 @@ run "alert_policies_with_channel" {
 run "alert_email_creates_a_channel" {
   command = apply
   variables {
-    alert_email           = "alerts@example.com"
-    notification_channels = ["projects/example-project/notificationChannels/123"]
+    alert_email                = "alerts@example.com"
+    create_alert_email_channel = true
+    notification_channels      = ["projects/example-project/notificationChannels/123"]
   }
   assert {
     condition = (
@@ -288,6 +289,11 @@ run "alert_email_creates_a_channel" {
       google_monitoring_notification_channel.email[0].labels["email_address"] == "alerts@example.com"
     )
     error_message = "alert_email must create one email notification channel for that address."
+  }
+  assert {
+    # T26: the address must be redacted in plans (the one CI posts on a pull request).
+    condition     = issensitive(google_monitoring_notification_channel.email[0].labels["email_address"]) && !strcontains(google_monitoring_notification_channel.email[0].display_name, "alerts@example.com")
+    error_message = "The email channel's labels must be sensitive (alert_email is), and its display name must not carry the address."
   }
   assert {
     condition = alltrue([
@@ -301,7 +307,8 @@ run "alert_email_creates_a_channel" {
 run "alert_email_alone_creates_policies" {
   command = apply
   variables {
-    alert_email = "alerts@example.com"
+    alert_email                = "alerts@example.com"
+    create_alert_email_channel = true
   }
   assert {
     condition = length(google_monitoring_alert_policy.this) == 3 && alltrue([

@@ -154,7 +154,8 @@ run "hourly_trigger_when_ingest_enabled" {
 run "seeder_alerts" {
   command = apply
   variables {
-    alert_email = "alerts@example.com"
+    alert_email                = "alerts@example.com"
+    create_alert_email_channel = true
   }
   assert {
     condition     = toset(keys(google_logging_metric.this)) == toset(["seed-run-failed", "scheduler-attempt-failed"]) && length(google_monitoring_alert_policy.this) == 2

@@ -293,11 +293,16 @@ The VM does **not** patch itself:
   (output `boot_image`), and **a change to `boot_image` takes effect only when the VM is
   replaced**.
 
-Patching is therefore a deliberate replacement, from the env root:
+Patching is therefore a deliberate replacement. From an env root (`infra/envs/dev` or
+`infra/envs/prod`), where this module sits inside the `_stack` composition, the address is
+`module.stack.module.edge_vm.google_compute_instance.this`:
 
 ```bash
-terraform apply -replace='module.edge_vm.google_compute_instance.this'
+terraform apply -replace='module.stack.module.edge_vm.google_compute_instance.this'
 ```
+
+(`module.edge_vm.google_compute_instance.this` is the address only in a root that calls this
+module directly.)
 
 What it does: Terraform deletes the VM and its boot disk, and creates a new VM from the newest
 image of the family (or the image `boot_image` names). The **data disk and the reserved internal

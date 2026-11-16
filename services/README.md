@@ -250,6 +250,7 @@ every `services/*/Dockerfile` it finds, in phases:
 ```text
 ----- BEGIN tfvars (v0.1.0, 0123456789abcdef0123456789abcdef01234567) -----
 cuff_sim_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/cuff-sim@sha256:<64 hex>"
+fhir_proxy_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/fhir-proxy@sha256:<64 hex>"
 health_sync_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/health-sync@sha256:<64 hex>"
 seed_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/seed@sha256:<64 hex>"
 v2_to_fhir_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
@@ -257,10 +258,10 @@ v2_to_fhir_image = "us-central1-docker.pkg.dev/<project>/pulsebridge-services/v2
 ```
 
 Each variable name is the service directory with `-` turned into `_`, plus `_image`. The value
-is the image by digest, without a tag. T20 (`v2_to_fhir_image`, `health_sync_image`, and
-`seed_image` for the seeder's Cloud Run job, created only with `use_synthetic_data`), T22
-(`cuff_sim_image`, later `fhir_proxy_image`) and T25 should use these names, so the block can be
-pasted unchanged. The block is printed only by a build that succeeded, and then it lists
+is the image by digest, without a tag. There are five: `v2_to_fhir_image`, `health_sync_image`
+and `seed_image` (the seeder's Cloud Run job, created only with `use_synthetic_data`) for module
+ingestion, `cuff_sim_image` and `fhir_proxy_image` for module phr; the env roots use exactly these
+names, so the block can be pasted unchanged. The block is printed only by a build that succeeded, and then it lists
 every service, each digest read back from the registry. A failed build prints no block. It may
 still have pushed some images (see "A failed release"), so do not take digests from the
 `=== <service>` lines of a failed build. To get the block from a finished build:
@@ -287,8 +288,8 @@ gcloud builds submit --config cloudbuild.yaml \
 A manual `gcloud builds submit` uploads the source to a Cloud Storage bucket
 (`gs://<project>_cloudbuild` by default) and the build reads it from there. With a
 user-specified build service account, that account probably also needs read access to that
-bucket (for example `roles/storage.objectViewer` on it). This is not verified; it is a note for
-T26. A trigger reads the source from GitHub and does not need it.
+bucket (for example `roles/storage.objectViewer` on it). This is not verified. The trigger (T26,
+below) reads the source from GitHub and does not need it.
 
 **Tags are pushed once.** The services repository has immutable tags (`project-base`): a
 pushed tag can never be moved to another image. The phases above are arranged around that:
@@ -336,29 +337,29 @@ not the `terraform-deployer` (which has far more power than a build needs). It n
 It needs no Secret Manager, Healthcare, Cloud Run or IAM roles. It deploys nothing: the deploy is
 a Terraform apply, as the deployer, with the digests from the log.
 
-**The trigger is not part of T24.** It would be a `google_cloudbuild_trigger` on tags matching
-`^v[0-9]+\.[0-9]+\.[0-9]+$`, with `filename = "cloudbuild.yaml"` and `service_account` set to
-the build account. It needs a one-time manual step: connecting the GitHub repository to Cloud
-Build through the Cloud Build GitHub App. The natural owner is T26 (Terraform CI/CD), with the
-build service account added to the `identity` module. An alternative that skips the Cloud Build
-GitHub connection is a GitHub Actions workflow on tag pushes. It would authenticate with the
-existing Workload Identity Federation and run `gcloud builds submit`. The deployer would then
-also need `roles/cloudbuild.builds.editor` and `roles/iam.serviceAccountUser` on the build
-account.
+**The account and the trigger exist since T26, both opt-in.** Module identity creates the build
+account (`create_build_account`, the env roots' `create_build_service_account`) with the log
+writer role; module project-base grants it the two repository roles above and, with
+`build_trigger_repository` set, creates a `google_cloudbuild_trigger` on tags matching
+`^v[0-9]+\.[0-9]+\.[0-9]+$` that runs `cloudbuild.yaml` as the build account. Each triggered
+build waits for an approval in the Cloud Build console by default (`build_trigger_approval_required`).
+The trigger needs a one-time manual step, connecting the GitHub repository to Cloud Build through
+the Cloud Build GitHub App (2nd gen), and the deployer needs `roles/cloudbuild.builds.editor`
+(bootstrap's `allow_build_trigger`). Steps: project-base README, "Image builds"; infra/envs/README.md,
+step 7.
 
 ### Cost
 
 Nothing here is always on. A build runs only when a tag is pushed (or you start one by hand) and
-is billed per build-minute. One build of the four images takes a few minutes on the default
+is billed per build-minute. One build of the five images takes a few minutes on the default
 `e2-standard-2` worker. That is inside Cloud Build's monthly free allowance (2,500 build-minutes
 at the time of writing), and about $0.006 per minute beyond it. These are not confirmed
 against the current pricing page.
 
-Storage is Artifact Registry's: each image is about 53 to 58 MB compressed. The four share the
-base layers, so a release adds about 100 MB, and the first 0.5 GB is free. Each release keeps
-its images, because tags are immutable and nothing deletes them. A cleanup policy on the
-repository (keep the last few releases) belongs in `project-base`. It is a suggested follow-up,
-because without one, storage grows by about $0.01 a month per release. Pulls inside the region
+Storage is Artifact Registry's: each image is about 53 to 58 MB compressed. The five share the
+base layers, so a release adds about 100 MB, and the first 0.5 GB is free. Tags are immutable, so
+nothing replaces an image; since T26 project-base's cleanup policy keeps the newest ten versions
+of each image and deletes older ones after 90 days (project-base README, "Image builds"). Pulls inside the region
 are free. No private worker pool is used: private pools are billed per minute and are not needed.
 
 ### Bumping the base image

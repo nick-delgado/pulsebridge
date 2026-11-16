@@ -306,6 +306,158 @@ variable "github_allowed_refs" {
   }
 }
 
+variable "github_environments" {
+  description = "Optional list of GitHub Environment names (for example [\"prod-plan\", \"prod\"]) whose jobs alone may obtain deployer tokens. Empty (the default) adds nothing. When set, the attribute condition also requires `assertion.environment in [...]`: only a job that references one of these environments gets a token, and GitHub applies the environment's protection rules (required reviewers, allowed branches) BEFORE such a job starts, so the gate is enforced by GitHub rather than by workflow YAML. Use it for the prod project (infra/envs/README.md, \"CI/CD\"). Pull-request plans reference no environment, so a project with this set cannot be planned from pull requests."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    # Pasted into a CEL string literal, like github_allowed_refs: no quotes or backslashes.
+    condition     = alltrue([for e in var.github_environments : can(regex("^[A-Za-z0-9._-]{1,255}$", e))])
+    error_message = "Each entry of github_environments must be an environment name of letters, digits, '.', '_' and '-'."
+  }
+}
+
+# CI contexts (wif.tf): "main", "pull-request" or "env-<environment>-main". The three accounts'
+# lists must never share a context, or a job could become two of them (a page deploy job would
+# hold the deployer). With github_environments set (prod), every context must be one of those
+# environments: a non-environment context would be refused by the pool's condition anyway, and
+# a default meant for dev must not pass silently.
+
+variable "deployer_wif_contexts" {
+  description = "The CI contexts (wif.tf) whose jobs may impersonate the deployer. Default [\"main\"] is dev's: jobs on main run by push, schedule or workflow_dispatch (the dev apply and the nightly destroy). prod: [\"env-prod-main\"] (only jobs in the prod GitHub Environment on main); with github_environments set, \"main\" is refused. Never \"pull-request\"."
+  type        = list(string)
+  default     = ["main"]
+  nullable    = false
+
+  validation {
+    condition     = length(var.deployer_wif_contexts) > 0 && alltrue([for c in var.deployer_wif_contexts : can(regex("^(main|env-[A-Za-z0-9._-]{1,255}-main)$", c))])
+    error_message = "deployer_wif_contexts must be a non-empty list of \"main\" or \"env-<environment>-main\" (never \"pull-request\")."
+  }
+
+  validation {
+    condition     = length(var.github_environments) == 0 || alltrue([for c in var.deployer_wif_contexts : contains([for e in var.github_environments : "env-${e}-main"], c)])
+    error_message = "With github_environments set (prod), deployer_wif_contexts must name those environments, for example [\"env-prod-main\"]; the dev default [\"main\"] does not apply."
+  }
+}
+
+variable "create_planner" {
+  description = "Create the read-only planner service account (ci_identities.tf, T26) that CI's terraform plan runs as. Default false. Opt in for CI."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "planner_account_id" {
+  description = "account_id of the planner service account."
+  type        = string
+  default     = "terraform-planner"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.planner_account_id))
+    error_message = "planner_account_id must be 6-30 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
+}
+
+variable "planner_role_id" {
+  description = "ID of the planner's custom project role. A deleted custom role keeps its ID reserved for about 37 days."
+  type        = string
+  default     = "pulsebridgeTerraformPlanner"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9_.]{3,64}$", var.planner_role_id))
+    error_message = "planner_role_id must be 3-64 letters, digits, '_' or '.'."
+  }
+}
+
+variable "planner_extra_permissions" {
+  description = "Permissions added to the planner's custom role (ci_identities.tf), if a real plan is refused on one the built-in list lacks. Only `<service>.<resource>.get` or `.getIamPolicy` are accepted, and never one that reads data (FHIR resources, HL7v2 messages, log entries, secret values, objects)."
+  type        = list(string)
+  default     = []
+  nullable    = false
+
+  validation {
+    condition = alltrue([
+      for p in var.planner_extra_permissions :
+      can(regex("^[a-z0-9]+\\.[A-Za-z0-9]+\\.(get|getIamPolicy)$", p)) && !can(regex("(?i)(fhirResources|hl7V2Messages|dicom|consent|logEntries|versions|objects|SerialPort|Screenshot)", p))
+    ])
+    error_message = "planner_extra_permissions may contain only <service>.<resource>.get or .getIamPolicy permissions that read no data (no FHIR resources, HL7v2 messages, log entries, secret versions or objects)."
+  }
+}
+
+variable "planner_wif_contexts" {
+  description = "The CI contexts whose jobs may impersonate the planner. Default [\"pull-request\"] is dev's. prod: [\"env-prod-plan-main\"] (the prod-plan Environment on main); with github_environments set, \"pull-request\" is refused."
+  type        = list(string)
+  default     = ["pull-request"]
+  nullable    = false
+
+  validation {
+    condition     = length(var.planner_wif_contexts) > 0 && alltrue([for c in var.planner_wif_contexts : can(regex("^(pull-request|main|env-[A-Za-z0-9._-]{1,255}-main)$", c))])
+    error_message = "planner_wif_contexts must be a non-empty list of \"pull-request\", \"main\" or \"env-<environment>-main\"."
+  }
+
+  validation {
+    condition     = length(var.github_environments) == 0 || alltrue([for c in var.planner_wif_contexts : contains([for e in var.github_environments : "env-${e}-main"], c)])
+    error_message = "With github_environments set (prod), planner_wif_contexts must name those environments, for example [\"env-prod-plan-main\"]."
+  }
+
+  validation {
+    condition     = length(setintersection(toset(var.planner_wif_contexts), toset(var.deployer_wif_contexts))) == 0
+    error_message = "planner_wif_contexts and deployer_wif_contexts must not share a context: a planning job would hold the deployer."
+  }
+}
+
+variable "create_page_deployer" {
+  description = "Create the page deployer service account (ci_identities.tf, T26): roles/firebasehosting.admin only, used by CI's page deploy jobs. Default false."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
+variable "page_deployer_account_id" {
+  description = "account_id of the page deployer service account."
+  type        = string
+  default     = "page-deployer"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.page_deployer_account_id))
+    error_message = "page_deployer_account_id must be 6-30 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
+}
+
+variable "page_deployer_wif_contexts" {
+  description = "The CI contexts whose jobs may impersonate the page deployer: its own GitHub Environment on main, never a context of the deployer or the planner (a page job runs npm packages, which could otherwise ask for their token). Default [\"env-dev-page-main\"] is dev's; prod: [\"env-prod-page-main\"]."
+  type        = list(string)
+  default     = ["env-dev-page-main"]
+  nullable    = false
+
+  validation {
+    condition     = length(var.page_deployer_wif_contexts) > 0 && alltrue([for c in var.page_deployer_wif_contexts : can(regex("^env-[A-Za-z0-9._-]{1,255}-main$", c))])
+    error_message = "page_deployer_wif_contexts must be a non-empty list of \"env-<environment>-main\": the page deployer has its own GitHub Environment."
+  }
+
+  validation {
+    condition     = length(var.github_environments) == 0 || alltrue([for c in var.page_deployer_wif_contexts : contains([for e in var.github_environments : "env-${e}-main"], c)])
+    error_message = "With github_environments set (prod), page_deployer_wif_contexts must name one of them, for example [\"env-prod-page-main\"]."
+  }
+
+  validation {
+    condition     = length(setintersection(toset(var.page_deployer_wif_contexts), toset(concat(var.deployer_wif_contexts, var.planner_wif_contexts)))) == 0
+    error_message = "page_deployer_wif_contexts must share no context with deployer_wif_contexts or planner_wif_contexts: the page job would then hold the deployer or the planner."
+  }
+}
+
+variable "allow_build_trigger" {
+  description = "Grant the deployer roles/cloudbuild.builds.editor, which creating project-base's Cloud Build trigger needs (T26). Default false: set it only together with build_trigger_repository in an env root. The role also lets the holder start builds."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "wif_pool_id" {
   description = "ID of the Workload Identity pool. 4-32 lowercase letters, digits and hyphens; the \"gcp-\" prefix is reserved. A deleted pool's ID cannot be reused for 30 days."
   type        = string

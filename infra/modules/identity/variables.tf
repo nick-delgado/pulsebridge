@@ -29,6 +29,13 @@ variable "create_seeder_account" {
   default     = false
 }
 
+variable "create_build_account" {
+  description = "Create the dedicated image-build service account (\"<prefix>-build\", key \"build\", T26) that Cloud Build runs cloudbuild.yaml as. This module grants it only roles/logging.logWriter on the project (the build log, logging: CLOUD_LOGGING_ONLY); module project-base grants it writer on the services repository and reader on the Docker Hub mirror, on those repositories only. Nothing else: no secrets, health data, Cloud Run or IAM. Default false: no build account."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "grant_pubsub_token_creator" {
   description = "Let the project's Pub/Sub service agent (service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com) mint OIDC tokens for the pubsub-push account. Projects created before 8 April 2021 need it; newer ones already allow it, so granting it is harmless there. On by default because it is scoped to the pubsub-push account only, never the project. This module is the only owner of this grant; the healthcare module must not also create it."
   type        = bool
@@ -73,7 +80,7 @@ variable "secret_deletion_protection" {
 # ----------------------------------------------------------------------------------------------
 
 variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through the write-only argument secret_data_wo, so it never enters Terraform state or plan files. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set the password EITHER this way OR with scripts/secrets/set-reviewer-password (T27), never both: while Terraform manages a version, the next apply undoes a script that disabled it. Leave unset in prod."
+  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through the write-only argument secret_data_wo, so it never enters Terraform state or plan files. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set the password EITHER this way OR with scripts/secrets/set-reviewer-password.sh (T27), never both: while Terraform manages a version, the next apply undoes a script that disabled it. Leave unset in prod."
   type        = string
   default     = null
   sensitive   = true

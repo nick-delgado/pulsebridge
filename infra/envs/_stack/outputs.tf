@@ -147,6 +147,16 @@ output "openemr" {
 
 # ---- for the build and the root's check -----------------------------------------------------
 
+output "build_service_account_email" {
+  description = "The image-build service account (T26), or null without create_build_service_account. For a manual build: `gcloud builds submit --service-account projects/<project>/serviceAccounts/<this> ...`."
+  value       = lookup(module.identity.service_account_emails, "build", null)
+}
+
+output "build_trigger_name" {
+  description = "The Cloud Build trigger that builds the images on release tags (T26), or null without build_trigger_repository."
+  value       = module.project_base.build_trigger_name
+}
+
 output "image_variable_names" {
   description = "The tfvars names the image build prints (services/README.md, \"Build in Cloud Build\"): paste its BEGIN/END tfvars block into terraform.tfvars unchanged."
   value       = ["cuff_sim_image", "fhir_proxy_image", "health_sync_image", "seed_image", "v2_to_fhir_image"]

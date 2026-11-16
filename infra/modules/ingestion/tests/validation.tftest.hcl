@@ -272,7 +272,26 @@ run "allows_healthcare_in_the_same_project" {
 run "rejects_bad_alert_email" {
   command = plan
   variables {
-    alert_email = "not an email"
+    alert_email                = "not an email"
+    create_alert_email_channel = true
   }
   expect_failures = [var.alert_email]
+}
+
+# T26: the address is sensitive, so a separate bool decides whether the channel exists. An address
+# without the bool would be silently ignored, and the bool without an address has nothing to send to.
+run "rejects_alert_email_without_the_channel_switch" {
+  command = plan
+  variables {
+    alert_email = "alerts@example.com"
+  }
+  expect_failures = [var.alert_email]
+}
+
+run "rejects_the_channel_switch_without_an_address" {
+  command = plan
+  variables {
+    create_alert_email_channel = true
+  }
+  expect_failures = [google_monitoring_notification_channel.email]
 }

@@ -118,3 +118,24 @@ run "prod_refuses_a_reviewer_password_even_without_a_version" {
 
   expect_failures = [var.reviewer_password]
 }
+
+# T26: the build trigger runs as the build account, so it is refused without it.
+run "build_trigger_needs_the_build_account" {
+  command = plan
+
+  variables {
+    build_trigger_repository = "projects/example-project/locations/us-central1/connections/github/repositories/pulsebridge"
+  }
+
+  expect_failures = [var.build_trigger_repository]
+}
+
+# T26 review: triggered builds wait for an approval unless the root turns it off.
+run "build_approval_is_on_by_default" {
+  command = plan
+
+  assert {
+    condition     = var.build_trigger_approval_required == true
+    error_message = "build_trigger_approval_required must default to true in the root."
+  }
+}

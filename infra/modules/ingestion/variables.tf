@@ -402,12 +402,28 @@ variable "notification_channels" {
 }
 
 variable "alert_email" {
-  description = "Optional email address the alerts are sent to: creates a Cloud Monitoring email notification channel in this module, used together with notification_channels. No default and never hardcoded: set it in the env root's tfvars (T25). It is stored in the Terraform state and on the channel. null (default) creates no channel."
+  description = "Optional email address the alerts are sent to, through a Cloud Monitoring email notification channel this module creates when create_alert_email_channel is true (the two are set together). No default and never hardcoded: set it in the env root's tfvars. Sensitive: plans, including the plan CI posts on a pull request (T26), show \"(sensitive value)\" instead of the address. It is still stored in the Terraform state and on the channel."
   type        = string
   default     = null
+  # A personal address. Sensitive values cannot decide how many resources exist (count/for_each),
+  # which is why the channel's existence is the separate bool create_alert_email_channel.
+  sensitive = true
 
   validation {
     condition     = var.alert_email == null || can(regex("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$", coalesce(var.alert_email, "x")))
     error_message = "alert_email must be an email address."
   }
+
+  validation {
+    # Cross-variable validation: an address without the switch would be silently ignored.
+    condition     = var.alert_email == null || var.create_alert_email_channel
+    error_message = "alert_email is set but create_alert_email_channel is false: set create_alert_email_channel = true to create the email channel (or leave alert_email unset)."
+  }
+}
+
+variable "create_alert_email_channel" {
+  description = "Create the email notification channel for alert_email (then alert_email is required; a precondition checks it). A plain bool, so the channel's count is known at plan time while alert_email stays sensitive: Terraform refuses a sensitive value in count or for_each. Default false: no channel. The env roots set it to whether alert_email is set."
+  type        = bool
+  default     = false
+  nullable    = false
 }
