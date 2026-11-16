@@ -89,10 +89,12 @@ test('a log row selects a cuff attempt sent in this session, and the cuff trace 
   await cuff.getByRole('button', { name: 'Take reading' }).click();
   await expect(cuff.locator('.cuff-reading')).toHaveCount(1);
   await openLog(page);
-  // The log row of this send: the same clock time as the cuff row (both in the browser's zone).
-  const sentAt = (await cuff.locator('.cuff-reading time').first().textContent()) ?? '';
+  // The log row of this send: the same instant as the cuff row (its <time datetime>). Not the
+  // clock text: in the hour after a clock goes back a seeded send an hour earlier shows the
+  // same wall time (T37).
+  const sentAt = await cuff.locator('.cuff-reading time').first().getAttribute('datetime');
   const newest = logRows(page)
-    .filter({ hasText: `, ${sentAt}` })
+    .filter({ has: page.locator(`time[datetime="${sentAt ?? 'none'}"]`) })
     .filter({ hasText: 'Cuff send' });
   await expect(newest).toHaveCount(1);
   await newest.getByRole('button', { name: /Select/ }).click();
@@ -397,7 +399,8 @@ test.describe('watch on the charger: a sync run that wrote nothing', () => {
   // 12:50 UTC (e2e/clock.ts): the 12:47 run found nothing new and nothing to finalise, so it
   // wrote no Bundle and no Provenance. The proxy builds transaction rows from Provenances, so
   // there is no row for it; the newest health-sync row is the 12:32 run, which finalised windows.
-  test.use({ clockAt: CHARGING_GAP_CLOCK });
+  // The log shows times in the browser's zone; this test names the runs in UTC, so it pins UTC.
+  test.use({ clockAt: CHARGING_GAP_CLOCK, timezoneId: 'UTC' });
 
   test('no row for the empty run; every health-sync row lists what it wrote', async ({ page }) => {
     const errors = await watchErrors(page);

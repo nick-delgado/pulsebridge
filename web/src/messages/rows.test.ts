@@ -172,6 +172,15 @@ describe('keys, sort times and clock text', () => {
     expect(logTime('2026-03-10T14:17:05.000Z', 'UTC')).toBe('10 Mar, 14:17:05');
     expect(logTime('2026-03-10T14:17:05.000Z', 'Asia/Kolkata')).toBe('10 Mar, 19:47:05');
     expect(logTime(null)).toBe('time unknown');
+    // The repeated hour after the autumn change (T37): 01:30 happens at 05:30 and 06:30 UTC.
+    const ny = 'America/New_York';
+    expect(logTime('2026-11-01T05:30:00Z', ny)).toBe('01 Nov, 01:30:00 (UTC-04:00)');
+    expect(logTime('2026-11-01T06:30:00Z', ny)).toBe('01 Nov, 01:30:00 (UTC-05:00)');
+    // Not repeated: the hours either side, and the spring change (02:30 never happens).
+    expect(logTime('2026-11-01T04:59:00Z', ny)).toBe('01 Nov, 00:59:00');
+    expect(logTime('2026-11-01T07:00:00Z', ny)).toBe('01 Nov, 02:00:00');
+    expect(logTime('2026-03-08T07:30:00Z', ny)).toBe('08 Mar, 03:30:00');
+    expect(logTime('2026-11-01T06:30:00Z', 'UTC')).toBe('01 Nov, 06:30:00');
   });
 });
 
