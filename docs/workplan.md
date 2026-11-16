@@ -501,6 +501,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
 | T36 | First-deploy follow-ups | T25 | `infra/modules/identity/`, `infra/bootstrap/README.md`, `infra/envs/README.md`, `docs/setup.md`, `README.md` | done |
 | T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
+| T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | in-progress |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -710,6 +711,33 @@ replace healthcare's three agent grants although nothing about them changed (avo
 targeted apply of the two IAP resources; IAP SSH was turned off again the same day, after the
 OpenEMR screenshot was taken); `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
 `pipefail`, which can fail falsely and, in its negative checks, pass falsely.
+
+**T38 Healthcare agent grants and the edge-VM script test.** Two follow-ups from T36's review and
+the dev deploy.
+
+1. Module healthcare grants roles to two Google-managed service agents (Healthcare, Pub/Sub) whose
+   addresses it builds from `data.google_project` read inside the module. Two faults: nothing
+   orders the Pub/Sub grants after identity's `google_project_service_identity.pubsub`, so a single
+   full apply on a new project can reach them before the agent exists; and when anything
+   healthcare depends on changes (seen on dev when an API was enabled), the data source is read
+   only at apply, the members become unknown and the plan replaces all three grants.
+2. `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
+   `pipefail`: when grep exits early the pipeline can return 141, so positive checks can fail
+   falsely and negative checks can pass falsely.
+
+- AC: healthcare's grants to the Pub/Sub agent are ordered after the agent's creation in a single
+  apply, without a module-level `depends_on` that defers healthcare's data sources.
+- AC: the members of healthcare's agent grants are known at plan time and do not change when an
+  unrelated API is enabled or another project-base resource changes; a test proves it and fails
+  when the fix is removed.
+- AC: on the deployed dev state the change must not replace the three existing grants: the member
+  strings stay byte-identical (state it, with the reasoning; the orchestrator plans against dev).
+- AC: the Healthcare service agent's existence on a new project is handled the same way or the
+  README says why it does not need it.
+- AC: no `printf | grep -q` (or equivalent early-exit pipe) remains in the edge-VM script test;
+  a demonstration shows the old form failing or passing falsely and the new form not.
+- AC: `make tf-validate tf-test tf-lint tf-scan lint test pre-commit secret-scan` pass without
+  credentials; READMEs and the runbook's finding are updated.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
