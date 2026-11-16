@@ -76,7 +76,57 @@ on exactly that resource, for the account `module.identity.service_account_email
 | `build` (only if `create_build_account`, T26) | `roles/logging.logWriter` | the project | **this module** | Cloud Build with a user-specified service account must log to Cloud Logging (`cloudbuild.yaml`: `logging: CLOUD_LOGGING_ONLY`). |
 | `build` | `roles/artifactregistry.writer` | the services repository only | `project-base` (T26) | Push the images, read existing tags, add a tag to an existing image. |
 | `build` | `roles/artifactregistry.reader` | the Docker Hub mirror only | `project-base` (T26) | Pull (and cache) the base image. |
-| Pub/Sub service agent `service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com` (`grant_pubsub_token_creator`, default true) | `roles/iam.serviceAccountTokenCreator` | the `pubsub-push` account only | **this module** (single owner) | Lets Pub/Sub sign the push OIDC token. Required in projects created before 8 April 2021; harmless in newer ones, and scoped to one account. |
+| Pub/Sub service agent `service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com` (`grant_pubsub_token_creator`, default true) | `roles/iam.serviceAccountTokenCreator` | the `pubsub-push` account only | **this module** (single owner) | Lets Pub/Sub sign the push OIDC token. Required in projects created before 8 April 2021; harmless in newer ones, and scoped to one account. The agent itself is created first by `google_project_service_identity.pubsub` (below). |
+
+### The Pub/Sub service agent must exist first (T36)
+
+A **service agent** is a Google-managed service account that a Google service uses to act inside
+your project (Pub/Sub's signs push tokens and publishes to dead-letter topics). Its address is
+fixed, `service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com`, but Google creates some
+agents **lazily**, on first use, not when the API is enabled. IAM refuses a grant to an account
+that does not exist yet. On the first dev deploy (16 November 2026, a new project) step 4 failed
+exactly so: `Error 400: Service account service-<number>@gcp-sa-pubsub.iam.gserviceaccount.com
+does not exist`, until the agent was created by hand.
+
+So the module now creates it: `google_project_service_identity.pubsub` (beta provider only; the
+env roots configure `google-beta` and Terraform passes it down) calls Service Usage's
+`services.generateServiceIdentity`, which creates the agent if missing and returns it if it
+exists. Then the Token Creator grant is made (`depends_on`). Details:
+
+- **Created whatever `grant_pubsub_token_creator` says.** The variable still means only "make the
+  Token Creator grant"; module healthcare also grants this agent roles (publisher on the dead-letter
+  topic, subscriber on the ingest subscription) and needs it to exist too. It costs nothing.
+- **The member string is still built from the project number**, not taken from the resource's
+  `member` attribute. The number is read at plan time, so the member is known in the plan. The
+  resource's attribute is "(known after apply)" while the resource is new, and `member` forces
+  replacement: on a project that already has the grant, the next plan would destroy and
+  re-create it for nothing. A **postcondition** on the service identity checks that the address
+  Google returns is the one the grant names (an empty answer passes, a different one stops the
+  apply).
+- **Lifecycle.** The resource cannot be updated, imported or really destroyed: `terraform
+  destroy` only drops it from state, and the agent stays, as every service agent does.
+- **Not verified:** which permission `generateServiceIdentity` checks (Google's reference names
+  only the OAuth scope). The deployer holds `roles/serviceusage.serviceUsageAdmin`; on the dev
+  deploy the agent was created by hand with another identity, so a deployer-only run is the first
+  real test (checklist A22).
+
+**On a project that is already deployed** (the dev project of 16 November, where the agent was
+created by hand and the grant exists), the next apply shows **one resource to add**,
+`module.stack.module.identity.google_project_service_identity.pubsub` (it returns the existing
+agent), and **no change** to `google_service_account_iam_member.pubsub_token_creator[0]`: its
+member string is the same. The data source `google_project.this` lost its `count` (its address
+changes from `this[0]` to `this`); data sources hold no lasting state, so the plan shows nothing for it.
+
+**Other service agents the stack grants roles to** (checked in T36): module healthcare grants the
+**Healthcare** agent publisher on the ingest topic and the **Pub/Sub** agent publisher on the
+dead-letter topic and subscriber on the ingest subscription, each with the address built from the
+project number. On the dev deploy the Healthcare grant worked (step 6), and the two Pub/Sub ones
+worked only because the agent had by then been created by hand. With the runbook's order they now
+work on a new project too (step 4 creates the agent before healthcare's grants in steps 6 and 8);
+a single full apply on a new project may still reach healthcare's grants first, because healthcare
+does not depend on this resource (re-run the apply). No module grants anything to the Cloud Run,
+Cloud Scheduler, Artifact Registry or Cloud Build agents, so those cannot fail this way (on the dev
+deploy the Cloud Run services, the Scheduler job and the build ran without any grant to them).
 
 In particular: no project-level `roles/owner`, `roles/editor`, admin, IAM, Secret Manager,
 Healthcare or Cloud Run role; `cuff-sim`, `v2-to-fhir`, `scheduler-invoker`, `pubsub-push` and
@@ -225,7 +275,7 @@ provider could not reach a project. `state_scan.py` removes them itself.
 ```bash
 env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT \
     -u GOOGLE_PROJECT -u GOOGLE_CREDENTIALS HOME="$(mktemp -d)" GCE_METADATA_HOST=127.0.0.1:9 \
-    sh -c 'terraform init -backend=false && terraform test'   # 29 runs, mock Google provider
+    sh -c 'terraform init -backend=false && terraform test'   # 32 runs, mock google and google-beta
 python3 tests/state_scan.py                                    # reviewer password absent from state
 ```
 
@@ -233,7 +283,10 @@ python3 tests/state_scan.py                                    # reviewer passwo
   known at plan time; the only project-level grant is the edge VM's log writer; no build account by
   default, and with `create_build_account` exactly one (`<prefix>-build`) whose only project grant
   is the log writer and which reads and writes no secret; Token Creator is
-  on by default, can be turned off and is on the push account only; `project_id` and
+  on by default, can be turned off and is on the push account only; the Pub/Sub service agent is
+  created in the project (also with the grant off); the grant's member is the literal
+  `serviceAccount:service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com` and known at
+  plan time (so an existing grant is not replaced); an agent with another address stops the apply; `project_id` and
   `name_prefix` validation.
 - `tests/secrets.tftest.hcl`: the eight secrets; no versions by default; the accessor bindings
   compared as a whole table; `cuff-sim` and the others read nothing; the only write access is
@@ -256,12 +309,14 @@ python3 tests/state_scan.py                                    # reviewer passwo
 |------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.11 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | ~> 8.11 |
+| <a name="requirement_google-beta"></a> [google-beta](#requirement\_google-beta) | ~> 8.11 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
 | <a name="provider_google"></a> [google](#provider\_google) | 8.11.0 |
+| <a name="provider_google-beta"></a> [google-beta](#provider\_google-beta) | 8.11.0 |
 
 ## Modules
 
@@ -272,6 +327,7 @@ No modules.
 | Name | Type |
 |------|------|
 | [google_project_iam_member.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
+| [google_project_service_identity.pubsub](https://registry.terraform.io/providers/hashicorp/google-beta/latest/docs/resources/project_service_identity) | resource |
 | [google_secret_manager_secret.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/secret_manager_secret) | resource |
 | [google_secret_manager_secret_iam_member.accessor](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/secret_manager_secret_iam_member) | resource |
 | [google_secret_manager_secret_iam_member.writer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/secret_manager_secret_iam_member) | resource |

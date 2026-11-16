@@ -10,6 +10,17 @@ mock_provider "google" {
   }
 }
 
+# google_project_service_identity (google-beta) answers with the agent of the synthetic project
+# number above, as Google does for a real project; the module's postcondition checks that.
+mock_provider "google-beta" {
+  mock_resource "google_project_service_identity" {
+    defaults = {
+      email  = "service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+      member = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+  }
+}
+
 variables {
   project_id = "example-project-01"
 }
@@ -175,6 +186,61 @@ run "pubsub_token_creator_can_be_turned_off" {
     condition     = length(google_service_account_iam_member.pubsub_token_creator) == 0
     error_message = "grant_pubsub_token_creator = false must remove the Pub/Sub service agent grant."
   }
+
+  # The opt-out is about the grant only: module healthcare also grants the agent roles, so the
+  # agent is still created.
+  assert {
+    condition     = google_project_service_identity.pubsub.service == "pubsub.googleapis.com"
+    error_message = "The Pub/Sub service agent must be created even when the Token Creator grant is off."
+  }
+}
+
+# --- The Pub/Sub service agent (T36, first dev deploy) ---------------------------------------------
+#
+# On a new project the agent did not exist and the grant failed. The module now creates it
+# (google_project_service_identity, google-beta) before granting it anything.
+
+run "pubsub_service_agent_is_created_in_the_project" {
+  command = apply
+
+  assert {
+    condition     = google_project_service_identity.pubsub.service == "pubsub.googleapis.com" && google_project_service_identity.pubsub.project == "example-project-01"
+    error_message = "The module must create the Pub/Sub service identity in var.project_id."
+  }
+}
+
+# The grant's member must be the literal address, and KNOWN at plan time. This is what keeps an
+# already-deployed project's grant in place: `member` forces replacement, so a member that is
+# "(known after apply)" (as google_project_service_identity's `member` is while that resource is
+# new) would make the next plan destroy and re-create the existing grant. An assertion on an
+# unknown value fails the run, so this run fails if the member stops being known at plan.
+run "pubsub_token_creator_member_is_the_literal_agent_known_at_plan" {
+  command = plan
+
+  assert {
+    condition     = google_service_account_iam_member.pubsub_token_creator[0].member == "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    error_message = "The Token Creator member must be serviceAccount:service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com, known at plan time."
+  }
+}
+
+# If Google ever answered with a different agent address, the grant (built from the project
+# number) would name the wrong member: the postcondition stops the apply instead.
+run "pubsub_service_agent_with_another_address_is_refused" {
+  command = apply
+
+  # A state of its own: in the file's shared state the agent already exists from earlier runs,
+  # and an override only changes what a resource is created with.
+  state_key = "agent_with_another_address"
+
+  override_resource {
+    target = google_project_service_identity.pubsub
+    values = {
+      email  = "service-100000000002@gcp-sa-pubsub.iam.gserviceaccount.com"
+      member = "serviceAccount:service-100000000002@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+  }
+
+  expect_failures = [google_project_service_identity.pubsub]
 }
 
 # On by default (this module is the single owner of the grant), and scoped to one account.

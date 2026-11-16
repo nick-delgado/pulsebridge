@@ -60,6 +60,7 @@ ALLOWED_TYPES = {
     "google_secret_manager_secret_iam_member",
     "google_secret_manager_secret_version",
     "google_project",  # data source: project number for the Pub/Sub service agent
+    "google_project_service_identity",  # T36: creates the Pub/Sub service agent (google-beta)
 }
 FORBIDDEN_TYPES = {"google_service_account_key"}
 

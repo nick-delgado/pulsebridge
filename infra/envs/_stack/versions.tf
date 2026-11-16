@@ -3,7 +3,8 @@
 # no backend: the root that calls it configures `google` and `google-beta` and the state backend,
 # and Terraform passes those default (un-aliased) provider configurations down to this module and
 # on to the seven modules it wires. No aliases are needed: every module uses the default `google`
-# configuration, and only module phr also uses the default `google-beta` one.
+# configuration, and modules phr (Firebase Hosting) and identity (the Pub/Sub service agent)
+# also use the default `google-beta` one.
 #
 # Lock files belong to root modules only: infra/envs/.gitignore keeps this directory's
 # .terraform.lock.hcl (created by `terraform init` in tests) out of git.
@@ -16,7 +17,8 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 8.11"
     }
-    # Module phr's Firebase Hosting site exists only in the beta provider at 8.11.
+    # Module phr's Firebase Hosting site and module identity's google_project_service_identity
+    # exist only in the beta provider at 8.11.
     google-beta = {
       source  = "hashicorp/google-beta"
       version = "~> 8.11"

@@ -271,7 +271,13 @@ def check_no_hardcoded_identity() -> None:
                 domain.endswith(".iam.gserviceaccount.com")
                 and domain.split(".")[0] in ALLOWED_PROJECTS
             )
-            if not (placeholder or sa):
+            # A Google-managed service agent (service-<project number>@gcp-sa-<service>...) names
+            # a project by its number, so it is a placeholder only with an allowed number (T36).
+            agent = re.fullmatch(
+                r"service-(\d{12})@gcp-sa-[a-z0-9-]+\.iam\.gserviceaccount\.com", addr
+            )
+            agent_ok = bool(agent) and agent.group(1) in ALLOWED_NUMBERS
+            if not (placeholder or sa or agent_ok):
                 fail(f"{rel}: email address {addr!r} is not a placeholder")
         for m in HOST.finditer(text):
             host = m.group(0)

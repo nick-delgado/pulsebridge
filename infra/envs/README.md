@@ -65,8 +65,8 @@ The brief asks for two environment roots that share the modules. The two options
 
 Terraform's provider rules do not get in the way of (a). A child module may not configure
 providers when it is called with `count`/`for_each`, and needs `configuration_aliases` only for
-**aliased** providers. Here every module uses the **default** `google` configuration, and module
-phr also uses the default `google-beta` one, so the roots configure both providers once and
+**aliased** providers. Here every module uses the **default** `google` configuration, and modules
+phr and identity also use the default `google-beta` one, so the roots configure both providers once and
 Terraform passes them down through `_stack` to every module automatically. No alias, no
 `providers = {...}` map.
 

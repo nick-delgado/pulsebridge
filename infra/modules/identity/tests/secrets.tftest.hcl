@@ -8,6 +8,17 @@ mock_provider "google" {
   }
 }
 
+# google_project_service_identity (google-beta) answers with the agent of the synthetic project
+# number above, as Google does for a real project; the module's postcondition checks that.
+mock_provider "google-beta" {
+  mock_resource "google_project_service_identity" {
+    defaults = {
+      email  = "service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+      member = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+  }
+}
+
 # The Pub/Sub Token Creator grant is on by default and the provider checks that its
 # service_account_id looks like a real account name, so the push account gets a synthetic,
 # well-formed name instead of the mock's random string.

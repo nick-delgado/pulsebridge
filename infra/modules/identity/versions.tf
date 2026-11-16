@@ -8,5 +8,11 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 8.11"
     }
+    # google_project_service_identity (the Pub/Sub service agent) exists only in the beta
+    # provider. The env roots configure the default `google-beta` and Terraform passes it down.
+    google-beta = {
+      source  = "hashicorp/google-beta"
+      version = "~> 8.11"
+    }
   }
 }
