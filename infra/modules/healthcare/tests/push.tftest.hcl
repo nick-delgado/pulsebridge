@@ -1,17 +1,30 @@
 # push_enabled = true: the ingest subscription pushes to v2-to-fhir with an OIDC token.
 
 mock_provider "google" {
-  override_data {
-    target = data.google_project.this
-    values = { number = "123456789012" }
-  }
   override_resource {
     target = google_pubsub_topic.dead_letter
     values = { id = "projects/example-project/topics/pulsebridge-hl7v2-ingest-dead-letter" }
   }
 }
 
+# google-beta: the Healthcare service identity answers with the agent of the synthetic project
+# number, as Google does (the module's postcondition refuses any other address).
+mock_provider "google-beta" {
+  override_resource {
+    target = google_project_service_identity.healthcare
+    values = {
+      email  = "service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+      member = "serviceAccount:service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+    }
+  }
+}
+
 variables {
+  # T38: the project number and the Pub/Sub agent come from module identity in the stack, and
+  # the API list from module project-base. Synthetic values.
+  project_number             = "123456789012"
+  pubsub_service_agent_email = "service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com"
+  enabled_apis               = ["healthcare.googleapis.com", "pubsub.googleapis.com"]
   project_id                 = "example-project"
   push_enabled               = true
   push_endpoint              = "https://v2-to-fhir-abc123-uc.a.run.app/pubsub/hl7v2"

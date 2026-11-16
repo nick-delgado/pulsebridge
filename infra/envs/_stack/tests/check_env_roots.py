@@ -614,10 +614,17 @@ def module_block(text: str, name: str) -> str:
 # module -> modules it must depend_on (explicitly): the APIs (project-base) and the secret
 # accessor grants (identity) must exist first (module READMEs, "For T25").
 REQUIRED_DEPENDS_ON = {
-    "healthcare": {"project_base"},
     "ingestion": {"identity", "project_base"},
     "phr": {"project_base", "identity"},
 }
+
+# T38: modules whose call must have NO module-level depends_on. A module-level depends_on makes
+# every data source inside the module wait for every pending change in the modules it names, so
+# the data source is read only at apply. identity's data source gives the project number that
+# module healthcare's agent grants are built from, and healthcare took a module-level depends_on on
+# project-base before T38: enabling one API then made the grants' members unknown and replaced
+# them. healthcare orders itself after the APIs through its enabled_apis input instead.
+FORBIDDEN_DEPENDS_ON = ("identity", "healthcare")
 
 
 def check_ordering_and_versions() -> None:
@@ -630,6 +637,15 @@ def check_ordering_and_versions() -> None:
             fail(
                 f"_stack/main.tf: module {module} must depend_on {sorted(needed)}, "
                 f"found {sorted(got)}"
+            )
+    for module in FORBIDDEN_DEPENDS_ON:
+        body = module_block(stack, module)
+        if not body:
+            fail(f"_stack/main.tf: no module {module} block")
+        elif re.search(r"^\s*depends_on\s*=", body, re.M):
+            fail(
+                f"_stack/main.tf: module {module} must have no module-level depends_on "
+                "(it defers data sources and replaced healthcare's agent grants; T38)"
             )
     for root in ROOTS:
         text = re.sub(r"#.*", "", (ENVS / root / "versions.tf").read_text())

@@ -105,7 +105,7 @@ def env_of(container: dict) -> dict[str, str]:
     return {e["name"]: e.get("value") for e in container.get("env") or []}
 
 
-def run_terraform() -> dict[str, dict]:
+def run_terraform() -> tuple[dict[str, dict], dict[str, dict]]:
     env = {k: v for k, v in os.environ.items() if k not in CREDENTIAL_VARS}
     home = tempfile.mkdtemp(prefix="stack-plan-scan-home-")
     env.update(
@@ -142,7 +142,9 @@ def run_terraform() -> dict[str, dict]:
             if m.get("@level") == "error":
                 print(m.get("@message", ""), file=sys.stderr)
         raise SystemExit("FAIL: terraform test did not pass; the plan scan cannot run")
-    return {m["@testrun"]: m["test_state"] for m in messages if m.get("type") == "test_state"}
+    states = {m["@testrun"]: m["test_state"] for m in messages if m.get("type") == "test_state"}
+    plans = {m["@testrun"]: m["test_plan"] for m in messages if m.get("type") == "test_plan"}
+    return states, plans
 
 
 class Scan:
@@ -645,8 +647,65 @@ def check_plan_redaction() -> list[str]:
     return failures
 
 
+# T38: plan runs in tests/stack.tftest.hcl that change something in project-base on top of an
+# applied state (or plan a new project). Before T38, module healthcare's data source was then read
+# only at apply (a "read" change, action_reason read_because_dependency_pending) and the three
+# agent grants' members became unknown. The real provider marks `member` as forcing replacement, so
+# dev's plan said "must be replaced"; the mock provider does not run the provider's plan logic and
+# shows the same grants as an update instead. So the checks that matter are: no deferred read, and
+# nothing changes outside project-base (an exact set where it is known). Each entry: the run, and
+# the exact set of resources it may change (None: any, as long as all are under
+# module.project_base).
+UNRELATED_CHANGE_RUNS = {
+    "enabling_an_api_keeps_the_agent_grants": {
+        'module.project_base.google_project_service.this["iap.googleapis.com"]',
+        'module.project_base.google_compute_firewall.allow["allow-iap-ssh-to-edge"]',
+    },
+    "another_project_base_change_keeps_the_agent_grants": None,
+}
+NEW_PROJECT_RUN = "new_project_agent_grant_members_known_at_plan"
+
+
+def check_agent_grants_kept(plans: dict) -> list[str]:
+    """Unrelated project-base changes replace nothing, change nothing else, defer no read."""
+    failures: list[str] = []
+    for run in [*UNRELATED_CHANGE_RUNS, NEW_PROJECT_RUN]:
+        before = len(failures)
+        if run not in plans:
+            failures.append(f"{run}: no plan in the test output (renamed or removed?)")
+            continue
+        changes = {
+            rc["address"]: rc["change"]["actions"]
+            for rc in plans[run].get("resource_changes", [])
+            if rc["change"]["actions"] != ["no-op"]
+        }
+        deferred = sorted(a for a, actions in changes.items() if "read" in actions)
+        if deferred:
+            failures.append(f"{run}: data sources read only at apply: {deferred}")
+        if run == NEW_PROJECT_RUN:
+            if len(failures) == before:
+                print(f"{run}: no read deferred to apply")
+            continue
+        replaced = sorted(a for a, actions in changes.items() if "delete" in actions)
+        if replaced:
+            failures.append(f"{run}: resources destroyed or replaced: {replaced}")
+        expected = UNRELATED_CHANGE_RUNS[run]
+        if not changes:
+            failures.append(f"{run}: the plan changes nothing, so it tests nothing")
+        elif expected is not None and set(changes) != expected:
+            failures.append(
+                f"{run}: changes {sorted(changes)}, expected exactly {sorted(expected)}"
+            )
+        elif expected is None and any(not a.startswith("module.project_base.") for a in changes):
+            outside = sorted(a for a in changes if not a.startswith("module.project_base."))
+            failures.append(f"{run}: changes outside project-base: {outside}")
+        if len(failures) == before:
+            print(f"{run}: {len(changes)} planned change(s), all in project-base, no deferred read")
+    return failures
+
+
 def main() -> int:
-    states = run_terraform()
+    states, plans = run_terraform()
     # Every apply run in the test file is a scenario, and every scenario is an apply run: an empty
     # or stale SCENARIOS table would otherwise check nothing and pass.
     if not SCENARIOS or set(SCENARIOS) != set(states):
@@ -672,6 +731,7 @@ def main() -> int:
             scan.fail(f"only {len(scan.by_address)} resources in the state; the stack has about 94")
         print(f"{name}: {len(scan.by_address)} resources checked, {len(scan.failures)} failure(s)")
         failures += scan.failures
+    failures += check_agent_grants_kept(plans)
     failures += check_plan_redaction()
     if failures:
         for f in failures:

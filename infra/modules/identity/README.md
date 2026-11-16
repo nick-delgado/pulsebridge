@@ -78,6 +78,19 @@ on exactly that resource, for the account `module.identity.service_account_email
 | `build` | `roles/artifactregistry.reader` | the Docker Hub mirror only | `project-base` (T26) | Pull (and cache) the base image. |
 | Pub/Sub service agent `service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com` (`grant_pubsub_token_creator`, default true) | `roles/iam.serviceAccountTokenCreator` | the `pubsub-push` account only | **this module** (single owner) | Lets Pub/Sub sign the push OIDC token. Required in projects created before 8 April 2021; harmless in newer ones, and scoped to one account. The agent itself is created first by `google_project_service_identity.pubsub` (below). |
 
+### Outputs for module healthcare (T38)
+
+- **`project_number`**: read by `data.google_project.this` at plan time. Module healthcare builds
+  the Healthcare agent's address from it. Healthcare used to read the project itself, inside a
+  module call with `depends_on = [module.project_base]`; that deferred its read to apply whenever
+  project-base had a change, and planned its three agent grants for replacement. This module's
+  call has no `depends_on`, so its data source is always read at plan, and the stack's
+  `tests/check_env_roots.py` keeps it so: a module-level `depends_on` on identity (or healthcare)
+  fails it.
+- **`pubsub_service_agent_email`**: the same string the Token Creator grant uses, so it is known at
+  plan; the output has `depends_on = [google_project_service_identity.pubsub]`, an ordering-only
+  edge, so whatever uses it waits for the agent to exist without the value becoming unknown.
+
 ### The Pub/Sub service agent must exist first (T36)
 
 A **service agent** is a Google-managed service account that a Google service uses to act inside
@@ -122,10 +135,12 @@ changes from `this[0]` to `this`); data sources hold no lasting state, so the pl
 **Healthcare** agent publisher on the ingest topic and the **Pub/Sub** agent publisher on the
 dead-letter topic and subscriber on the ingest subscription, each with the address built from the
 project number. On the dev deploy the Healthcare grant worked (step 6), and the two Pub/Sub ones
-worked only because the agent had by then been created by hand. With the runbook's order they now
-work on a new project too (step 4 creates the agent before healthcare's grants in steps 6 and 8);
-a single full apply on a new project may still reach healthcare's grants first, because healthcare
-does not depend on this resource (re-run the apply). No module grants anything to the Cloud Run,
+worked only because the agent had by then been created by hand. Since T38 healthcare takes the
+agent from this module's `pubsub_service_agent_email` output, which is declared to depend on
+`google_project_service_identity.pubsub`, so a single full apply on a new project creates the agent
+before healthcare's two grants too (the runbook's order, step 4 before steps 6 and 8, still works).
+Healthcare also creates the Healthcare agent itself before granting it (healthcare README,
+"Service agents: known at plan, created first"). No module grants anything to the Cloud Run,
 Cloud Scheduler, Artifact Registry or Cloud Build agents, so those cannot fail this way (on the dev
 deploy the Cloud Run services, the Scheduler job and the build ran without any grant to them).
 
@@ -356,6 +371,8 @@ No modules.
 
 | Name | Description |
 |------|-------------|
+| <a name="output_project_number"></a> [project\_number](#output\_project\_number) | The project's number, read at plan time by data.google\_project. Module healthcare builds the Healthcare service agent's address from it. |
+| <a name="output_pubsub_service_agent_email"></a> [pubsub\_service\_agent\_email](#output\_pubsub\_service\_agent\_email) | The project's Pub/Sub service agent, service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com. Known at plan (built from the number), and declared to depend on google\_project\_service\_identity.pubsub, so any resource that uses it, such as module healthcare's dead-letter and subscriber grants, is created after the agent exists. |
 | <a name="output_reviewer_password_version_created"></a> [reviewer\_password\_version\_created](#output\_reviewer\_password\_version\_created) | True when this module wrote a reviewer-password version from tfvars (dev). False means the secret is empty until scripts/secrets/set-reviewer-password.sh runs, and the proxy's login answers 503. |
 | <a name="output_secret_ids"></a> [secret\_ids](#output\_secret\_ids) | Secret ID (the short name, e.g. "pb-reviewer-password") per secret key. Cloud Run secret references and the scripts that add versions use this. |
 | <a name="output_secret_readers"></a> [secret\_readers](#output\_secret\_readers) | Which workloads may read each secret (the accessor bindings this module creates). Informational, for READMEs and checks in other modules. |

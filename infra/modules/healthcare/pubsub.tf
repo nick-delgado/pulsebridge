@@ -20,12 +20,30 @@ resource "google_pubsub_topic" "ingest" {
   labels  = var.labels
   # No topic-level message retention: it is billed, and the subscription already keeps
   # unacknowledged notifications for message_retention_duration.
+
+  lifecycle {
+    # Orders the topic after the Pub/Sub API's enablement (a reference in a condition is a
+    # dependency) and checks the API is in the caller's list. See the dataset in main.tf.
+    precondition {
+      condition     = contains(var.enabled_apis, "pubsub.googleapis.com")
+      error_message = "enabled_apis must include pubsub.googleapis.com (module project-base's enabled_apis output)."
+    }
+  }
 }
 
 resource "google_pubsub_topic" "dead_letter" {
   project = var.project_id
   name    = local.dead_letter_topic_name
   labels  = var.labels
+
+  lifecycle {
+    # Orders the topic after the Pub/Sub API's enablement (a reference in a condition is a
+    # dependency) and checks the API is in the caller's list. See the dataset in main.tf.
+    precondition {
+      condition     = contains(var.enabled_apis, "pubsub.googleapis.com")
+      error_message = "enabled_apis must include pubsub.googleapis.com (module project-base's enabled_apis output)."
+    }
+  }
 }
 
 # The subscription v2-to-fhir receives notifications from. It always exists; push_config is

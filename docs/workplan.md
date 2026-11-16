@@ -501,7 +501,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
 | T36 | First-deploy follow-ups | T25 | `infra/modules/identity/`, `infra/bootstrap/README.md`, `infra/envs/README.md`, `docs/setup.md`, `README.md` | done |
 | T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
-| T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | in-progress |
+| T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -738,6 +738,19 @@ the dev deploy.
   a demonstration shows the old form failing or passing falsely and the new form not.
 - AC: `make tf-validate tf-test tf-lint tf-scan lint test pre-commit secret-scan` pass without
   credentials; READMEs and the runbook's finding are updated.
+
+T38 outcome: reviewed (pass with notes) and merged. Cause: the stack's module-level `depends_on`
+on healthcare made its project lookup wait for any pending change in project-base. Healthcare now
+takes the project number and the Pub/Sub agent's address as inputs, creates the Healthcare
+service agent itself, and is ordered after the APIs through preconditions on `enabled_apis`.
+Planned against dev on 16 November (read-only): one resource to add, nothing replaced; with
+`enable_iap_ssh = true`, only the two IAP resources in addition. Not yet applied to dev. Notes
+left open: `check_agent_ordering.sh` says more broadly than is true that healthcare does not
+reach project-base's network (two resources do, through ingestion, harmlessly); its required
+line for the subscriber grant passes without the fix (the dead-letter line is the guard); static
+check 11 misses a pipe split across lines; the same `printf | grep -q` form remains in the
+static checks of ingestion, phr and project-base; identity's Pub/Sub agent is not ordered after
+the Pub/Sub API on a new project.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate

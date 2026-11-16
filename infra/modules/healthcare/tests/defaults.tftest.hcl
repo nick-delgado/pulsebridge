@@ -4,10 +4,6 @@
 
 mock_provider "google" {
   # Fixed, synthetic coordinates so assertions can compare against literal strings.
-  override_data {
-    target = data.google_project.this
-    values = { number = "123456789012" }
-  }
   override_resource {
     target = google_healthcare_dataset.this
     values = { id = "projects/example-project/locations/us-central1/datasets/pulsebridge" }
@@ -34,8 +30,25 @@ mock_provider "google" {
   }
 }
 
+# google-beta: the Healthcare service identity answers with the agent of the synthetic project
+# number, as Google does (the module's postcondition refuses any other address).
+mock_provider "google-beta" {
+  override_resource {
+    target = google_project_service_identity.healthcare
+    values = {
+      email  = "service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+      member = "serviceAccount:service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+    }
+  }
+}
+
 variables {
-  project_id = "example-project"
+  # T38: the project number and the Pub/Sub agent come from module identity in the stack, and
+  # the API list from module project-base. Synthetic values.
+  project_number             = "123456789012"
+  pubsub_service_agent_email = "service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com"
+  enabled_apis               = ["healthcare.googleapis.com", "pubsub.googleapis.com"]
+  project_id                 = "example-project"
 }
 
 run "fhir_store_is_r4_with_chosen_settings" {
@@ -394,4 +407,48 @@ run "retention_variable_reaches_both_subscriptions" {
     condition     = google_pubsub_subscription.ingest.message_retention_duration == "86400s" && google_pubsub_subscription.dead_letter.message_retention_duration == "86400s"
     error_message = "message_retention_duration must reach both subscriptions."
   }
+}
+
+# ---- T38: the agents' grants are known at plan; the Healthcare agent is created first -------
+
+# `member` forces replacement, so a member that is "(known after apply)" in a plan replaces an
+# existing grant. A plan-time assertion fails with "Unknown condition value" if any is unknown.
+run "agent_grant_members_are_known_at_plan" {
+  command = plan
+
+  assert {
+    condition = output.service_agent_grant_members == {
+      healthcare_agent_publisher         = "serviceAccount:service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+      pubsub_agent_dead_letter_publisher = "serviceAccount:service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com"
+      pubsub_agent_ingest_subscriber     = "serviceAccount:service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+    error_message = "The three agent grants' members must be the literal agent addresses, known at plan time."
+  }
+}
+
+run "healthcare_service_agent_is_created" {
+  command = apply
+
+  assert {
+    condition     = google_project_service_identity.healthcare.service == "healthcare.googleapis.com" && google_project_service_identity.healthcare.project == "example-project"
+    error_message = "The module must create (generate) the Healthcare service agent in the project."
+  }
+}
+
+# Google answering with another address means the grant's assumption is wrong: stop the apply.
+run "an_unexpected_healthcare_agent_stops_the_apply" {
+  command = apply
+  # A fresh state: the earlier runs already created the identity, and an override only changes
+  # what a resource is created with.
+  state_key = "agent_with_another_address"
+
+  override_resource {
+    target = google_project_service_identity.healthcare
+    values = {
+      email  = "service-999999999999@gcp-sa-healthcare.iam.gserviceaccount.com"
+      member = "serviceAccount:service-999999999999@gcp-sa-healthcare.iam.gserviceaccount.com"
+    }
+  }
+
+  expect_failures = [google_project_service_identity.healthcare]
 }

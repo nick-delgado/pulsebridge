@@ -7,7 +7,9 @@
 # the arrows that look like cycles are not):
 #
 #   identity ──emails──> project-base, healthcare, ingestion, edge-vm, phr
+#   identity ──project number, Pub/Sub agent (after its creation)──> healthcare
 #   project-base ──network, subnet, mirror, ports──> edge-vm, openemr, phr
+#   project-base ──enabled_apis──> healthcare (its dataset, topics, Healthcare agent)
 #   healthcare ──store names──> ingestion, edge-vm, phr
 #   ingestion ──v2-to-fhir push endpoint, ingest_enabled──> healthcare (only its subscription)
 #   edge-vm reserved ADDRESS ──internal_ip──> openemr ──hooks──> edge-vm INSTANCE metadata
@@ -125,9 +127,21 @@ module "healthcare" {
   # Module identity's map as it is; healthcare uses the keys it knows.
   store_iam_service_accounts = module.identity.service_account_emails
 
+  # T38: the service agents. Both values are known at plan (identity reads the number from a data
+  # source nothing defers), so the three agent grants' `member`s are known and never replaced for
+  # nothing. The Pub/Sub agent's email output depends on identity's
+  # google_project_service_identity.pubsub, which orders healthcare's two grants to that agent
+  # after its creation in a single apply.
+  project_number             = module.identity.project_number
+  pubsub_service_agent_email = module.identity.pubsub_service_agent_email
+
   # The Healthcare and Pub/Sub APIs are enabled by project-base; on a fresh project the dataset
-  # would otherwise race the API enablement.
-  depends_on = [module.project_base]
+  # and topics would otherwise race the API enablement. The list orders exactly those resources
+  # (healthcare references it in preconditions). Deliberately NOT `depends_on = [module.project_base]`:
+  # a module-level depends_on makes every data source in the module wait for every change in
+  # project-base, which on dev (16 November, enable_iap_ssh) made the agent grants' members
+  # unknown and planned all three for replacement. tests/check_env_roots.py refuses it.
+  enabled_apis = module.project_base.enabled_apis
 }
 
 # ---------------------------------------------------------------------------------------------
