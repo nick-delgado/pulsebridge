@@ -416,7 +416,7 @@ without them. `gcloud builds log` prints the lines **without** a step prefix (se
 November), so the block pastes as it is. Paste the block into `terraform.tfvars` unchanged: it
 names all five images; the one your mode does not use is ignored. A manual `gcloud builds submit`
 runs as Cloud Build's default account, which in a new project is the **Compute Engine default
-service account** (`<project number>-compute@developer.gserviceaccount.com`; seen on 16
+service account** (`<project-number>-compute@developer.gserviceaccount.com`; seen on 16
 November, and that account may hold project Editor), unless you add `--service-account
 projects/<project>/serviceAccounts/$(terraform output -raw build_service_account_email)`; the
 build account then also needs read access to the source bucket (not verified; services/README.md). Note that `gcloud builds submit` creates a source
