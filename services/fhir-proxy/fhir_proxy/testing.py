@@ -257,7 +257,7 @@ class FakeHealthcare:
                 "date",
                 "_sort",
                 "_count",
-                "_summary",
+                "_total",
                 "_elements",
                 "_page_token",
             },
@@ -319,9 +319,13 @@ class FakeHealthcare:
                     ),
                     reverse=sort.startswith("-"),
                 )
-        if params.get("_summary") == ["count"]:
-            return {"resourceType": "Bundle", "type": "searchset", "total": len(resources)}
+        # As Cloud Healthcare: ``_summary`` is refused (it is not in the allowed set above); a
+        # count is ``_total=accurate`` with ``_count=0``, which returns the total and no entries.
         count = int(params.get("_count", ["100"])[0])
+        if count == 0:
+            if params.get("_total") != ["accurate"]:
+                raise AssertionError("_count=0 without _total=accurate gives an estimated total")
+            return {"resourceType": "Bundle", "type": "searchset", "total": len(resources)}
         if self.page_size_override:
             count = min(count, self.page_size_override)
         start = int((params.get("_page_token") or ["0"])[0])

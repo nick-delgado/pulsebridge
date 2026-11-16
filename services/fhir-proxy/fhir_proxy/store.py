@@ -155,7 +155,11 @@ class Stores:
             [
                 ("subject", ",".join(refs)),
                 ("code", token(codes.LOINC, code)),
-                ("_summary", "count"),
+                # Cloud Healthcare refuses ``_summary`` ("_summary argument is not supported yet",
+                # found on the first real deploy). ``_total=accurate`` with ``_count=0`` gives an
+                # exact ``Bundle.total`` and no entries.
+                ("_total", "accurate"),
+                ("_count", "0"),
             ],
         )
         total = bundle.get("total") if isinstance(bundle, dict) else None

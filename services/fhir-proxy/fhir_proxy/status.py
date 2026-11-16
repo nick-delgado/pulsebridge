@@ -14,7 +14,7 @@ The rest comes from the FHIR store, in three cheap searches, reused for
 - ``lastSyncAt``: the **time of the newest heart-rate write**, ``meta.lastUpdated`` of the most
   recently updated heart-rate Observation (``_sort=-_lastUpdated&_count=1``). health-sync writes
   only windows that changed, so this moves only when there is new data (README, open question 9).
-- ``observationCounts``: ``_summary=count`` for heart rate (watch) and the blood-pressure panel
+- ``observationCounts``: ``_total=accurate&_count=0`` (Cloud Healthcare has no ``_summary``) for heart rate (watch) and the blood-pressure panel
   (cuff), for the configured patient.
 - ``fhirStore``: reachable when those searches answered. When they did not (an error, or the
   request's time budget ran out), the counts are ``null`` ("not known", never 0) and
