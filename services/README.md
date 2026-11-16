@@ -418,7 +418,9 @@ so refused pushes and recovery from a failed push were checked with the fake doc
 `tests/tooling/test_cloudbuild.py`, not against Artifact Registry.
 
 **Confirmed by the first real build** (16 November 2026, dev, a `gcloud builds submit` by hand
-with `TAG_NAME=v0.1.0`; five new images, the block printed, all five deployed and serving):
+with `TAG_NAME=v0.1.0`; five new images and the block printed. With synthetic data the apply
+deployed four of them: `seed` (the job and its Scheduler job), `v2-to-fhir`, `cuff-sim` and
+`fhir-proxy`; the `health-sync` image was built but not deployed or exercised):
 
 - `automapSubstitutions` exposes the built-in `PROJECT_ID`, `TAG_NAME` and `COMMIT_SHA` to the
   `script` as well as the `_` substitutions.

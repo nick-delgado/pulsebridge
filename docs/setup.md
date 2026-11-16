@@ -638,8 +638,9 @@ and `terraform output push_enabled` is `false`. Real data: if it stops at
 `google_cloud_run_v2_service.health_sync` on a secret error, run the connect script (3.8) now and
 apply again. Then run checklist item E8's `AA` test (a test message through the MLLP adapter must
 get `AA`; the VM's ingest grant on the store is created by this apply). Runbook: [step 8](../infra/envs/README.md#8-first-full-apply-ingest-off-deployer).
-Confirmed on the 16 November dev deploy with synthetic data (A10, A11, A19); the real-data
-health-sync case is not (A8).
+Confirmed on the 16 November dev deploy with synthetic data (A10, A11); A19 only partly (the
+apply did not stop at fhir-proxy, with the secret's version present; whether Cloud Run refuses a
+secret with no version is still open); the real-data health-sync case is not verified (A8).
 
 ### 3.8 The setup step: write the Patient (exactly one of the two)
 

@@ -564,15 +564,26 @@ if not d.get("accessToken"):
     sys.exit("mint failed: " + str(d.get("error", {}).get("message", ""))[:300])
 sys.stdout.write(d["accessToken"])'
 }
-tok="$(mint_deployer_token)" || { echo "could not mint a deployer token" >&2; exit 1; }
-env -u GOOGLE_APPLICATION_CREDENTIALS GOOGLE_OAUTH_ACCESS_TOKEN="$tok" terraform plan
+# Safe to paste into an interactive shell: a failed mint returns from the function, it does not exit.
+tf_as_deployer() {
+  local tok
+  tok="$(mint_deployer_token)" || { echo "could not mint a deployer token" >&2; return 1; }
+  env -u GOOGLE_APPLICATION_CREDENTIALS GOOGLE_OAUTH_ACCESS_TOKEN="$tok" terraform "$@"
+}
+tf_as_deployer plan
 # gcloud as the deployer, the same way:
-CLOUDSDK_AUTH_ACCESS_TOKEN="$tok" gcloud run jobs list --project <project-id> --region <region>
+gcloud_as_deployer() {
+  local tok
+  tok="$(mint_deployer_token)" || { echo "could not mint a deployer token" >&2; return 1; }
+  CLOUDSDK_AUTH_ACCESS_TOKEN="$tok" gcloud "$@"
+}
+gcloud_as_deployer run jobs list --project <project-id> --region <region>
 ```
 
   What the caller needs: `roles/iam.serviceAccountTokenCreator` on the deployer account, and
   `serviceusage.services.use` on `<project-id>` for the header (the project's Owner has both).
-  The IAM Credentials API must be enabled in `<project-id>` (bootstrap enables it). On a failure the
+  The IAM Credentials API must be enabled in `<project-id>` (bootstrap enables it). `--fail-with-body`
+  needs curl 7.76 or later. On a failure the
   function prints Google's error message (which names no token) and returns non-zero. This is
   documented commands, not a committed script: a helper would have to be tested against a fake
   token endpoint, and these few lines are clearer to read than a wrapper.
@@ -1059,7 +1070,7 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task.
 | A2 | Step 4's targeted apply creates the eight empty secrets once Secret Manager is enabled | T25 | 2026-11-16 dev: ok. The eight secrets were created; the run then stopped on the Pub/Sub agent grant (A5) |
 | A3 | The full plan on a clean project has no "Invalid count argument" for project-base's mirror grant (its count is now a plain bool; see "Findings") | T25 | 2026-11-16 dev: ok. Step 8's full apply planned and applied with no "Invalid count argument" |
 | A4 | `health.googleapis.com` is the Google Health API's service name (it enables) | PB | 2026-11-16 dev: ok. `health.googleapis.com` enabled in step 3 |
-| A5 | Service agents exist once the APIs are enabled; if an IAM binding to one fails, re-running the apply fixes it | HC | 2026-11-16 dev: **no** for Pub/Sub: the agent did not exist after the API was enabled, and a re-run does not help (`Service account service-<number>@gcp-sa-pubsub... does not exist`). Created by hand; since T36 module identity creates it (step 4). The Healthcare agent existed (A6) |
+| A5 | Service agents exist once the APIs are enabled; if an IAM binding to one fails, re-running the apply fixes it | HC | 2026-11-16 dev: **no** for Pub/Sub: the agent did not exist after the API was enabled, a re-run would not help (inferred: the apply failed once and the agent was then created by hand, without a second try) (`Service account service-<number>@gcp-sa-pubsub... does not exist`). Created by hand; since T36 module identity creates it (step 4). The Healthcare agent existed (A6) |
 | A6 | The Healthcare topic-level publisher binding is accepted (S5 could not show it is needed) | HC | 2026-11-16 dev: ok. The Healthcare agent's publisher binding on the ingest topic was created (step 6) |
 | A7 | The image build runs from a clean checkout and prints the tfvars block; the source bucket note (build account read access) | SVC | 2026-11-16 dev: partly. A by-hand build from the working tree (not a clean checkout) printed the tfvars block with five digests; the source-bucket note not tried (C7) |
 | A8 | health-sync deploys while its secrets have no version yet (else: connect first, apply again) | IN | |
@@ -1128,7 +1139,7 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task.
 | O8 | The metadata block: `sudo iptables -S DOCKER-USER` shows the rule; `docker run --rm --network pulsebridge-edge <image with curl> curl -m 5 -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/` times out; the adapter still gets `AA`; the startup script still reads secrets; `getent hosts mariadb` answers and `getent hosts example.com` times out in a container on the edge network; optionally `--publish <internal_ip>:443:443` | OE | 2026-11-16 dev: partly. "blocked the metadata server (169.254.169.254) for containers on pulsebridge-edge"; the adapter still got `AA` and the script still read secrets; the container-side curl and `getent` checks not run |
 | O9 | Apache capped: `docker exec openemr ps` shows at most 5 `httpd` under a burst; `zz-lowmem.conf` loads after `mpm.conf` | OE | |
 | O10 | Memory: `free -m` shows about 200 MB or more available at idle | OE | 2026-11-16 dev: not checked; journald reported "Under memory pressure" several times during the pull and setup |
-| O11 | The settings: `OPENEMR_SETTING_* took effect`; `docker logs openemr` shows `Set rest_fhir_api to 1`; `GET /apis/default/fhir/metadata` is 200 | OE | 2026-11-16 dev: ok. "OPENEMR_SETTING_* took effect" and FHIR metadata 200 (the hook's checks) |
+| O11 | The settings: `OPENEMR_SETTING_* took effect`; `docker logs openemr` shows `Set rest_fhir_api to 1`; `GET /apis/default/fhir/metadata` is 200 | OE | 2026-11-16 dev: partly. The hook's checks were seen ("OPENEMR_SETTING_* took effect", FHIR metadata 200); the `docker logs openemr` line `Set rest_fhir_api to 1` was not looked at |
 | O12 | The database connection as `openemr` over TCP to 127.0.0.1 works; `oauth_clients` has `client_id`, `client_name`, `is_enabled` | OE | 2026-11-16 dev: ok. The hook registered and enabled the client in `oauth_clients` |
 | O13 | The registration: 200 with a `client_id`; the client enabled; a token request from fhir-proxy (T15) succeeds with the RS384 assertion. Scopes: the six v1 scopes in the token; then try `openemr_scopes = ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"]`, re-run the startup script, repeat a share (search, create, read work; `PUT`/`DELETE` refused); keep v2 if it works | OE | 2026-11-16 dev: partly. Registration and enable ok, and fhir-proxy's token requests worked (the shares, P-items); the v2-scope trial not done |
 | O14 | Secret Manager: `addVersion` with `secretVersionAdder`; `GET versions/latest` with `viewer` reports `state` and `name` | OE, ID | 2026-11-16 dev: partly. `addVersion` with `secretVersionAdder` stored version 1; the `viewer` read of `versions/latest` not exercised on a first boot |

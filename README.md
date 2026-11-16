@@ -173,7 +173,8 @@ npm run dev       # mock mode on http://localhost:5173 (any non-empty password l
 
 > **Placeholder.** Reviewers cannot open OpenEMR themselves (its screens are deliberately not
 > exposed, decision D13), so this section is meant to show a shared reading in the real OpenEMR
-> chart. It needs a deployed stack and has not been captured yet.
+> chart. It is still open: dev has been deployed (see [Status](#status)), but the capture needs a
+> person logged in to OpenEMR through an IAP tunnel, as below, and has not been done yet.
 >
 > How it will be captured, **with synthetic data only**:
 >
