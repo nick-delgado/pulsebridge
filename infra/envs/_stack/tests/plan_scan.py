@@ -649,10 +649,13 @@ def check_plan_redaction() -> list[str]:
 
 # T38: plan runs in tests/stack.tftest.hcl that change something in project-base on top of an
 # applied state (or plan a new project). Before T38, module healthcare's data source was then read
-# only at apply ("read" with action_reason read_because_dependency_pending) and its three agent
-# grants were planned "delete, create". Each entry: the run, and the exact set of resources it may
-# change (None: any, as long as all are under module.project_base). Every change must be a
-# create or an in-place update; no read may be deferred to apply.
+# only at apply (a "read" change, action_reason read_because_dependency_pending) and the three
+# agent grants' members became unknown. The real provider marks `member` as forcing replacement, so
+# dev's plan said "must be replaced"; the mock provider does not run the provider's plan logic and
+# shows the same grants as an update instead. So the checks that matter are: no deferred read, and
+# nothing changes outside project-base (an exact set where it is known). Each entry: the run, and
+# the exact set of resources it may change (None: any, as long as all are under
+# module.project_base).
 UNRELATED_CHANGE_RUNS = {
     "enabling_an_api_keeps_the_agent_grants": {
         'module.project_base.google_project_service.this["iap.googleapis.com"]',
@@ -665,8 +668,9 @@ NEW_PROJECT_RUN = "new_project_agent_grant_members_known_at_plan"
 
 def check_agent_grants_kept(plans: dict) -> list[str]:
     """Unrelated project-base changes replace nothing, change nothing else, defer no read."""
-    failures = []
+    failures: list[str] = []
     for run in [*UNRELATED_CHANGE_RUNS, NEW_PROJECT_RUN]:
+        before = len(failures)
         if run not in plans:
             failures.append(f"{run}: no plan in the test output (renamed or removed?)")
             continue
@@ -679,6 +683,8 @@ def check_agent_grants_kept(plans: dict) -> list[str]:
         if deferred:
             failures.append(f"{run}: data sources read only at apply: {deferred}")
         if run == NEW_PROJECT_RUN:
+            if len(failures) == before:
+                print(f"{run}: no read deferred to apply")
             continue
         replaced = sorted(a for a, actions in changes.items() if "delete" in actions)
         if replaced:
@@ -691,7 +697,8 @@ def check_agent_grants_kept(plans: dict) -> list[str]:
         elif expected is None and any(not a.startswith("module.project_base.") for a in changes):
             outside = sorted(a for a in changes if not a.startswith("module.project_base."))
             failures.append(f"{run}: changes outside project-base: {outside}")
-        print(f"{run}: {len(changes)} planned change(s), all in project-base, none replaced")
+        if len(failures) == before:
+            print(f"{run}: {len(changes)} planned change(s), all in project-base, no deferred read")
     return failures
 
 
