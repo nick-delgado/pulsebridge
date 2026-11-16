@@ -50,11 +50,20 @@ module "healthcare" {
 
   # Module identity's map as it is: this module uses the keys it knows and ignores the rest.
   store_iam_service_accounts = module.identity.service_account_emails
+
+  # T38: the service agents' inputs (see "Service agents: known at plan, created first").
+  project_number             = module.identity.project_number
+  pubsub_service_agent_email = module.identity.pubsub_service_agent_email
+  enabled_apis               = module.project_base.enabled_apis
+
+  # No `depends_on = [module.project_base]`: enabled_apis orders what needs the APIs.
 }
 ```
 
 `module.identity.service_account_emails` is module identity's output (T04). The
-`module.ingestion` output name above is illustrative; T20 and T25 settle it.
+`module.ingestion` output name above is illustrative; T20 and T25 settle it. The module needs the
+default `google-beta` provider too (for the Healthcare service identity); a root that configures
+`google-beta` passes it down without any `providers` argument.
 
 ## FHIR store settings (health data)
 
@@ -145,6 +154,52 @@ All bindings are resource-level and additive (`*_iam_member`); none is project-l
 | Cloud Healthcare service agent `service-<number>@gcp-sa-healthcare` | `roles/pubsub.publisher` | ingest topic | Publishes the HL7v2 store's notifications. The store depends on this binding: creating a store whose topic it cannot publish to fails with 403 (S5). |
 | Pub/Sub service agent `service-<number>@gcp-sa-pubsub` | `roles/pubsub.publisher` | dead-letter topic | Forwards failed notifications. |
 | Pub/Sub service agent | `roles/pubsub.subscriber` | ingest subscription | Acknowledges the original once it is dead-lettered. |
+
+### Service agents: known at plan, created first (T38)
+
+A **service agent** is a Google-managed service account that a Google service acts as inside the
+project. The two this module grants roles to have fixed addresses,
+`service-<project number>@gcp-sa-healthcare.iam.gserviceaccount.com` and
+`service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com`. Three rules shape how the module
+handles them:
+
+1. **The grants' `member` must be known at plan time.** In the Google provider, changing `member`
+   on a `*_iam_member` resource forces replacement (destroy, then create). If a plan cannot know
+   the member yet ("(known after apply)"), Terraform must assume it changes and plans a
+   replacement, even when the final value turns out identical. So the members are built from
+   inputs whose values are known at plan: `project_number` and `pubsub_service_agent_email`.
+2. **No data source in this module.** It used to read `data.google_project` itself for the number.
+   A data source is normally read during plan, but Terraform postpones the read to apply when the
+   data source depends on something with a pending change, and a module-level `depends_on` on the
+   call makes every data source in the module depend on everything named there. The stack gave
+   this module `depends_on = [module.project_base]`; on dev (16 November) enabling one API in
+   project-base (`enable_iap_ssh`) therefore made the plan say
+   `data.google_project.this will be read during apply` and `must be replaced` for all three
+   grants, though nothing about them had changed. `tests/check_ordering.sh` now fails if a data
+   source comes back.
+3. **Each agent must exist before it is granted anything.** IAM refuses a grant to an account that
+   does not exist, and Google creates some agents lazily rather than when the API is enabled (the
+   Pub/Sub one did not exist on a new project; module identity README). Module identity creates the
+   Pub/Sub agent and its `pubsub_service_agent_email` output is declared to depend on that
+   resource, so the two grants that use it are ordered after it. This module creates the
+   Healthcare agent (`google_project_service_identity.healthcare`, beta provider) and the
+   publisher grant `depends_on` it. On the dev deploy the Healthcare agent already existed right
+   after the API was enabled (checklist A6), so this is a safeguard: Google's documentation could
+   not be read from the build session to confirm whether that is promised, and the provider's own
+   documentation uses `healthcare.googleapis.com` as its example service, so
+   `generateServiceIdentity` supports it. A postcondition stops the apply if Google returns another
+   address than the one the grant names.
+
+The APIs (Healthcare, Pub/Sub) must be enabled before the dataset, the topics and the Healthcare
+agent are created. That ordering comes from `enabled_apis` (module project-base's output), which
+those resources reference in a precondition; a reference in a condition is a dependency like any
+other, and it orders only those resources, not the whole module.
+
+**On the deployed dev project** the first plan with this change shows one resource to add,
+`module.stack.module.healthcare.google_project_service_identity.healthcare`, and nothing to change
+or destroy: the three grants' members are the same strings as before (the same project number,
+now read by module identity's data source instead of this module's), and a data source that
+disappears from the configuration leaves nothing to plan.
 
 **Not in this module: the push token grant.** To sign the push request's OIDC token, the
 Pub/Sub service agent needs `roles/iam.serviceAccountTokenCreator` on the push service account.
@@ -255,8 +310,11 @@ From spike S5's "What was not verified" and this module's own choices:
   not rely on that default.
 - **Push delivery, OIDC, retry and dead-letter behaviour** are from Pub/Sub documentation; S5 had
   no endpoint. First confirmation comes with T20/T29.
-- **Service agents exist** once the APIs are enabled (module project-base). If an apply runs
-  before the agent is created, the IAM binding fails; re-running the apply fixes it.
+- **Service agents exist** before they are granted anything: this module creates the Healthcare
+  agent and module identity the Pub/Sub one (see "Service agents: known at plan, created first").
+  Whether Google creates the Healthcare agent when the API is enabled is not verified from its
+  documentation; dev's deploy suggests so (A6). Which permission `generateServiceIdentity` checks is
+  not documented; the deployer created the Pub/Sub agent with it on 16 November (A22).
 - **Least-privilege roles** in the IAM tables above are untested, and so is which permission an update-create `PUT` checks.
 - **Parser V1 vs V2/V3**: only V1 was exercised.
 
@@ -275,9 +333,19 @@ different `for_each` or store, or if the module declares project-level IAM or a 
 
 - any `.tf` file here manages a service account's IAM or grants
   `roles/iam.serviceAccountTokenCreator` (module identity owns that grant);
-- `terraform graph` lacks either ordering edge: HL7v2 store -> the Healthcare service agent's
-  publisher binding on the ingest topic, and ingest subscription -> the Pub/Sub service
-  agent's publisher binding on the dead-letter topic.
+- any `.tf` file here declares a data source (T38: see "Service agents");
+- `terraform graph` lacks an ordering edge: HL7v2 store -> the Healthcare service agent's
+  publisher binding on the ingest topic; ingest subscription -> the Pub/Sub service agent's
+  publisher binding on the dead-letter topic; that publisher binding -> the Healthcare service
+  identity.
+
+The test files also cover (T38): the agent grants' members are the literal agent addresses and
+known at plan; the Healthcare service identity is created and an agent with another address
+stops the apply; `project_number` must be digits, `pubsub_service_agent_email` must be this
+project number's agent, and `enabled_apis` must contain both APIs (dataset and Healthcare agent,
+or the two topics, refuse otherwise). Ordering across modules (the Pub/Sub grants after identity's
+agent; the dataset and topics after project-base's APIs) can only be seen from the stack:
+`infra/envs/_stack/tests/check_agent_ordering.sh`.
 
 Run every Terraform command for this module with Google credentials removed from the
 environment (no `GOOGLE_APPLICATION_CREDENTIALS`, no project variables, no gcloud config), so a
@@ -296,12 +364,14 @@ tests/check_store_iam.sh        # same
 |------|---------|
 | <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.11 |
 | <a name="requirement_google"></a> [google](#requirement\_google) | ~> 8.11 |
+| <a name="requirement_google-beta"></a> [google-beta](#requirement\_google-beta) | ~> 8.11 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
 | <a name="provider_google"></a> [google](#provider\_google) | 8.11.0 |
+| <a name="provider_google-beta"></a> [google-beta](#provider\_google-beta) | 8.11.0 |
 
 ## Modules
 
@@ -318,6 +388,7 @@ No modules.
 | [google_healthcare_fhir_store_iam_member.audit](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_fhir_store_iam_member) | resource |
 | [google_healthcare_hl7_v2_store.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_hl7_v2_store) | resource |
 | [google_healthcare_hl7_v2_store_iam_member.app](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/healthcare_hl7_v2_store_iam_member) | resource |
+| [google_project_service_identity.healthcare](https://registry.terraform.io/providers/hashicorp/google-beta/latest/docs/resources/project_service_identity) | resource |
 | [google_pubsub_subscription.dead_letter](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_subscription) | resource |
 | [google_pubsub_subscription.ingest](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_subscription) | resource |
 | [google_pubsub_subscription_iam_member.pubsub_agent_ingest_subscriber](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_subscription_iam_member) | resource |
@@ -325,7 +396,6 @@ No modules.
 | [google_pubsub_topic.ingest](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_topic) | resource |
 | [google_pubsub_topic_iam_member.healthcare_agent_publisher](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_topic_iam_member) | resource |
 | [google_pubsub_topic_iam_member.pubsub_agent_dead_letter_publisher](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/pubsub_topic_iam_member) | resource |
-| [google_project.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/data-sources/project) | data source |
 
 ## Inputs
 
@@ -334,6 +404,7 @@ No modules.
 | <a name="input_ack_deadline_seconds"></a> [ack\_deadline\_seconds](#input\_ack\_deadline\_seconds) | How long Pub/Sub waits for v2-to-fhir to answer a push before treating it as failed and retrying. 60 s covers a Cloud Run cold start plus a FHIR write; the Pub/Sub default of 10 s does not. | `number` | `60` | no |
 | <a name="input_audit_fhir_store_name"></a> [audit\_fhir\_store\_name](#input\_audit\_fhir\_store\_name) | Name (which is also the ID) of the second FHIR R4 store, which holds only the AuditEvents<br/>that record cuff send attempts (D15). null (default) gives "<name\_prefix>-fhir-audit".<br/>Must differ from the main FHIR store's name, "<name\_prefix>-fhir". Changing it replaces<br/>the store and deletes its records. | `string` | `null` | no |
 | <a name="input_deletion_policy"></a> [deletion\_policy](#input\_deletion\_policy) | What `terraform destroy` (or a replacing apply) may do to the dataset and its three stores<br/>(FHIR, audit FHIR, HL7v2).<br/>"DELETE" (default) deletes them together with every stored FHIR resource and HL7v2 message,<br/>so a destroyed dev stack leaves nothing billable. "PREVENT" makes destroy fail instead, which<br/>suits prod where the data is real. The setting is read from state, so switching from PREVENT<br/>to DELETE needs an apply before the destroy. "ABANDON" is not offered: it would leave the<br/>stores, and their storage bill, behind without Terraform knowing. | `string` | `"DELETE"` | no |
+| <a name="input_enabled_apis"></a> [enabled\_apis](#input\_enabled\_apis) | Service names of the APIs enabled in the project: module project-base's enabled\_apis output.<br/>Must include healthcare.googleapis.com and pubsub.googleapis.com. Besides being checked, the<br/>list orders the dataset, the topics and the Healthcare service identity after the APIs'<br/>enablement on a fresh project (a reference creates a dependency). It replaces a module-level<br/>depends\_on on project-base, which deferred this module's reads and made the agent grants'<br/>members unknown whenever any project-base resource changed (T38). If the APIs are enabled<br/>outside Terraform, pass their names. | `list(string)` | n/a | yes |
 | <a name="input_hl7v2_parser_version"></a> [hl7v2\_parser\_version](#input\_hl7v2\_parser\_version) | Version of the HL7v2 store's built-in (unschematized) parser, which fills the stored message's parsedData. Cannot be changed after the store is created (spike S4). V1 is the version spikes S4 and S5 tested; see the README before changing it. | `string` | `"V1"` | no |
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the stores, topics and subscriptions (the dataset resource has no labels). | `map(string)` | `{}` | no |
 | <a name="input_location"></a> [location](#input\_location) | Cloud Healthcare API location for the dataset and all its stores (a region such as "us-central1", or a multi-region such as "us"). Stored health data stays in this location. | `string` | `"us-central1"` | no |
@@ -341,6 +412,8 @@ No modules.
 | <a name="input_message_retention_duration"></a> [message\_retention\_duration](#input\_message\_retention\_duration) | How long the ingest and dead-letter subscriptions keep unacknowledged notifications (a duration such as "604800s" = 7 days, Pub/Sub's default). Pub/Sub allows up to 31 days; this module caps it at 7 days as a cost choice, since unacknowledged messages older than a day can be billed as storage (negligible at this volume, but not zero). | `string` | `"604800s"` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every resource name in this module (dataset, stores, topics, subscriptions). Lets two stacks share one project without colliding. | `string` | `"pulsebridge"` | no |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the GCP project that holds the Healthcare dataset and the Pub/Sub topics. Comes from the env root; never hardcoded. | `string` | n/a | yes |
+| <a name="input_project_number"></a> [project\_number](#input\_project\_number) | Number of the same project (the numeric ID Google puts in service agent addresses). The<br/>Healthcare and Pub/Sub service agents' addresses are built from it. In the stack it is module<br/>identity's project\_number output, read from a data source that nothing defers, so it is known<br/>at plan time; that keeps the agent grants' `member` known at plan (T38). Not a secret, but it<br/>identifies a project: pass it from a data source or a variable, never hardcode it. | `string` | n/a | yes |
+| <a name="input_pubsub_service_agent_email"></a> [pubsub\_service\_agent\_email](#input\_pubsub\_service\_agent\_email) | The project's Pub/Sub service agent, service-<project\_number>@gcp-sa-pubsub.iam.gserviceaccount.com,<br/>which gets publisher on the dead-letter topic and subscriber on the ingest subscription. Pass<br/>module identity's pubsub\_service\_agent\_email output: identity creates the agent<br/>(google\_project\_service\_identity.pubsub) and that output depends on it, so the two grants here<br/>are created after the agent in a single apply, while the value stays known at plan. | `string` | n/a | yes |
 | <a name="input_push_audience"></a> [push\_audience](#input\_push\_audience) | Audience (aud claim) of the OIDC token. null (default) uses the endpoint's origin, scheme and host only, which is the Cloud Run service URL that Cloud Run checks tokens against. | `string` | `null` | no |
 | <a name="input_push_enabled"></a> [push\_enabled](#input\_push\_enabled) | Turn the ingest subscription into an OIDC-authenticated push subscription to v2-to-fhir.<br/>false (default): the subscription exists as a pull subscription and simply holds<br/>notifications (up to the retention period) until push is switched on, so nothing is lost<br/>while the v2-to-fhir service does not exist yet. true: push\_endpoint and<br/>push\_service\_account\_email are required. This is a plain bool, not derived from<br/>push\_endpoint, so Terraform knows at plan time which resources to create even when the<br/>endpoint is a Cloud Run URL that is only known after apply. | `bool` | `false` | no |
 | <a name="input_push_endpoint"></a> [push\_endpoint](#input\_push\_endpoint) | HTTPS URL Pub/Sub posts each notification to: the v2-to-fhir Cloud Run service URL plus its handler path (from module ingestion, T20). Required when push\_enabled is true. | `string` | `null` | no |
@@ -378,4 +451,5 @@ No modules.
 | <a name="output_project_id"></a> [project\_id](#output\_project\_id) | Project that holds the dataset and topics (echoed so consumers take every coordinate from one place). |
 | <a name="output_pubsub_service_agent_email"></a> [pubsub\_service\_agent\_email](#output\_pubsub\_service\_agent\_email) | Pub/Sub service agent that dead-letters and signs push OIDC tokens. |
 | <a name="output_push_enabled"></a> [push\_enabled](#output\_push\_enabled) | Whether the ingest subscription currently pushes to v2-to-fhir. |
+| <a name="output_service_agent_grant_members"></a> [service\_agent\_grant\_members](#output\_service\_agent\_grant\_members) | The `member` of each of the three service agent grants, keyed by resource name, read from the resources themselves. Known at plan time (T38); the stack's tests assert on it so that a change making these members unknown (which would replace the grants) fails. |
 <!-- END_TF_DOCS -->

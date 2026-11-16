@@ -126,3 +126,12 @@ output "pubsub_service_agent_email" {
   description = "Pub/Sub service agent that dead-letters and signs push OIDC tokens."
   value       = local.pubsub_service_agent
 }
+
+output "service_agent_grant_members" {
+  description = "The `member` of each of the three service agent grants, keyed by resource name, read from the resources themselves. Known at plan time (T38); the stack's tests assert on it so that a change making these members unknown (which would replace the grants) fails."
+  value = {
+    healthcare_agent_publisher         = google_pubsub_topic_iam_member.healthcare_agent_publisher.member
+    pubsub_agent_dead_letter_publisher = google_pubsub_topic_iam_member.pubsub_agent_dead_letter_publisher.member
+    pubsub_agent_ingest_subscriber     = google_pubsub_subscription_iam_member.pubsub_agent_ingest_subscriber.member
+  }
+}

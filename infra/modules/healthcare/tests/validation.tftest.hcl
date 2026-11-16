@@ -1,14 +1,27 @@
 # Variable validations reject bad input at plan time.
 
 mock_provider "google" {
-  override_data {
-    target = data.google_project.this
-    values = { number = "123456789012" }
+}
+
+# google-beta: the Healthcare service identity answers with the agent of the synthetic project
+# number, as Google does (the module's postcondition refuses any other address).
+mock_provider "google-beta" {
+  override_resource {
+    target = google_project_service_identity.healthcare
+    values = {
+      email  = "service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+      member = "serviceAccount:service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+    }
   }
 }
 
 variables {
-  project_id = "example-project"
+  # T38: the project number and the Pub/Sub agent come from module identity in the stack, and
+  # the API list from module project-base. Synthetic values.
+  project_number             = "123456789012"
+  pubsub_service_agent_email = "service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com"
+  enabled_apis               = ["healthcare.googleapis.com", "pubsub.googleapis.com"]
+  project_id                 = "example-project"
 }
 
 run "rejects_bad_project_id" {
@@ -196,4 +209,40 @@ run "rejects_bad_time_zone" {
     time_zone = "UTC+2 summer"
   }
   expect_failures = [var.time_zone]
+}
+
+# ---- T38: project number, Pub/Sub agent and API list ----------------------------------------
+
+run "rejects_a_project_number_that_is_not_digits" {
+  command = plan
+  variables {
+    project_number             = "example-project"
+    pubsub_service_agent_email = "service-example-project@gcp-sa-pubsub.iam.gserviceaccount.com"
+  }
+  expect_failures = [var.project_number]
+}
+
+# The Pub/Sub agent is passed in (from module identity); it must be this project's agent.
+run "rejects_a_pubsub_agent_of_another_project" {
+  command = plan
+  variables {
+    pubsub_service_agent_email = "service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+  }
+  expect_failures = [var.pubsub_service_agent_email]
+}
+
+run "rejects_an_api_list_without_healthcare" {
+  command = plan
+  variables {
+    enabled_apis = ["pubsub.googleapis.com"]
+  }
+  expect_failures = [google_healthcare_dataset.this, google_project_service_identity.healthcare]
+}
+
+run "rejects_an_api_list_without_pubsub" {
+  command = plan
+  variables {
+    enabled_apis = ["healthcare.googleapis.com"]
+  }
+  expect_failures = [google_pubsub_topic.ingest, google_pubsub_topic.dead_letter]
 }

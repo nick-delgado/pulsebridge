@@ -27,6 +27,26 @@ fail() {
   failures=$((failures + 1))
 }
 
+# No `producer | grep -q` anywhere in this file (T38). Under `set -o pipefail`, grep -q exits at
+# its first match; if the producer (printf, find) is still writing, it is killed by SIGPIPE and
+# exits 141, and pipefail makes 141 the pipeline's status. A positive check (`if ! ... | grep -q`)
+# then reports a present line as missing, and a negative one (`if ... | grep -q; then fail`)
+# passes although the line is there. Text is searched with a here-string instead
+# (`grep -q PATTERN <<<"$text"`), which has no second process to kill, and find's output is
+# captured whole (left_behind below) before it is tested. static_checks.sh refuses the old form.
+
+# Prints the paths under $1 that match the find expression in the remaining arguments, or nothing
+# when $1 does not exist (then nothing was left behind). Assign its output to a variable
+# (`left=$(left_behind ...)`) before testing it: a failing find then stops the script (set -e
+# applies to an assignment, not to a substitution inside `[ ... ]`) instead of counting as
+# "nothing found".
+left_behind() {
+  local dir=$1
+  shift
+  [ -e "$dir" ] || return 0
+  find "$dir" \( "$@" \) -print
+}
+
 # ---- 1. Lint ----------------------------------------------------------------------------------------
 
 shellcheck_bin="${SHELLCHECK:-$(command -v shellcheck || true)}"
@@ -258,18 +278,18 @@ for want in "--restart" "unless-stopped" "--stop-timeout" "120" "--network" "pul
   "type=bind,source=$SB/mnt/disks/edge/mariadb,target=/var/lib/mysql" \
   "type=bind,source=$SB/mnt/disks/edge/secrets/mariadb-root-password,target=/run/secrets/mariadb-root-password,readonly" \
   "MARIADB_ROOT_PASSWORD_FILE=/run/secrets/mariadb-root-password" "$MARIADB_IMAGE" "mariadbd" "--innodb-buffer-pool-size=64M"; do
-  if ! printf '%s\n' "$joined" | grep -qxF -- "$want"; then
+  if ! grep -qxF -- "$want" <<<"$joined"; then
     fail "mariadb: docker run lacks '$want'"
     missing_args=1
   fi
 done
 if [ "$missing_args" = 0 ]; then pass "mariadb: restart policy, 120 s stop timeout, network, bind mounts, password file, image and flags"; fi
-if printf '%s\n' "$joined" | grep -q 'MARIADB_ROOT_PASSWORD='; then
+if grep -q 'MARIADB_ROOT_PASSWORD=' <<<"$joined"; then
   fail "mariadb: the password is passed as an environment value"
 else
   pass "mariadb: password as a file only"
 fi
-if printf '%s\n' "$joined" | grep -qE '^(--publish|-p|--publish-all|-P)$|^--publish=|^--network=?host$'; then
+if grep -qE '^(--publish|-p|--publish-all|-P)$|^--publish=|^--network=?host$' <<<"$joined"; then
   fail "mariadb: published on a host port (or on the host network)"
 else
   pass "mariadb: never published on a host port"
@@ -281,7 +301,8 @@ if [ "$(cat "$secret_file")" = "$FAKE_SECRET" ] && [ "$(stat -c %a "$secret_file
 else
   fail "secret: file content or permissions wrong"
 fi
-if find "$SB/mnt/disks/edge/secrets" -name '*.tmp' | grep -q .; then fail "secret: temporary files left behind"; else pass "secret: no temporary response files left behind"; fi
+left=$(left_behind "$SB/mnt/disks/edge/secrets" -name '*.tmp')
+if [ -n "$left" ]; then fail "secret: temporary files left behind"; else pass "secret: no temporary response files left behind"; fi
 expect_log 'mllp-adapter is up and stayed up' "checks that the adapter stayed up"
 
 # -- Case: second run on the same boot (re-run by hand) -----------------------------------------------
@@ -518,7 +539,8 @@ run_script FAKE_CHMOD_FAIL=1
 expect_rc nonzero "chmod failure"
 expect_log 'secret mariadb-root-password .*chmod-failed' "reports the failed chmod"
 expect_calls '^docker run .*--name mariadb' 0 "does not start MariaDB"
-if find "$SB/mnt/disks/edge/secrets" -name '*.tmp' -o -name 'mariadb-root-password' | grep -q .; then
+left=$(left_behind "$SB/mnt/disks/edge/secrets" -name '*.tmp' -o -name 'mariadb-root-password')
+if [ -n "$left" ]; then
   fail "a secret file or temporary file was left behind"
 else
   pass "leaves no secret file or temporary file behind"

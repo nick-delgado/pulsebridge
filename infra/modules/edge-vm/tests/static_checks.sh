@@ -55,7 +55,8 @@ hits="$(code_lines "${tf_files[@]}" "${scripts[@]}" | grep -E 'developer\.gservi
 if [[ -n "$hits" ]]; then bad "the Compute Engine default service account is referenced:"; echo "$hits"; else ok "no default Compute Engine account"; fi
 
 # The instance must name its account from the variable.
-if code_lines "$here/main.tf" | grep -qE 'email[[:space:]]*=[[:space:]]*var\.service_account_email'; then
+# A here-string, not `code_lines ... | grep -q`: see startup_script.sh (SIGPIPE under pipefail, T38).
+if grep -qE 'email[[:space:]]*=[[:space:]]*var\.service_account_email' <<<"$(code_lines "$here/main.tf")"; then
   ok "instance service account comes from var.service_account_email"
 else
   bad "the instance's service_account.email is not var.service_account_email"
@@ -79,7 +80,7 @@ if [[ -z "$metadata_block" ]]; then
   bad "local.instance_metadata not found in main.tf (the metadata check would pass vacuously)"
 else
   keys="$(printf '%s\n' "$metadata_block" | grep -oE '"[^"]+"[[:space:]]*(=>|=)' | sed -E 's/"([^"]+)".*/\1/' || true)"
-  if ! printf '%s\n' "$keys" | grep -qx 'startup-script'; then
+  if ! grep -qx 'startup-script' <<<"$keys"; then
     bad "could not read the metadata keys (startup-script not among them)"
   fi
   suspicious="$(printf '%s\n' "$keys" | grep -v -x 'block-project-ssh-keys' | grep -iE 'ssh-?keys|sshkeys|password|passwd|secret|token|credential|private-?key|api-?key' || true)"
@@ -109,5 +110,12 @@ if [[ -n "$hits" ]]; then bad "IAM resource declared (grants belong to the modul
 # 10. No child modules.
 hits="$(grep -nH -E '^[[:space:]]*module[[:space:]]+"' "${tf_files[@]}" || true)"
 if [[ -n "$hits" ]]; then bad "module call found (resources could hide in it):"; echo "$hits"; else ok "no module calls"; fi
+
+# 11. No early-exit pipe in this module's test scripts (T38): `producer | grep -q` (or grep -m,
+#     head) under pipefail returns 141 when the producer is killed by SIGPIPE, so a positive check
+#     can fail falsely and a negative one pass falsely (startup_script.sh explains the fix).
+test_scripts=("$here"/tests/*.sh)
+hits="$(code_lines "${test_scripts[@]}" | grep -E '\|[[:space:]]*(grep[[:space:]]+([^|]*[[:space:]])?-([a-zA-Z]*[qm]|-quiet|-silent|-max-count)|head([[:space:]]|$))' || true)"
+if [[ -n "$hits" ]]; then bad "early-exit pipe in a test script (use a here-string or capture the output):"; echo "$hits"; else ok "no early-exit pipe into grep -q or head in the test scripts"; fi
 
 exit "$fail"

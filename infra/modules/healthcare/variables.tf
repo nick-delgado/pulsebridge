@@ -14,6 +14,51 @@ variable "project_id" {
   }
 }
 
+variable "project_number" {
+  description = <<-EOT
+    Number of the same project (the numeric ID Google puts in service agent addresses). The
+    Healthcare and Pub/Sub service agents' addresses are built from it. In the stack it is module
+    identity's project_number output, read from a data source that nothing defers, so it is known
+    at plan time; that keeps the agent grants' `member` known at plan (T38). Not a secret, but it
+    identifies a project: pass it from a data source or a variable, never hardcode it.
+  EOT
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]{6,20}$", var.project_number))
+    error_message = "project_number must be the project's numeric ID (digits only)."
+  }
+}
+
+variable "pubsub_service_agent_email" {
+  description = <<-EOT
+    The project's Pub/Sub service agent, service-<project_number>@gcp-sa-pubsub.iam.gserviceaccount.com,
+    which gets publisher on the dead-letter topic and subscriber on the ingest subscription. Pass
+    module identity's pubsub_service_agent_email output: identity creates the agent
+    (google_project_service_identity.pubsub) and that output depends on it, so the two grants here
+    are created after the agent in a single apply, while the value stays known at plan.
+  EOT
+  type        = string
+
+  validation {
+    condition     = var.pubsub_service_agent_email == "service-${var.project_number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+    error_message = "pubsub_service_agent_email must be service-<project_number>@gcp-sa-pubsub.iam.gserviceaccount.com for the same project_number."
+  }
+}
+
+variable "enabled_apis" {
+  description = <<-EOT
+    Service names of the APIs enabled in the project: module project-base's enabled_apis output.
+    Must include healthcare.googleapis.com and pubsub.googleapis.com. Besides being checked, the
+    list orders the dataset, the topics and the Healthcare service identity after the APIs'
+    enablement on a fresh project (a reference creates a dependency). It replaces a module-level
+    depends_on on project-base, which deferred this module's reads and made the agent grants'
+    members unknown whenever any project-base resource changed (T38). If the APIs are enabled
+    outside Terraform, pass their names.
+  EOT
+  type        = list(string)
+}
+
 variable "location" {
   description = "Cloud Healthcare API location for the dataset and all its stores (a region such as \"us-central1\", or a multi-region such as \"us\"). Stored health data stays in this location."
   type        = string

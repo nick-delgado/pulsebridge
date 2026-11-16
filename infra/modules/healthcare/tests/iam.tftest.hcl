@@ -4,10 +4,6 @@
 # store. Whole-table assertions include the store ID, so a binding on the wrong store fails.
 
 mock_provider "google" {
-  override_data {
-    target = data.google_project.this
-    values = { number = "123456789012" }
-  }
   override_resource {
     target = google_healthcare_fhir_store.this
     values = { id = "projects/example-project/locations/us-central1/datasets/pulsebridge/fhirStores/pulsebridge-fhir" }
@@ -22,8 +18,25 @@ mock_provider "google" {
   }
 }
 
+# google-beta: the Healthcare service identity answers with the agent of the synthetic project
+# number, as Google does (the module's postcondition refuses any other address).
+mock_provider "google-beta" {
+  override_resource {
+    target = google_project_service_identity.healthcare
+    values = {
+      email  = "service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+      member = "serviceAccount:service-123456789012@gcp-sa-healthcare.iam.gserviceaccount.com"
+    }
+  }
+}
+
 variables {
-  project_id = "example-project"
+  # T38: the project number and the Pub/Sub agent come from module identity in the stack, and
+  # the API list from module project-base. Synthetic values.
+  project_number             = "123456789012"
+  pubsub_service_agent_email = "service-123456789012@gcp-sa-pubsub.iam.gserviceaccount.com"
+  enabled_apis               = ["healthcare.googleapis.com", "pubsub.googleapis.com"]
+  project_id                 = "example-project"
 }
 
 run "identity_map_gets_exactly_the_expected_roles" {
