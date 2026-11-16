@@ -60,6 +60,7 @@ ALLOWED_TYPES = {
     "google_secret_manager_secret_iam_member",
     "google_secret_manager_secret_version",
     "google_project",  # data source: project number for the Pub/Sub service agent
+    "google_project_service_identity",  # T36: creates the Pub/Sub service agent (google-beta)
 }
 FORBIDDEN_TYPES = {"google_service_account_key"}
 
@@ -271,6 +272,15 @@ def main() -> int:
                 for attr in ("secret_data", "secret_data_wo"):
                     if v["values"].get(attr) is not None:
                         failures.append(f"dev_password: {v['address']}.{attr} is set in state")
+        # T36: IAM refuses a grant to a service agent that does not exist yet, so the Token
+        # Creator grant must be ordered after the resource that creates the Pub/Sub agent. Its
+        # member string does not reference that resource, so only `depends_on` orders them; the
+        # state records each resource's dependencies.
+        agent = "google_project_service_identity.pubsub"
+        grants = [r for r in resources if "pubsub_token_creator" in r["address"]]
+        for r in grants:
+            if agent not in (r.get("depends_on") or []):
+                failures.append(f"{run}: {r['address']} does not depend on {agent}")
         print(f"{run}: resource types {sorted(types)}")
 
     # Belt and braces: no form of the dummy anywhere in the module runs' output stream either.

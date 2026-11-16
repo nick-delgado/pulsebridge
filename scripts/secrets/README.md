@@ -290,21 +290,33 @@ real gcloud cannot be reached; values are fake, generated per test. No credentia
 
 ## Not verified (check on the first real run)
 
-1. gcloud stores the bytes from `--data-file=-` unchanged: after the first version, the `wc -c`
-   check above shows the value's length.
-2. `gcloud secrets versions list ... --filter=state:ENABLED --sort-by=~createTime --limit=1`
-   returns the newest enabled version (and nothing for a secret with none), so the "already has an
-   enabled version" stop works.
+Settled on the first dev deploy (16 November 2026, synthetic data):
+
+- For a secret with **no** versions, `gcloud secrets versions list ... --filter=state:ENABLED`
+  prints nothing on standard output but a warning about the filter ("filter keys were not present
+  in any resource") on standard error. The first run read that warning as an enabled version and
+  refused to write; `lib.sh` now takes only standard output, and only lines that look like a
+  version (two tests). The three edge-VM passwords were then stored with `--generate` as version 1.
+- The edge VM picked up the three passwords at its first boot (master checklist E10), and
+  OpenEMR's first-time setup accepted the generated admin password (O19).
+
+Still open:
+
+1. gcloud stores the bytes from `--data-file=-` unchanged, with no trailing newline: the `wc -c`
+   check above was **not run** on the dev deploy. The VM and OpenEMR accepting the generated
+   values shows they worked, not that no byte was added.
+2. `--filter=state:ENABLED --sort-by=~createTime --limit=1` returns the **newest** enabled version
+   when there are several (the dev run only ever had one), so the "already has an enabled
+   version" stop works.
 3. No file under `~/.config/gcloud/logs` is written during a run (file logging is switched off),
    and gcloud's error messages never contain the payload.
 4. The roles above are enough for a deployer who is not project Owner.
 5. macOS: bash 3.2, BSD `tr` and `head -c`. Only bash 5.2 on Linux ran the tests; bash 3.2 is
    covered by a static check of the usual bash 4 constructs, not by a run.
-6. The edge VM picks up the database passwords at boot (infra/envs master checklist E10) and
-   fhir-proxy the reviewer password within about 30 s (P6).
+6. fhir-proxy picks up a new reviewer password within about 30 s (P6).
 7. The pinned OpenEMR image (8.5.0) passes the allowed punctuation through its first-time setup
    unchanged, as the 8.1.1 scripts and the installer's main branch do (read, not run); for example
    log in with a typed admin password containing `!#$%&;|<>*?` once. `--generate` avoids the
-   question. The rotation steps above are untested.
+   question (the dev run generated it). The rotation steps above are untested.
 8. Pressing Ctrl-C at the hidden prompt leaves the terminal echoing (bash restores it; if not,
    type `stty echo` and Enter).

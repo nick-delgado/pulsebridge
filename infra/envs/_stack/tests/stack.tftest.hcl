@@ -24,6 +24,16 @@ mock_provider "google" {
 
 mock_provider "google-beta" {}
 
+# Module identity's Pub/Sub service agent (google-beta) answers with the agent of the synthetic
+# project number above, as Google does; the module's postcondition refuses any other address.
+override_resource {
+  target = module.identity.google_project_service_identity.pubsub
+  values = {
+    email  = "service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    member = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+  }
+}
+
 # ---- producers: identity (generated pattern: <prefix>-<key> accounts and secrets) ------------
 
 override_resource {

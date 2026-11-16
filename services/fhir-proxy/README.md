@@ -587,6 +587,16 @@ already has `secretAccessor` on the secret, and Direct VPC egress reaches the VM
 9. **Narrower scopes**: `system/Patient.crs system/Encounter.crs system/Observation.cr` with
    `client_credentials`.
 
+**Results of the first dev deploy** (16 November 2026, OpenEMR 8.5.0 on the edge VM, synthetic
+patient). Settled: **2** (the heart rate was a 201 at the window's start, and OpenEMR kept the
+average only, no components), **3** (a repeat of each, blood pressure and heart rate, answered
+the predicted duplicate text naming the Observation id and gave `already-shared` with the same
+Observation id), **5** (the 201 bodies carry the
+`uuid` the proxy reads), **6** (`/status` reached readyz without a token). Partly: **1** (the
+token request worked and a repeat share within minutes reused the token; `expires_in` and the
+error echo were not checked), **4** (`Encounter?date=<UTC day>` found the day's Encounter;
+whether OpenEMR's zone was other than UTC was not checked). Not done: 7, 8, 9.
+
 ### How `share/` plugs in (the extension seam)
 
 - Create the package **`services/fhir-proxy/fhir_proxy/share/`** (a subpackage, so it is
@@ -804,12 +814,14 @@ redirect, size cap). All data is synthetic; the test password is obviously fake.
 ## Not verified
 
 T15 made no call to a real OpenEMR: the share was tested against `fhir_proxy.share.testing`'s
-fake (S1's recorded behaviour, over an injected transport and over real TLS on 127.0.0.1). What
-only a live OpenEMR can confirm is the nine-point checklist in "Share to OpenEMR (T15)": that a
-heart rate sent at its window's start is accepted and what is stored; OpenEMR's duplicate text
-(for blood pressure and heart rate); the Encounter date search with a non-UTC server zone; the
-201 bodies; readyz without a token; whether OAuth errors echo the assertion; concurrent first
-shares; re-registration; the narrower scopes. The fake's OpenEMR behaviour beyond spike S1
+fake (S1's recorded behaviour, over an injected transport and over real TLS on 127.0.0.1). The
+first dev deploy (16 November 2026) then settled part of the nine-point checklist in "Share to
+OpenEMR (T15)" against a live OpenEMR 8.5.0 ("Results of the first dev deploy" there): a heart
+rate sent at its window's start is accepted and only the average is kept; the duplicate text is
+as predicted for blood pressure and heart rate; the Encounter date search works; the 201 bodies
+carry `uuid`; readyz answers without a token. Still open: the Encounter date search with a
+non-UTC server zone; whether OAuth errors echo the assertion; concurrent first shares;
+re-registration; the narrower scopes. The fake's OpenEMR behaviour beyond spike S1
 (`effectiveDateTime` required, `effectivePeriod` ignored, unknown components skipped, the exact
 duplicate text, the Encounter date being `period.start`) comes from reading the 8.5.0 source
 (`FhirObservationVitalsService`, `FhirEncounterService`), not from a running server.
@@ -819,12 +831,13 @@ notes, and must be confirmed on the first deployment (T25):
 
 - **X-Forwarded-For on `*.run.app`** (one appended entry) and **behind Firebase Hosting**: from a
   forum report and reasoning, not Google's Cloud Run documentation. See "For T22".
-- That Firebase Hosting's rewrite forwards the `Authorization` header and the full path, and its
-  60 s timeout in practice.
+- Firebase Hosting's rewrite forwards the `Authorization` header (confirmed on the first dev
+  deploy: login, `/status` and the searches worked through `/api`); the full path and its 60 s
+  timeout in practice are still open.
 - Cloud Healthcare FHIR search: `gt`/`lt` on `effectivePeriod` (the proxy re-applies R4's rule,
   but cannot add windows the store left out); `_sort=date` on Observation; reusing a
-  `_page_token` from a `next` link with the proxy's own parameter order; `_total=accurate&_count=0` (not `_summary=count`, which Cloud Healthcare refuses: found on the first deploy) giving
-  `total`; `_sort=-_lastUpdated` with `_elements=id,meta` returning `meta.lastUpdated`;
+  `_page_token` from a `next` link with the proxy's own parameter order; `_total=accurate&_count=0` (not `_summary=count`, which Cloud Healthcare refuses: found on the
+  first deploy) giving `total`; `_sort=-_lastUpdated` with `_elements=id,meta` returning `meta.lastUpdated`;
   identifier OR lists; AuditEvent `type`/`subtype`/`date`/`_sort=-date` (T31 flagged these);
   Provenance `recorded` search and sort, and `_include=Provenance:target`. **Indexing delay**: Cloud Healthcare indexes
   non-identifier searches asynchronously (its search documentation), so a just-written reading
@@ -840,7 +853,8 @@ notes, and must be confirmed on the first deployment (T25):
 - Timings: the request budget and the parallel calls were tested with slow fakes, not against
   Cloud Healthcare's real latencies.
 - That Cloud Run accepts an identity token whose audience is the service URL, and that the
-  metadata server mints one for the proxy's service account.
+  metadata server mints one for the proxy's service account: confirmed for cuff-sim on the first
+  dev deploy (cuff sends through the proxy worked); health-sync (real data) not reached.
 - That a mounted secret file reflects a new `latest` version on read without a restart (s6,
   from a search summary).
 - Least-privilege roles: that `fhirResourceReader` allows every search above.

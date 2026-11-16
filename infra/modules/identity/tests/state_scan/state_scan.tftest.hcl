@@ -11,6 +11,17 @@ mock_provider "google" {
   }
 }
 
+# google_project_service_identity (google-beta) answers with the agent of the synthetic project
+# number above, as Google does for a real project; the module's postcondition checks that.
+mock_provider "google-beta" {
+  mock_resource "google_project_service_identity" {
+    defaults = {
+      email  = "service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+      member = "serviceAccount:service-100000000001@gcp-sa-pubsub.iam.gserviceaccount.com"
+    }
+  }
+}
+
 # Same reason as in tests/service_accounts.tftest.hcl: the Token Creator binding needs a
 # well-formed account name, and the mock's is random.
 override_resource {

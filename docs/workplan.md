@@ -499,7 +499,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T23 | Module `openemr` | T21, S1 | `infra/modules/openemr/` | done |
 | T24 | Container build pipeline | T01 | `cloudbuild.yaml`, `services/*/Dockerfile` | done |
 | T34 | Dashboard shell follow-ups from T13 and T17 | T13, T17 | `web/` except `web/src/heart-rate/` | done |
-| T36 | First-deploy follow-ups | T25 | `infra/modules/identity/`, `infra/bootstrap/README.md`, `infra/envs/README.md`, `docs/setup.md`, `README.md` | in-progress |
+| T36 | First-deploy follow-ups | T25 | `infra/modules/identity/`, `infra/bootstrap/README.md`, `infra/envs/README.md`, `docs/setup.md`, `README.md` | done |
 | T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
@@ -697,6 +697,15 @@ filter; fhir-proxy counted with `_summary`, which Cloud Healthcare refuses.
 - AC: the master checklist records what the dev deploy confirmed (E, O, I, P and C items) and
   what is still unchecked (hop measurement, alerts firing, destroy, patching, rotation).
 - AC: the README's OpenEMR screenshot (T28) is taken from the dev deployment.
+
+T36 outcome: reviewed (pass with notes) and merged. Module identity now creates the Pub/Sub
+service agent before the Token Creator grant; the runbook, checklist and READMEs record what the
+dev deploy showed. The OpenEMR screenshot is not part of T36: it needs a person and stays with T28.
+Applied to dev on 16 November as the deployer: one resource added, nothing changed or destroyed,
+so the deployer can create the agent (checklist A22). Follow-ups not yet assigned to a task: module healthcare grants roles to the Pub/Sub
+agent without depending on its creation (a single full apply on a new project can race; a re-run
+fixes it); `infra/modules/edge-vm/tests/startup_script.sh` pipes `printf` into `grep -q` under
+`pipefail`, which can fail falsely and, in its negative checks, pass falsely.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
