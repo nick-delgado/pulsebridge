@@ -503,6 +503,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
 | T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | done |
 | T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
+| T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | in-progress |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -779,6 +780,17 @@ finalised, 0 amended. Left on dev: its earlier synthetic final windows carry sta
 and extra versions, and cannot be shared (T15 shares only `final`). Open design question, not
 changed: after any other failed read the services write every window, which overwrites withdrawn
 windows, writes `amended` back as `final` and can write a held final as `preliminary`.
+
+**T40 Default `trusted_proxy_hops` to 2 behind Firebase Hosting.** The hop measurement on dev
+(17 November, checklist P1) showed that through Hosting the visitor is the second
+`X-Forwarded-For` entry from the right and that Hosting replaces a caller's own header; with 1
+hop the login limit was keyed on Hosting's addresses.
+- AC: the Terraform default is 2 wherever a deployment default is declared; descriptions say why.
+- AC: the service's own default and the docs are consistent, and the READMEs state what a direct
+  call to the proxy's `run.app` URL means for the per-address limit under 2 hops (the caller
+  writes the entry that is then trusted), what still protects the login, and what would close it.
+- AC: tests pin the default and an override, and the client-address behaviour for fewer entries
+  than hops and for a direct call with a made-up left entry; break-checked; all gates pass.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
