@@ -672,7 +672,7 @@ needed before T18 and T19 start.
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml` and `ci.yml`'s Terraform job, `.tflint.hcl`, the Makefile's `tf-lint`/`tf-scan`, `infra/envs/ci/`, and what its ACs needed in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/`, `infra/envs/`, plus README corrections from the T28 review | in-progress (offline part merged; first real run open) |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | done |
-| T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
+| T29 | End-to-end smoke test | T25 | `tests/e2e/` | in-progress |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
 
 **First dev deploy (16 November).** A new dev project was bootstrapped and runbook steps 1 to 11
