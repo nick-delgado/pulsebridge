@@ -216,9 +216,8 @@ def test_slug_rules_match_github() -> None:
 # ---- 2. repository paths -------------------------------------------------------------------------
 
 # Paths a doc may name although they do not exist in this checkout.
-PENDING_PATHS = {
-    # Planned in T29 (end-to-end smoke test).
-    "tests/e2e/": "T29",
+PENDING_PATHS: dict[str, str] = {
+    # Add "<path>": "<task id>" for a path a doc names before the task that creates it merges.
 }
 GENERATED_PATHS = {
     # Written by the page deploy from Terraform's firebase_json output; git-ignored.

@@ -214,6 +214,13 @@ is the PulseBridge side of the same exchange:
   tests and Playwright browser tests against the mock build), `make fhir-validate` (the HL7 FHIR
   Validator, in its own CI workflow), `make secret-scan` and `make pre-commit`. `make check` runs
   the Python and Terraform gates together.
+- `make smoke` is the **end-to-end smoke test** of a deployed stack
+  ([`tests/e2e/`](tests/e2e/README.md)): through the public front door only, it sends a
+  simulated cuff reading over MLLP, waits for the FHIR Observation and its Provenance, shares it
+  to OpenEMR (twice: the second must be `already-shared`), checks that malformed readings create
+  nothing, and on a real-data stack runs health-sync's first-sync checks from its logs. It is
+  not part of `make check` (it needs a deployment); its own tests run in `make test` against an
+  in-process stack.
 - **Tests are break-checked.** For every behaviour under test, the implementation was
   deliberately broken (a flipped condition, a wrong code or unit, a removed field) to see the test
   fail for the right reason, then restored. A test that cannot fail does not count.
@@ -268,6 +275,7 @@ connect script, health-sync) and prod; and on dev, the hop measurement for the f
 alerts firing, patching the VM, password rotation, `terraform destroy`, and CI/CD's first run.
 The runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's
 result and lists what is still open. The Terraform CI/CD workflows exist but stay switched off
-until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)); the
-end-to-end smoke test (T29) and a custom domain for the demo (T30) are in progress or planned
-([`docs/workplan.md`](docs/workplan.md)).
+until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)). The
+end-to-end smoke test exists (`make smoke`, [`tests/e2e/`](tests/e2e/README.md)) but has not
+been run against dev yet, and its health-sync checks need a real-data stack; a custom domain for
+the demo (T30) is planned ([`docs/workplan.md`](docs/workplan.md)).

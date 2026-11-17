@@ -522,8 +522,28 @@ second run (`stored_read: ok`, `windows_unchanged > 0`), `/status` timing, the a
 
 ### 14. End to end (T29)
 
-`tests/e2e/` (T29): a simulated cuff reading through MLLP to the FHIR store, then shared to
-OpenEMR, asserted from the APIs, with one command against the dev stack.
+`make smoke` ([`tests/e2e/README.md`](../../tests/e2e/README.md)): through the front door only,
+a simulated cuff reading over MLLP to the FHIR store (Observation and Provenance checked
+against the message sent), shared to OpenEMR and read back, shared again (`already-shared`),
+plus malformed readings that must create nothing and the `/status` strip. Run it with your own
+`gcloud` login (it reads `<prefix>-reviewer-password` from Secret Manager in memory):
+
+```bash
+PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/<env> output -raw dashboard_url)/api" \
+SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/<env> output -raw secret_name_prefix)" \
+make smoke
+```
+
+On a real-data stack it refuses to write a test reading into the patient's record unless
+`SMOKE_ARGS=--allow-real-data-writes` is given, and it runs I4, I6 and I7's health-sync checks
+from the `sync-run` log lines: add
+`PULSEBRIDGE_HEALTH_SYNC_SERVICE="$(terraform -chdir=infra/envs/<env> output -raw health_sync_service_name)"`
+and run it as someone with `roles/logging.viewer`. On a synthetic stack those checks are
+reported as skipped. It prints what it added (synthetic values, attempt and Observation ids);
+nothing it adds can be removed through the API.
+
+Worked when: the last line is `SMOKE RESULT: PASSED` (or `PASSED WITH 4 SKIPPED` on synthetic
+data, the four being health-sync's checks).
 
 ### Running the env roots from a service account in another project
 
@@ -1060,7 +1080,8 @@ run, and needing a session with the user's go-ahead:
   marked `partly`. Source abbreviations: **B** bootstrap, **PB** project-base, **ID** identity, **HC**
 healthcare, **IN** ingestion, **EV** edge-vm, **OE** openemr, **PHR** phr, **HS** health-sync,
 **SEED** services/seed, **SVC** services/README.md, **CG** connect-google-health, **CS**
-cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task.
+cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the smoke test
+(`make smoke`, tests/e2e/README.md).
 
 ### Before and during the applies (steps 1 to 5, 7 and 8)
 
@@ -1163,8 +1184,8 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task.
 | I3 | `roles/run.invoker` on the job lets Scheduler's OAuth call to `jobs.run` through | IN | |
 | I4 | First real sync: the Patient entry answers `200`, not `201` (else switch to the fixed-ID fallback in the T06 README and record it) | HS, T29 | |
 | I5 | `GET Observation?identifier=urn:pulsebridge:observation\|<key>` returns one Observation whose `subject.reference` is the setup Patient; `GET Patient?identifier=urn:pulsebridge:patient\|<PATIENT_ID>` returns exactly one Patient | HS | |
-| I6 | Second run: `stored_read: "ok"` and `windows_unchanged > 0` (health-sync and seeder); `stranded_preliminary` is a number | HS, SEED | |
-| I7 | `/status` answers within a second or two | HS | |
+| I6 | Second run: `stored_read: "ok"` and `windows_unchanged > 0` (health-sync and seeder); `stranded_preliminary` is a number | HS, SEED, T29 | |
+| I7 | `/status` answers within a second or two | HS, T29 | |
 | I8 | Pub/Sub push and Cloud Scheduler reach the internal-only services (else the ingress fallbacks) | IN | 2026-11-16 dev: partly. Pub/Sub push reached internal-only v2-to-fhir (cuff messages became Observations); Scheduler's call not checked |
 | I9 | The OIDC audience (the bare service URL) is accepted | IN | 2026-11-16 dev: partly. The push subscription's OIDC audience was accepted; health-sync's (real data) not reached |
 | I10 | v2-to-fhir's `hl7V2Consumer` can patch message labels (else healthcare moves to `hl7V2Editor`); `fhirResourceEditor` includes `executeBundle` and update-create `PUT` | ID, HC | 2026-11-16 dev: partly. `executeBundle` worked for the seeder and v2-to-fhir; the label patch not checked on its own |
