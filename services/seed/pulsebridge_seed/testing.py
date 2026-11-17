@@ -7,7 +7,9 @@ The FHIR store is the real :class:`pulsebridge_gcp.HealthcareClient` over :class
   Observation conditional update by identifier, Provenance ``PUT`` by id) and answers ``201`` or
   ``200`` per entry;
 - ``GET Patient`` and ``GET Observation`` searches answer from what was stored, with ``total``,
-  ``_count`` paging and ``next`` links inside the store.
+  ``_count`` paging and ``next`` links inside the store; the Observation search applies
+  ``_elements`` as Cloud Healthcare does (``pulsebridge_gcp.testing.select_elements``: choice
+  elements by base name only), so a wrong ``_elements`` loses the same fields here as on dev.
 
 A route scripted with ``add`` takes precedence, so a test can make a search fail or answer
 anything. ``bundle_errors`` scripts the next ``executeBundle`` answers (``None``: apply it).
@@ -26,7 +28,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from pulsebridge_gcp import HealthcareClient, HttpResponse
-from pulsebridge_gcp.testing import FakeTransport, RecordedRequest, json_response
+from pulsebridge_gcp.testing import FakeTransport, RecordedRequest, json_response, select_elements
 
 from pulsebridge_seed.config import FhirTarget, SeedConfig
 from pulsebridge_seed.seeder import Dependencies
@@ -145,6 +147,9 @@ class StoreFake(FakeTransport):
                 end = datetime.fromisoformat(value[2:].replace("Z", "+00:00"))
         matches = [copy.deepcopy(r) for r in self.observations.values() if _overlaps(r, start, end)]
         params = dict(pairs)
+        # ``_elements`` as Cloud Healthcare applies it: a choice element (``effectivePeriod``,
+        # ``valueQuantity``) only when asked for by its base name (``effective``, ``value``).
+        matches = [select_elements(r, params.get("_elements")) for r in matches]
         count = int(params.get("_count", "1000"))
         if self.page_size_cap:
             count = min(count, self.page_size_cap)

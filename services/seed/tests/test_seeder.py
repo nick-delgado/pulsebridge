@@ -657,6 +657,55 @@ def test_each_window_is_written_at_most_twice_over_hourly_top_ups():
     assert sum(1 for w in writes.values() if w == ["preliminary", "final"]) > 200
 
 
+def test_a_steady_hourly_run_finalises_the_last_hour_and_leaves_the_rest():
+    """What dev's hourly job (--hours 4, 48 windows) should report once the store holds the
+    earlier runs: the newest hour is new (preliminary), the hour before it is now due final
+    (finalised), and the two older hours are already final with the same values (unchanged).
+    On dev before T39 it reported new 12, changed 12, amended 24, unchanged 0: ``_elements``
+    named ``effectivePeriod,valueQuantity``, which Cloud Healthcare (and now StoreFake) leaves
+    out, so no stored window ever matched."""
+    store = fresh_store()
+    reports = []
+    for hour in range(9):  # 12:02:30 to 20:02:30 UTC; the last run's range has no modelled gap
+        now = NOW + timedelta(hours=hour)
+        reports.append(seed(store, length=timedelta(hours=4), until=now, now=now))
+    for later in reports[1:]:  # every run after the first, including those over a data gap
+        assert later.stored_read == "ok"
+        assert (later.windows_changed, later.windows_amended) == (0, 0)
+        assert later.windows_written == later.windows_new + later.windows_finalised
+        assert later.windows_unchanged == later.windows_generated - later.windows_written
+    steady = reports[-1]
+    assert steady.windows_generated == 48
+    assert (
+        steady.windows_new,
+        steady.windows_finalised,
+        steady.windows_unchanged,
+        steady.windows_changed,
+        steady.windows_amended,
+        steady.windows_written,
+    ) == (12, 12, 24, 0, 0, 24)
+    assert all(o["status"] != "amended" for o in store.observations.values())
+
+
+def test_typed_choice_names_in_elements_are_a_visible_read_failure(monkeypatch):
+    """Defence in depth: if ``_elements`` ever names ``effectivePeriod,valueQuantity`` again,
+    the store leaves both out; the run reports a failed read and writes each window with the
+    status it has now, instead of reporting ``ok`` and amending every final window."""
+    import pulsebridge_fhir.stored
+
+    store = fresh_store()
+    seed(store, length=timedelta(hours=2), until=UNTIL)
+    monkeypatch.setattr(
+        pulsebridge_fhir.stored,
+        "ELEMENTS",
+        "identifier,status,effectivePeriod,valueQuantity,component",
+    )
+    report = seed(store, length=timedelta(hours=2), until=UNTIL)
+    assert report.stored_read == "failed:StoredReadError"
+    assert report.windows_amended == 0
+    assert report.windows_written == report.windows_generated > 0
+
+
 def test_read_follows_next_links():
     store = fresh_store()
     seed(store, length=DAY, until=UNTIL)

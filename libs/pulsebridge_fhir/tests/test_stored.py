@@ -260,6 +260,41 @@ def test_page_windows_in_page_order_with_repeats_and_foreign_entries_skipped():
     assert page_windows({"resourceType": "Bundle"}) == []
 
 
+def _page(*resources: dict) -> dict:
+    return {"resourceType": "Bundle", "entry": [{"resource": r} for r in resources]}
+
+
+def _without(resource: dict, *names: str) -> dict:
+    return {k: v for k, v in resource.items() if k not in names}
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [("effectivePeriod", "valueQuantity"), ("effectivePeriod",), ("valueQuantity",)],
+    ids=["both", "end", "average"],
+)
+def test_a_page_where_no_window_has_an_end_and_an_average_is_a_read_error(missing):
+    """What a wrong ``_elements`` looked like on dev (T39): the typed choice names selected
+    nothing, every window came back without its period and value, and every run rewrote every
+    window while reporting ``stored_read: ok``. Now the read fails instead, visibly."""
+    page = _page(_without(observation("k1"), *missing), _without(observation("k2"), *missing))
+    with pytest.raises(StoredReadError, match="end and an average"):
+        page_windows(page)
+
+
+def test_one_unreadable_window_among_readable_ones_is_only_that_window():
+    page = _page(observation("k1"), _without(observation("k2"), "effectivePeriod", "valueQuantity"))
+    assert page_windows(page) == [
+        ("k1", StoredWindow(status="final", end=END, values=(60, 64.5, 71))),
+        ("k2", StoredWindow(status="final", end=None, values=(60, None, 71))),
+    ]
+
+
+def test_a_page_without_windows_of_ours_is_not_an_error():
+    foreign = observation(identifier=[{"system": "urn:other", "value": "k"}])
+    assert page_windows(_page(_without(foreign, "effectivePeriod", "valueQuantity"))) == []
+
+
 @pytest.mark.parametrize(
     "page",
     [
@@ -304,7 +339,7 @@ def test_search_parameters_are_the_r4_query():
         ("code", "http://loinc.org|8867-4"),
         ("date", "ge2026-01-15T12:05:00Z"),
         ("date", "lt2026-01-15T15:05:00Z"),
-        ("_elements", "identifier,status,effectivePeriod,valueQuantity,component"),
+        ("_elements", "identifier,status,effective,value,component"),
         ("_count", "1000"),
     ]
     assert params[4][1] == ELEMENTS

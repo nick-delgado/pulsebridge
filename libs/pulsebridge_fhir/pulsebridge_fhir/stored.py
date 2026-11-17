@@ -13,13 +13,23 @@ links through the Cloud Healthcare client, is :func:`pulsebridge_gcp.stored.stor
 The search is standard R4, one query for the whole range::
 
     Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&date=ge<start>&date=lt<end>
-               &_elements=identifier,status,effectivePeriod,valueQuantity,component&_count=1000
+               &_elements=identifier,status,effective,value,component&_count=1000
 
 ``date`` on an Observation searches ``effective[x]``; for an ``effectivePeriod`` R4 matches when
 the period overlaps the searched range, so the window that ends exactly at the range start is
 also returned. That is harmless: it is simply not among the windows being written.
 
-``_elements`` asks only for the fields compared here. Values are compared, never logged.
+``_elements`` asks only for the fields compared here. ``effective[x]`` and ``value[x]`` are R4
+*choice elements*: one element that can take one of several data types, written in JSON with the
+type in the name (``effectivePeriod``, ``valueQuantity``). In ``_elements`` they are named by
+their base name, ``effective`` and ``value``. Cloud Healthcare does exactly that and nothing
+else: asked for ``effectivePeriod,valueQuantity`` it silently leaves both out (seen on dev on
+17 November 2026; ``effective[x]`` and ``Observation.effective`` select nothing either). Every
+stored window then read as "end and average unknown", never equal to the window being planned,
+so every run rewrote every window and turned each final one into ``amended``.
+:func:`page_windows` now reports a page where no window has both parts as a read error, so the
+same mistake shows in the run report (``stored_read`` not ``ok``) instead of as endless
+rewrites. Values are compared, never logged.
 """
 
 from __future__ import annotations
@@ -32,7 +42,9 @@ from pulsebridge_fhir import codes
 from pulsebridge_fhir.keys import escape_search_value
 
 SEARCH_PAGE_SIZE = 1000  # 14 days of windows is 4,032: five pages at most
-ELEMENTS = "identifier,status,effectivePeriod,valueQuantity,component"
+# Base names for the choice elements effective[x] and value[x] (R4 search, ``_elements``); the
+# typed JSON names (effectivePeriod, valueQuantity) select nothing on Cloud Healthcare.
+ELEMENTS = "identifier,status,effective,value,component"
 # R4 observation-status codes that mean "complete": final, and its two later revisions.
 FINAL_STATUSES = ("final", "amended", "corrected")
 # R4 observation-status: "entered-in-error" ("the observation has been withdrawn following
@@ -172,7 +184,14 @@ def page_windows(page: object) -> list[tuple[str, StoredWindow]]:
     decides what that means). Raises :class:`StoredReadError` unless the page is a ``Bundle``
     whose ``entry`` is absent or a list (R4 JSON: ``Bundle.entry`` is an array), and when an
     Observation's arrays or ``component.code`` have another shape (:func:`parse_stored_window`).
-    Entries that are not one of our heart-rate Observations are skipped."""
+    Entries that are not one of our heart-rate Observations are skipped.
+
+    Also raises when the page holds windows of ours but **none** has both a readable end
+    (``effectivePeriod.end``) and a readable average (``valueQuantity.value``). Every heart-rate
+    Observation T06 writes has both, so that is the search leaving elements out (as a wrong
+    ``_elements`` did on dev), not data: reading on would rewrite every window, every run,
+    without any sign in the report. One unreadable window among readable ones is still just
+    that window rewritten (:func:`parse_stored_window`)."""
     if not isinstance(page, dict) or page.get("resourceType") != "Bundle":
         raise StoredReadError("search did not return a Bundle")
     entries = page.get("entry", [])
@@ -184,7 +203,13 @@ def page_windows(page: object) -> list[tuple[str, StoredWindow]]:
         parsed = parse_stored_window(resource) if isinstance(resource, dict) else None
         if parsed is not None:
             found.append(parsed)
+    if found and not any(_readable(window) for _, window in found):
+        raise StoredReadError("no stored window on the page has an end and an average")
     return found
+
+
+def _readable(window: StoredWindow) -> bool:
+    return window.end is not None and window.values[1] is not None
 
 
 @dataclass(frozen=True)

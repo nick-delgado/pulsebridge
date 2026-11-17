@@ -121,6 +121,11 @@ class Transport(Protocol):
   account from the metadata server; no key file exists.
 - `pulsebridge_gcp.testing.FakeTransport` scripts responses by method and path suffix and
   records every request. An unscripted request fails the test.
+- `pulsebridge_gcp.testing.select_elements(resource, elements)` returns a resource as Cloud
+  Healthcare returns it for `_elements=<elements>` (seen on dev, T39): a top-level element by
+  its name, an R4 choice element (`effectivePeriod`, `valueQuantity`) only by its base name
+  (`effective`, `value`), and always `resourceType`, `id` and `meta`. The fake FHIR stores of
+  `health-sync` and the seeder answer their searches through it.
 
 ```python
 transport = FakeTransport()

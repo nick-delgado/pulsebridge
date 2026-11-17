@@ -47,6 +47,9 @@ def ready(world, *, stored: int = 0, page_size: int | None = None) -> None:
             "resourceType": "Observation",
             "identifier": [{"system": "urn:pulsebridge:observation", "value": f"k{i}"}],
             "status": "final",
+            # Every window T06 writes has both; a page where none has them is a read error.
+            "effectivePeriod": {"start": "2026-01-15T10:00:00Z", "end": "2026-01-15T10:05:00Z"},
+            "valueQuantity": {"value": 60},
         }
         for i in range(stored)
     ]
@@ -56,7 +59,9 @@ def observation_pages(transport) -> list:
     return [
         r
         for r in transport.requests
-        if r.method == "GET" and r.path.endswith("/Observation") and "_summary" not in r.params
+        if r.method == "GET"
+        and r.path.endswith("/Observation")
+        and r.params.get("_count") != "0"  # not the stranded count
     ]
 
 

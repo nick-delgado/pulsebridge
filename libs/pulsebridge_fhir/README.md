@@ -192,12 +192,41 @@ uses the functions below. This module makes no request of its own.
 
 | Name | What it is |
 | --- | --- |
-| `stored_window_search_params(patient_ref, start, end)` | The R4 search: `subject`, `code=http://loinc.org\|8867-4`, `date=ge…`, `date=lt…` (UTC, `Z`), `_elements=identifier,status,effectivePeriod,valueQuantity,component`, `_count=1000`. `date` on an `effectivePeriod` matches when the period overlaps the range. |
-| `page_windows(page)` | The `(key, StoredWindow)` pairs on one search page, in order. `StoredReadError` unless it is a `Bundle` whose `entry` is absent or a list, and when an Observation has a wrong shape (below). |
+| `stored_window_search_params(patient_ref, start, end)` | The R4 search: `subject`, `code=http://loinc.org\|8867-4`, `date=ge…`, `date=lt…` (UTC, `Z`), `_elements=identifier,status,effective,value,component`, `_count=1000`. `date` on an `effectivePeriod` matches when the period overlaps the range. `effective` and `value` are the base names of the choice elements `effective[x]` and `value[x]` (below). |
+| `page_windows(page)` | The `(key, StoredWindow)` pairs on one search page, in order. `StoredReadError` unless it is a `Bundle` whose `entry` is absent or a list, when an Observation has a wrong shape (below), and when the page holds windows of ours but none has both an end and an average (the search left elements out; below). |
 | `parse_stored_window(resource)` | One stored Observation: its key (`urn:pulsebridge:observation`), status, end and min/avg/max; `None` if it is not ours. Unreadable values (an end that is not a time, a value that is not a number, a component that is not an object) become `None`, so that window is written again. An `identifier`, `component` or `coding` that is not an array, or a `component.code` that is not an object, raises `StoredReadError`: the caller's read fails and every window is written, never a crash. |
 | `StoredWindow(status, end, values)`, `.is_final` | What is compared. `is_final`: `final`, `amended` or `corrected`. |
 | `plan_writes(items, stored, *, key_of, status_of)` | A `Plan`: the items to write (in order), the counts, and `amend_keys`. `stored=None` writes everything. |
 | `search_instant(dt)`, `search_token(system, value)` | A UTC `date` value; an escaped `system\|code` token. |
+
+**`_elements` and choice elements (found on dev, 17 November 2026; fixed in T39).** A *choice
+element* is an R4 element whose data type varies, written `effective[x]` in the specification
+and with the type spelled into the JSON name (`effectivePeriod`, `valueQuantity`). `_elements`
+names it by its base name. Until T39 the search sent
+`_elements=identifier,status,effectivePeriod,valueQuantity,component`; Cloud Healthcare silently
+selects nothing for a typed name, so every stored window came back without its period and
+average (`end` and `avg` read as `None`), no window ever matched, and every run rewrote every
+window: the hourly seeder on dev reported `windows_unchanged 0, windows_new 12,
+windows_changed 12, windows_amended 24, windows_written 48` with `stored_read: "ok"`, each
+final window turning `amended` on the next run although its content was identical. Live
+searches as an Owner showed what the store does:
+
+| `_elements` | Elements returned |
+| --- | --- |
+| `identifier,status,effectivePeriod,valueQuantity,component` | `component`, `id`, `identifier`, `meta`, `resourceType`, `status` |
+| `identifier,status,effective,value,component` | the same plus `effectivePeriod`, `valueQuantity` (works) |
+| `effective[x],value[x]` | neither choice element |
+| `Observation.effective,Observation.value` | only `id`, `meta`, `resourceType` |
+
+The fix is the base names. Two guards keep it from returning silently: the fake FHIR stores of
+`health-sync` and the seeder apply `_elements` the same way (`pulsebridge_gcp.testing.
+select_elements`), so their "second run is unchanged" tests fail on the old value; and
+`page_windows` refuses a page where no window of ours has both an end and an average (every
+window T06 writes has both), so the run report says `stored_read: "failed:StoredReadError"` and
+the run writes each window with the status it has now, instead of `ok` and endless amendments.
+One unreadable window among readable ones is still only that window rewritten. Windows already
+stored `amended` stay so: `amended` counts as final (`FINAL_STATUSES`), so they are left alone
+when their values match.
 
 The decision per window (R4 `Observation.status` codes):
 
