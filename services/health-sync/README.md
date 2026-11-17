@@ -80,7 +80,7 @@ answers at once with `200 {"outcome": "already-running"}` and does nothing.
 | `deadline-reached` | 503 | the run stopped before starting a range or Bundle (`before-range`, `before-bundle`) because too little time was left | next scheduled run picks up the rest |
 | `google-error` | 500 | Google refused the request (another 4xx, a second 401) or answered malformed JSON | needs a person; logs give the status and Google's reason code |
 | `fhir-misconfigured` | 500 | the FHIR store answered 401/403 (`fhir-permission-denied`: the role is missing, or still propagating after an apply) or 404 (`fhir-store-missing`) | needs a person |
-| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx, `fhir-refused-bundle`; its OperationOutcome is logged without free text), or answered 2xx with a body that is not a Bundle (`fhir-malformed-response`) | needs a person |
+| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx, `fhir-refused-bundle`; its OperationOutcome is logged without free text), answered 2xx with a body that is not a Bundle (`fhir-malformed-response`), or returned the stored windows without the elements compared (`stored-elements-missing`, T39: nothing written) | needs a person |
 | `mapping-failed` | 500 | T06 refused input that passed the window checks (a bug) | needs a person |
 
 **Why 200 for reconnect-needed.** A retry cannot fix an expired grant, and every retry would hit
@@ -347,8 +347,8 @@ own 10 s timeout, a fresh client per page so each page's timeout is cut to the t
    `effective` and `value` are the base names of the R4 choice elements `effective[x]` and
    `value[x]`; until T39 this was `effectivePeriod,valueQuantity`, which Cloud Healthcare
    silently ignores (`libs/pulsebridge_fhir` README, "`_elements` and choice elements"), so no
-   stored window ever matched and every run rewrote every window. A page where no window has an
-   end and an average is now a read error (`stored_read: "failed:StoredReadError"`).
+   stored window ever matched and every run rewrote every window. A read where no window has
+   its end, minimum, average and maximum now stops the run (fail closed: below).
 
 The first two are `health_sync/stored.py`. The third, and the decision per window below, are
 shared with the seeder since T35: `pulsebridge_gcp.stored.stored_windows` (called with a fresh
@@ -365,7 +365,18 @@ runs twelve consecutive runs and checks no window is written more than twice.
   identifier: a `WARNING`, every window written, and the conditional creates will report the
   412 until the duplicate is removed by hand, T06 README); `skipped-for-time` (see "Deadline");
   `failed:<HTTP status or error type>` (`stored-read-failed` logged, every window written:
-  reading only saves writes); `not-attempted` (the run had no windows).
+  reading only saves writes); `failed:elements-missing` (below: the run stops, nothing is
+  written); `not-attempted` (the run had no windows).
+- **A read without the compared elements** (since T39, fail closed): when at least two windows
+  of ours that are not withdrawn come back and none has its end, minimum, average and maximum
+  (every window T06 writes has all four), the search itself is wrong, as `_elements` with
+  typed choice names was on dev. The run logs `stored-elements-missing` at `ERROR` and ends
+  `fhir-rejected` with reason `stored-elements-missing` (HTTP 500, an `ERROR` `sync-run` line
+  for the alerts) before writing anything in that range. A rewrite cannot fix a broken search,
+  carrying on rewrote every window on every run, and writing everything would overwrite
+  withdrawn and amended windows. Nothing is lost: the next run after a fix writes what is still
+  in its three-hour look-back, and a backfill covers anything older. One stored window with an
+  unreadable part, or a few among complete ones, are only those windows rewritten.
 - **A search page that is not valid FHIR JSON** (since T35, the seeder's handling): an `entry`
   that is not an array (`null`, a number, an object), or a stored Observation whose
   `identifier`, `component` or `component.coding` is not an array or whose `component.code` is
@@ -409,11 +420,14 @@ values. The run counts them (`windows_amended`), and they are also counted in `w
   clinic. T06 also refuses `amended` for a window that is not complete. So the window is **not
   written**: the stored `final` stays, the run counts it (`windows_held_final`), and once the
   cutoff passes it again a later run writes it `amended` with the new values.
-- **When the read fails** (`stored_read` not `ok`), nothing is known about what is stored, so
-  every window is written with the status the cutoff gives (`final` or `preliminary`), as
-  before: a window that was `amended` goes back to `final` until its values change again, and
-  after `FINAL_AFTER_MINUTES` was raised a stored `final` window inside the new "still filling"
-  part could be written `preliminary`. Only a successful read can prevent that.
+- **When the read fails** (`stored_read` is `failed:<status or type>`; not `elements-missing`,
+  which writes nothing), nothing is known about what is stored, so every window is written
+  with the status the cutoff gives (`final` or `preliminary`), as before: a withdrawn
+  (`entered-in-error`, `cancelled`) window is overwritten, a window that was `amended` goes back
+  to `final` until its values change again, and after `FINAL_AFTER_MINUTES` was raised a stored
+  `final` window inside the new "still filling" part could be written `preliminary`. Only a
+  successful read can prevent that. Recorded in T39 as an open question for the orchestrator
+  (`libs/pulsebridge_fhir` README), not changed.
 - **The dashboard** treats `amended` like other non-final statuses: drawn on the solid line,
   described as "status amended: not shared (only final is)" (`web/src/heart-rate`). So an
   amended window cannot be shared with the clinic (T15 shares only `final`).
@@ -645,8 +659,9 @@ base name only, `pulsebridge_gcp.testing.select_elements`), answers `_count=0` o
 was not seen refused: `status` and the rest of the unverified rows are answered as R4 says.
 
 If a search is refused, it fails and the run writes everything (`stored_read: "failed:…"`), so
-a wrong assumption costs writes, not data. It can also fail silently (as `_elements` did), so
-check:
+a wrong assumption costs writes (and, for withdrawn or amended windows, their status: above),
+not data. It can also fail silently (as `_elements` did; that case now stops the run as
+`stored-elements-missing`), so check:
 
 4. On the **second** sync run after deployment, the report has `stored_read: "ok"` and
    `windows_unchanged > 0`. If `windows_unchanged` stays 0 run after run while `stored_read` is

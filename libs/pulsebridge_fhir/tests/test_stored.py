@@ -14,8 +14,10 @@ import pytest
 from pulsebridge_fhir.stored import (
     ELEMENTS,
     Plan,
+    StoredElementsMissing,
     StoredReadError,
     StoredWindow,
+    check_elements_present,
     page_windows,
     parse_stored_window,
     plan_writes,
@@ -260,39 +262,67 @@ def test_page_windows_in_page_order_with_repeats_and_foreign_entries_skipped():
     assert page_windows({"resourceType": "Bundle"}) == []
 
 
-def _page(*resources: dict) -> dict:
-    return {"resourceType": "Bundle", "entry": [{"resource": r} for r in resources]}
-
-
-def _without(resource: dict, *names: str) -> dict:
-    return {k: v for k, v in resource.items() if k not in names}
+def _window(status: str = "final", *, end=END, values=(60, 64.5, 71)) -> StoredWindow:
+    return StoredWindow(status=status, end=end, values=values)
 
 
 @pytest.mark.parametrize(
-    "missing",
-    [("effectivePeriod", "valueQuantity"), ("effectivePeriod",), ("valueQuantity",)],
-    ids=["both", "end", "average"],
+    "incomplete",
+    [
+        {"end": None},
+        {"values": (60, None, 71)},
+        {"values": (None, 64.5, 71)},  # a dropped ``component`` loses the minimum ...
+        {"values": (60, 64.5, None)},  # ... and the maximum
+        {"end": None, "values": (None, None, None)},  # what dev's typed _elements gave
+    ],
+    ids=["end", "average", "minimum", "maximum", "everything"],
 )
-def test_a_page_where_no_window_has_an_end_and_an_average_is_a_read_error(missing):
-    """What a wrong ``_elements`` looked like on dev (T39): the typed choice names selected
-    nothing, every window came back without its period and value, and every run rewrote every
-    window while reporting ``stored_read: ok``. Now the read fails instead, visibly."""
-    page = _page(_without(observation("k1"), *missing), _without(observation("k2"), *missing))
-    with pytest.raises(StoredReadError, match="end and an average"):
-        page_windows(page)
+def test_a_read_where_no_window_is_complete_is_elements_missing(incomplete):
+    """What a wrong ``_elements`` looked like on dev (T39): every window came back without its
+    period and value, and every run rewrote every window while reporting ``stored_read: ok``."""
+    with pytest.raises(StoredElementsMissing):
+        check_elements_present([_window(**incomplete), _window("preliminary", **incomplete)])
 
 
-def test_one_unreadable_window_among_readable_ones_is_only_that_window():
-    page = _page(observation("k1"), _without(observation("k2"), "effectivePeriod", "valueQuantity"))
-    assert page_windows(page) == [
-        ("k1", StoredWindow(status="final", end=END, values=(60, 64.5, 71))),
-        ("k2", StoredWindow(status="final", end=None, values=(60, None, 71))),
-    ]
+def test_one_complete_window_among_incomplete_ones_is_not_elements_missing():
+    check_elements_present([_window(end=None), _window(end=None), _window()])
 
 
-def test_a_page_without_windows_of_ours_is_not_an_error():
-    foreign = observation(identifier=[{"system": "urn:other", "value": "k"}])
-    assert page_windows(_page(_without(foreign, "effectivePeriod", "valueQuantity"))) == []
+def test_a_single_incomplete_window_is_just_that_window_rewritten():
+    check_elements_present([_window(end=None, values=(None, None, None))])
+
+
+def test_an_empty_read_is_not_elements_missing():
+    check_elements_present([])
+
+
+@pytest.mark.parametrize("status", ["entered-in-error", "cancelled"])
+def test_withdrawn_windows_are_not_judged(status):
+    incomplete = {"end": None, "values": (None, None, None)}
+    check_elements_present([_window(status, **incomplete), _window(status, **incomplete)])
+    # A complete withdrawn window does not hide two incomplete ones that are not withdrawn.
+    with pytest.raises(StoredElementsMissing):
+        check_elements_present(
+            [_window(status), _window(**incomplete), _window("preliminary", **incomplete)]
+        )
+
+
+def test_elements_missing_is_not_a_read_error():
+    """A caller catching StoredReadError (write everything) must not swallow it."""
+    assert not issubclass(StoredElementsMissing, StoredReadError)
+
+
+def test_page_windows_reads_incomplete_windows_as_none_without_judging_them():
+    page = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": observation("k1", effectivePeriod=None, valueQuantity=None)},
+            {"resource": observation("k2", effectivePeriod=None, valueQuantity=None)},
+        ],
+    }
+    assert [w for _, w in page_windows(page)] == [
+        StoredWindow(status="final", end=None, values=(60, None, 71))
+    ] * 2
 
 
 @pytest.mark.parametrize(

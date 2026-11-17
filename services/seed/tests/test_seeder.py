@@ -17,6 +17,7 @@ from pulsebridge_seed.seeder import Outcome, run, setup_bundle
 from pulsebridge_seed.testing import (
     NOW,
     PATIENT_ID,
+    STORE,
     StoreFake,
     deps_for,
     fresh_store,
@@ -687,23 +688,44 @@ def test_a_steady_hourly_run_finalises_the_last_hour_and_leaves_the_rest():
     assert all(o["status"] != "amended" for o in store.observations.values())
 
 
-def test_typed_choice_names_in_elements_are_a_visible_read_failure(monkeypatch):
-    """Defence in depth: if ``_elements`` ever names ``effectivePeriod,valueQuantity`` again,
-    the store leaves both out; the run reports a failed read and writes each window with the
-    status it has now, instead of reporting ``ok`` and amending every final window."""
+def test_typed_choice_names_in_elements_stop_the_run_and_write_nothing(monkeypatch):
+    """Fail closed (T39): if ``_elements`` ever names ``effectivePeriod,valueQuantity`` again,
+    the store leaves both out and the run ends ``fhir-rejected`` (exit 1, a WARNING seed-run
+    line for the alert) before writing anything: no endless rewrites, and a withdrawn window
+    is not overwritten as a "write everything" would."""
     import pulsebridge_fhir.stored
+    from pulsebridge_seed.cli import EXIT_FAILED, _exit_code
 
     store = fresh_store()
     seed(store, length=timedelta(hours=2), until=UNTIL)
+    withdrawn = next(iter(store.observations))
+    store.observations[withdrawn]["status"] = "entered-in-error"
+    before = copy.deepcopy(store.observations)
+    sent = len(store.bundles())
     monkeypatch.setattr(
         pulsebridge_fhir.stored,
         "ELEMENTS",
         "identifier,status,effectivePeriod,valueQuantity,component",
     )
     report = seed(store, length=timedelta(hours=2), until=UNTIL)
-    assert report.stored_read == "failed:StoredReadError"
-    assert report.windows_amended == 0
-    assert report.windows_written == report.windows_generated > 0
+    assert (report.outcome, report.reason) == (Outcome.FHIR_REJECTED, "stored-elements-missing")
+    assert report.stored_read == "failed:elements-missing"
+    assert _exit_code(report) == EXIT_FAILED
+    assert len(store.bundles()) == sent and report.windows_written == 0
+    assert store.observations == before
+
+
+def test_the_store_fake_refuses_summary_and_unmodelled_parameters():
+    from pulsebridge_gcp import ClientError, HealthcareClient
+
+    client = HealthcareClient(project="p", location="l", dataset="d", transport=fresh_store())
+    with pytest.raises(ClientError) as raised:
+        client.search(STORE, "Observation", [("_summary", "count")])
+    assert raised.value.status == 400
+    with pytest.raises(AssertionError, match="does not model"):
+        client.search(STORE, "Observation", [("status", "preliminary")])
+    with pytest.raises(AssertionError, match="does not model"):
+        client.search(STORE, "Patient", [("_elements", "id")])
 
 
 def test_read_follows_next_links():

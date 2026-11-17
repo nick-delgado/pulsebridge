@@ -56,7 +56,12 @@ from pulsebridge_fhir import (
     window_status,
 )
 from pulsebridge_fhir.keys import escape_search_value
-from pulsebridge_fhir.stored import StoredReadError, StoredWindow, plan_writes
+from pulsebridge_fhir.stored import (
+    StoredElementsMissing,
+    StoredReadError,
+    StoredWindow,
+    plan_writes,
+)
 from pulsebridge_gcp import (
     ClientError,
     ConflictError,
@@ -438,6 +443,13 @@ def _stored(
             max_pages=max_pages_for_range(window_range.start, window_range.end),
             logger=logger,
         )
+    except StoredElementsMissing:
+        # Fail closed (T39): the search returned our windows without the compared elements,
+        # so it is the search that is wrong. Writing everything would overwrite withdrawn and
+        # amended windows; carrying on would rewrite every window, every run. Stop with a
+        # failed outcome (exit 1, a WARNING seed-run line for the alert) and write nothing.
+        report.stored_read = "failed:elements-missing"
+        raise _Stop(Outcome.FHIR_REJECTED, "stored-elements-missing") from None
     except (HealthcareApiError, StoredReadError, ValueError) as exc:
         status = getattr(exc, "status", None)
         report.stored_read = f"failed:{status if status is not None else type(exc).__name__}"

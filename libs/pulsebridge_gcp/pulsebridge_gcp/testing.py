@@ -70,6 +70,25 @@ def select_elements(resource: dict, elements: str | None) -> dict:
     }
 
 
+def summary_refused() -> HttpResponse:
+    """Cloud Healthcare's answer to a search with ``_summary``: 400 with this text (first dev
+    deploy, seen by fhir-proxy). The issue ``code`` was not recorded; ``not-supported`` is a
+    stand-in and no caller reads it."""
+    return json_response(
+        400,
+        {
+            "resourceType": "OperationOutcome",
+            "issue": [
+                {
+                    "severity": "error",
+                    "code": "not-supported",
+                    "diagnostics": "_summary argument is not supported yet",
+                }
+            ],
+        },
+    )
+
+
 @dataclass(frozen=True)
 class RecordedRequest:
     method: str

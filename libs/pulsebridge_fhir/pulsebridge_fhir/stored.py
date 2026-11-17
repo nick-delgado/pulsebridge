@@ -27,14 +27,14 @@ else: asked for ``effectivePeriod,valueQuantity`` it silently leaves both out (s
 17 November 2026; ``effective[x]`` and ``Observation.effective`` select nothing either). Every
 stored window then read as "end and average unknown", never equal to the window being planned,
 so every run rewrote every window and turned each final one into ``amended``.
-:func:`page_windows` now reports a page where no window has both parts as a read error, so the
-same mistake shows in the run report (``stored_read`` not ``ok``) instead of as endless
-rewrites. Values are compared, never logged.
+:func:`check_elements_present` now stops such a read (:class:`StoredElementsMissing`), and the
+services end the run as a failure without writing, so the same mistake shows as a failed run
+instead of as endless rewrites. Values are compared, never logged.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -59,6 +59,19 @@ class StoredReadError(Exception):
     client raises itself). The caller then writes every window."""
 
 
+class StoredElementsMissing(Exception):  # noqa: N818 - a condition, named for what it means
+    """The search returned our windows without the elements compared (:func:`check_elements_
+    present`). Deliberately not a :class:`StoredReadError`: the caller must not write every
+    window, but stop the run as a failure, writing nothing (fail closed).
+
+    Why stop rather than write: this means the search contract with the store is broken (as
+    ``_elements`` with typed choice names was on dev), which a rewrite cannot fix; carrying on
+    rewrote every window on every run and turned each final window into ``amended``. Writing
+    everything instead would overwrite withdrawn windows and stored ``amended`` statuses.
+    Stopping loses nothing: the windows are still at the source, and the next run after the fix
+    writes them (within the look-back; older ones by backfill)."""
+
+
 @dataclass(frozen=True)
 class StoredWindow:
     """The parts of a stored heart-rate Observation that decide whether to write it again."""
@@ -70,6 +83,11 @@ class StoredWindow:
     @property
     def is_final(self) -> bool:
         return self.status in FINAL_STATUSES
+
+    @property
+    def is_complete(self) -> bool:
+        """End, minimum, average and maximum all readable: every window T06 writes has them."""
+        return self.end is not None and all(v is not None for v in self.values)
 
 
 def search_instant(value: datetime) -> str:
@@ -184,14 +202,7 @@ def page_windows(page: object) -> list[tuple[str, StoredWindow]]:
     decides what that means). Raises :class:`StoredReadError` unless the page is a ``Bundle``
     whose ``entry`` is absent or a list (R4 JSON: ``Bundle.entry`` is an array), and when an
     Observation's arrays or ``component.code`` have another shape (:func:`parse_stored_window`).
-    Entries that are not one of our heart-rate Observations are skipped.
-
-    Also raises when the page holds windows of ours but **none** has both a readable end
-    (``effectivePeriod.end``) and a readable average (``valueQuantity.value``). Every heart-rate
-    Observation T06 writes has both, so that is the search leaving elements out (as a wrong
-    ``_elements`` did on dev), not data: reading on would rewrite every window, every run,
-    without any sign in the report. One unreadable window among readable ones is still just
-    that window rewritten (:func:`parse_stored_window`)."""
+    Entries that are not one of our heart-rate Observations are skipped."""
     if not isinstance(page, dict) or page.get("resourceType") != "Bundle":
         raise StoredReadError("search did not return a Bundle")
     entries = page.get("entry", [])
@@ -203,13 +214,30 @@ def page_windows(page: object) -> list[tuple[str, StoredWindow]]:
         parsed = parse_stored_window(resource) if isinstance(resource, dict) else None
         if parsed is not None:
             found.append(parsed)
-    if found and not any(_readable(window) for _, window in found):
-        raise StoredReadError("no stored window on the page has an end and an average")
     return found
 
 
-def _readable(window: StoredWindow) -> bool:
-    return window.end is not None and window.values[1] is not None
+# Fewer judged windows than this never trip the check: one stored window with an unreadable
+# part is just that window rewritten (parse_stored_window), not a reason to stop every run until
+# it leaves the range. A broken search shows from the second stored window on.
+MIN_WINDOWS_JUDGED = 2
+
+
+def check_elements_present(windows: Iterable[StoredWindow]) -> None:
+    """Raise :class:`StoredElementsMissing` when the whole read (every page) holds at least
+    :data:`MIN_WINDOWS_JUDGED` windows of ours that are not withdrawn and **none** of them is
+    complete (end, minimum, average and maximum all readable, :attr:`StoredWindow.is_complete`).
+
+    Every heart-rate Observation T06 writes has all four (``effectivePeriod.end``,
+    ``valueQuantity`` and the two ``component`` values), so a read where none has them is the
+    search leaving elements out, not data: on dev, ``_elements`` with typed choice names
+    dropped ``effectivePeriod`` and ``valueQuantity``; a dropped ``component`` would do the same
+    to the minimum and maximum. Withdrawn windows (``entered-in-error``, ``cancelled``) are not
+    judged: they are never rewritten whatever they hold. Some unreadable windows among complete
+    ones are only those windows rewritten."""
+    judged = [w for w in windows if w.status not in WITHDRAWN_STATUSES]
+    if len(judged) >= MIN_WINDOWS_JUDGED and not any(w.is_complete for w in judged):
+        raise StoredElementsMissing("no stored window has its end, minimum, average and maximum")
 
 
 @dataclass(frozen=True)

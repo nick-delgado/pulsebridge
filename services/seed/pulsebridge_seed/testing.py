@@ -9,7 +9,9 @@ The FHIR store is the real :class:`pulsebridge_gcp.HealthcareClient` over :class
 - ``GET Patient`` and ``GET Observation`` searches answer from what was stored, with ``total``,
   ``_count`` paging and ``next`` links inside the store; the Observation search applies
   ``_elements`` as Cloud Healthcare does (``pulsebridge_gcp.testing.select_elements``: choice
-  elements by base name only), so a wrong ``_elements`` loses the same fields here as on dev.
+  elements by base name only), so a wrong ``_elements`` loses the same fields here as on dev;
+- like health-sync's ``FhirFake``: ``_summary`` answers 400 (as Cloud Healthcare did on dev)
+  and a search parameter outside :data:`SEARCH_PARAMETERS` fails the test.
 
 A route scripted with ``add`` takes precedence, so a test can make a search fail or answer
 anything. ``bundle_errors`` scripts the next ``executeBundle`` answers (``None``: apply it).
@@ -28,7 +30,13 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 from pulsebridge_gcp import HealthcareClient, HttpResponse
-from pulsebridge_gcp.testing import FakeTransport, RecordedRequest, json_response, select_elements
+from pulsebridge_gcp.testing import (
+    FakeTransport,
+    RecordedRequest,
+    json_response,
+    select_elements,
+    summary_refused,
+)
 
 from pulsebridge_seed.config import FhirTarget, SeedConfig
 from pulsebridge_seed.seeder import Dependencies
@@ -52,6 +60,15 @@ def _overlaps(resource: dict, start: datetime | None, end: datetime | None) -> b
     lo = datetime.fromisoformat(period["start"])
     hi = datetime.fromisoformat(period["end"])
     return (start is None or hi >= start) and (end is None or lo < end)
+
+
+# The search parameters StoreFake answers: the ones the seeder sends, and ``_offset`` in the
+# fake's own ``next`` links. Any other fails the test (the fake does not model it; that is not a
+# claim that Cloud Healthcare refuses it). ``_summary`` answers 400 as Cloud Healthcare does.
+SEARCH_PARAMETERS: dict[str, frozenset[str]] = {
+    "Patient": frozenset({"identifier", "_count"}),
+    "Observation": frozenset({"subject", "code", "date", "_elements", "_count", "_offset"}),
+}
 
 
 class StoreFake(FakeTransport):
@@ -83,9 +100,16 @@ class StoreFake(FakeTransport):
         path = urlsplit(url).path
         if method == "POST" and path.endswith("/fhir"):
             return self._execute(json.loads(body))
-        if method == "GET" and path.endswith("/fhir/Patient"):
-            return self._searchset([copy.deepcopy(p) for p in self.patients])
-        if method == "GET" and path.endswith("/fhir/Observation"):
+        if method == "GET" and path.endswith(("/fhir/Patient", "/fhir/Observation")):
+            resource_type = path.rsplit("/", 1)[1]
+            names = {name for name, _ in pairs or query}
+            if "_summary" in names:
+                return summary_refused()  # as Cloud Healthcare answered on dev
+            unexpected = names - SEARCH_PARAMETERS[resource_type]
+            if unexpected:
+                raise AssertionError(f"StoreFake does not model {resource_type} {unexpected}")
+            if resource_type == "Patient":
+                return self._searchset([copy.deepcopy(p) for p in self.patients])
             return self._observation_search(url, pairs or query)
         raise AssertionError(f"StoreFake: no route for {method} {path}")
 

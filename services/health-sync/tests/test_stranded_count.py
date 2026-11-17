@@ -81,9 +81,10 @@ def test_the_count_is_the_searchset_total_of_a_zero_entry_page():
         {"resourceType": "Bundle", "type": "searchset", "total": "5"},
         {"resourceType": "Bundle", "type": "searchset", "total": 5.0},
         {"resourceType": "Bundle", "type": "searchset", "total": True},
+        {"resourceType": "Bundle", "type": "searchset", "total": False},  # not a zero
         {"resourceType": "Bundle", "type": "searchset", "total": -1},
     ],
-    ids=["missing", "null", "string", "float", "bool", "negative"],
+    ids=["missing", "null", "string", "float", "true", "false", "negative"],
 )
 def test_a_missing_or_non_numeric_total_is_a_failure_not_zero(bundle):
     transport = FhirFake(count_failure=json_response(200, bundle))

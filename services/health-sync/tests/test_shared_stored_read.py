@@ -47,9 +47,20 @@ def ready(world, *, stored: int = 0, page_size: int | None = None) -> None:
             "resourceType": "Observation",
             "identifier": [{"system": "urn:pulsebridge:observation", "value": f"k{i}"}],
             "status": "final",
-            # Every window T06 writes has both; a page where none has them is a read error.
+            # Every window T06 writes has all four (end, min, avg, max); a read where none has
+            # them is StoredElementsMissing (T39).
             "effectivePeriod": {"start": "2026-01-15T10:00:00Z", "end": "2026-01-15T10:05:00Z"},
             "valueQuantity": {"value": 60},
+            "component": [
+                {
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "96935-2"}]},
+                    "valueQuantity": {"value": 58},
+                },
+                {
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "55426-1"}]},
+                    "valueQuantity": {"value": 63},
+                },
+            ],
         }
         for i in range(stored)
     ]

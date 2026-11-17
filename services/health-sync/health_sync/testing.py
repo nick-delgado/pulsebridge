@@ -23,7 +23,13 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pulsebridge_gcp import HealthcareClient, TimedOutError
-from pulsebridge_gcp.testing import FakeTransport, RecordedRequest, json_response, select_elements
+from pulsebridge_gcp.testing import (
+    FakeTransport,
+    RecordedRequest,
+    json_response,
+    select_elements,
+    summary_refused,
+)
 from pulsebridge_gcp.transport import HttpResponse
 
 from health_sync.config import DEFAULT_SCOPE, SecretPaths, ServiceConfig
@@ -194,7 +200,7 @@ class FhirFake(FakeTransport):
                 query.setdefault(name, []).append(value)
             resource_type = path.rsplit("/", 1)[1]
             if resource_type == "Observation" and "_summary" in query:
-                return _summary_refused()
+                return summary_refused()
             unexpected = set(query) - SEARCH_PARAMETERS[resource_type]
             if unexpected:
                 raise AssertionError(f"FhirFake does not model {resource_type} {unexpected}")
@@ -253,25 +259,6 @@ SEARCH_PARAMETERS: dict[str, frozenset[str]] = {
         {"subject", "code", "status", "date", "_elements", "_count", "_total"}
     ),
 }
-
-
-def _summary_refused() -> HttpResponse:
-    """Cloud Healthcare's answer to ``_summary``: 400 with this text (first dev deploy, seen by
-    fhir-proxy). The issue ``code`` was not recorded; ``not-supported`` is a stand-in and no
-    caller reads it."""
-    return json_response(
-        400,
-        {
-            "resourceType": "OperationOutcome",
-            "issue": [
-                {
-                    "severity": "error",
-                    "code": "not-supported",
-                    "diagnostics": "_summary argument is not supported yet",
-                }
-            ],
-        },
-    )
 
 
 def _searchset(entries: Sequence[dict]) -> dict:

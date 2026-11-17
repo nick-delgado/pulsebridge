@@ -193,7 +193,8 @@ uses the functions below. This module makes no request of its own.
 | Name | What it is |
 | --- | --- |
 | `stored_window_search_params(patient_ref, start, end)` | The R4 search: `subject`, `code=http://loinc.org\|8867-4`, `date=ge…`, `date=lt…` (UTC, `Z`), `_elements=identifier,status,effective,value,component`, `_count=1000`. `date` on an `effectivePeriod` matches when the period overlaps the range. `effective` and `value` are the base names of the choice elements `effective[x]` and `value[x]` (below). |
-| `page_windows(page)` | The `(key, StoredWindow)` pairs on one search page, in order. `StoredReadError` unless it is a `Bundle` whose `entry` is absent or a list, when an Observation has a wrong shape (below), and when the page holds windows of ours but none has both an end and an average (the search left elements out; below). |
+| `page_windows(page)` | The `(key, StoredWindow)` pairs on one search page, in order. `StoredReadError` unless it is a `Bundle` whose `entry` is absent or a list, and when an Observation has a wrong shape (below). |
+| `check_elements_present(windows)`, `StoredElementsMissing` | Run by `pulsebridge_gcp.stored.stored_windows` over the whole read (every page): raises `StoredElementsMissing` when at least two windows of ours that are not withdrawn were read and none is complete (end, min, avg and max all readable, `StoredWindow.is_complete`). Not a `StoredReadError`: the caller stops the run instead of writing everything (below). |
 | `parse_stored_window(resource)` | One stored Observation: its key (`urn:pulsebridge:observation`), status, end and min/avg/max; `None` if it is not ours. Unreadable values (an end that is not a time, a value that is not a number, a component that is not an object) become `None`, so that window is written again. An `identifier`, `component` or `coding` that is not an array, or a `component.code` that is not an object, raises `StoredReadError`: the caller's read fails and every window is written, never a crash. |
 | `StoredWindow(status, end, values)`, `.is_final` | What is compared. `is_final`: `final`, `amended` or `corrected`. |
 | `plan_writes(items, stored, *, key_of, status_of)` | A `Plan`: the items to write (in order), the counts, and `amend_keys`. `stored=None` writes everything. |
@@ -218,26 +219,49 @@ searches as an Owner showed what the store does:
 | `effective[x],value[x]` | neither choice element |
 | `Observation.effective,Observation.value` | only `id`, `meta`, `resourceType` |
 
-The fix is the base names. Two guards keep it from returning silently: the fake FHIR stores of
-`health-sync` and the seeder apply `_elements` the same way (`pulsebridge_gcp.testing.
-select_elements`), so their "second run is unchanged" tests fail on the old value; and
-`page_windows` refuses a page where no window of ours has both an end and an average (every
-window T06 writes has both), so the run report says `stored_read: "failed:StoredReadError"` and
-the run writes each window with the status it has now, instead of `ok` and endless amendments.
-One unreadable window among readable ones is still only that window rewritten. Windows already
-stored `amended` stay so: `amended` counts as final (`FINAL_STATUSES`), so they are left alone
-when their values match.
+The fix is the base names. Two guards keep it from returning silently:
+
+- The fake FHIR stores of `health-sync` and the seeder apply `_elements` the same way
+  (`pulsebridge_gcp.testing.select_elements`), so their "second run is unchanged" tests fail on
+  the old value.
+- **Fail closed.** `check_elements_present` judges the whole read: if at least two windows of
+  ours that are not withdrawn came back and none has its end, minimum, average and maximum
+  (every window T06 writes has all four), it raises `StoredElementsMissing`. Both services
+  then end the run as `fhir-rejected` with reason `stored-elements-missing` and
+  `stored_read: "failed:elements-missing"`, and write no heart-rate window. Why stop rather
+  than write: it means the search contract with the store is broken, which a rewrite cannot
+  fix and which caused the endless rewrites on dev; writing everything (as other read failures
+  do, below) would overwrite withdrawn windows and stored `amended` statuses. Stopping is safe
+  because nothing is lost: the windows are still at the source, and the next run after a fix
+  writes what is still in its range (older windows by backfill). The run's failed outcome
+  reaches the existing alerts (health-sync: HTTP 500 and an `ERROR` `sync-run` line; the
+  seeder: exit 1 and a `WARNING` `seed-run` line). Withdrawn windows are not judged (they are
+  never rewritten), and a single stored window with an unreadable part does not trip it: that
+  window alone is rewritten, as are a few unreadable windows among complete ones.
+
+Windows already stored `amended` stay so: `amended` counts as final (`FINAL_STATUSES`), so they
+are left alone when their values match.
 
 The decision per window (R4 `Observation.status` codes):
 
 | Stored | Now | Result |
 | --- | --- | --- |
-| nothing (or the read failed: `stored=None`) | any | write (`new`) |
+| nothing (or the read failed: `stored=None`) | any | write (`new`); after a failed read this also rewrites withdrawn windows, writes `amended` ones back as `final`, and can write a held `final` back as `preliminary` (open question below) |
 | `entered-in-error` or `cancelled` | any | **keep**, never rewritten: someone withdrew it (`withdrawn_kept`) |
 | same end and values, same status or already final | any | skip (`unchanged`) |
 | `preliminary`, same end and values | `final` | write (`finalised`) |
 | `final`/`amended`/`corrected`, end or values changed | `final` | write as **`amended`** ("Subsequent to being Final, the observation has been modified"), key in `amend_keys` |
 | `final`/`amended`/`corrected`, end or values changed | `preliminary` | **not written** (`held_final`): R4 has no path from `final` back to `preliminary`; a later run writes it `amended` |
+
+**Open question (recorded in T39, not changed): what a failed read writes.** For every read
+failure except `StoredElementsMissing` (an HTTP error, too many pages, a malformed page), the
+caller passes `stored=None` and every window is written as new, with the status the cutoff
+gives. Nothing is known about what is stored, so the rules above that protect stored windows
+do not apply: a withdrawn (`entered-in-error`, `cancelled`) window is overwritten and comes back
+as `final` or `preliminary`, an `amended` window goes back to `final`, and a stored `final`
+window that would be `preliminary` now (after `FINAL_AFTER_MINUTES` was raised) is written
+`preliminary`. This is the behaviour since T09 and T10; whether a failed read should instead
+skip the writes is for the orchestrator to decide.
 | `preliminary`, end or values changed | any | write (`changed`) |
 
 ### `v2-to-fhir` (T12), from PID-3 and PID-5 only
