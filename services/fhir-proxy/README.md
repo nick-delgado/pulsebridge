@@ -218,11 +218,12 @@ derived.
     | --- | --- |
     | one address (an IPv6 /64 counts as one) | 5 |
     | N addresses | 5 × N |
-    | a wrong `TRUSTED_PROXY_HOPS` (the key is then a value the caller writes) | as many as the service answers: bounded only by throughput (instances × threads) |
+    | a wrong `TRUSTED_PROXY_HOPS`, or a direct `*.run.app` caller sending its own `X-Forwarded-For` while the hop count is 2 (the key is then a value the caller writes) | as many as the service answers: bounded only by throughput (instances × threads) |
 
     What protects the login then is the password: a random 16-character password (T27's
     enforced minimum; 24 or more is recommended) has far more values than any of these rates
-    can try. T22 must set `TRUSTED_PROXY_HOPS` right for the one path that reaches the service.
+    can try. `TRUSTED_PROXY_HOPS` must be right for the one path the page uses (module phr sets
+    2 for Firebase Hosting, measured; see "For T22: deploying it" below).
     The costs of a flood are log volume and Cloud Run usage (requests, CPU, instances up to
     `max_instance_count`). No hard ceiling on verifications is applied: it would bring the
     lockout back.
@@ -242,10 +243,14 @@ derived.
   "X-Forwarded-For header", read 2026-11-15). Cloud Run's own documentation (container contract,
   HTTPS invocation) says nothing about the header; a Google developer forum thread reports that
   `*.run.app` appends exactly one entry, the observed client address. So the default
-  `TRUSTED_PROXY_HOPS=1` takes the **last** entry; `2` takes the second from the right (one
-  more proxy in front); `0` ignores the header (no proxy, local use). A spoofed left-hand entry
-  never moves the key (tested). Failed logins log the address and the number of XFF entries,
-  never the values to their left, so T22 can see the real shape behind Firebase Hosting.
+  `TRUSTED_PROXY_HOPS=1` takes the **last** entry (the service alone at `*.run.app`); `2` takes
+  the second from the right (one more proxy in front: Firebase Hosting, measured, which module
+  phr sets); `0` ignores the header (no proxy, local use). With the right count for the path a
+  request took, a spoofed left-hand entry never moves the key (tested); with fewer entries than
+  hops the left-most is used. Under 2, a request sent straight to `*.run.app` with its own
+  header does choose its key (tested; module phr's README, "The client address and the direct
+  run.app URL"). Failed logins log the address and the number of XFF entries, never the values
+  to their left.
 - **Logs** record `login-failed` (client address, XFF entry count), `login-rate-limited`,
   `login-succeeded`, `token-refused` (reason code); never a submitted password or a token.
 
@@ -656,7 +661,7 @@ whether OpenEMR's zone was other than UTC was not checked). Not done: 7, 8, 9.
 | `SESSION_TTL_SECONDS` | no | `28800` | token lifetime, 60-86400 |
 | `TOKEN_ISSUER` | no | `pulsebridge-fhir-proxy` | JWT `iss`/`aud`; also salts the key derivation (set a deployment-specific value to defeat shared precomputation) |
 | `PASSWORD_CACHE_SECONDS` | no | `30` | rotation delay, 0-300 |
-| `TRUSTED_PROXY_HOPS` | no | `1` | see below |
+| `TRUSTED_PROXY_HOPS` | no | `1` | `1` for the service alone at `*.run.app`; **`2` behind Firebase Hosting** (measured; module phr sets it). See below |
 | `LOGIN_FAILURES_PER_ADDRESS` / `LOGIN_FAILURES_TOTAL` / `LOGIN_WINDOW_SECONDS` | no | `5` / `60` / `60` | the login limit |
 | `FHIR_TIMEOUT_SECONDS` | no | `10` | per Cloud Healthcare request, 1-30 |
 | `CUFF_FORWARD_TIMEOUT_SECONDS` | no | `55` | 10-3000, at least 10 s below `REQUEST_TIMEOUT_SECONDS`; the budget of the cuff send (below) |
@@ -683,20 +688,29 @@ rewrite (`PATH_PREFIX=/api`, `PUBLIC_BASE_URL=https://<hosting domain>/api`). It
 `*.run.app` for some routes and Hosting for others: the two put different entries at the right
 of `X-Forwarded-For`, and no single `TRUSTED_PROXY_HOPS` fits both.
 
-**`TRUSTED_PROXY_HOPS`: measure it on the first deploy.** Behind the rewrite the right-most entry
-may be Firebase's own egress address, which would put every reviewer in one bucket. Make two
-failed logins through the hosting domain (one with a made-up `X-Forwarded-For: 192.0.2.1`
-header) and read the `login-failed` log lines: the `forwarded_for_entries` count (without the
-made-up header) and which `client_address` came out tell you whether `1` or `2` is right. While
-`*.run.app` stays reachable directly, a hop count of 2 lets a direct caller choose its own key
-(the left of two entries), and then only throughput bounds its guesses (see "Reviewer login").
+**`TRUSTED_PROXY_HOPS`: 2 behind Firebase Hosting (measured), 1 without it.** Measured on the
+dev deploy on 17 November 2026 (infra/envs/README.md, checklist P1): through the rewrite the
+service receives two entries, `<visitor>, <Hosting's address>`, also when the visitor sends its
+own `X-Forwarded-For` (Hosting replaces it), so the visitor is second from the right. With 1 the
+key was Hosting's address, which changed between requests and was shared by visitors. Module phr
+therefore sets 2 (its default). This service's own default stays **1**: called at `*.run.app`
+with nothing in front, it receives exactly one entry, and a default of 2 would let any direct
+caller write its own key. While `*.run.app` stays reachable directly (Hosting needs it), the
+hop count of 2 lets a direct caller that sends its own header choose its key (the left of two
+entries), and then only throughput bounds its guesses; the password is what protects the login
+(see "Reviewer login" and module phr's README, "The client address and the direct run.app URL").
+On a new deployment, confirm the shape with two failed logins through the hosting domain (one
+with a made-up `X-Forwarded-For: 192.0.2.1`) and read `forwarded_for_entries` and
+`client_address` in the `login-failed` lines.
 
 **Possible follow-up: `TRUSTED_PROXY_CIDRS`.** A hop count cannot tell a Hosting-forwarded request
 from a direct `*.run.app` one. A setting listing Firebase Hosting's egress address ranges would:
 trust the second-from-right `X-Forwarded-For` entry only when the right-most entry, which Cloud
 Run itself appends, lies inside those ranges, and otherwise key on the right-most entry. A direct
-caller could then not choose its own key. Not built; it needs the ranges Hosting really uses
-(measured on the first deploy) and a way to keep them current.
+caller could then not choose its own key. Not built; it needs ranges that hold Hosting's addresses and
+not addresses other Google Cloud customers can send from (none is documented; the first
+measurement saw only a Google address that changed between requests) and a way to keep them
+current.
 
 **Timeouts under Firebase Hosting's 60 s.** Hosting ends a rewritten request at 60 s
 (documented). Everything is sized to answer before that:
@@ -829,8 +843,11 @@ duplicate text, the Encounter date being `period.start`) comes from reading the 
 T14 made no GCP call. Everything about Google's services is from documentation or other tasks'
 notes, and must be confirmed on the first deployment (T25):
 
-- **X-Forwarded-For on `*.run.app`** (one appended entry) and **behind Firebase Hosting**: from a
-  forum report and reasoning, not Google's Cloud Run documentation. See "For T22".
+- **X-Forwarded-For on `*.run.app`** (one appended entry) and **behind Firebase Hosting**: not
+  in Google's Cloud Run documentation. Measured on dev on 17 November 2026 (infra/envs/README.md,
+  P1): a plain request to `*.run.app` arrives with 1 entry, and through Hosting with 2 whether
+  or not the visitor sent its own header. Not measured: that a direct `*.run.app` request with
+  its own header arrives as `<its header>, <caller>` (the forum report). See "For T22".
 - Firebase Hosting's rewrite forwards the `Authorization` header (confirmed on the first dev
   deploy: login, `/status` and the searches worked through `/api`); the full path and its 60 s
   timeout in practice are still open.
