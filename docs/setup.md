@@ -543,6 +543,9 @@ scripts/secrets/set-reviewer-password.sh --generate             # prints the new
   `--replace` (rotation: see the scripts' README).
 - `set-reviewer-password.sh --generate` prints the password once, after it is stored, and only to
   a terminal (add `--show` to send it to a pipe on purpose). Without `--generate` it prompts.
+  Prefer `--generate` (24 random characters): direct callers of the proxy's `run.app` URL are not
+  held by the per-address login limit, so the password's strength is what stops guessing, and a
+  password you chose is only as strong as that choice.
 - `openemr-admin-password` is OpenEMR's `admin` login, which you only need to look at OpenEMR's
   own screens through IAP; if you generate it, nobody can read it except through Secret Manager.
 

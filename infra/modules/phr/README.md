@@ -338,6 +338,12 @@ use only the rewrite, and why the hop count chosen for Hosting has a known limit
 callers (next section). Restricting the proxy to Hosting alone would need a load balancer in
 front (billed hourly, against D4).
 
+**cuff-sim** is `INGRESS_TRAFFIC_INTERNAL_ONLY` with the invoker check on. fhir-proxy's calls
+count as internal because they go through the VPC: "When calling from Cloud Run ... to a Cloud
+Run service that's set to "Internal" ..., traffic must route through a VPC network that's
+considered internal" (ingress page) — hence `ALL_TRAFFIC` on the proxy (the proxy README and
+module ingestion's README, "For T22").
+
 ## The client address and the direct run.app URL
 
 The login limit (services/fhir-proxy/README.md, "Reviewer login") counts failed logins per
@@ -347,42 +353,57 @@ takes the key from `X-Forwarded-For`, counting `TRUSTED_PROXY_HOPS` entries from
 many right-hand entries were written by Google's proxies; the key is the entry just left of
 them. Anything further left was written by the caller and can be anything.
 
-**What the proxy receives, and the key it takes.** Measured on dev on 17 November 2026 from a
-machine with no proxy of its own (infra/envs/README.md, checklist P1), except the last row:
+**What the proxy receives, and the key it takes.** All rows measured on dev on 17 November 2026
+(infra/envs/README.md, checklist P1). The Hosting rows were measured from a machine with no proxy
+of its own. The direct rows with a header were measured with 2 hops configured from a session
+behind an egress proxy, so the right-most entry there is not the session's own address; the
+entries the caller wrote were logged exactly as sent.
 
 | Path | `X-Forwarded-For` at the proxy | Key with 2 hops | Key with 1 hop |
 | --- | --- | --- | --- |
-| through Hosting | `<visitor>, <Hosting>` | the visitor | Hosting's address (shared by visitors; changed between requests) |
-| through Hosting, sending `X-Forwarded-For: 192.0.2.1` | `<visitor>, <Hosting>`: Hosting **replaced** the header | the visitor | Hosting's address |
+| through Hosting | `<visitor>, <Hosting>` | the visitor | a Hosting address (it changed between two requests; how many there are was not measured) |
+| through Hosting, sending `X-Forwarded-For: 192.0.2.1` | `<visitor>, <Hosting>`: Hosting **replaced** the header | the visitor | a Hosting address |
 | straight to `run.app` | `<caller>` (1 entry, appended by Cloud Run) | the caller (fewer entries than hops: the left-most is used, and every entry present was appended by Cloud Run) | the caller |
-| straight to `run.app`, sending `X-Forwarded-For: X` | `X, <caller>` (**not measured**: Cloud Run is reported to append, not replace) | `X`, **chosen by the caller** | the caller |
+| straight to `run.app`, sending `X-Forwarded-For: 192.0.2.1` | `192.0.2.1, <caller>`: Cloud Run **appended** | `192.0.2.1`, **chosen by the caller** (logged as such) | the caller |
+| straight to `run.app`, sending `X-Forwarded-For: 192.0.2.1, 198.51.100.9` | `192.0.2.1, 198.51.100.9, <caller>` (3 entries) | `198.51.100.9`, **chosen by the caller** (logged as such) | the caller |
 
-**Why the default is 2.** The page reaches the proxy only through Hosting's rewrite (`/api/**`),
-so the hop count is set for that path. With 1, every visitor shares a handful of Hosting
-addresses as keys, and an attacker's five wrong guesses a minute through Hosting would lock
-reviewers out. With 2, each visitor has its own bucket, and a visitor cannot move its key by
-sending a header (Hosting replaces it). The env roots pass their own default, also 2.
-fhir-proxy's own default stays 1, because the service alone, called at `run.app` with nothing in
-front, has one hop; a deployment of the service without Hosting should keep 1.
+**1 hop or 2: what each gives up.** The env roots and this module default to 2; fhir-proxy's own
+default stays 1, because the service alone, called at `run.app` with nothing in front, has one
+hop (a deployment of the service without Hosting should keep 1).
+
+| | 1 hop | 2 hops (the default) |
+| --- | --- | --- |
+| Key through Hosting (the page's only path) | a Hosting address, shared by visitors | the visitor; a header the visitor sends cannot move it (Hosting replaces it) |
+| Key straight to `run.app` | the caller's own address | the caller's own address without a header; with one, a value the caller chose |
+| Who evades the per-address limit | nobody | a caller of the `run.app` URL that sends its own header |
+| Who can lock whom out | anyone, through the public page and knowing nothing: five wrong guesses fill one Hosting key, so failures spread over Hosting's addresses (about 5 × their number a minute; the number was not measured) keep every visitor at `429` | a `run.app` caller that knows a visitor's public address can keep that visitor at `429`, even with the right password, because the address's slot is reserved before the password is read; it ends within 60 s of the attacker stopping |
+| What bounds guessing | 5 a minute per key (per instance) | for `run.app` callers with a header, only throughput, so the password's strength |
+
+Two hops is chosen because the first column's lockout needs no knowledge and hits everyone, while
+the second column's cost is carried by the password. That holds only for a strong password:
+**store it with `scripts/secrets/set-reviewer-password.sh --generate`** (24 random letters and
+digits). A password a person chose is only as strong as that choice; the script's 16-character
+minimum is a length rule, not a randomness check. The decision between 1 and 2 is the deployer's;
+the default can be overridden per environment with `trusted_proxy_hops`.
 
 **The run.app URL is public in this design, and must be.** fhir-proxy has
 `ingress = "INGRESS_TRAFFIC_ALL"` and `invoker_iam_disabled = true` (`fhir_proxy.tf`; tested by
 `real_data.tftest.hcl` and `tests/static_checks.sh`): Hosting calls the default `run.app` URL as an
 outside caller and does not authenticate to it (Firebase's guide has the service allow
 unauthenticated invocations), so neither lock can be closed without breaking the rewrite
-(previous section). The URL (output `fhir_proxy_url`) is not a
-secret; treat it as known.
+("Public access and ingress"). The URL (output `fhir_proxy_url`) is not a secret; treat it as
+known.
 
-**What a direct caller can do under 2 hops** (row 4 of the table; tested in
+**What a direct caller can do under 2 hops** (the last two rows of the first table; tested in
 `services/fhir-proxy/tests/test_login.py`, "two hops ... run.app"):
 
-- **Escape the per-address limit.** Writing a different address as `X` on each request gives
-  each guess a fresh bucket (any IPv4 address, or one per IPv6 /64). Text in that position is
-  no help to it: it falls into one shared `unparseable` bucket.
-- **Fill a known reviewer's bucket.** Five wrong guesses with `X` set to a reviewer's public
-  address make that reviewer's next attempts, through Hosting and with the right password, get
-  `429` until the window (60 s) passes; repeating it keeps them out. It needs the reviewer's
-  address, and it works per instance (the counts are in memory; there are up to two).
+- **Escape the per-address limit.** Writing a different address on each request gives each
+  guess a fresh bucket (any IPv4 address, or one per IPv6 /64). Text in that position is no help
+  to it: it falls into one shared `unparseable` bucket.
+- **Fill a known visitor's bucket.** Five wrong guesses claiming a reviewer's public address
+  make that reviewer's next attempts, through Hosting and with the right password, get `429`
+  until 60 s after the attacker stops. It needs the reviewer's address, and it works per
+  instance (the counts are in memory; there are up to two).
 - Not lock everyone out: filling the address table (10,000 live entries) makes a new address
   count as at its limit, but its password is still checked, so a right password still gets in.
 
@@ -391,31 +412,24 @@ bounds guessing") once the total of 60 failures a window per instance is exceede
 still checked, answering `200` for the right one and `429` for a wrong one, so the total does not
 bound how many passwords a caller can try. Such a caller is bounded only by throughput: two
 instances × eight concurrent requests, each a digest comparison (the rate this allows was not
-measured). What protects the login is the password's strength. The secret script enforces 16 to
-128 characters, which is a length rule, not a randomness check; its `--generate` option stores 24
-random letters and digits, about 143 bits (62^24), which no such rate exhausts: even 10,000
-guesses a second would take about 3 × 10^25 years to try one millionth of them. A password a
-person chose is only as strong as that choice: use `--generate`. The costs of a flood are Cloud
-Run usage (capped by `max_instance_count = 2`) and log volume (the proxy's log sampler writes the
-first event of at most 100 addresses per window, plus the failures below the total).
+measured). What protects the login is the password's strength: `--generate` stores about 143 bits
+(62^24), which no such rate exhausts; even 10,000 guesses a second would take about 3 × 10^25
+years to try one millionth of them. The costs of a flood are Cloud Run usage (capped by
+`max_instance_count = 2`) and log volume (the proxy's log sampler writes the first event of at
+most 100 addresses per window, plus the failures below the total).
 
-**What could close it, and why none is done here.** Each was considered; none is both cheap and
-clearly right, so this is a **known limit**:
+**What could close it, and why none is done here.** None is both cheap and clearly right, so
+this is a **known limit**:
 
-| Option | Why not now |
-| --- | --- |
-| `TRUSTED_PROXY_CIDRS` (fhir-proxy README, "Possible follow-up"): trust the second entry only when the right-most one is a Hosting address | Needs address ranges that hold Hosting's addresses and not addresses any Google Cloud customer can send from. None is documented for Hosting, and P1 saw only "a Google address that changed between requests". |
-| A secret header that only Hosting adds | Hosting's configuration (`firebase.json` `headers`) sets response headers; it documents no way to add a header to the forwarded request (not tried). |
-| Recognise Hosting by a header it adds | A direct caller can send the same header; Cloud Run passes request headers through. |
-| Count both the second and the right-most entry | Through Hosting the right-most is Hosting's shared address: the lockout of 1 hop comes back. |
-| Turn off the default `run.app` URL, or ingress "internal and Cloud Load Balancing" | Breaks the rewrite; the second needs an external Application Load Balancer in front (billed hourly, against D4), which with Cloud Armor would also close this. |
-| Hop count 1 | Swaps this limit for a worse one: shared buckets for every visitor through Hosting. |
-
-**cuff-sim** is `INGRESS_TRAFFIC_INTERNAL_ONLY` with the invoker check on. fhir-proxy's calls
-count as internal because they go through the VPC: "When calling from Cloud Run ... to a Cloud
-Run service that's set to "Internal" ..., traffic must route through a VPC network that's
-considered internal" (ingress page) — hence `ALL_TRAFFIC` on the proxy (the proxy README and
-module ingestion's README, "For T22").
+| Option | Gains | Costs, or why not now |
+| --- | --- | --- |
+| `TRUSTED_PROXY_CIDRS` (fhir-proxy README, "Possible follow-up"): trust the second entry only when the right-most one is a Hosting address, and otherwise key on the right-most | Direct callers could no longer choose their key; Hosting visitors keep their own buckets | Needs a range list that holds Hosting's addresses and not addresses any Google Cloud customer can send from. The candidate worth testing: Google's published service ranges minus the ranges Google Cloud customers use (`goog.json` minus `cloud.json`), falling back to the right-most entry on a miss. Unverified: whether Hosting's addresses are in that set was not checked. A possible follow-up |
+| Count the second and the right-most entry, with the same limit, both checked before the password | Holds direct callers to 5 a minute | Through Hosting the right-most is a shared Hosting address: the everyone-lockout of 1 hop comes back |
+| The same with a higher limit on the right-most entry | Holds one direct attacker to that higher rate | A different trade-off: a distributed attack through Hosting's shared addresses could again lock everyone out, at a higher cost to the attacker |
+| A secret header that only Hosting adds | It would mark Hosting's requests | Hosting's configuration (`firebase.json` `headers`) sets response headers; it documents no way to add a header to the forwarded request (not tried) |
+| Recognise Hosting by a header it adds | | A direct caller can send the same header; Cloud Run passes request headers through |
+| Turn off the default `run.app` URL, or ingress "internal and Cloud Load Balancing" | Closes the direct path | Breaks the rewrite; the second needs an external Application Load Balancer in front (billed hourly, against D4), which with Cloud Armor would also close this |
+| Hop count 1 | Direct callers cannot choose their key: no targeted lockout, and the per-address limit holds for them | Visitors through Hosting share keys, and anyone can lock every visitor out (the comparison table above) |
 
 ## Who may invoke what
 
@@ -690,9 +704,11 @@ Nothing in this module has been applied; every test runs against mocked provider
    above), and now the default. On a new deployment, confirm it: through the Hosting domain,
    make two failed logins (`POST https://<site>.web.app/api/auth/login` with a wrong password),
    one plain and one with a made-up `X-Forwarded-For: 192.0.2.1`; then one plain failed login
-   directly at the proxy's `run.app` URL. Read the three `login-failed` log lines:
-   `forwarded_for_entries` and `client_address`. Through Hosting both must show 2 entries and
-   your own address, never `192.0.2.1`; directly at `run.app`, 1 entry.
+   directly at the proxy's `run.app` URL, and one there with `X-Forwarded-For: 192.0.2.1`. Read
+   the four `login-failed` log lines: `forwarded_for_entries` and `client_address`. Through
+   Hosting both must show 2 entries and your own address, never `192.0.2.1`; directly at
+   `run.app`, 1 entry plain, and with the header 2 entries and `192.0.2.1` as `client_address`
+   (the known limit: a direct caller chooses its key under 2 hops).
    - Hosting gives 2 entries (as measured) and the made-up entry never becomes
      `client_address`: keep the default 2. Its known limit for direct `run.app` callers is in
      "The client address and the direct run.app URL".
@@ -739,10 +755,10 @@ Nothing in this module has been applied; every test runs against mocked provider
 
 ## Not verified
 
-- What Firebase Hosting puts in `X-Forwarded-For` was measured on dev (step 1; checklist P1),
-  not documented by Google, so it could change. That a direct `run.app` request carrying its own
-  `X-Forwarded-For` arrives as `<its header>, <caller>` was not measured (a forum report); if
-  Cloud Run replaced the header instead, direct callers could not choose their key.
+- What Firebase Hosting and `run.app` put in `X-Forwarded-For` was measured on dev on 17
+  November 2026 (step 1; checklist P1): Hosting replaces a visitor's header, Cloud Run appends
+  to a direct caller's. Neither is documented by Google, so either could change; step 1
+  re-checks both.
 - That Hosting forwards `Authorization` and the full `/api/...` path (documented only
   indirectly; steps 2 and 3).
 - That a request through Hosting reaches a service whose invoker check is disabled with no

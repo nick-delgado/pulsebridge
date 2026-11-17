@@ -260,7 +260,7 @@ def test_trusted_hops_setting_reaches_the_limiter(tmp_path) -> None:
 # address and the direct run.app URL").
 
 VISITOR = "198.51.100.7"  # the real caller, as Hosting or Cloud Run saw it
-HOSTING = "35.191.0.1"  # stands in for Hosting's own (changing) address
+HOSTING = "203.0.113.200"  # stands in for Hosting's own (changing) address
 
 
 @pytest.mark.parametrize(

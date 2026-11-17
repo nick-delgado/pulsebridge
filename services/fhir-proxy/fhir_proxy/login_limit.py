@@ -22,12 +22,16 @@ Once it is exceeded, verifications are bounded only per address:
 
 - one address (an IPv6 /64 counts as one): 5 guesses a minute;
 - N addresses: 5 x N a minute;
-- a wrong ``TRUSTED_PROXY_HOPS``, so the key is a value the caller writes: as many as the
-  service can answer, bounded only by throughput (instances x threads).
+- a wrong ``TRUSTED_PROXY_HOPS``, or a caller of the ``*.run.app`` URL sending its own header
+  while the hop count is 2, so the key is a value the caller writes: as many as the service
+  can answer, bounded only by throughput (instances x threads).
 
-What protects the login then is the password itself: a random 16-character password (T27's
-enforced minimum; 24+ is recommended) has far more values than any of these rates could try,
-and T22 must set the hop count right for the one path that reaches the service. The costs of a
+What protects the login then is the password itself: a random one (T27's script stores 24
+random letters and digits with ``--generate``; its 16-character minimum is a length rule, not
+a randomness check) has far more values than any of these rates could try,
+and the hop count must be right for the page's path. Two paths reach the service: Firebase
+Hosting's rewrite (the page's) and the public ``*.run.app`` URL; no single hop count is right
+for both (module phr's README, "The client address and the direct run.app URL"). The costs of a
 flood are log volume (bounded by :class:`FloodLogSampler`: about one line per address per
 window) and Cloud Run usage (instances, CPU, requests), which ``max_instance_count`` caps. No
 hard ceiling on verifications is applied: it would bring the lockout back.

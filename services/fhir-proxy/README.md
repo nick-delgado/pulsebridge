@@ -220,9 +220,10 @@ derived.
     | N addresses | 5 × N |
     | a wrong `TRUSTED_PROXY_HOPS`, or a direct `*.run.app` caller sending its own `X-Forwarded-For` while the hop count is 2 (the key is then a value the caller writes) | as many as the service answers: bounded only by throughput (instances × threads) |
 
-    What protects the login then is the password: a random 16-character password (T27's
-    enforced minimum; 24 or more is recommended) has far more values than any of these rates
-    can try. `TRUSTED_PROXY_HOPS` must be right for the one path the page uses (module phr sets
+    What protects the login then is the password: a random one has far more values than any
+    of these rates can try. Store it with `set-reviewer-password.sh --generate` (24 random
+    letters and digits); the script's 16-character minimum is a length rule, not a randomness
+    check, and a password a person chose is only as strong as that choice. `TRUSTED_PROXY_HOPS` must be right for the one path the page uses (module phr sets
     2 for Firebase Hosting, measured; see "For T22: deploying it" below).
     The costs of a flood are log volume and Cloud Run usage (requests, CPU, instances up to
     `max_instance_count`). No hard ceiling on verifications is applied: it would bring the
@@ -241,14 +242,17 @@ derived.
   ("appends two IP addresses ... `EXISTING_VALUE, CLIENT_IP, LOAD_BALANCER_IP`" and "does not
   verify any IP addresses that precede", docs.cloud.google.com/load-balancing/docs/https,
   "X-Forwarded-For header", read 2026-11-15). Cloud Run's own documentation (container contract,
-  HTTPS invocation) says nothing about the header; a Google developer forum thread reports that
-  `*.run.app` appends exactly one entry, the observed client address. So the default
+  HTTPS invocation) says nothing about the header. Measured on dev on 17 November 2026
+  (infra/envs/README.md, P1): `*.run.app` appends one entry, the address it saw, after whatever
+  the caller sent (`192.0.2.1` arrived as 2 entries, `192.0.2.1, 198.51.100.9` as 3), as a
+  Google developer forum thread had reported. So the default
   `TRUSTED_PROXY_HOPS=1` takes the **last** entry (the service alone at `*.run.app`); `2` takes
   the second from the right (one more proxy in front: Firebase Hosting, measured, which module
   phr sets); `0` ignores the header (no proxy, local use). With the right count for the path a
   request took, a spoofed left-hand entry never moves the key (tested); with fewer entries than
   hops the left-most is used. Under 2, a request sent straight to `*.run.app` with its own
-  header does choose its key (tested; module phr's README, "The client address and the direct
+  header does choose its key (measured: the logged `client_address` was the caller's
+  second-from-right value; tested; module phr's README, "The client address and the direct
   run.app URL"). Failed logins log the address and the number of XFF entries, never the values
   to their left.
 - **Logs** record `login-failed` (client address, XFF entry count), `login-rate-limited`,
@@ -845,9 +849,11 @@ notes, and must be confirmed on the first deployment (T25):
 
 - **X-Forwarded-For on `*.run.app`** (one appended entry) and **behind Firebase Hosting**: not
   in Google's Cloud Run documentation. Measured on dev on 17 November 2026 (infra/envs/README.md,
-  P1): a plain request to `*.run.app` arrives with 1 entry, and through Hosting with 2 whether
-  or not the visitor sent its own header. Not measured: that a direct `*.run.app` request with
-  its own header arrives as `<its header>, <caller>` (the forum report). See "For T22".
+  P1): a plain request to `*.run.app` arrives with 1 entry, and one with its own header arrives
+  with that header plus one entry (Cloud Run appends); through Hosting it arrives with 2 whether
+  or not the visitor sent its own header (Hosting replaces it). The direct measurement with a
+  header ran behind an egress proxy, so its right-most entry was not the session's own address;
+  the caller's entries were logged exactly as sent. See "For T22".
 - Firebase Hosting's rewrite forwards the `Authorization` header (confirmed on the first dev
   deploy: login, `/status` and the searches worked through `/api`); the full path and its 60 s
   timeout in practice are still open.

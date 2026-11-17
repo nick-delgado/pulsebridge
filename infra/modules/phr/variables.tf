@@ -448,9 +448,10 @@ variable "trusted_proxy_hops" {
     Default 2, MEASURED (dev, 17 November 2026; infra/envs/README.md, checklist P1): the page
     reaches the proxy only through Firebase Hosting's rewrite, and there the proxy receives two
     entries, "<visitor>, <Hosting's address>". Hosting replaces any X-Forwarded-For the visitor
-    sent, so the second entry from the right is the visitor. With 1 the key would be Hosting's
-    address, shared by every visitor (one attacker's 5 wrong guesses a minute would lock
-    reviewers out).
+    sent, so the second entry from the right is the visitor. With 1 the key would be a
+    Hosting address shared by visitors, so anyone could lock every visitor out through the
+    public page (5 failures fill one such key; how many Hosting addresses there are was not
+    measured).
     Use another value only for another front door: 1 if the page called the run.app URL
     directly with nothing in front (the service's own default), 0 never on Cloud Run (local
     use: the header is ignored). The known cost of 2: the run.app URL stays publicly reachable

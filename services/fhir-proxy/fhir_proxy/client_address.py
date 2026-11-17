@@ -14,9 +14,11 @@ What Google documents (checked 2026-11-15):
   CLIENT_IP, LOAD_BALANCER_IP" (https://docs.cloud.google.com/load-balancing/docs/https,
   "X-Forwarded-For header").
 - Cloud Run's own documentation (container contract, HTTPS invocation) does not describe XFF.
-  Cloud Run's ``*.run.app`` front end is reported (Google developer forum, "Cloud Run: which
-  client IP can I safely use for rate limiting?") to append exactly one entry, the address it
-  saw, after whatever the client sent: ``<client-supplied>, ..., OBSERVED_IP``.
+  Its ``*.run.app`` front end appends exactly one entry, the address it saw, after whatever the
+  client sent: ``<client-supplied>, ..., OBSERVED_IP``. Reported on the Google developer forum
+  ("Cloud Run: which client IP can I safely use for rate limiting?") and measured on dev on
+  17 November 2026 (infra/envs/README.md, P1: a made-up ``192.0.2.1`` arrived as 2 entries,
+  ``192.0.2.1, 198.51.100.9`` as 3).
 
 So ``TRUSTED_PROXY_HOPS`` counts trusted entries **from the right**, and the client is the
 entry that many places from the end:
@@ -38,9 +40,10 @@ A hop count cannot tell which path a request took. With 2, a request sent straig
 ``*.run.app`` URL, which stays public because Hosting calls it, is keyed as follows: with no
 header of its own it carries 1 entry (the caller, appended by Cloud Run) and that entry is used,
 which is right; with a header ``X`` of its own it arrives as ``X, <caller>`` and ``X``, which
-the caller wrote, becomes the key. Such a caller can therefore pick a fresh key per request,
-or a reviewer's address to fill that reviewer's bucket (README, "Reviewer login"; module phr's
-README, "The client address and the direct run.app URL").
+the caller wrote, becomes the key (measured; with ``A, B`` it is ``B``). Such a caller can
+therefore pick a fresh key per request, or a reviewer's address to fill that reviewer's bucket
+(README, "Reviewer login"; module phr's README, "The client address and the direct run.app
+URL").
 
 IPv6 clients are grouped by their /64 network: one subscriber usually holds a whole /64, so
 per-address counting of single IPv6 addresses would give an attacker 2^64 fresh budgets.
