@@ -276,6 +276,7 @@ alerts firing, patching the VM, password rotation, `terraform destroy`, and CI/C
 The runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's
 result and lists what is still open. The Terraform CI/CD workflows exist but stay switched off
 until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)). The
-end-to-end smoke test exists (`make smoke`, [`tests/e2e/`](tests/e2e/README.md)) but has not
-been run against dev yet, and its health-sync checks need a real-data stack; a custom domain for
-the demo (T30) is planned ([`docs/workplan.md`](docs/workplan.md)).
+end-to-end smoke test (`make smoke`, [`tests/e2e/`](tests/e2e/README.md)) ran against dev on
+17 November and passed: the cuff path through MLLP, the FHIR store and the share to OpenEMR.
+Its health-sync checks were skipped and have never run live: they need a real-data stack. A
+custom domain for the demo (T30) is planned ([`docs/workplan.md`](docs/workplan.md)).

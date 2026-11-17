@@ -82,7 +82,7 @@ Each line of output is `PASS`, `FAIL`, `SKIP` (deliberately not run, with the re
 | Id | Check |
 | --- | --- |
 | S1 | reviewer login (`POST /auth/login`) gives a session token |
-| S2 to S6 | `GET /status` answers 200, within `--status-max-seconds` (5 s), FHIR store reachable, observation counts known, OpenEMR reachable |
+| S2 to S6 | fhir-proxy's `GET /status` answers 200, within `--status-max-seconds` (5 s), FHIR store reachable, observation counts known, OpenEMR reachable |
 | S7 | the stack's data mode (below), cross-checked with the patient of the newest earlier reading |
 | B1 to B4 | Part B, health-sync's first-sync checks (real data only, below) |
 | A1 | a cuff reading with random synthetic values (systolic 101-139, diastolic 61-89) is sent over MLLP (`POST /cuff/readings`) |
@@ -97,6 +97,14 @@ Each line of output is `PASS`, `FAIL`, `SKIP` (deliberately not run, with the re
 | N1 | an invalid reading (80/120: systolic must be above diastolic) is refused with `422` and an OperationOutcome; nothing is sent |
 | N2, N3 | a message the store cannot parse (T07 sample `unparseable_no_msh`) gets `AE`, and its trace has no Observation |
 | N4, N5 | a message that is stored but cannot be mapped (`unmappable_non_numeric_obx5`: OBX-5 `HIGH`) gets `AA`, then the mapper labels it `error` and creates no Observation |
+
+**What S3 times.** The whole of fhir-proxy's `/status` as a caller of the front door sees it:
+the round trip through Hosting, which includes the proxy's call to health-sync's own `/status`
+(when health-sync is deployed), its three FHIR store searches (cached 60 s) and the OpenEMR
+probe, run in parallel. It does **not** time health-sync's own `/status`, which is
+internal-only. The health-sync README's "within a second or two" (checklist item I7) is about
+that service alone, so S3 does not settle I7: a fast S3 makes a slow health-sync unlikely, but a
+slow S3 does not say which part was slow.
 
 The Observation is found through the cuff-attempt trace, which looks it up **by identifier**
 (Cloud Healthcare indexes identifiers synchronously), not with a date search, which Cloud
@@ -125,7 +133,7 @@ stack whose owner agrees to a test reading in their record, and note the trail i
 | Id | Check |
 | --- | --- |
 | B1 | `/status` says health-sync is `connected` to Google Health |
-| B2 | in every synced run that wrote a Bundle, the Patient entry answered `200`, never `201`. health-sync's Bundle creates the Patient only if none has its identifier (a conditional create); the setup step already wrote it, so the store must *match* (200). A `201` means it created a second Patient: switch to the fixed-ID fallback in the T06 README and record it |
+| B2 | in every synced run that wrote a Bundle, the Patient entry answered `200`, never `201`. health-sync's Bundle creates the Patient only if none has its identifier (a conditional create); the setup step already wrote it, so the store must *match* (200). A `201` means it created a second Patient: switch to the fixed-ID fallback in the T06 README and record it. **Window caveat:** a `201` is expected on a run *before* the setup step wrote the Patient (health-sync README, "For T25"). Normally there is no such run (the Scheduler job exists only once `ingest_enabled` is on, after setup), but if one fell inside `--log-freshness`, for example a manual `POST /sync` on a fresh store, B2 reports it as a failure: compare its timestamp with when setup ran, and narrow `--log-freshness` to start after setup |
 | B3 | the newest synced run with windows (at least the second one) has `stored_read: ok` and `windows_unchanged > 0`: the store answers the searches health-sync relies on. `ok` with 0 unchanged in every run means the read silently matches nothing |
 | B4 | `WARN` only: `stranded_preliminary` is a number |
 
@@ -155,8 +163,8 @@ patient id). On a real-data stack without a log source, B2 and B3 `FAIL` with wh
 | Status | Meaning |
 | --- | --- |
 | 0 | no check failed (skips are listed in the summary) |
-| 1 | a check failed, or a part stopped after a failure |
-| 2 | configuration: no base URL, no password, an unreadable secret, a bad setting |
+| 1 | a check failed, or a part stopped after a failure; an answer of an unexpected shape is a `FAIL` too (`X2`, naming only the exception's type), never a traceback |
+| 2 | configuration: no base URL (the message names `PULSEBRIDGE_BASE_URL`), no password or one under 4 characters, an unreadable secret (with what to check and gcloud's own message), a bad setting |
 | 3 | with `--fail-on-skip`: nothing failed, but something was skipped |
 
 ## What each run adds, and cleanup
@@ -198,7 +206,8 @@ tests/e2e/
   pulsebridge_smoke/     the command (stdlib urllib, plus hl7apy through T07's parser)
     cli.py               flags, environment, the password and log sources, exit status
     http.py              transport (no redirects), the API client, OperationOutcome reasons
-    redact.py            the password and token out of every line
+    redact.py            the password and token, and their escaped forms, out of every line
+    children.py          gcloud's environment (without the password) and its error text
     report.py            PASS/FAIL/SKIP/WARN, the trail, the summary
     cuff_path.py         status, the real-data guard, Part A
     first_sync.py        Part B and its Cloud Logging source
@@ -226,12 +235,15 @@ a message saying what was wrong. Part B is tested against synthetic `sync-run` l
 
 ## Not verified
 
-- **No live run yet.** T29 was built without network access to the deployment; the first live
-  run against dev is the orchestrator's. Part B has never run live: no real-data stack exists.
+- **Part A has run live once and passed; Part B has never run live.** 17 November 2026,
+  against the dev stack (synthetic data), run as a project Owner: exit 0,
+  `SMOKE RESULT: PASSED WITH 4 SKIPPED (pass=33 fail=0 skip=4 warn=0)`; S3's `/status` answered
+  in 0.85 s; B1 to B4 were skipped (synthetic data: health-sync is not deployed). No real-data
+  stack exists yet, so Part B is tested only against synthetic log entries.
 - The `gcloud logging read` filter and the shape of its JSON (`jsonPayload` per entry) are from
   Cloud Logging's documented output and health-sync's logging code, not from a real entry.
-- The 5 s `/status` limit: a cold Cloud Run start, or a cold edge VM behind the OpenEMR probe,
-  can exceed it. Raise `--status-max-seconds` for a first call after a long idle period.
+- The 5 s `/status` limit (0.85 s on the live run): a cold Cloud Run start, or a cold edge VM
+  behind the OpenEMR probe, can exceed it. Raise `--status-max-seconds` for a first call after a long idle period.
 - health-sync's stranded-preliminary count uses `_summary=count`, which Cloud Healthcare refuses
   (found by the first dev deploy for the proxy's counts). Expect B4 to `WARN` until health-sync
   changes that search.

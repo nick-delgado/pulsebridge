@@ -535,15 +535,24 @@ make smoke
 ```
 
 On a real-data stack it refuses to write a test reading into the patient's record unless
-`SMOKE_ARGS=--allow-real-data-writes` is given, and it runs I4, I6 and I7's health-sync checks
+`SMOKE_ARGS=--allow-real-data-writes` is given, and it runs I4's and I6's health-sync checks
 from the `sync-run` log lines: add
 `PULSEBRIDGE_HEALTH_SYNC_SERVICE="$(terraform -chdir=infra/envs/<env> output -raw health_sync_service_name)"`
 and run it as someone with `roles/logging.viewer`. On a synthetic stack those checks are
 reported as skipped. It prints what it added (synthetic values, attempt and Observation ids);
 nothing it adds can be removed through the API.
 
+Its `/status` check (S3, 5 s by default) times fhir-proxy's `/status` through the front door, not
+health-sync's own, so it does not settle I7.
+
 Worked when: the last line is `SMOKE RESULT: PASSED` (or `PASSED WITH 4 SKIPPED` on synthetic
 data, the four being health-sync's checks).
+
+**Result of the first run** (17 November 2026, dev, synthetic data, run as a project Owner):
+exit 0, `SMOKE RESULT: PASSED WITH 4 SKIPPED (pass=33 fail=0 skip=4 warn=0)`. The cuff path
+(Part A) ran live and passed, including the share and the repeat share; fhir-proxy's `/status`
+answered in 0.85 s. Part B (I4, I6) was skipped: no health-sync on synthetic data. It has never
+run live.
 
 ### Running the env roots from a service account in another project
 
@@ -1182,10 +1191,10 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | I1 | Connect script: Google spells the scope as expected; `access_secret_version` on `versions/latest` answers `NOT_FOUND` for a secret with no version; the deployer's ADC works with Secret Manager without extra quota-project setup | CG | |
 | I2 | First seeding: `entry_statuses` shows `Patient 201` once (fresh store) and `Patient 200` for every data Bundle | SEED | 2026-11-16 dev: ok. Outcome `seeded`, 8,365 windows in 84 bundles, `Patient 201` once and then `200`, safety check `no-patient` |
 | I3 | `roles/run.invoker` on the job lets Scheduler's OAuth call to `jobs.run` through | IN | |
-| I4 | First real sync: the Patient entry answers `200`, not `201` (else switch to the fixed-ID fallback in the T06 README and record it) | HS, T29 | |
+| I4 | First real sync: the Patient entry answers `200`, not `201` (else switch to the fixed-ID fallback in the T06 README and record it) | HS, T29 | 2026-11-17 dev: not checked (synthetic data, no health-sync; the smoke test's Part B skipped) |
 | I5 | `GET Observation?identifier=urn:pulsebridge:observation\|<key>` returns one Observation whose `subject.reference` is the setup Patient; `GET Patient?identifier=urn:pulsebridge:patient\|<PATIENT_ID>` returns exactly one Patient | HS | |
-| I6 | Second run: `stored_read: "ok"` and `windows_unchanged > 0` (health-sync and seeder); `stranded_preliminary` is a number | HS, SEED, T29 | |
-| I7 | `/status` answers within a second or two | HS, T29 | |
+| I6 | Second run: `stored_read: "ok"` and `windows_unchanged > 0` (health-sync and seeder); `stranded_preliminary` is a number | HS, SEED, T29 | 2026-11-17 dev: not checked for health-sync (synthetic data; the smoke test's Part B skipped) |
+| I7 | `/status` answers within a second or two | HS | |
 | I8 | Pub/Sub push and Cloud Scheduler reach the internal-only services (else the ingress fallbacks) | IN | 2026-11-16 dev: partly. Pub/Sub push reached internal-only v2-to-fhir (cuff messages became Observations); Scheduler's call not checked |
 | I9 | The OIDC audience (the bare service URL) is accepted | IN | 2026-11-16 dev: partly. The push subscription's OIDC audience was accepted; health-sync's (real data) not reached |
 | I10 | v2-to-fhir's `hl7V2Consumer` can patch message labels (else healthcare moves to `hl7V2Editor`); `fhirResourceEditor` includes `executeBundle` and update-create `PUT` | ID, HC | 2026-11-16 dev: partly. `executeBundle` worked for the seeder and v2-to-fhir; the label patch not checked on its own |
