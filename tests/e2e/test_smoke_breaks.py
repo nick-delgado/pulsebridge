@@ -9,6 +9,7 @@ broken, is in ``test_smoke_flow.py``.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -185,6 +186,34 @@ BREAKS = [
         ),
         "A4",
         "OBX-6 units",
+    ),
+    Break(
+        "the message sent carries another systolic value",
+        answer_edit(
+            "POST",
+            "/cuff/readings",
+            lambda b: b.update(
+                messageSent=re.sub(
+                    r"(OBX\|1\|NM\|8480-6\^[^|]*\^LN\|\|)\d+", r"\g<1>999", b["messageSent"]
+                )
+            ),
+            nth=1,
+        ),
+        "A4",
+        "OBX-5 values are {'8480-6': '999'",
+    ),
+    Break(
+        "the message sent is not an ORU^R01",
+        answer_edit(
+            "POST",
+            "/cuff/readings",
+            lambda b: b.update(
+                messageSent=b["messageSent"].replace("ORU^R01^ORU_R01", "ADT^A01^ADT_A01")
+            ),
+            nth=1,
+        ),
+        "A4",
+        "MSH-9 is 'ADT^A01",
     ),
     Break(
         "the message names another control ID",
