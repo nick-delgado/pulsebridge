@@ -30,6 +30,15 @@ DIASTOLIC = "8462-4"
 MM_HG = "mm[Hg]"
 
 
+def _list(value: object) -> list:
+    """``value`` if it is a JSON array, else empty: an answer of another shape never raises."""
+    return value if isinstance(value, list) else []
+
+
+def _dict(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
 def parse_instant(text: object) -> datetime | None:
     """An R4 dateTime with a time and a zone (``2026-11-17T10:00:00+00:00`` or ``...Z``)."""
     if not isinstance(text, str) or "T" not in text:
@@ -55,7 +64,7 @@ def component_quantity(observation: dict, loinc: str) -> dict | None:
     """The ``valueQuantity`` of the component coded ``loinc``, or None (absent or repeated)."""
     found = [
         c
-        for c in observation.get("component") or []
+        for c in _list(observation.get("component"))
         if isinstance(c, dict) and has_code(c.get("code"), LOINC, loinc)
     ]
     if len(found) != 1 or not isinstance(found[0].get("valueQuantity"), dict):
@@ -117,7 +126,7 @@ def store_observation_checks(
     subject = observation.get("subject")
     subject_ref = subject.get("reference") if isinstance(subject, dict) else None
     category_ok = any(
-        has_code(c, OBSERVATION_CATEGORY, "vital-signs") for c in observation.get("category") or []
+        has_code(c, OBSERVATION_CATEGORY, "vital-signs") for c in _list(observation.get("category"))
     )
     return [
         (
@@ -160,20 +169,16 @@ def provenance_problem(
     """The Provenance targets this Observation and names the stored message as its source."""
     if not isinstance(provenance, dict) or provenance.get("resourceType") != "Provenance":
         return "the trace has no Provenance for the Observation"
-    targets = [t.get("reference") for t in provenance.get("target") or [] if isinstance(t, dict)]
+    targets = [_dict(t).get("reference") for t in _list(provenance.get("target"))]
     if f"Observation/{observation_id}" not in targets:
         return f"Provenance.target is {targets}, expected Observation/{observation_id}"
     if not provenance.get("recorded"):
         return "Provenance.recorded is missing"
-    sources = [
-        e
-        for e in provenance.get("entity") or []
-        if isinstance(e, dict) and e.get("role") == "source"
-    ]
+    sources = [_dict(e) for e in _list(provenance.get("entity"))]
     names = [
-        (s.get("what") or {}).get("identifier", {}).get("value")
+        _dict(_dict(s.get("what")).get("identifier")).get("value")
         for s in sources
-        if isinstance(s.get("what"), dict)
+        if s.get("role") == "source"
     ]
     # Compared on the message id (after "/messages/"): the source value may be the full
     # resource name or the store-relative one, depending on what the notification carried.

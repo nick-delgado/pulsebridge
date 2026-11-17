@@ -49,15 +49,18 @@ EXIT_SKIPPED = 3  # only with --fail-on-skip
 @dataclass
 class Report:
     out: Callable[[str], None]
+    # Applied to every detail and trail value BEFORE it is stored, so neither a printed line
+    # nor the JSON report (which escapes text again) can carry a secret a server echoed.
+    redact: Callable[[str], str] = str
     results: list[Result] = field(default_factory=list)
     trail: list[tuple[str, str]] = field(default_factory=list)
     stopped: list[str] = field(default_factory=list)
 
     def record(self, check_id: str, title: str, status: Status, detail: str = "") -> Result:
-        result = Result(check_id, title, status, detail)
+        result = Result(check_id, self.redact(title), status, self.redact(detail))
         self.results.append(result)
-        line = f"{status.value:<4}  {check_id:<4} {title}"
-        self.out(f"{line}: {detail}" if detail else line)
+        line = f"{status.value:<4}  {check_id:<4} {result.title}"
+        self.out(f"{line}: {result.detail}" if result.detail else line)
         return result
 
     def check(self, check_id: str, title: str, problem: str | None, ok: str = "") -> bool:
@@ -80,6 +83,7 @@ class Report:
         self.record(check_id, title, Status.WARN, detail)
 
     def note(self, key: str, value: str) -> None:
+        value = self.redact(value)
         self.trail.append((key, value))
         self.out(f"      trail: {key} = {value}")
 

@@ -29,6 +29,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+from pulsebridge_smoke.children import PASSWORD_ENV, child_environment, gcloud_said
 from pulsebridge_smoke.cuff_path import Context, Settings, check_status, guard, run_part_a
 from pulsebridge_smoke.first_sync import (
     PROJECT_ID,
@@ -48,7 +49,6 @@ from pulsebridge_smoke.http import (
 from pulsebridge_smoke.redact import Redactor
 from pulsebridge_smoke.report import EXIT_USAGE, Report, Status, Stop
 
-PASSWORD_ENV = "PULSEBRIDGE_REVIEWER_PASSWORD"  # noqa: S105 - a variable name, not a value
 PREFIX = re.compile(r"[a-z]([a-z0-9-]{0,10}[a-z0-9])?")  # module identity's name_prefix rule
 
 
@@ -81,13 +81,20 @@ def secret_manager_password(
             text=True,
             timeout=60,
             check=False,
+            env=child_environment(),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise UsageError(f"gcloud did not run ({type(exc).__name__})") from None
     if done.returncode != 0:
-        # stderr of a failed access holds no secret (there was no value to print).
-        last = (done.stderr or "").strip().splitlines()[-1:] or ["no message"]
-        raise UsageError(f"could not read {prefix}-reviewer-password: {last[0]}")
+        # stderr of a failed access holds no secret (there was no value to print); it is
+        # redacted again when printed.
+        raise UsageError(
+            f"could not read {prefix}-reviewer-password with gcloud (exit {done.returncode}). "
+            "Check that gcloud is logged in as you (gcloud auth list), that "
+            "CLOUDSDK_CORE_PROJECT is the stack's project, that SECRET_NAME_PREFIX is its "
+            "secret_name_prefix output, and that your account may access the secret "
+            "(roles/secretmanager.secretAccessor). " + gcloud_said(done.stderr)
+        )
     password = (done.stdout or "").rstrip("\r\n")  # the proxy drops a trailing newline too
     if not password:
         raise UsageError(f"{prefix}-reviewer-password has an empty latest version")
@@ -150,6 +157,21 @@ def sync_source(args: argparse.Namespace, env: Mapping[str, str]) -> SyncRunSour
     return FileSyncRuns(Path(choice))
 
 
+def front_door(args: argparse.Namespace, env: Mapping[str, str]) -> str:
+    raw = args.base_url or env.get("PULSEBRIDGE_BASE_URL", "")
+    if not raw:
+        raise UsageError(
+            "no front door: set PULSEBRIDGE_BASE_URL (or --base-url) to <dashboard_url>/api"
+        )
+    try:
+        return check_base_url(raw)
+    except ValueError as exc:
+        raise UsageError(f"PULSEBRIDGE_BASE_URL: {exc}") from None
+
+
+MIN_PASSWORD = 4  # the redactor's floor; T27's script sets at least 16 characters
+
+
 def password_from(
     args: argparse.Namespace,
     env: Mapping[str, str],
@@ -161,7 +183,7 @@ def password_from(
     if source == "env":
         if not env.get(PASSWORD_ENV):
             raise UsageError(f"{PASSWORD_ENV} is not set")
-        return env[PASSWORD_ENV]
+        return _long_enough(env[PASSWORD_ENV], PASSWORD_ENV)
     project = args.project or env.get("CLOUDSDK_CORE_PROJECT", "")
     prefix = args.secret_prefix or env.get("SECRET_NAME_PREFIX", "")
     if not project or not prefix:
@@ -169,7 +191,17 @@ def password_from(
             f"no password: set {PASSWORD_ENV}, or CLOUDSDK_CORE_PROJECT and SECRET_NAME_PREFIX "
             "to read it from Secret Manager"
         )
-    return secret_reader(project, prefix)
+    return _long_enough(secret_reader(project, prefix), f"{prefix}-reviewer-password")
+
+
+def _long_enough(password: str, where: str) -> str:
+    if len(password) < MIN_PASSWORD:
+        raise UsageError(
+            f"the password from {where} is shorter than {MIN_PASSWORD} characters, so it cannot "
+            "be the stack's reviewer password (scripts/secrets/set-reviewer-password.sh sets at "
+            "least 16)"
+        )
+    return password
 
 
 def run_smoke(ctx: Context, password: str, source: SyncRunSource | None) -> Report:
@@ -219,13 +251,13 @@ def main(
         write(redact(line))
 
     try:
-        base_url = check_base_url(args.base_url or env.get("PULSEBRIDGE_BASE_URL", ""))
+        base_url = front_door(args, env)
         source = sync_source(args, env)
         password = password_from(args, env, secret_reader)
+        redact.add(password)
     except (UsageError, ValueError) as exc:
         emit(f"smoke: {exc}")
         return EXIT_USAGE
-    redact.add(password)
     settings = Settings(
         status_max_seconds=args.status_max_seconds,
         poll_timeout=args.poll_timeout,
@@ -233,7 +265,7 @@ def main(
         allow_real_data_writes=args.allow_real_data_writes,
         transport=args.transport,
     )
-    report = Report(out=emit)
+    report = Report(out=emit, redact=redact)
     api = ApiClient(
         transport or UrllibTransport(base_url), redact, log=emit if args.verbose else None
     )
@@ -245,6 +277,15 @@ def main(
         run_smoke(ctx, password, source)
     except TransportError as exc:
         report.record("X1", "the front door answers", Status.FAIL, str(exc))
+    except Exception as exc:  # noqa: BLE001 - last resort: a FAIL with exit 1, never a traceback
+        # Only the exception's type: its text could quote a server answer.
+        report.record(
+            "X2",
+            "the smoke test ran to the end",
+            Status.FAIL,
+            f"stopped by an unexpected {type(exc).__name__}; a server answer probably had an "
+            "unexpected shape (rerun with --verbose to see which request was last)",
+        )
     for line in report.summary():
         emit(line)
     if args.report_json:

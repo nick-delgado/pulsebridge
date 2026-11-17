@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from pulsebridge_smoke.children import child_environment, gcloud_said
 from pulsebridge_smoke.report import Report
 
 SERVICE_NAME = re.compile(r"[a-z]([a-z0-9-]{0,61}[a-z0-9])?")
@@ -114,12 +115,17 @@ class GcloudSyncRuns:
                 text=True,
                 timeout=GCLOUD_TIMEOUT_SECONDS,
                 check=False,
+                env=child_environment(),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise SourceError(f"gcloud logging read did not run ({type(exc).__name__})") from None
         if done.returncode != 0:
-            last = (done.stderr or "").strip().splitlines()[-1:] or ["no message"]
-            raise SourceError(f"gcloud logging read failed (exit {done.returncode}): {last[0]}")
+            raise SourceError(
+                f"gcloud logging read failed (exit {done.returncode}). Check that gcloud is "
+                "logged in as you (gcloud auth list), that CLOUDSDK_CORE_PROJECT is the stack's "
+                "project and that your account has roles/logging.viewer there. "
+                + gcloud_said(done.stderr)
+            )
         try:
             return json.loads(done.stdout or "[]")
         except ValueError:

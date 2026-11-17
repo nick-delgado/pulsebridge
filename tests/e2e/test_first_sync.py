@@ -208,7 +208,9 @@ def test_gcloud_failure_is_a_source_error() -> None:
     def fake(command, **_):  # noqa: ANN001, ANN202
         return subprocess.CompletedProcess(command, 1, stdout="", stderr="x\nPERMISSION_DENIED")
 
-    with pytest.raises(SourceError, match="exit 1.*PERMISSION_DENIED"):
+    with pytest.raises(
+        SourceError, match="exit 1.*roles/logging.viewer.*gcloud said: x PERMISSION"
+    ):
         GcloudSyncRuns("example-project-1", "pb-health-sync", run=fake).fetch()
 
 

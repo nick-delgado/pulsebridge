@@ -282,3 +282,19 @@ def test_an_opaque_session_token_is_redacted_once_issued() -> None:
     text = "\n".join(lines)
     assert "upstream said [redacted]" in text
     assert token not in text
+
+
+def test_the_report_stores_details_and_trail_values_already_redacted() -> None:
+    """Redaction happens before a result is stored, not only when a line is printed, so the
+    JSON report never holds a secret whatever escaping it applies."""
+    from pulsebridge_smoke.report import Report, Status
+
+    redact = Redactor()
+    redact.add("synthetic-pass\\word-0001")
+    printed: list[str] = []
+    report = Report(out=printed.append, redact=redact)
+    report.record("X9", "echo", Status.FAIL, "server said 'synthetic-pass\\\\word-0001'")
+    report.note("echo", "synthetic-pass\\word-0001")
+    assert report.results[0].detail == "server said '[redacted]'"
+    assert report.trail == [("echo", "[redacted]")]
+    assert "synthetic-pass" not in "\n".join(printed)

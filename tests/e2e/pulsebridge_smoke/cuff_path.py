@@ -168,7 +168,7 @@ def earlier_patient_is_synthetic(ctx: Context) -> bool | None:
             continue
         try:
             patient_id = read_sent_reading(sent).patient_id
-        except ValueError:
+        except Exception:  # noqa: BLE001, S112 - hostile text: hl7apy may raise anything
             continue
         return patient_id.startswith(SYNTHETIC_PATIENT_PREFIX)
     return None
@@ -228,7 +228,7 @@ def _resources(trace: dict, resource_type: str) -> list[dict]:
     bundle = _dict(trace.get("resources"))
     return [
         e["resource"]
-        for e in bundle.get("entry") or []
+        for e in (bundle.get("entry") if isinstance(bundle.get("entry"), list) else [])
         if isinstance(e, dict)
         and isinstance(e.get("resource"), dict)
         and e["resource"].get("resourceType") == resource_type
@@ -311,7 +311,7 @@ def send_reading(ctx: Context, facts: StackFacts) -> Sent:
     )
     try:
         message = read_sent_reading(str(result.get("messageSent") or ""))
-    except ValueError:
+    except Exception:  # noqa: BLE001 - hostile text: hl7apy may raise anything
         message = None
     problem = None
     if message is None:

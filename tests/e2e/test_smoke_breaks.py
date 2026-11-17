@@ -288,6 +288,40 @@ BREAKS = [
         "'mmHg'",
     ),
     Break(
+        "the unit system is not UCUM",
+        mapper_edit(
+            lambda o: bp_component(o, "8462-4")["valueQuantity"].update(
+                system="http://example.org/units"
+            )
+        ),
+        "A7e",
+        "'http://example.org/units'",
+    ),
+    Break(
+        "the Provenance's target is not a list",
+        trace_edit(
+            lambda b: next(
+                e["resource"]
+                for e in b["resources"]["entry"]
+                if e["resource"]["resourceType"] == "Provenance"
+            ).update(target={"reference": "Observation/x"})
+        ),
+        "A8",
+        "Provenance.target is []",
+    ),
+    Break(
+        "the Provenance's source identifier is not an object",
+        trace_edit(
+            lambda b: next(
+                e["resource"]
+                for e in b["resources"]["entry"]
+                if e["resource"]["resourceType"] == "Provenance"
+            )["entity"][0]["what"].update(identifier="hl7V2Stores/s/messages/x")
+        ),
+        "A8",
+        "does not name the stored HL7v2 message",
+    ),
+    Break(
         "the time differs",
         mapper_edit(lambda o: o.update(effectiveDateTime="2026-01-01T00:00:00+00:00")),
         "A7f",

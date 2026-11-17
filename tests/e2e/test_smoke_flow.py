@@ -13,7 +13,8 @@ import pytest
 from e2e_fake_stack import REAL_PATIENT, Stack, build_stack
 from e2e_runs import BASE, bp_component, edit_json, run
 from fhir_proxy.share.testing import FakeOpenEmr
-from pulsebridge_smoke.cli import secret_manager_password
+from pulsebridge_smoke.cli import UsageError, secret_manager_password
+from pulsebridge_smoke.first_sync import GcloudSyncRuns
 from pulsebridge_smoke.http import Response, TransportError
 
 PART_A_WRITES = ("A1", "A10", "N1")
@@ -195,7 +196,12 @@ def test_wrong_password_fails_the_login_and_stops(stack: Stack) -> None:
 @pytest.mark.parametrize(
     ("env", "args", "message"),
     [
-        ({"PULSEBRIDGE_BASE_URL": ""}, [], "must start with https://"),
+        ({"PULSEBRIDGE_BASE_URL": ""}, [], "set PULSEBRIDGE_BASE_URL"),
+        (
+            {"PULSEBRIDGE_REVIEWER_PASSWORD": "abc"},
+            [],
+            "shorter than 4 characters, so it cannot be the stack's reviewer password",
+        ),
         ({"PULSEBRIDGE_BASE_URL": "http://dashboard.example.test/api"}, [], "https://"),
         ({"PULSEBRIDGE_BASE_URL": "https://x.example.test/api?a=1"}, [], "no query"),
         ({"PULSEBRIDGE_REVIEWER_PASSWORD": ""}, [], "no password"),
@@ -276,10 +282,96 @@ def test_password_from_secret_manager_uses_the_callers_gcloud(stack: Stack, pass
 
 
 def test_secret_manager_failure_is_a_clear_usage_error() -> None:
-    def failing(command, **_):  # noqa: ANN001, ANN202
-        return subprocess.CompletedProcess(command, 1, stdout="", stderr="PERMISSION_DENIED\n")
+    stderr = (
+        "ERROR: (gcloud.secrets.versions.access)\nPERMISSION_DENIED: Permission denied " + "x" * 900
+    )
 
-    with pytest.raises(Exception, match="could not read pb-reviewer-password: PERMISSION_DENIED"):
+    def failing(command, **_):  # noqa: ANN001, ANN202
+        return subprocess.CompletedProcess(command, 1, stdout="", stderr=stderr)
+
+    with pytest.raises(UsageError) as caught:
         secret_manager_password("example-project-1", "pb", run=failing)
-    with pytest.raises(Exception, match="not a valid name prefix"):
+    message = str(caught.value)
+    assert message.startswith("could not read pb-reviewer-password with gcloud (exit 1).")
+    assert "roles/secretmanager.secretAccessor" in message
+    # gcloud's whole message, on one line, limited: not just its last line.
+    assert "gcloud said: ERROR: (gcloud.secrets.versions.access) PERMISSION_DENIED" in message
+    assert message.endswith(" [...]")
+    assert len(message) < 1000
+    with pytest.raises(UsageError, match="not a valid name prefix"):
         secret_manager_password("example-project-1", "PB; rm", run=failing)
+
+
+def test_gcloud_never_gets_the_password_in_its_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PULSEBRIDGE_REVIEWER_PASSWORD", "synthetic-password-in-env-0001")
+    monkeypatch.setenv("CLOUDSDK_CORE_PROJECT", "example-project-1")
+    seen = []
+
+    def fake(command, **kwargs):  # noqa: ANN001, ANN202
+        seen.append(kwargs["env"])
+        out = "[]" if command[1] == "logging" else "synthetic-value-0001\n"
+        return subprocess.CompletedProcess(command, 0, stdout=out, stderr="")
+
+    secret_manager_password("example-project-1", "pb", run=fake)
+    GcloudSyncRuns("example-project-1", "pb-health-sync", run=fake).fetch()
+    assert len(seen) == 2
+    for env in seen:
+        assert "PULSEBRIDGE_REVIEWER_PASSWORD" not in env
+        assert env.get("CLOUDSDK_CORE_PROJECT") == "example-project-1"  # the rest is passed on
+
+
+# A password with every character repr() or json.dumps() escapes: backslash, newline, both
+# quotes and non-ASCII. Synthetic.
+ESCAPED_PASSWORD = "syn\\the\"tic\nPässwörd-'0001"  # noqa: S105 - synthetic
+
+
+def test_an_echoed_password_is_redacted_in_every_escaped_form(stack: Stack, tmp_path: Path) -> None:
+    stack.env.harness.password_file.write_text(ESCAPED_PASSWORD + "\n", encoding="utf-8")
+
+    def echo(body: dict) -> None:
+        # The detail is shown with !r; the apostrophe makes repr choose double quotes there.
+        body["fhirStore"].update(reachable=False, detail=f"it's {ESCAPED_PASSWORD}")
+        body["observationCounts"]["cuff"] = {"echo": ESCAPED_PASSWORD}  # shown as a dict
+
+    stack.tamper("GET", "/status", edit_json(echo))
+    report = tmp_path / "report.json"
+    result = run(stack, ESCAPED_PASSWORD, "--report-json", str(report))
+    assert result.status_of("S1") == "PASS", result.text  # the login really used it
+    assert result.status_of("S4") == "FAIL"
+    assert "[redacted]" in result.line_of("S4")
+    assert "[redacted]" in result.line_of("S5")
+    raw = report.read_text(encoding="utf-8")
+    decoded = json.dumps(json.loads(raw), ensure_ascii=False)
+    forms = {
+        ESCAPED_PASSWORD,
+        repr(ESCAPED_PASSWORD)[1:-1],
+        repr("'\"" + ESCAPED_PASSWORD)[3:-1],
+        json.dumps(ESCAPED_PASSWORD)[1:-1],
+        json.dumps(ESCAPED_PASSWORD, ensure_ascii=False)[1:-1],
+        "Pässwörd",
+        "P\\u00e4ssw",
+    }
+    for text in (result.text, raw, decoded, json.loads(raw)["results"].__repr__()):
+        for form in forms:
+            assert form not in text, (form, text[:200])
+
+
+def test_an_unexpected_answer_shape_is_a_fail_not_a_traceback(stack: Stack, password: str) -> None:
+    class Boom:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def send(self, method, path, **kwargs):  # noqa: ANN001, ANN201
+            self.calls += 1
+            if self.calls == 1:
+                return stack.transport.send(method, path, **kwargs)
+            raise RuntimeError(f"a library bug quoting {password}")
+
+    result = run(stack, password, transport=Boom())
+    assert result.code == 1
+    assert result.status_of("X2") == "FAIL"
+    assert "unexpected RuntimeError" in result.line_of("X2")
+    assert password not in result.text
+    assert "a library bug" not in result.text  # the type only, never the text
