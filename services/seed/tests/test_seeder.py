@@ -17,6 +17,7 @@ from pulsebridge_seed.seeder import Outcome, run, setup_bundle
 from pulsebridge_seed.testing import (
     NOW,
     PATIENT_ID,
+    STORE,
     StoreFake,
     deps_for,
     fresh_store,
@@ -655,6 +656,76 @@ def test_each_window_is_written_at_most_twice_over_hourly_top_ups():
     assert all(len(w) <= 2 for w in writes.values())
     assert all(w in (["preliminary", "final"], ["final"]) for w in middle)
     assert sum(1 for w in writes.values() if w == ["preliminary", "final"]) > 200
+
+
+def test_a_steady_hourly_run_finalises_the_last_hour_and_leaves_the_rest():
+    """What dev's hourly job (--hours 4, 48 windows) should report once the store holds the
+    earlier runs: the newest hour is new (preliminary), the hour before it is now due final
+    (finalised), and the two older hours are already final with the same values (unchanged).
+    On dev before T39 it reported new 12, changed 12, amended 24, unchanged 0: ``_elements``
+    named ``effectivePeriod,valueQuantity``, which Cloud Healthcare (and now StoreFake) leaves
+    out, so no stored window ever matched."""
+    store = fresh_store()
+    reports = []
+    for hour in range(9):  # 12:02:30 to 20:02:30 UTC; the last run's range has no modelled gap
+        now = NOW + timedelta(hours=hour)
+        reports.append(seed(store, length=timedelta(hours=4), until=now, now=now))
+    for later in reports[1:]:  # every run after the first, including those over a data gap
+        assert later.stored_read == "ok"
+        assert (later.windows_changed, later.windows_amended) == (0, 0)
+        assert later.windows_written == later.windows_new + later.windows_finalised
+        assert later.windows_unchanged == later.windows_generated - later.windows_written
+    steady = reports[-1]
+    assert steady.windows_generated == 48
+    assert (
+        steady.windows_new,
+        steady.windows_finalised,
+        steady.windows_unchanged,
+        steady.windows_changed,
+        steady.windows_amended,
+        steady.windows_written,
+    ) == (12, 12, 24, 0, 0, 24)
+    assert all(o["status"] != "amended" for o in store.observations.values())
+
+
+def test_typed_choice_names_in_elements_stop_the_run_and_write_nothing(monkeypatch):
+    """Fail closed (T39): if ``_elements`` ever names ``effectivePeriod,valueQuantity`` again,
+    the store leaves both out and the run ends ``fhir-rejected`` (exit 1, a WARNING seed-run
+    line for the alert) before writing anything: no endless rewrites, and a withdrawn window
+    is not overwritten as a "write everything" would."""
+    import pulsebridge_fhir.stored
+    from pulsebridge_seed.cli import EXIT_FAILED, _exit_code
+
+    store = fresh_store()
+    seed(store, length=timedelta(hours=2), until=UNTIL)
+    withdrawn = next(iter(store.observations))
+    store.observations[withdrawn]["status"] = "entered-in-error"
+    before = copy.deepcopy(store.observations)
+    sent = len(store.bundles())
+    monkeypatch.setattr(
+        pulsebridge_fhir.stored,
+        "ELEMENTS",
+        "identifier,status,effectivePeriod,valueQuantity,component",
+    )
+    report = seed(store, length=timedelta(hours=2), until=UNTIL)
+    assert (report.outcome, report.reason) == (Outcome.FHIR_REJECTED, "stored-elements-missing")
+    assert report.stored_read == "failed:elements-missing"
+    assert _exit_code(report) == EXIT_FAILED
+    assert len(store.bundles()) == sent and report.windows_written == 0
+    assert store.observations == before
+
+
+def test_the_store_fake_refuses_summary_and_unmodelled_parameters():
+    from pulsebridge_gcp import ClientError, HealthcareClient
+
+    client = HealthcareClient(project="p", location="l", dataset="d", transport=fresh_store())
+    with pytest.raises(ClientError) as raised:
+        client.search(STORE, "Observation", [("_summary", "count")])
+    assert raised.value.status == 400
+    with pytest.raises(AssertionError, match="does not model"):
+        client.search(STORE, "Observation", [("status", "preliminary")])
+    with pytest.raises(AssertionError, match="does not model"):
+        client.search(STORE, "Patient", [("_elements", "id")])
 
 
 def test_read_follows_next_links():

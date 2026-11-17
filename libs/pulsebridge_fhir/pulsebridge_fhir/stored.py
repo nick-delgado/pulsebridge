@@ -13,18 +13,28 @@ links through the Cloud Healthcare client, is :func:`pulsebridge_gcp.stored.stor
 The search is standard R4, one query for the whole range::
 
     Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&date=ge<start>&date=lt<end>
-               &_elements=identifier,status,effectivePeriod,valueQuantity,component&_count=1000
+               &_elements=identifier,status,effective,value,component&_count=1000
 
 ``date`` on an Observation searches ``effective[x]``; for an ``effectivePeriod`` R4 matches when
 the period overlaps the searched range, so the window that ends exactly at the range start is
 also returned. That is harmless: it is simply not among the windows being written.
 
-``_elements`` asks only for the fields compared here. Values are compared, never logged.
+``_elements`` asks only for the fields compared here. ``effective[x]`` and ``value[x]`` are R4
+*choice elements*: one element that can take one of several data types, written in JSON with the
+type in the name (``effectivePeriod``, ``valueQuantity``). In ``_elements`` they are named by
+their base name, ``effective`` and ``value``. Cloud Healthcare does exactly that and nothing
+else: asked for ``effectivePeriod,valueQuantity`` it silently leaves both out (seen on dev on
+17 November 2026; ``effective[x]`` and ``Observation.effective`` select nothing either). Every
+stored window then read as "end and average unknown", never equal to the window being planned,
+so every run rewrote every window and turned each final one into ``amended``.
+:func:`check_elements_present` now stops such a read (:class:`StoredElementsMissing`), and the
+services end the run as a failure without writing, so the same mistake shows as a failed run
+instead of as endless rewrites. Values are compared, never logged.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -32,7 +42,9 @@ from pulsebridge_fhir import codes
 from pulsebridge_fhir.keys import escape_search_value
 
 SEARCH_PAGE_SIZE = 1000  # 14 days of windows is 4,032: five pages at most
-ELEMENTS = "identifier,status,effectivePeriod,valueQuantity,component"
+# Base names for the choice elements effective[x] and value[x] (R4 search, ``_elements``); the
+# typed JSON names (effectivePeriod, valueQuantity) select nothing on Cloud Healthcare.
+ELEMENTS = "identifier,status,effective,value,component"
 # R4 observation-status codes that mean "complete": final, and its two later revisions.
 FINAL_STATUSES = ("final", "amended", "corrected")
 # R4 observation-status: "entered-in-error" ("the observation has been withdrawn following
@@ -47,6 +59,19 @@ class StoredReadError(Exception):
     client raises itself). The caller then writes every window."""
 
 
+class StoredElementsMissing(Exception):  # noqa: N818 - a condition, named for what it means
+    """The search returned our windows without the elements compared (:func:`check_elements_
+    present`). Deliberately not a :class:`StoredReadError`: the caller must not write every
+    window, but stop the run as a failure, writing nothing (fail closed).
+
+    Why stop rather than write: this means the search contract with the store is broken (as
+    ``_elements`` with typed choice names was on dev), which a rewrite cannot fix; carrying on
+    rewrote every window on every run and turned each final window into ``amended``. Writing
+    everything instead would overwrite withdrawn windows and stored ``amended`` statuses.
+    Stopping loses nothing: the windows are still at the source, and the next run after the fix
+    writes them (within the look-back; older ones by backfill)."""
+
+
 @dataclass(frozen=True)
 class StoredWindow:
     """The parts of a stored heart-rate Observation that decide whether to write it again."""
@@ -58,6 +83,11 @@ class StoredWindow:
     @property
     def is_final(self) -> bool:
         return self.status in FINAL_STATUSES
+
+    @property
+    def is_complete(self) -> bool:
+        """End, minimum, average and maximum all readable: every window T06 writes has them."""
+        return self.end is not None and all(v is not None for v in self.values)
 
 
 def search_instant(value: datetime) -> str:
@@ -185,6 +215,29 @@ def page_windows(page: object) -> list[tuple[str, StoredWindow]]:
         if parsed is not None:
             found.append(parsed)
     return found
+
+
+# Fewer judged windows than this never trip the check: one stored window with an unreadable
+# part is just that window rewritten (parse_stored_window), not a reason to stop every run until
+# it leaves the range. A broken search shows from the second stored window on.
+MIN_WINDOWS_JUDGED = 2
+
+
+def check_elements_present(windows: Iterable[StoredWindow]) -> None:
+    """Raise :class:`StoredElementsMissing` when the whole read (every page) holds at least
+    :data:`MIN_WINDOWS_JUDGED` windows of ours that are not withdrawn and **none** of them is
+    complete (end, minimum, average and maximum all readable, :attr:`StoredWindow.is_complete`).
+
+    Every heart-rate Observation T06 writes has all four (``effectivePeriod.end``,
+    ``valueQuantity`` and the two ``component`` values), so a read where none has them is the
+    search leaving elements out, not data: on dev, ``_elements`` with typed choice names
+    dropped ``effectivePeriod`` and ``valueQuantity``; a dropped ``component`` would do the same
+    to the minimum and maximum. Withdrawn windows (``entered-in-error``, ``cancelled``) are not
+    judged: they are never rewritten whatever they hold. Some unreadable windows among complete
+    ones are only those windows rewritten."""
+    judged = [w for w in windows if w.status not in WITHDRAWN_STATUSES]
+    if len(judged) >= MIN_WINDOWS_JUDGED and not any(w.is_complete for w in judged):
+        raise StoredElementsMissing("no stored window has its end, minimum, average and maximum")
 
 
 @dataclass(frozen=True)

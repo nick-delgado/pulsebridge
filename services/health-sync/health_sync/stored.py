@@ -13,7 +13,7 @@ Provenance. Instead a run makes these FHIR searches (R4 search, standard paramet
    the same code). What to write is then :func:`pulsebridge_fhir.stored.plan_writes`.
 
 and :func:`count_stranded`, here, counts preliminary windows that have fallen behind every
-future run (``status=preliminary&date=lt<range start>&_summary=count``).
+future run (``status=preliminary&date=lt<range start>&_total=accurate&_count=0``).
 
 If any search fails, the caller writes everything, as before: reading is an optimisation,
 never a condition for writing. Values are compared, never logged.
@@ -54,7 +54,14 @@ def find_patient_ids(client: SearchClient, store: str, patient_id: str) -> list[
 def count_stranded(client: SearchClient, store: str, patient_ref: str, before: datetime) -> int:
     """Stored ``preliminary`` windows that start before ``before`` (the earliest range start).
     No later run will request them again, so they stay preliminary until a backfill covers
-    them. ``_summary=count`` returns only ``Bundle.total``."""
+    them.
+
+    The count is ``Bundle.total`` of a searchset with no entries. R4 offers two ways to ask for
+    that: ``_summary=count``, which Cloud Healthcare refuses with 400 ("_summary argument is not
+    supported yet", seen on the first dev deploy by fhir-proxy), and ``_count=0`` (a page of
+    zero resources) with ``_total=accurate`` (R4 search's ``_total``: an exact total rather than
+    an estimate), which is what fhir-proxy's ``/status`` counts with since then. A missing,
+    negative or non-integer ``total`` raises, so a broken count is never reported as zero."""
     bundle = client.search(
         store,
         "Observation",
@@ -63,7 +70,8 @@ def count_stranded(client: SearchClient, store: str, patient_ref: str, before: d
             ("code", search_token(codes.LOINC, codes.HEART_RATE["code"])),
             ("status", "preliminary"),
             ("date", f"lt{search_instant(before)}"),
-            ("_summary", "count"),
+            ("_total", "accurate"),
+            ("_count", "0"),
         ],
     )
     total = bundle.get("total") if isinstance(bundle, dict) else None

@@ -80,7 +80,7 @@ answers at once with `200 {"outcome": "already-running"}` and does nothing.
 | `deadline-reached` | 503 | the run stopped before starting a range or Bundle (`before-range`, `before-bundle`) because too little time was left | next scheduled run picks up the rest |
 | `google-error` | 500 | Google refused the request (another 4xx, a second 401) or answered malformed JSON | needs a person; logs give the status and Google's reason code |
 | `fhir-misconfigured` | 500 | the FHIR store answered 401/403 (`fhir-permission-denied`: the role is missing, or still propagating after an apply) or 404 (`fhir-store-missing`) | needs a person |
-| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx, `fhir-refused-bundle`; its OperationOutcome is logged without free text), or answered 2xx with a body that is not a Bundle (`fhir-malformed-response`) | needs a person |
+| `fhir-rejected` | 500 | the FHIR store refused a Bundle (4xx, `fhir-refused-bundle`; its OperationOutcome is logged without free text), answered 2xx with a body that is not a Bundle (`fhir-malformed-response`), or returned the stored windows without the elements compared (`stored-elements-missing`, T39: nothing written) | needs a person |
 | `mapping-failed` | 500 | T06 refused input that passed the window checks (a bug) | needs a person |
 
 **Why 200 for reconnect-needed.** A retry cannot fix an expired grant, and every retry would hit
@@ -335,10 +335,20 @@ Each run makes three FHIR searches (standard R4 search parameters), each with it
 own 10 s timeout, a fresh client per page so each page's timeout is cut to the time left:
 
 1. `Patient?identifier=urn:pulsebridge:patient|<PATIENT_ID>&_elements=id`: the Patient's id;
-2. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&status=preliminary&date=lt<range start>&_summary=count`:
-   stranded preliminary windows;
-3. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&date=ge<start>&date=lt<end>&_elements=identifier,status,effectivePeriod,valueQuantity,component&_count=1000`,
+2. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&status=preliminary&date=lt<range start>&_total=accurate&_count=0`:
+   stranded preliminary windows, read from the searchset Bundle's `total` (a missing or
+   non-integer `total` is a failed count, never zero). Not `_summary=count`, the other R4 way to
+   ask for a count only: Cloud Healthcare answers it with 400 ("_summary argument is not
+   supported yet", seen by fhir-proxy on the first dev deploy; fixed here in T39).
+   `_count=0` asks for a page of no resources; `_total=accurate` asks for an exact total rather
+   than an estimate;
+3. `Observation?subject=Patient/<id>&code=http://loinc.org|8867-4&date=ge<start>&date=lt<end>&_elements=identifier,status,effective,value,component&_count=1000`,
    following the `next` links (bounded at 20 pages): what is stored for the range.
+   `effective` and `value` are the base names of the R4 choice elements `effective[x]` and
+   `value[x]`; until T39 this was `effectivePeriod,valueQuantity`, which Cloud Healthcare
+   silently ignores (`libs/pulsebridge_fhir` README, "`_elements` and choice elements"), so no
+   stored window ever matched and every run rewrote every window. A read where no window has
+   its end, minimum, average and maximum now stops the run (fail closed: below).
 
 The first two are `health_sync/stored.py`. The third, and the decision per window below, are
 shared with the seeder since T35: `pulsebridge_gcp.stored.stored_windows` (called with a fresh
@@ -355,7 +365,18 @@ runs twelve consecutive runs and checks no window is written more than twice.
   identifier: a `WARNING`, every window written, and the conditional creates will report the
   412 until the duplicate is removed by hand, T06 README); `skipped-for-time` (see "Deadline");
   `failed:<HTTP status or error type>` (`stored-read-failed` logged, every window written:
-  reading only saves writes); `not-attempted` (the run had no windows).
+  reading only saves writes); `failed:elements-missing` (below: the run stops, nothing is
+  written); `not-attempted` (the run had no windows).
+- **A read without the compared elements** (since T39, fail closed): when at least two windows
+  of ours that are not withdrawn come back and none has its end, minimum, average and maximum
+  (every window T06 writes has all four), the search itself is wrong, as `_elements` with
+  typed choice names was on dev. The run logs `stored-elements-missing` at `ERROR` and ends
+  `fhir-rejected` with reason `stored-elements-missing` (HTTP 500, an `ERROR` `sync-run` line
+  for the alerts) before writing anything in that range. A rewrite cannot fix a broken search,
+  carrying on rewrote every window on every run, and writing everything would overwrite
+  withdrawn and amended windows. Nothing is lost: the next run after a fix writes what is still
+  in its three-hour look-back, and a backfill covers anything older. One stored window with an
+  unreadable part, or a few among complete ones, are only those windows rewritten.
 - **A search page that is not valid FHIR JSON** (since T35, the seeder's handling): an `entry`
   that is not an array (`null`, a number, an object), or a stored Observation whose
   `identifier`, `component` or `component.coding` is not an array or whose `component.code` is
@@ -399,11 +420,14 @@ values. The run counts them (`windows_amended`), and they are also counted in `w
   clinic. T06 also refuses `amended` for a window that is not complete. So the window is **not
   written**: the stored `final` stays, the run counts it (`windows_held_final`), and once the
   cutoff passes it again a later run writes it `amended` with the new values.
-- **When the read fails** (`stored_read` not `ok`), nothing is known about what is stored, so
-  every window is written with the status the cutoff gives (`final` or `preliminary`), as
-  before: a window that was `amended` goes back to `final` until its values change again, and
-  after `FINAL_AFTER_MINUTES` was raised a stored `final` window inside the new "still filling"
-  part could be written `preliminary`. Only a successful read can prevent that.
+- **When the read fails** (`stored_read` is `failed:<status or type>`; not `elements-missing`,
+  which writes nothing), nothing is known about what is stored, so every window is written
+  with the status the cutoff gives (`final` or `preliminary`), as before: a withdrawn
+  (`entered-in-error`, `cancelled`) window is overwritten, a window that was `amended` goes back
+  to `final` until its values change again, and after `FINAL_AFTER_MINUTES` was raised a stored
+  `final` window inside the new "still filling" part could be written `preliminary`. Only a
+  successful read can prevent that. Recorded in T39 as an open question for the orchestrator
+  (`libs/pulsebridge_fhir` README), not changed.
 - **The dashboard** treats `amended` like other non-final statuses: drawn on the solid line,
   described as "status amended: not shared (only final is)" (`web/src/heart-rate`). So an
   amended window cannot be shared with the clinic (T15 shares only `final`).
@@ -607,17 +631,45 @@ task made no GCP calls, so it is **not yet confirmed**; the check belongs to the
 If any fails, switch to the fixed-ID fallback in the T06 README ("Unverified server behaviour,
 and the fallback"); that is a change to `libs/pulsebridge_fhir`, not to this service.
 
-**The read step.** These search features are standard R4 but unverified on Cloud Healthcare:
-`_elements` on Patient and Observation searches; `_summary=count` returning `Bundle.total`;
-`date` on an `effectivePeriod` with R4's overlap semantics; `_count=1000`; and `next` links on
-the store's own base URL (`next_page` refuses any other). If one is refused, the search fails
-and the run writes everything (`stored_read: "failed:…"`), so a wrong assumption costs writes,
-not data. It can also fail silently (for example `date` matching nothing), so check:
+**The read step: what Cloud Healthcare is known to accept (T39 audit).** health-sync itself
+has never run against Cloud Healthcare (no real-data stack yet). Other services sending the
+same requests on dev (16 and 17 November 2026, synthetic data) settle some of them:
+
+| Request health-sync sends | On Cloud Healthcare | Evidence |
+| --- | --- | --- |
+| `Patient?identifier=<system>\|<value>` (token search) | works | fhir-proxy's Patient lookup and the seeder's safety check on dev |
+| `_elements=id` on Patient | works | fhir-proxy sends the same search and reads `id` on dev; `id` is not a choice element |
+| `_summary=count` | **refused**, 400 | fhir-proxy's `/status` on dev; health-sync no longer sends it (T39) |
+| `_total=accurate&_count=0`, reading `total` | works | fhir-proxy's `/status` counts on dev since the fix |
+| Observation `subject`, `code=http://loinc.org\|8867-4`, `date=ge…&date=lt…` | works | the seeder's hourly read on dev (`stored_read: ok`, 36 of 48 windows found) |
+| `_elements=identifier,status,effectivePeriod,valueQuantity,component` | **silently drops** `effectivePeriod` and `valueQuantity` | the seeder's hourly reports on dev and live searches (17 November); fixed in T39 |
+| `_elements=identifier,status,effective,value,component` | works | live searches on dev (17 November); not yet run by a deployed service |
+| `_count=1000` | accepted | the seeder's hourly read on dev (one page; 48 windows) |
+| `executeBundle` transaction: Patient and Device conditional create (`POST` + `ifNoneExist`), Observation conditional update (`PUT Observation?identifier=…`), Provenance `PUT` by id, in-Bundle `urn:uuid` references, status `amended` | works | the seeder on dev uses the same `heart_rate_transaction` (`Patient 200` on every data Bundle; hourly runs wrote `amended`); v2-to-fhir's Bundles |
+| `status=preliminary` on Observation | **not verified** | no deployed service sends `status` |
+| `date=lt…` alone, with `status` and `_total=accurate&_count=0` | **not verified** together | each part is seen above, this combination is not |
+| `next` links (more than 1,000 windows, or a server's smaller pages) | **not verified** | no dev search returned more than one page; `next_page` refuses a link outside the store's base URL |
+| R4 overlap semantics of `date` on an `effectivePeriod` at the range edges | **not verified** | the in-range windows are found; the edge window is not checked |
+| Indexing delay of non-identifier searches (Cloud Healthcare indexes them asynchronously) | **not verified** | a window written in one run is read 15 minutes later, which is likely enough |
+
+`FhirFake` (`health_sync.testing`) follows the rows marked refused or silently dropped: it
+answers `_summary` with 400, applies `_elements` as the real store does (choice elements by
+base name only, `pulsebridge_gcp.testing.select_elements`), answers `_count=0` only with
+`_total=accurate`, and fails a test on any parameter it does not model. It refuses nothing that
+was not seen refused: `status` and the rest of the unverified rows are answered as R4 says.
+
+If a search is refused, it fails and the run writes everything (`stored_read: "failed:…"`), so
+a wrong assumption costs writes (and, for withdrawn or amended windows, their status: above),
+not data. It can also fail silently (as `_elements` did; that case now stops the run as
+`stored-elements-missing`), so check:
 
 4. On the **second** sync run after deployment, the report has `stored_read: "ok"` and
    `windows_unchanged > 0`. If `windows_unchanged` stays 0 run after run while `stored_read` is
-   `ok`, the read step is silently not working and every window is being rewritten.
-5. `stranded_preliminary` is a number (not `null`) in the run report.
+   `ok`, the read step is silently not working and every window is being rewritten (this is
+   what the seeder showed on dev before T39).
+5. `stranded_preliminary` is a number (not `null`) in the run report, and no
+   `stranded-count-failed` line is logged. This is the first run of `status=preliminary` with
+   `_total=accurate&_count=0` on Cloud Healthcare.
 6. `GET /status` answers within a second or two (it makes one token request and no FHIR
    request); a slow answer means it is waiting on Google's token endpoint.
 
