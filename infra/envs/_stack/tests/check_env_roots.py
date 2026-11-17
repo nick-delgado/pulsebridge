@@ -573,7 +573,7 @@ def check_example_plans(root: str) -> None:
                     f"{hops.get(run)!r}, expected {expected!r}"
                 )
         if all(hops.get(r) == v for r, v in EXPECTED_HOPS.items()):
-            print(f"{root}: fhir-proxy's TRUSTED_PROXY_HOPS is 2 by default and follows an override")
+            print(f"{root}: fhir-proxy's TRUSTED_PROXY_HOPS is 2 by default, 1 when overridden")
     finally:
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(home, ignore_errors=True)
