@@ -632,8 +632,11 @@ terraform apply -replace='module.stack.module.edge_vm.google_compute_instance.th
 
 The data disk and the reserved internal address survive; the new VM boots from the newest
 `cos-stable` image, mounts the existing disk without formatting, pulls the images again and
-starts OpenEMR on its existing site files (about 15 minutes of downtime). Do it monthly, and
-whenever the COS release notes announce a security fix. Check with `terraform output edge_vm`
+starts OpenEMR on its existing site files (about 10 minutes of downtime on 17 November: the
+replace itself a minute, then the startup script, most of it the OpenEMR image pull). Do it
+monthly, and whenever the COS release notes announce a security fix. Afterwards run
+`terraform apply -refresh-only`: until then `terraform output edge_vm` shows the image family
+it asked for, not the image the VM booted from. Check with `terraform output edge_vm`
 (`boot_image`) and the startup log (`edge VM startup: done, all steps ok`).
 
 ### Rotating the reviewer password
@@ -1073,14 +1076,16 @@ runbook steps 1 to 11, checked from the apply logs, the VM's serial port output,
 execution, the build log and the front-door smoke checks). An item says `ok` only where that
 evidence shows exactly what the item asks; `partly` says which half was seen; `no` means it was
 seen to be false; an empty cell, or "not checked", means it is still open. Still open after that
-run, and needing a session with the user's go-ahead:
+run, and needing a session with the user's go-ahead (a second session on 17 November did the
+reboot, patching, seeder-alert and Scheduler items; what it left is listed here):
 
-- **Hop measurement** (P1, `trusted_proxy_hops`), and the rest of the front door: P6 (the
-  reviewer password's secret mount and **rotation**), P8 to P11, P16.
-- **Alerts firing** (I11, I12) and the remaining ingestion checks: the Scheduler path (I3), the
-  second run (I5, I6), `/status` timing (I7), replay (I13), dead-lettering (I21).
-- **Patching** (E17) and every reboot item (E3's second half, E12, E13, O16), the crash-loop
-  check (E16), logging (E15, E19).
+- **Hop measurement** (P1, `trusted_proxy_hops`): measured but not conclusive, repeat from a
+  machine with no proxy. The rest of the front door: P6 (the reviewer password's secret mount
+  and **rotation**), P8 to P11, P16.
+- **The Scheduler alert** (the second halves of I11 and I12) and the remaining ingestion checks:
+  I5, `/status` timing for health-sync (I7), replay (I13), dead-lettering (I21).
+- What needs a shell on the VM: MariaDB's shutdown log (E12), the crash-loop check (E16),
+  logging (E15, E19).
 - **Destroy** (T1 to T4).
 - **CI/CD's first real run** (CI1 to CI17), and the WIF items (A14).
 - **The real-data path**: connect script and health-sync (I1, I4, I14 to I20, I23, A8), and prod
@@ -1110,14 +1115,14 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | A12 | dev: the reviewer password from tfvars creates a version; raising `reviewer_password_wo_version` replaces it (and whether there is a moment with no enabled version) | ID | |
 | A13 | Bootstrap on a brand-new project: the first apply may stop on "API has not been used ... or it is disabled"; a re-run continues; `add_firebase` adds Firebase with the owner's ADC (`billing_project` set); `firebase_added = true` | B | 2026-11-16 dev: partly. The first apply stopped on "API has not been used", but for the **caller's** project (a service account key from another project); `USER_PROJECT_OVERRIDE`/`GOOGLE_BILLING_PROJECT` fixed it; then 24 resources and `firebase_added = true`. An existing project was adopted; not run with a person's own login |
 | A14 | Workload Identity Federation: a workflow of the configured repository gets deployer tokens; one from another repository is refused; `google.subject` stays under 127 bytes for the branch names used | B | |
-| A15 | IAP TCP forwarding works once `enable_iap_ssh = true` enabled `iap.googleapis.com` (understood to be required) | PB | |
+| A15 | IAP TCP forwarding works once `enable_iap_ssh = true` enabled `iap.googleapis.com` (understood to be required) | PB | 2026-11-16 dev: ok. With `enable_iap_ssh = true` (the firewall rule and `iap.googleapis.com`), an SSH tunnel through IAP reached OpenEMR on the VM (the README screenshot was taken through it); set back to `false` the same day |
 | A16 | Prices against Google's pricing pages: Cloud NAT, the rejected Serverless VPC Access connector, Artifact Registry storage, Cloud Build minutes, snapshot storage, the e2-micro list price | PB, SVC, EV | |
 | A17 | Cloud Scheduler in a project that first enabled the Scheduler API before 19 March 2019: its service agent may lack `roles/cloudscheduler.serviceAgent` (OIDC jobs fail); new projects are unaffected | ID | |
 | A18 | Step 6's targeted apply creates the VM (and the dataset and HL7v2 store it needs) with no images and nothing of phr or ingestion; the OpenEMR client version exists before step 8 | T25 | 2026-11-16 dev: ok. 7 resources (topic and its publisher binding, dataset, HL7v2 store, data disk, address, VM), no images, nothing of phr or ingestion; the client key's version 1 existed before step 8 |
 | A19 | Step 8 does not stop at fhir-proxy on `openemr-client-private-key` (and, for the record, whether Cloud Run refuses a volume secret with no version at all) | PHR, T25 | 2026-11-16 dev: partly. Step 8 created fhir-proxy without stopping (version 1 present); whether Cloud Run refuses a volume secret with no version is still open |
 | A20 | prod: the deployer (`roles/compute.instanceAdmin.v1`) can create the data disk's snapshot schedule and attach it; the first daily snapshot appears | EV, T25 | |
 | A21 | The HL7v2 store parses with parser V1 as the spikes saw (V2 and V3 were never tried; the setting cannot be changed later) | HC | 2026-11-16 dev: ok. The store parsed the cuff's ORU^R01 (MLLP and HTTPS ingest) and v2-to-fhir mapped it to final Observations |
-| A22 | The deployer can create the Pub/Sub service agent (`google_project_service_identity`, Service Usage `generateServiceIdentity`; Google names no permission for it); if refused, the owner runs step 4 once. On the deployed dev project the next apply adds only this resource and leaves the Token Creator grant unchanged | ID, T36 | |
+| A22 | The deployer can create the Pub/Sub service agent (`google_project_service_identity`, Service Usage `generateServiceIdentity`; Google names no permission for it); if refused, the owner runs step 4 once. On the deployed dev project the next apply adds only this resource and leaves the Token Creator grant unchanged | ID, T36 | 2026-11-16 dev: ok. The deployer's apply created `google_project_service_identity.pubsub` (1 added); on 17 November the same for the Healthcare agent (T38) |
 
 ### The image build (step 7)
 
@@ -1137,8 +1142,8 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | --- | --- | --- | --- |
 | E1 | The VM boots COS with Shielded VM on an e2-micro; serial port shows `pulsebridge-edge: edge VM startup: begin`; metadata shows `cos-update-strategy=update_disabled` | EV | 2026-11-16 dev: partly. COS booted with UEFI Secure Boot enabled; `edge VM startup: begin` on the serial port; the `cos-update-strategy` metadata not inspected |
 | E2 | Every command the script needs exists on COS (the preflight step logs any missing: `blkid`, `mkfs.ext4`, `fsck.ext4`, `mkswap`, `swapon`, `curl`, `dd`, `timeout`, `tr`, `wc`, `sha256sum`, `stat`, `flock`) | EV | 2026-11-16 dev: ok. `step preflight: ok` |
-| E3 | The format decision on a real disk: the new disk reads as zeros, `blkid -p` exits 2, `wipefs --no-act` prints nothing, it is formatted once; after a reboot "has an ext4 filesystem; not formatting" | EV | 2026-11-16 dev: partly. "data disk /dev/sdb is blank (no signature, reads as zeros): formatting it", once; the reboot half not done (E13) |
-| E4 | Swap: `swapon --show` lists the file (swap on COS is not documented for Compute Engine) | EV | 2026-11-16 dev: partly. The script logged "swap file ... enabled"; `swapon --show` not run by hand |
+| E3 | The format decision on a real disk: the new disk reads as zeros, `blkid -p` exits 2, `wipefs --no-act` prints nothing, it is formatted once; after a reboot "has an ext4 filesystem; not formatting" | EV | 2026-11-16 dev: partly. "data disk /dev/sdb is blank (no signature, reads as zeros): formatting it", once; the reboot half not done (E13) 2026-11-17 dev: the reboot half ok. After a stop and start, and again on the replaced VM: "data disk /dev/sdb has an ext4 filesystem; not formatting". |
+| E4 | Swap: `swapon --show` lists the file (swap on COS is not documented for Compute Engine) | EV | 2026-11-16 dev: partly. The script logged "swap file ... enabled"; `swapon --show` not run by hand 2026-11-17: "enabled" again after the reboot and on the replaced VM; `swapon --show` still not run by hand. |
 | E5 | Artifact Registry and gcr.io over Private Google Access: both pulls succeed with no NAT (else `enable_cloud_nat = true`) | EV, PB | 2026-11-16 dev: ok. The adapter (gcr.io) and MariaDB and OpenEMR (Artifact Registry) pulled with no Cloud NAT |
 | E6 | `roles/artifactregistry.reader` on the mirror is enough to pull through the remote repository | EV, PB | 2026-11-16 dev: ok. MariaDB and OpenEMR pulled through the mirror with the VM's reader grant |
 | E7 | docker-credential-gcr writes under `/var/lib/pulsebridge-edge` and `docker pull` uses it | EV | 2026-11-16 dev: partly. The mirror pulls authenticated, so the helper works; where it writes not checked |
@@ -1146,12 +1151,12 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | E9 | `--logtostderr`: a second adapter started by hand with it stays up (then consider adding it) | EV | |
 | E10 | The MariaDB secret file appears with mode 600; the `sed` parsing of Secret Manager's real response works | EV | 2026-11-16 dev: ok. Three secret files "written ... (mode 600)"; MariaDB started with the parsed value |
 | E11 | MariaDB initialises on the bind mount, becomes `healthy`, `--health-start-interval` is accepted; a configuration change replaces it with "Shutdown complete" | EV | 2026-11-16 dev: partly. `MariaDB is healthy`; replacement on a configuration change not tried |
-| E12 | Graceful shutdown on VM stop: MariaDB's log on the next boot; `systemctl show docker -p TimeoutStopUSec` | EV | |
-| E13 | After a reboot both containers come back and the script reports all steps ok | EV | |
+| E12 | Graceful shutdown on VM stop: MariaDB's log on the next boot; `systemctl show docker -p TimeoutStopUSec` | EV | 2026-11-17 dev: partly. `gcloud compute instances stop` returned after 35 s and MariaDB came back healthy 42 s after its container was started; MariaDB's own shutdown log and `TimeoutStopUSec` not read (they need a shell) |
+| E13 | After a reboot both containers come back and the script reports all steps ok | EV | 2026-11-17 dev: ok. After a stop and start the script ran from 03:19:14 to 03:21:30 UTC (2 min 16 s) and ended "done, all steps ok": the adapter "running with the current configuration; nothing to do", mariadb and openemr "exited; starting it". `make smoke` passed afterwards |
 | E14 | `timeout` and curl's time limits behave on COS as in the sandbox | EV | |
 | E15 | The logging agent ships the startup script's lines to Cloud Logging | EV | |
 | E16 | The crash-loop check on a real crash (restart back-off, `restarting` status) | EV | |
-| E17 | Patching: `apply -replace` keeps the data disk and the address; `boot_image` reports the new image | EV | |
+| E17 | Patching: `apply -replace` keeps the data disk and the address; `boot_image` reports the new image | EV | 2026-11-17 dev: ok. `apply -replace` took 63 s (1 added, 1 destroyed); the data disk and the address were kept; the new VM's script ran from 03:40:00 to 03:48:38 UTC (the OpenEMR pull 7 min 10 s), did not format or seed, and found the client registered: about 10 minutes of downtime. The boot image moved to a newer `cos-stable` build, but `terraform output edge_vm` showed the image **family** until `terraform apply -refresh-only` (added to "Patching the VM"). `make smoke` passed afterwards |
 | E18 | The e2-micro free tier applies (billing report after a month); the e2-micro list price outside it | EV | |
 | E19 | Docker `--log-opt max-size` is compatible with the COS logging agent | EV | |
 
@@ -1174,7 +1179,7 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | O13 | The registration: 200 with a `client_id`; the client enabled; a token request from fhir-proxy (T15) succeeds with the RS384 assertion. Scopes: the six v1 scopes in the token; then try `openemr_scopes = ["system/Patient.crs", "system/Encounter.crs", "system/Observation.cr"]`, re-run the startup script, repeat a share (search, create, read work; `PUT`/`DELETE` refused); keep v2 if it works | OE | 2026-11-16 dev: partly. Registration and enable ok, and fhir-proxy's token requests worked (the shares, P-items); the v2-scope trial not done |
 | O14 | Secret Manager: `addVersion` with `secretVersionAdder`; `GET versions/latest` with `viewer` reports `state` and `name` | OE, ID | 2026-11-16 dev: partly. `addVersion` with `secretVersionAdder` stored version 1; the `viewer` read of `versions/latest` not exercised on a first boot |
 | O15 | fhir-proxy's TLS from Cloud Run: Python's default context with the certificate as `cadata`, hostname checking on, accepts `https://<internal_ip>` | OE | 2026-11-16 dev: ok. fhir-proxy's shares reached `https://<internal_ip>` (TLS with the stored certificate) |
-| O16 | A reboot: the registration hook logs `nothing to do`; nothing is pulled, created or registered | OE | |
+| O16 | A reboot: the registration hook logs `nothing to do`; nothing is pulled, created or registered | OE | 2026-11-17 dev: ok. After the stop and start: images "already present", "sites directory ... has files; not seeding", the TLS certificate kept, and the registration hook: "registered, enabled, and its key is version 1 of the secret; nothing to do" |
 | O17 | Time: first boot within `hook_timeout_minutes = 40`; record pull and setup times | OE | 2026-11-16 dev: ok. The openemr hook took about 18 minutes, the registration about 40 s; the whole startup about 20 minutes |
 | O18 | A database wipe (dev only): a new client is registered and fhir-proxy recovers after re-reading its secret file | OE | |
 | O19 | OpenEMR's first-time setup accepts the `openemr-admin-password` value | OE | 2026-11-16 dev: ok. First-time setup completed with the stored (generated) admin password |
@@ -1190,16 +1195,16 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | --- | --- | --- | --- |
 | I1 | Connect script: Google spells the scope as expected; `access_secret_version` on `versions/latest` answers `NOT_FOUND` for a secret with no version; the deployer's ADC works with Secret Manager without extra quota-project setup | CG | |
 | I2 | First seeding: `entry_statuses` shows `Patient 201` once (fresh store) and `Patient 200` for every data Bundle | SEED | 2026-11-16 dev: ok. Outcome `seeded`, 8,365 windows in 84 bundles, `Patient 201` once and then `200`, safety check `no-patient` |
-| I3 | `roles/run.invoker` on the job lets Scheduler's OAuth call to `jobs.run` through | IN | |
+| I3 | `roles/run.invoker` on the job lets Scheduler's OAuth call to `jobs.run` through | IN | 2026-11-17 dev: ok. Cloud Scheduler started the seed job every hour and every execution succeeded |
 | I4 | First real sync: the Patient entry answers `200`, not `201` (else switch to the fixed-ID fallback in the T06 README and record it) | HS, T29 | 2026-11-17 dev: not checked (synthetic data, no health-sync; the smoke test's Part B skipped) |
 | I5 | `GET Observation?identifier=urn:pulsebridge:observation\|<key>` returns one Observation whose `subject.reference` is the setup Patient; `GET Patient?identifier=urn:pulsebridge:patient\|<PATIENT_ID>` returns exactly one Patient | HS | |
-| I6 | Second run: `stored_read: "ok"` and `windows_unchanged > 0` (health-sync and seeder); `stranded_preliminary` is a number (health-sync counts with `_total=accurate&_count=0` since T39, not `_summary=count`) | HS, SEED, T29 | 2026-11-17 dev: **failed for the seeder**. Every hourly run reported `stored_read: "ok"` but `windows_unchanged 0, windows_new 12, windows_changed 12, windows_amended 24, windows_written 48`: `_elements` named `effectivePeriod,valueQuantity`, which Cloud Healthcare silently leaves out (choice elements go by base name: `effective,value`). Fixed in T39, not yet redeployed; expected after it: new 12, finalised 12, unchanged 24, amended 0 (seed README). Dev's earlier synthetic final windows stay `amended`. Since T39 a read that returns windows without their end and values stops the run (`fhir-rejected`, `stored-elements-missing`, `stored_read: "failed:elements-missing"`, nothing written) instead of reporting `ok`; if that appears, the search is wrong, not the data. Not checked for health-sync (synthetic data; the smoke test's Part B skipped); it shares the fixed search |
+| I6 | Second run: `stored_read: "ok"` and `windows_unchanged > 0` (health-sync and seeder); `stranded_preliminary` is a number (health-sync counts with `_total=accurate&_count=0` since T39, not `_summary=count`) | HS, SEED, T29 | 2026-11-17 dev: **failed for the seeder**. Every hourly run reported `stored_read: "ok"` but `windows_unchanged 0, windows_new 12, windows_changed 12, windows_amended 24, windows_written 48`: `_elements` named `effectivePeriod,valueQuantity`, which Cloud Healthcare silently leaves out (choice elements go by base name: `effective,value`). Fixed in T39; expected after it: new 12, finalised 12, unchanged 24, amended 0 (seed README). Dev's earlier synthetic final windows stay `amended`. Since T39 a read that returns windows without their end and values stops the run (`fhir-rejected`, `stored-elements-missing`, `stored_read: "failed:elements-missing"`, nothing written) instead of reporting `ok`; if that appears, the search is wrong, not the data. Not checked for health-sync (synthetic data; the smoke test's Part B skipped); it shares the fixed search **Redeployed and confirmed the same day:** with the fixed image, a run 13 minutes after the previous one reported `windows_unchanged 42, windows_new 3, windows_finalised 3, windows_changed 0, windows_amended 0, windows_written 6`, `stored_read: "ok"` (seeder only; health-sync has not run) |
 | I7 | `/status` answers within a second or two | HS | |
 | I8 | Pub/Sub push and Cloud Scheduler reach the internal-only services (else the ingress fallbacks) | IN | 2026-11-16 dev: partly. Pub/Sub push reached internal-only v2-to-fhir (cuff messages became Observations); Scheduler's call not checked |
 | I9 | The OIDC audience (the bare service URL) is accepted | IN | 2026-11-16 dev: partly. The push subscription's OIDC audience was accepted; health-sync's (real data) not reached |
 | I10 | v2-to-fhir's `hl7V2Consumer` can patch message labels (else healthcare moves to `hl7V2Editor`); `fhirResourceEditor` includes `executeBundle` and update-create `PUT` | ID, HC | 2026-11-16 dev: partly. `executeBundle` worked for the seeder and v2-to-fhir; the label patch not checked on its own |
-| I11 | The log filters match real entries (`jsonPayload.event`, `http_status`, `outcome`, the `bug` line, the seeder's stderr lines); a failed Scheduler attempt is logged at ERROR | IN | |
-| I12 | The email channel delivers without further confirmation, and a policy fires as intended | IN | |
+| I11 | The log filters match real entries (`jsonPayload.event`, `http_status`, `outcome`, the `bug` line, the seeder's stderr lines); a failed Scheduler attempt is logged at ERROR | IN | 2026-11-17 dev: partly. The seeder filter matched a real entry: one execution with an invalid `SYNTHETIC_SEED` override logged `event: "seed-run"` at WARNING (`outcome: not-started`, exit 2) and the metric counted 1. The Scheduler filter was not exercised (no failed attempt) |
+| I12 | The email channel delivers without further confirmation, and a policy fires as intended | IN | 2026-11-17 dev: ok for the seeder policy. The email arrived within minutes of the failed execution, with no confirmation step for the channel. The Scheduler policy has not fired |
 | I13 | Replay: `gcloud pubsub subscriptions pull --format=json` returns `message.data` base64-encoded; the `messages.list` label filter works | IN | |
 | I14 | Connect script: the consent flow with a Desktop-app client and a random loopback port returns to `http://127.0.0.1:<port>/?state=...&code=...` | CG | |
 | I15 | Google accepts `access_type=offline` and `prompt=consent` with PKCE for a Desktop client; the token response carries `refresh_token` (and, in Testing, `refresh_token_expires_in`) | CG | |
@@ -1218,9 +1223,9 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 
 | # | Check | Source | Verified on / result |
 | --- | --- | --- | --- |
-| P1 | `TRUSTED_PROXY_HOPS`: two failed logins through Hosting (one plain, one with `X-Forwarded-For: 192.0.2.1`), one directly at `fhir_proxy_url`; read `forwarded_for_entries` and `client_address` in the three `login-failed` lines; choose 1 or 2 and re-apply | PHR | |
+| P1 | `TRUSTED_PROXY_HOPS`: two failed logins through Hosting (one plain, one with `X-Forwarded-For: 192.0.2.1`), one directly at `fhir_proxy_url`; read `forwarded_for_entries` and `client_address` in the three `login-failed` lines; choose 1 or 2 and re-apply | PHR | 2026-11-17 dev: partly, and not conclusive. Through Hosting `forwarded_for_entries` was 2 both plain and with a made-up `X-Forwarded-For` (so the caller's header was not simply appended to), and `client_address` (with 1 hop) was a Google address that differed between the two requests; directly at `fhir_proxy_url` there was 1 entry. The session that measured sits behind its own egress proxy, so the left-hand entry could not be told apart from the real client. `trusted_proxy_hops` stays 1: the key is then an address Google wrote (safe), but it is Hosting's, so visitors share buckets. Repeat from a machine with no proxy before choosing 2 |
 | P2 | `Authorization` reaches the proxy: after login, `/api/status` is 200, not 401 | PHR | 2026-11-16 dev: ok. After login through Hosting, `/api/status` answered and the status strip showed |
-| P3 | The rewrite path: `/api/fhir/metadata` with the token gives the CapabilityStatement; `/api/unknown` gives the proxy's OperationOutcome; search links start with `/api/` | PHR | 2026-11-16 dev: partly. Heart-rate search and trace through `/api` worked; `/api/fhir/metadata`, `/api/unknown` and the link prefixes not recorded |
+| P3 | The rewrite path: `/api/fhir/metadata` with the token gives the CapabilityStatement; `/api/unknown` gives the proxy's OperationOutcome; search links start with `/api/` | PHR | 2026-11-17 dev: ok. `/api/fhir/metadata` 200 with a `CapabilityStatement` (4.0.1); `/api/unknown` 404 with an `OperationOutcome`; the search's `self` and `next` links start with `/api/` |
 | P4 | cuff-sim's and health-sync's `run.app` URLs refuse outside callers even with a valid token; a cuff send through the page works; the status strip shows health-sync's state | PHR, IN | 2026-11-16 dev: partly. A cuff send over HTTPS through fhir-proxy worked; outside calls to the `run.app` URLs not tried; no health-sync (synthetic) |
 | P5 | MLLP through the VPC: a cuff send over MLLP returns `AA` | PHR, EV | 2026-11-16 dev: ok. A cuff send over MLLP returned `AA` |
 | P6 | The secret mount: login 503 before a version; works within about 30 s after `scripts/secrets/set-reviewer-password.sh`; an old token is refused after a second new version | PHR | |
