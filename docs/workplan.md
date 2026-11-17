@@ -675,7 +675,7 @@ needed before T18 and T19 start.
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | done |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | in-progress (merged; cuff path run live on dev; the health-sync checks need a real-data stack) |
-| T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
+| T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | deferred (17 Nov: the demo uses prod's Firebase Hosting address) |
 
 **First dev deploy (16 November).** A new dev project was bootstrapped and runbook steps 1 to 11
 were run with synthetic data. Working end to end: edge VM first boot (all steps ok, about 13
@@ -908,4 +908,7 @@ Cloud Healthcare refuses, so on real data the count stays null and `/status` nev
 `backfill-needed`; its fake accepts `_summary` and should refuse it.
 
 **T30 Public demo domain.** Map the dashboard to a subdomain; the domain is a variable.
+**Deferred on 17 November 2026 by the user's decision:** the demo is presented at the Firebase
+Hosting address of the prod project (`https://<project-id>.web.app`); no custom domain for now.
+`public_origin` stays as an optional variable. If taken up later:
 - AC: TLS works; nothing about the author's domain is hardcoded outside `tfvars`.
