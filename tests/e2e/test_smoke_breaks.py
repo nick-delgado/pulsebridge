@@ -130,6 +130,27 @@ def _component_value(loinc: str, value: object) -> Callable[[dict], None]:
     return lambda o: bp_component(o, loinc)["valueQuantity"].update(value=value)
 
 
+def _set_ack_code(code: str, *, when_result: str) -> Callable[[dict], None]:
+    def edit(body: dict) -> None:
+        if body.get("result") == when_result:
+            body["ack"]["code"] = code
+
+    return edit
+
+
+def rejected_attempt_names_an_observation(stack: Stack, _: pytest.MonkeyPatch) -> None:
+    def change(body: dict) -> None:
+        if body["attempt"]["result"] == "rejected":
+            body["attempt"]["observation"] = "Observation/x"
+
+    stack.tamper("GET", r"/trace/cuff-attempts/.+", edit_json(change))
+
+
+INVALID_ANSWERED_200 = (
+    b'{"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "invalid"}]}'
+)
+
+
 BREAKS = [
     # --- status ---------------------------------------------------------------------------
     Break("status answers 500", answer("GET", "/status", 500), "S2", "HTTP 500"),
@@ -164,6 +185,12 @@ BREAKS = [
         lambda s, m: setattr(s.edge, "ack_override", "AE"),
         "A2",
         "ACK 'AE'",
+    ),
+    Break(
+        "an accepted send whose ACK is CA, not AA",
+        answer_edit("POST", "/cuff/readings", _set_ack_code("CA", when_result="accepted"), nth=1),
+        "A2",
+        "ACK 'CA'",
     ),
     Break(
         "no AuditEvent recorded",
@@ -363,7 +390,27 @@ BREAKS = [
         "N1",
         "HTTP 200",
     ),
+    Break(
+        "an invalid reading answered 200 with the refusal's body",
+        lambda s, m: s.tamper(
+            "POST", "/cuff/readings", nth_only(2, lambda r: Response(200, INVALID_ANSWERED_200))
+        ),
+        "N1",
+        "HTTP 200",
+    ),
     Break("the store accepts an unparseable message", store_accepts_everything, "N2", "ACK 'AA'"),
+    Break(
+        "the unparseable message is rejected with AR, not AE",
+        answer_edit("POST", "/cuff/readings", _set_ack_code("AR", when_result="rejected")),
+        "N2",
+        "ACK 'AR'",
+    ),
+    Break(
+        "the rejected attempt names an Observation",
+        rejected_attempt_names_an_observation,
+        "N3",
+        "HTTP 200",
+    ),
     Break(
         "the rejected message shows an Observation",
         rejected_trace_has_observation,

@@ -252,3 +252,33 @@ def test_provenance_must_target_the_observation_and_name_the_message() -> None:
     assert fhir.provenance_problem(provenance, "obs-2", full_name) is not None
     assert fhir.provenance_problem(provenance, "obs-1", full_name.replace("m1", "m2")) is not None
     assert fhir.provenance_problem(None, "obs-1", full_name) is not None
+
+
+def test_an_opaque_session_token_is_redacted_once_issued() -> None:
+    """The token pattern catches JWTs; a token of another shape is redacted because the client
+    registers it at login. A server quoting it in an error must not reach the output."""
+    from pulsebridge_smoke.cli import main
+    from pulsebridge_smoke.http import TransportError
+
+    token = "opaque-session-value-0001"  # noqa: S105 - synthetic
+
+    class Fake:
+        def send(self, method, path, **_):  # noqa: ANN001, ANN003, ANN201
+            if path == "/auth/login":
+                return Response(200, ('{"token": "%s"}' % token).encode())  # noqa: UP031
+            raise TransportError(f"{method} {path}: upstream said {token}")
+
+    lines: list[str] = []
+    code = main(
+        [],
+        env={
+            "PULSEBRIDGE_BASE_URL": "https://dash.example.test/api",
+            "PULSEBRIDGE_REVIEWER_PASSWORD": "synthetic-password-0001",
+        },
+        transport=Fake(),
+        out=lines.append,
+    )
+    assert code == 1
+    text = "\n".join(lines)
+    assert "upstream said [redacted]" in text
+    assert token not in text
