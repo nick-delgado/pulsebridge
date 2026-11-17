@@ -758,8 +758,10 @@ alerts) are first-deployment checks, listed in the master checklist's tables
 that is how this project's open assumptions get closed. Most of them read log lines, which the
 deployer cannot do: run those as the project's owner or with `roles/logging.viewer`. The 16
 November dev deploy did not do the hop measurement (P1), so `trusted_proxy_hops` is still at its
-default. The end-to-end smoke test (T29,
-[step 14](../infra/envs/README.md#14-end-to-end-t29)) is not built yet.
+default. Then run the end-to-end smoke test,
+[step 14](../infra/envs/README.md#14-end-to-end-t29) (`make smoke`, see
+[`tests/e2e/README.md`](../tests/e2e/README.md)): it checks the cuff path from the front door to
+OpenEMR and, on a real-data stack, the first-sync checks of step 13 from health-sync's logs.
 
 ## Step 4: log in as a reviewer
 

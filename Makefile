@@ -301,3 +301,20 @@ images-smoke: install ## Start each image built by `make images` and check it se
 	PULSEBRIDGE_IMAGE_SMOKE=1 IMAGE_PREFIX="$(IMAGE_PREFIX)" IMAGE_TAG="$(IMAGE_TAG)" DOCKER="$(DOCKER)" \
 		IMAGE_PIP_CERT="$(IMAGE_PIP_CERT)" \
 		$(BIN)/pytest tests/tooling/test_image_smoke.py
+
+# ---- End-to-end smoke test (T29) ----------------------------------------------------------------
+# Runs against a DEPLOYED stack through its public front door (the fhir-proxy behind the Hosting
+# rewrite) and asserts from the APIs: a simulated cuff reading through MLLP to the FHIR store,
+# shared to OpenEMR, plus health-sync's first-sync checks on a real-data stack. Deliberately NOT
+# part of `check`: it needs a deployment, the network and the reviewer password, and it writes a
+# synthetic reading into the stack. Its own unit tests (against an in-process stack) run in
+# `make test`. Configuration is by environment variable only (tests/e2e/README.md), for example:
+#   PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/dev output -raw dashboard_url)/api" \
+#   SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/dev output -raw secret_name_prefix)" make smoke
+# Extra flags go through SMOKE_ARGS, e.g. SMOKE_ARGS="--verbose --report-json /tmp/smoke.json".
+SMOKE_ARGS ?=
+
+.PHONY: smoke
+
+smoke: install ## End-to-end smoke test of a deployed stack (not in `check`; tests/e2e/README.md)
+	PYTHONPATH="$(abspath tests/e2e)" $(BIN)/python -m pulsebridge_smoke $(SMOKE_ARGS)
