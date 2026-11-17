@@ -672,7 +672,7 @@ needed before T18 and T19 start.
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml` and `ci.yml`'s Terraform job, `.tflint.hcl`, the Makefile's `tf-lint`/`tf-scan`, `infra/envs/ci/`, and what its ACs needed in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/`, `infra/envs/`, plus README corrections from the T28 review | in-progress (offline part merged; first real run open) |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | done |
-| T29 | End-to-end smoke test | T25 | `tests/e2e/` | todo |
+| T29 | End-to-end smoke test | T25 | `tests/e2e/` | in-progress (merged; cuff path run live on dev; the health-sync checks need a real-data stack) |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
 
 **First dev deploy (16 November).** A new dev project was bootstrapped and runbook steps 1 to 11
@@ -744,7 +744,8 @@ on healthcare made its project lookup wait for any pending change in project-bas
 takes the project number and the Pub/Sub agent's address as inputs, creates the Healthcare
 service agent itself, and is ordered after the APIs through preconditions on `enabled_apis`.
 Planned against dev on 16 November (read-only): one resource to add, nothing replaced; with
-`enable_iap_ssh = true`, only the two IAP resources in addition. Not yet applied to dev. Notes
+`enable_iap_ssh = true`, only the two IAP resources in addition. Applied to dev on 17 November as the deployer: one
+resource added, nothing changed or destroyed, and a plan afterwards shows no changes. Notes
 left open: `check_agent_ordering.sh` says more broadly than is true that healthcare does not
 reach project-base's network (two resources do, through ingestion, harmlessly); its required
 line for the subscriber grant passes without the fix (the dead-letter line is the guard); static
@@ -855,6 +856,17 @@ to OpenEMR, asserted from the APIs.
   fixed-ID fallback in the T06 README and record the result); the second run reports
   `stored_read: ok` and `windows_unchanged > 0` (so Cloud Healthcare supports the searches
   the service relies on); `/status` answers quickly.
+
+T29 outcome so far: `make smoke` (tests/e2e/) reviewed (pass with notes; fixes made) and merged.
+Run live against dev (synthetic data) on 17 November, twice: 33 checks passed, none failed, the
+four health-sync checks skipped and reported as skipped; `/status` answered in under a second.
+Each run adds one synthetic reading to the FHIR store and OpenEMR and two rejected messages to
+the log; nothing can be removed through the API. Still open: the health-sync first-sync checks
+(Patient 200 not 201; `stored_read: ok`, `windows_unchanged > 0`) are built and unit-tested but
+have never run live, because no stack with real Google Health data exists. Found on the way, not
+assigned: `services/health-sync` counts stranded preliminary windows with `_summary=count`, which
+Cloud Healthcare refuses, so on real data the count stays null and `/status` never reports
+`backfill-needed`; its fake accepts `_summary` and should refuse it.
 
 **T30 Public demo domain.** Map the dashboard to a subdomain; the domain is a variable.
 - AC: TLS works; nothing about the author's domain is hardcoded outside `tfvars`.
