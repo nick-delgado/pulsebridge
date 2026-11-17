@@ -1079,9 +1079,8 @@ seen to be false; an empty cell, or "not checked", means it is still open. Still
 run, and needing a session with the user's go-ahead (a second session on 17 November did the
 reboot, patching, seeder-alert and Scheduler items; what it left is listed here):
 
-- **Hop measurement** (P1, `trusted_proxy_hops`): measured but not conclusive, repeat from a
-  machine with no proxy. The rest of the front door: P6 (the reviewer password's secret mount
-  and **rotation**), P8 to P11, P16.
+- The rest of the front door: P6 (the reviewer password's secret mount and **rotation**), P8 to
+  P11, P16. (The hop measurement, P1, is done: 2 hops behind Hosting.)
 - **The Scheduler alert** (the second halves of I11 and I12) and the remaining ingestion checks:
   I5, `/status` timing for health-sync (I7), replay (I13), dead-lettering (I21).
 - What needs a shell on the VM: MariaDB's shutdown log (E12), the crash-loop check (E16),
@@ -1223,7 +1222,7 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 
 | # | Check | Source | Verified on / result |
 | --- | --- | --- | --- |
-| P1 | `TRUSTED_PROXY_HOPS`: two failed logins through Hosting (one plain, one with `X-Forwarded-For: 192.0.2.1`), one directly at `fhir_proxy_url`; read `forwarded_for_entries` and `client_address` in the three `login-failed` lines; choose 1 or 2 and re-apply | PHR | 2026-11-17 dev: partly, and not conclusive. Through Hosting `forwarded_for_entries` was 2 both plain and with a made-up `X-Forwarded-For` (so the caller's header was not simply appended to), and `client_address` (with 1 hop) was a Google address that differed between the two requests; directly at `fhir_proxy_url` there was 1 entry. The session that measured sits behind its own egress proxy, so the left-hand entry could not be told apart from the real client. `trusted_proxy_hops` stays 1: the key is then an address Google wrote (safe), but it is Hosting's, so visitors share buckets. Repeat from a machine with no proxy before choosing 2 |
+| P1 | `TRUSTED_PROXY_HOPS`: two failed logins through Hosting (one plain, one with `X-Forwarded-For: 192.0.2.1`), one directly at `fhir_proxy_url`; read `forwarded_for_entries` and `client_address` in the three `login-failed` lines; choose 1 or 2 and re-apply | PHR | 2026-11-17 dev: ok, **2 hops**. Measured from a machine with no proxy in front. Through Hosting the proxy received 2 `X-Forwarded-For` entries both plain and with a made-up `X-Forwarded-For: 192.0.2.1`, so the count alone could not tell whether Hosting replaces the caller's header or drops the client. With `trusted_proxy_hops = 2` applied, the same made-up request logged the measuring machine's own public address as `client_address` (confirmed by its owner), not `192.0.2.1`: Hosting replaces a caller's header with the client it saw, and the second entry from the right is the visitor. With 1 hop the key was a Google (Hosting) address that changed between requests, so visitors shared buckets. dev now runs with 2. (An earlier attempt from a session behind an egress proxy was not conclusive; directly at `fhir_proxy_url` there is 1 entry, so 2 hops is right only for the Hosting path, which is the only one the page uses) |
 | P2 | `Authorization` reaches the proxy: after login, `/api/status` is 200, not 401 | PHR | 2026-11-16 dev: ok. After login through Hosting, `/api/status` answered and the status strip showed |
 | P3 | The rewrite path: `/api/fhir/metadata` with the token gives the CapabilityStatement; `/api/unknown` gives the proxy's OperationOutcome; search links start with `/api/` | PHR | 2026-11-17 dev: ok. `/api/fhir/metadata` 200 with a `CapabilityStatement` (4.0.1); `/api/unknown` 404 with an `OperationOutcome`; the search's `self` and `next` links start with `/api/` |
 | P4 | cuff-sim's and health-sync's `run.app` URLs refuse outside callers even with a valid token; a cuff send through the page works; the status strip shows health-sync's state | PHR, IN | 2026-11-16 dev: partly. A cuff send over HTTPS through fhir-proxy worked; outside calls to the `run.app` URLs not tried; no health-sync (synthetic) |
