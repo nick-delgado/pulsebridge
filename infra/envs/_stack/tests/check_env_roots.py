@@ -425,21 +425,37 @@ run "example_plans_in_full_with_images" {
   }
 }
 
-# The same with trusted_proxy_hops overridden, as a deployer without Hosting in front would.
-run "example_with_one_proxy_hop" {
+# fhir-proxy's TRUSTED_PROXY_HOPS as planned, with the example's trusted_proxy_hops (unset: the
+# root's default) and with an override. Synthetic data in both roots: with real data health-sync's
+# URL is known only after apply, which leaves the proxy's whole `env` unknown in a plan.
+run "example_proxy_hops_default" {
   command = plan
   variables {
 %%IMAGES%%
+%%SYNTHETIC%%
+  }
+}
+
+run "example_proxy_hops_override" {
+  command = plan
+  variables {
+%%IMAGES%%
+%%SYNTHETIC%%
     trusted_proxy_hops = 1
   }
 }
 """
 
-# What fhir-proxy's planned TRUSTED_PROXY_HOPS must be in each run above. The example leaves
-# trusted_proxy_hops unset, so the full plan shows the root's default reaching the service:
-# 2, measured behind Firebase Hosting (infra/envs/README.md, checklist P1).
+SYNTHETIC = """    use_synthetic_data  = true
+    patient_id          = "SYN-0001"
+    patient_family_name = null
+    patient_given_name  = null"""
+EXAMPLE_TEST = EXAMPLE_TEST.replace("%%SYNTHETIC%%", SYNTHETIC)
+
+# What fhir-proxy's planned TRUSTED_PROXY_HOPS must be in those runs: the roots' default is 2,
+# measured behind Firebase Hosting (infra/envs/README.md, checklist P1).
 PROXY = "module.stack.module.phr.google_cloud_run_v2_service.fhir_proxy"
-EXPECTED_HOPS = {"example_plans_in_full_with_images": "2", "example_with_one_proxy_hop": "1"}
+EXPECTED_HOPS = {"example_proxy_hops_default": "2", "example_proxy_hops_override": "1"}
 
 # The images the full-plan run sets: synthetic digests (one repeated digit), one per service.
 REGISTRY = "us-central1-docker.pkg.dev/example-project/pulsebridge-services"
