@@ -52,7 +52,13 @@ from pulsebridge_fhir import (
     window_from_rollup,
     window_status,
 )
-from pulsebridge_fhir.stored import Plan, StoredReadError, StoredWindow, plan_writes
+from pulsebridge_fhir.stored import (
+    Plan,
+    StoredElementsMissing,
+    StoredReadError,
+    StoredWindow,
+    plan_writes,
+)
 from pulsebridge_gcp import (
     ClientError,
     ConflictError,
@@ -594,6 +600,17 @@ def _stored_for(run: _Run, piece: TimeRange, windows: int) -> dict[str, StoredWi
             piece.end,
             logger=logger,  # max_pages: the library default, MAX_SEARCH_PAGES (20)
         )
+    except StoredElementsMissing:
+        # Fail closed (T39): the store returned our windows without the compared elements, so
+        # the search itself is wrong. Writing everything would overwrite withdrawn and amended
+        # windows; carrying on would rewrite every window, every run. Stop before any write of
+        # this range; the next run after the fix writes what is still in its look-back.
+        run.report.stored_read = "failed:elements-missing"
+        logger.error(
+            "stored windows came back without the compared elements; writing nothing",
+            extra={"fields": {"event": "stored-elements-missing"}},
+        )
+        raise _Stop(Outcome.FHIR_REJECTED, "stored-elements-missing") from None
     except (HealthcareApiError, StoredReadError, ValueError) as exc:
         _read_failed(run.report, exc)
         return None

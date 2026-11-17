@@ -23,7 +23,13 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from pulsebridge_gcp import HealthcareClient, TimedOutError
-from pulsebridge_gcp.testing import FakeTransport, RecordedRequest, json_response
+from pulsebridge_gcp.testing import (
+    FakeTransport,
+    RecordedRequest,
+    json_response,
+    select_elements,
+    summary_refused,
+)
 from pulsebridge_gcp.transport import HttpResponse
 
 from health_sync.config import DEFAULT_SCOPE, SecretPaths, ServiceConfig
@@ -144,14 +150,30 @@ class Clock:
 @dataclass
 class FhirFake(FakeTransport):
     """The FHIR store. ``POST`` of a Bundle goes to the scripted routes, as with
-    ``FakeTransport``; the two searches health-sync makes are answered from this state:
+    ``FakeTransport``; the searches health-sync makes are answered from this state:
 
     - ``patient_server_id``: the Patient the setup step wrote (``None``: no Patient yet);
-    - ``stored``: Observation resources the store holds, returned by every Observation search;
-    - ``stranded``: the ``total`` of the ``_summary=count`` search;
+    - ``stored``: Observation resources the store holds, returned by every Observation search
+      that asks for entries;
+    - ``stranded``: the ``total`` of the count search (``_total=accurate&_count=0``);
     - ``read_failure``: if set, every search answers with it;
     - ``auto_store``: copy each successfully written Bundle's Observations into ``stored``
       (replacing by identifier) and give the Patient an id, like a real store would.
+
+    As strict as fhir-proxy's fake where the real store is known to differ from plain R4:
+
+    - ``_summary`` on an Observation search answers 400, as Cloud Healthcare did on the first
+      dev deploy ("_summary argument is not supported yet"), so a count written with
+      ``_summary=count`` gets no total and the test sees the count fail.
+    - ``_count=0`` is answered only with ``_total=accurate`` (the total and no entries);
+      without it a server may return an estimate, which the fake does not model.
+    - ``_elements`` is applied as Cloud Healthcare applies it
+      (:func:`pulsebridge_gcp.testing.select_elements`): a choice element such as
+      ``effectivePeriod`` comes back only when asked for by its base name, ``effective``. Before
+      T39 the fake returned whole resources, which is how a wrong ``_elements`` hid until dev.
+    - Any other parameter outside :data:`SEARCH_PARAMETERS` fails the test with
+      ``AssertionError``: the fake does not model it. That is not a claim that the real store
+      refuses it; what is and is not confirmed on Cloud Healthcare is in the README.
     """
 
     patient_server_id: str | None = None
@@ -173,21 +195,35 @@ class FhirFake(FakeTransport):
             )
             if self.read_failure is not None:
                 return self.read_failure
-            if path.endswith("/Patient"):
+            query: dict[str, list[str]] = {}
+            for name, value in pairs:
+                query.setdefault(name, []).append(value)
+            resource_type = path.rsplit("/", 1)[1]
+            if resource_type == "Observation" and "_summary" in query:
+                return summary_refused()
+            unexpected = set(query) - SEARCH_PARAMETERS[resource_type]
+            if unexpected:
+                raise AssertionError(f"FhirFake does not model {resource_type} {unexpected}")
+            if resource_type == "Patient":
                 ids = [self.patient_server_id] if self.patient_server_id else []
                 if self.duplicate_patient:
                     ids = ids + ["p-duplicate"]
                 entries = [{"resource": {"resourceType": "Patient", "id": i}} for i in ids]
                 return json_response(200, _searchset(entries))
-            if self.observation_failure is not None and "_summary" not in dict(pairs):
-                return self.observation_failure
-            if self.count_failure is not None and dict(pairs).get("_summary") == "count":
-                return self.count_failure
-            if dict(pairs).get("_summary") == "count":
+            if query.get("_count") == ["0"]:
+                if query.get("_total") != ["accurate"]:
+                    raise AssertionError("_count=0 without _total=accurate: an estimated total")
+                if self.count_failure is not None:
+                    return self.count_failure
+                # R4: a searchset with ``total`` and no ``entry`` (zero resources asked for).
                 return json_response(
                     200, {"resourceType": "Bundle", "type": "searchset", "total": self.stranded}
                 )
-            entries = [{"resource": r} for r in self.stored]
+            if self.observation_failure is not None:
+                return self.observation_failure
+            # ``_elements`` as Cloud Healthcare applies it (choice elements by base name only).
+            elements = (query.get("_elements") or [None])[-1]
+            entries = [{"resource": select_elements(r, elements)} for r in self.stored]
             if self.page_size is None:
                 return json_response(200, _searchset(entries))
             page = int(urlsplit(url).query.removeprefix("page=") or 1)
@@ -214,6 +250,15 @@ class FhirFake(FakeTransport):
             key = resource["identifier"][0]["value"]
             self.stored = [r for r in self.stored if r["identifier"][0]["value"] != key]
             self.stored.append(resource)
+
+
+# The search parameters the fake answers, per resource type: the ones health-sync sends.
+SEARCH_PARAMETERS: dict[str, frozenset[str]] = {
+    "Patient": frozenset({"identifier", "_elements"}),
+    "Observation": frozenset(
+        {"subject", "code", "status", "date", "_elements", "_count", "_total"}
+    ),
+}
 
 
 def _searchset(entries: Sequence[dict]) -> dict:

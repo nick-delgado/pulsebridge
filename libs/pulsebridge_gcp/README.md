@@ -64,12 +64,14 @@ then decides with `pulsebridge_fhir.stored.plan_writes` which windows to write (
 library's README, "Stored windows: read once, write only what changed").
 
 ```python
-from pulsebridge_fhir.stored import StoredReadError, plan_writes
+from pulsebridge_fhir.stored import StoredElementsMissing, StoredReadError, plan_writes
 from pulsebridge_gcp.stored import max_pages_for_range, stored_windows
 
 try:
     stored = stored_windows(lambda: client, "fhir-store-id", "Patient/<server id>", start, end,
                             max_pages=max_pages_for_range(start, end), logger=logger)
+except StoredElementsMissing:
+    raise  # fail closed (T39): the caller ends the run as a failure and writes nothing
 except (HealthcareApiError, StoredReadError, ValueError):
     stored = None  # reading is an optimisation: write everything
 plan = plan_writes(items, stored, key_of=..., status_of=...)
@@ -77,7 +79,7 @@ plan = plan_writes(items, stored, key_of=..., status_of=...)
 
 | Name | What it is |
 | --- | --- |
-| `stored_windows(client_for, store, patient_ref, start, end, *, max_pages=MAX_SEARCH_PAGES, logger=None)` | `{key: StoredWindow}` for every stored window overlapping `[start, end)`. `client_for()` is called for every request (the first search and each `next_page`, including the last), so a caller can give each page its own timeout (`health-sync`) or pass the same client (`lambda: client`, the seeder). A key found twice is left out (so it is written) and `stored-duplicate-key` with the count is logged on `logger` (the caller's; default `pulsebridge_gcp`). Raises `StoredReadError` for an unusable page (not a `Bundle`, an `entry` that is not an array, or an Observation of the wrong shape: `pulsebridge_fhir.stored.page_windows`) or when `max_pages` pages have been read, and the client's own errors for HTTP failures; a caller that catches those two (and `ValueError`) never crashes on what the store answers. |
+| `stored_windows(client_for, store, patient_ref, start, end, *, max_pages=MAX_SEARCH_PAGES, logger=None)` | `{key: StoredWindow}` for every stored window overlapping `[start, end)`. `client_for()` is called for every request (the first search and each `next_page`, including the last), so a caller can give each page its own timeout (`health-sync`) or pass the same client (`lambda: client`, the seeder). A key found twice is left out (so it is written) and `stored-duplicate-key` with the count is logged on `logger` (the caller's; default `pulsebridge_gcp`). Raises `StoredReadError` for an unusable page (not a `Bundle`, an `entry` that is not an array, or an Observation of the wrong shape: `pulsebridge_fhir.stored.page_windows`) or when `max_pages` pages have been read, and the client's own errors for HTTP failures; a caller that catches those two (and `ValueError`) never crashes on what the store answers. After the last page, raises `pulsebridge_fhir.stored.StoredElementsMissing` when the whole read has no complete window (`check_elements_present`); callers stop the run on it rather than write everything. |
 | `MAX_SEARCH_PAGES` | 20, `health-sync`'s bound (a 14-day backfill piece is five pages of 1,000). |
 | `max_pages_for_range(start, end)` | The seeder's bound: windows in the range plus two (a useful page holds at least one window). |
 
@@ -121,6 +123,12 @@ class Transport(Protocol):
   account from the metadata server; no key file exists.
 - `pulsebridge_gcp.testing.FakeTransport` scripts responses by method and path suffix and
   records every request. An unscripted request fails the test.
+- `pulsebridge_gcp.testing.select_elements(resource, elements)` returns a resource as Cloud
+  Healthcare returns it for `_elements=<elements>` (seen on dev, T39): a top-level element by
+  its name, an R4 choice element (`effectivePeriod`, `valueQuantity`) only by its base name
+  (`effective`, `value`), and always `resourceType`, `id` and `meta`. The fake FHIR stores of
+  `health-sync` and the seeder answer their searches through it. `summary_refused()` is the
+  400 Cloud Healthcare answers to `_summary`; both fakes return it.
 
 ```python
 transport = FakeTransport()

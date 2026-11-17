@@ -8,7 +8,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from pulsebridge_fhir.stored import StoredReadError, StoredWindow
+from pulsebridge_fhir.stored import StoredElementsMissing, StoredReadError, StoredWindow
 from pulsebridge_gcp import HealthcareClient, RetryableError
 from pulsebridge_gcp.stored import MAX_SEARCH_PAGES, max_pages_for_range, stored_windows
 from pulsebridge_gcp.testing import FakeTransport, json_response
@@ -29,6 +29,16 @@ def observation(key: str, status: str = "final") -> dict:
         "status": status,
         "effectivePeriod": {"end": "2026-01-15T12:05:00Z"},
         "valueQuantity": {"value": 64.5},
+        "component": [  # minimum (LOINC 96935-2) and maximum (55426-1), as T06 writes them
+            {
+                "code": {"coding": [{"system": "http://loinc.org", "code": "96935-2"}]},
+                "valueQuantity": {"value": 60},
+            },
+            {
+                "code": {"coding": [{"system": "http://loinc.org", "code": "55426-1"}]},
+                "valueQuantity": {"value": 71},
+            },
+        ],
     }
 
 
@@ -61,7 +71,7 @@ def test_reads_every_page_and_sends_the_r4_query():
     found = read(transport)
     assert {k: w.status for k, w in found.items()} == {"k1": "final", "k2": "preliminary"}
     assert found["k1"] == StoredWindow(
-        status="final", end=datetime(2026, 1, 15, 12, 5, tzinfo=UTC), values=(None, 64.5, None)
+        status="final", end=datetime(2026, 1, 15, 12, 5, tzinfo=UTC), values=(60, 64.5, 71)
     )
     first = searches(transport)[0].params
     assert first["subject"] == "Patient/p-1"
@@ -157,3 +167,57 @@ def test_the_seeders_bound_grows_with_the_range():
     assert max_pages_for_range(START, END) == 38
     assert max_pages_for_range(START, START + timedelta(days=366)) == 366 * 288 + 2
     assert max_pages_for_range(START, START + timedelta(minutes=4)) == 2
+
+
+# ---- the whole-read elements check (T39) --------------------------------------------------------
+
+
+def incomplete(key: str) -> dict:
+    """A window as dev's typed ``_elements`` returned it: no period, no value."""
+    resource = observation(key)
+    del resource["effectivePeriod"], resource["valueQuantity"]
+    return resource
+
+
+def test_a_read_with_no_complete_window_on_any_page_is_elements_missing():
+    transport = FakeTransport()
+    transport.add(
+        "GET",
+        SEARCH,
+        json_response(200, page(incomplete("k1"), next_page=2)),
+        json_response(200, page(incomplete("k2"))),
+    )
+    with pytest.raises(StoredElementsMissing):
+        read(transport)
+    assert len(searches(transport)) == 2  # judged over the whole read, after the last page
+
+
+def test_one_odd_window_on_a_later_page_is_only_that_window():
+    transport = FakeTransport()
+    transport.add(
+        "GET",
+        SEARCH,
+        json_response(200, page(observation("k1"), observation("k2"), next_page=2)),
+        json_response(200, page(incomplete("k3"))),  # alone on its page
+    )
+    found = read(transport)
+    assert found["k3"].end is None and found["k1"].is_complete
+
+
+def test_a_single_window_page_with_an_odd_window_is_only_that_window():
+    transport = FakeTransport()
+    transport.add("GET", SEARCH, json_response(200, page(incomplete("k1"))))
+    assert read(transport)["k1"].values == (60, None, 71)
+
+
+def test_an_only_withdrawn_read_is_not_judged():
+    withdrawn = [incomplete(k) | {"status": "entered-in-error"} for k in ("k1", "k2")]
+    transport = FakeTransport()
+    transport.add("GET", SEARCH, json_response(200, page(*withdrawn)))
+    assert {w.status for w in read(transport).values()} == {"entered-in-error"}
+
+
+def test_an_empty_read_is_not_elements_missing():
+    transport = FakeTransport()
+    transport.add("GET", SEARCH, json_response(200, page()))
+    assert read(transport) == {}

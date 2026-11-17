@@ -14,8 +14,10 @@ import pytest
 from pulsebridge_fhir.stored import (
     ELEMENTS,
     Plan,
+    StoredElementsMissing,
     StoredReadError,
     StoredWindow,
+    check_elements_present,
     page_windows,
     parse_stored_window,
     plan_writes,
@@ -260,6 +262,69 @@ def test_page_windows_in_page_order_with_repeats_and_foreign_entries_skipped():
     assert page_windows({"resourceType": "Bundle"}) == []
 
 
+def _window(status: str = "final", *, end=END, values=(60, 64.5, 71)) -> StoredWindow:
+    return StoredWindow(status=status, end=end, values=values)
+
+
+@pytest.mark.parametrize(
+    "incomplete",
+    [
+        {"end": None},
+        {"values": (60, None, 71)},
+        {"values": (None, 64.5, 71)},  # a dropped ``component`` loses the minimum ...
+        {"values": (60, 64.5, None)},  # ... and the maximum
+        {"end": None, "values": (None, None, None)},  # what dev's typed _elements gave
+    ],
+    ids=["end", "average", "minimum", "maximum", "everything"],
+)
+def test_a_read_where_no_window_is_complete_is_elements_missing(incomplete):
+    """What a wrong ``_elements`` looked like on dev (T39): every window came back without its
+    period and value, and every run rewrote every window while reporting ``stored_read: ok``."""
+    with pytest.raises(StoredElementsMissing):
+        check_elements_present([_window(**incomplete), _window("preliminary", **incomplete)])
+
+
+def test_one_complete_window_among_incomplete_ones_is_not_elements_missing():
+    check_elements_present([_window(end=None), _window(end=None), _window()])
+
+
+def test_a_single_incomplete_window_is_just_that_window_rewritten():
+    check_elements_present([_window(end=None, values=(None, None, None))])
+
+
+def test_an_empty_read_is_not_elements_missing():
+    check_elements_present([])
+
+
+@pytest.mark.parametrize("status", ["entered-in-error", "cancelled"])
+def test_withdrawn_windows_are_not_judged(status):
+    incomplete = {"end": None, "values": (None, None, None)}
+    check_elements_present([_window(status, **incomplete), _window(status, **incomplete)])
+    # A complete withdrawn window does not hide two incomplete ones that are not withdrawn.
+    with pytest.raises(StoredElementsMissing):
+        check_elements_present(
+            [_window(status), _window(**incomplete), _window("preliminary", **incomplete)]
+        )
+
+
+def test_elements_missing_is_not_a_read_error():
+    """A caller catching StoredReadError (write everything) must not swallow it."""
+    assert not issubclass(StoredElementsMissing, StoredReadError)
+
+
+def test_page_windows_reads_incomplete_windows_as_none_without_judging_them():
+    page = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": observation("k1", effectivePeriod=None, valueQuantity=None)},
+            {"resource": observation("k2", effectivePeriod=None, valueQuantity=None)},
+        ],
+    }
+    assert [w for _, w in page_windows(page)] == [
+        StoredWindow(status="final", end=None, values=(60, None, 71))
+    ] * 2
+
+
 @pytest.mark.parametrize(
     "page",
     [
@@ -304,7 +369,7 @@ def test_search_parameters_are_the_r4_query():
         ("code", "http://loinc.org|8867-4"),
         ("date", "ge2026-01-15T12:05:00Z"),
         ("date", "lt2026-01-15T15:05:00Z"),
-        ("_elements", "identifier,status,effectivePeriod,valueQuantity,component"),
+        ("_elements", "identifier,status,effective,value,component"),
         ("_count", "1000"),
     ]
     assert params[4][1] == ELEMENTS

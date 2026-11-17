@@ -15,7 +15,10 @@ The two services differ in two ways, both parameters here:
   (:func:`max_pages_for_range`), because its range can be a year long.
 
 If a search fails (an HTTP error from the client, or :class:`StoredReadError` from here), the
-caller writes everything: reading is an optimisation, never a condition for writing.
+caller writes everything: reading is an optimisation, never a condition for writing. The one
+exception is :class:`~pulsebridge_fhir.stored.StoredElementsMissing` (the whole read came back
+without the compared elements, :func:`~pulsebridge_fhir.stored.check_elements_present`): the
+caller then stops the run as a failure and writes nothing (fail closed, T39).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from typing import Protocol
 from pulsebridge_fhir.stored import (
     StoredReadError,
     StoredWindow,
+    check_elements_present,
     page_windows,
     stored_window_search_params,
 )
@@ -71,15 +75,20 @@ def stored_windows(
 
     A key found more than once (two Observations with one identifier, which should not exist)
     is left out, so the window is written; the write's conditional update then reports the
-    duplicate itself. Only the count is logged, never the keys, on ``logger`` (the caller's,
+    duplicate itself. When the read is complete, every window seen (all pages, repeats
+    included) is judged by :func:`~pulsebridge_fhir.stored.check_elements_present`, which
+    raises :class:`~pulsebridge_fhir.stored.StoredElementsMissing` when none is complete.
+    Only the count is logged, never the keys, on ``logger`` (the caller's,
     so the warning carries the service's logger name)."""
     log = logger or _default_logger
     params = stored_window_search_params(patient_ref, start, end)
     found: dict[str, StoredWindow] = {}
+    seen: list[StoredWindow] = []  # every window read, for the whole-read elements check
     duplicated: set[str] = set()
     page: dict | None = client_for().search(store, "Observation", params)
     for _ in range(max_pages):
         if page is None:
+            check_elements_present(seen)
             if duplicated:
                 log.warning(
                     "an observation key is stored more than once; writing those windows",
@@ -95,5 +104,6 @@ def stored_windows(
             if key in found:
                 duplicated.add(key)
             found[key] = window
+            seen.append(window)
         page = client_for().next_page(store, page)
     raise StoredReadError("too many search pages")

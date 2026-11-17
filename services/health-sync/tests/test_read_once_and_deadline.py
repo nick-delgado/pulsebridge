@@ -175,14 +175,15 @@ def test_the_stored_window_search_uses_standard_parameters(world):
         ("code", "http://loinc.org|8867-4"),
         ("status", "preliminary"),
         ("date", "lt2026-01-15T12:05:00Z"),
-        ("_summary", "count"),
+        ("_total", "accurate"),
+        ("_count", "0"),
     ]
     assert windows.param_pairs == [
         ("subject", "Patient/p-7"),
         ("code", "http://loinc.org|8867-4"),
         ("date", "ge2026-01-15T12:05:00Z"),
         ("date", "lt2026-01-15T15:05:00Z"),
-        ("_elements", "identifier,status,effectivePeriod,valueQuantity,component"),
+        ("_elements", "identifier,status,effective,value,component"),
         ("_count", "1000"),
     ]
 
@@ -200,7 +201,7 @@ def test_stored_windows_are_read_across_search_pages(world):
     pages = [
         r
         for r in fhir_searches(world)
-        if r.path.endswith("/Observation") and "_summary" not in r.params
+        if r.path.endswith("/Observation") and r.params.get("_count") != "0"
     ]
     assert len(pages) == 2
 
@@ -541,6 +542,20 @@ def test_each_search_page_gets_a_fresh_client(world):
             "resourceType": "Observation",
             "identifier": [{"system": "urn:pulsebridge:observation", "value": f"k{i}"}],
             "status": "final",
+            # Every window T06 writes has all four (end, min, avg, max); a read where none has
+            # them is StoredElementsMissing (T39).
+            "effectivePeriod": {"start": "2026-01-15T10:00:00Z", "end": "2026-01-15T10:05:00Z"},
+            "valueQuantity": {"value": 60},
+            "component": [
+                {
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "96935-2"}]},
+                    "valueQuantity": {"value": 58},
+                },
+                {
+                    "code": {"coding": [{"system": "http://loinc.org", "code": "55426-1"}]},
+                    "valueQuantity": {"value": 63},
+                },
+            ],
         }
         for i in range(3)
     ]
