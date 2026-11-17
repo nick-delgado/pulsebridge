@@ -502,7 +502,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T36 | First-deploy follow-ups | T25 | `infra/modules/identity/`, `infra/bootstrap/README.md`, `infra/envs/README.md`, `docs/setup.md`, `README.md` | done |
 | T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
 | T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | done |
-| T39 | health-sync: count stranded windows without `_summary` | T06, T29 | `services/health-sync/` | in-progress |
+| T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -765,6 +765,19 @@ with `_summary=count`, which Cloud Healthcare refuses (seen on dev for fhir-prox
   fails a test; audit every other search the service sends against what the fake accepts and what
   fhir-proxy's fake (which follows the real store) refuses.
 - AC: tests break-checked; README "Not verified" list updated; nothing run against GCP.
+
+T39 outcome: reviewed (pass with notes; fixes made) and merged. Scope grew on 17 November when the
+dev checklist showed every hourly seeder run rewriting all 48 windows of its range
+(`windows_unchanged: 0`, 24 `amended`): the shared stored-window read asked for
+`_elements=...effectivePeriod,valueQuantity...`, and Cloud Healthcare returns a choice element only
+when asked by its base name (`effective`, `value`), so the stored end and average read as missing
+and nothing ever compared equal. Fixed in `libs/pulsebridge_fhir` (shared by health-sync and the
+seeder); the fakes now filter `_elements` and refuse `_summary` as the real store does; a read whose
+windows all lack end or values now stops the run without writing (`stored_read:
+failed:elements-missing`). Left on dev: its earlier synthetic final windows carry status `amended`
+and extra versions, and cannot be shared (T15 shares only `final`). Open design question, not
+changed: after any other failed read the services write every window, which overwrites withdrawn
+windows, writes `amended` back as `final` and can write a held final as `preliminary`.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
