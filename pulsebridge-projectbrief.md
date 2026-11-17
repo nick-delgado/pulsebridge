@@ -155,7 +155,7 @@ The two goals don't conflict because they live at different layers. The enterpri
 
 |  | dev | prod |
 | --- | --- | --- |
-| Who uses it | anyone who clones the repo; nightly CI | the public demo at a `tinkeringnick.com` subdomain |
+| Who uses it | anyone who clones the repo; nightly CI | the public demo, at the prod project's Firebase Hosting address |
 | OpenEMR | included | included |
 | Reviewer login | default credential from `tfvars` | credential in Secret Manager, rotated |
 | e2-micro | created | created |
@@ -187,7 +187,7 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 | Reviewer login | Shared password in Secret Manager checked by the proxy, which issues an 8-hour signed bearer token | One shared credential needs no user directory; fully created and destroyed by Terraform; rotating the password revokes every session | Identity Platform (its config cannot be destroyed by Terraform and a user cannot be created in Terraform); Identity-Aware Proxy on Cloud Run (needs a Google account per reviewer) |
 | Wearable account | Per deployment: each deployer registers their own OAuth app and connects their own Google Health account | Keeps the PHR single-patient and the repo free of the author's credentials | Hosted multi-user connect (rejected: strangers' PHI, scope verification) |
 | CI authentication | Workload Identity Federation | No long-lived keys in GitHub | Service account key secret |
-| Product name | PulseBridge | PulseBridge; repo slug pulsebridge; demo at pulsebridge.tinkeringnick.com |  |
+| Product name | PulseBridge | PulseBridge; repo slug pulsebridge; demo at the prod project's Firebase Hosting address (changed 17 November 2026: no custom domain for now) |  |
 
 ## Open questions and spikes
 
@@ -199,7 +199,7 @@ Run these before building; each is a half-day and any one of them can change the
 - [x] **mllp-adapter on e2-micro.** Resolved by spike S4 (`docs/spikes/s4.md`): Google's adapter runs next to MariaDB in about 27 MiB and relays the store's ACK in a median of 75 ms. No Python listener is needed. Memory with OpenEMR also running is spike S2's question.
 - [x] **HL7v2 store notification.** Resolved by spike S5 (`docs/spikes/s5.md`): `ingest` and `create` both publish one Pub/Sub message per newly stored message. It carries only the message's resource name and a `msgType` attribute. Identical bytes sent again are stored once and not re-notified. The push request body was not observed (the spike used a pull subscription).
 - [x] **Reviewer auth.** Resolved by spike S6 (`docs/spikes/s6.md`): a shared password in Secret Manager checked by the fhir-proxy, with a signed bearer token and a login rate limit. No Identity Platform.
-- [ ] **Name.** Decided: PulseBridge, slug pulsebridge, demo at pulsebridge.tinkeringnick.com. Check slug availability on GitHub.
+- [ ] **Name.** Decided: PulseBridge, slug pulsebridge, demo at the prod project's Firebase Hosting address (no custom domain for now). Check slug availability on GitHub.
 
 ## Out of scope
 
