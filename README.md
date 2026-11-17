@@ -278,5 +278,6 @@ result and lists what is still open. The Terraform CI/CD workflows exist but sta
 until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)). The
 end-to-end smoke test (`make smoke`, [`tests/e2e/`](tests/e2e/README.md)) ran against dev on
 17 November and passed: the cuff path through MLLP, the FHIR store and the share to OpenEMR.
-Its health-sync checks were skipped and have never run live: they need a real-data stack. A
-custom domain for the demo (T30) is planned ([`docs/workplan.md`](docs/workplan.md)).
+Its health-sync checks were skipped and have never run live: they need a real-data stack. The
+demo is shown at the Firebase Hosting address of the prod project; a custom domain (T30) is
+deferred ([`docs/workplan.md`](docs/workplan.md)).
