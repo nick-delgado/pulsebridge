@@ -265,7 +265,7 @@ variable "openemr_scopes" {
 # ---------------------------------------------------------------------------------------------
 
 variable "trusted_proxy_hops" {
-  description = "fhir-proxy's TRUSTED_PROXY_HOPS (module phr); measure on the first deploy."
+  description = "fhir-proxy's TRUSTED_PROXY_HOPS (module phr). No default here: the env roots pass theirs (2, measured behind Firebase Hosting; infra/envs/README.md, checklist P1)."
   type        = number
   nullable    = false
 }

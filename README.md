@@ -271,8 +271,8 @@ refuses, the Pub/Sub service agent missing on a new project), and gaps in the ru
 documented ([findings](infra/envs/README.md#findings-for-the-modules)).
 
 **Not yet verified:** the real-data path (a Pixel Watch through the Google Health API, the
-connect script, health-sync) and prod; and on dev, the hop measurement for the front door,
-alerts firing, patching the VM, password rotation, `terraform destroy`, and CI/CD's first run.
+connect script, health-sync) and prod; and on dev, alerts firing, patching the VM, password
+rotation, `terraform destroy`, and CI/CD's first run.
 The runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's
 result and lists what is still open. The Terraform CI/CD workflows exist but stay switched off
 until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)). The

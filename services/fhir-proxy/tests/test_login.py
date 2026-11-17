@@ -251,6 +251,65 @@ def test_trusted_hops_setting_reaches_the_limiter(tmp_path) -> None:
     assert _login(h, "wrong", xff="203.0.113.1, 35.191.0.1").status_code == 429
 
 
+# ---- two hops (module phr's default) and the public run.app URL ------------------------------
+#
+# Behind Firebase Hosting the header arrives as "<visitor>, <Hosting's address>": Hosting replaces
+# whatever the visitor sent (measured, infra/envs/README.md P1). The run.app URL stays public, and
+# there Cloud Run appends the caller to whatever the caller sent. These tests DOCUMENT what a hop
+# count of 2 then does; the last two show the known limit (module phr's README, "The client
+# address and the direct run.app URL").
+
+VISITOR = "198.51.100.7"  # the real caller, as Hosting or Cloud Run saw it
+HOSTING = "203.0.113.200"  # stands in for Hosting's own (changing) address
+
+
+@pytest.mark.parametrize(
+    ("xff", "expected"),
+    [
+        # Through Hosting: the visitor, whatever it sent (Hosting dropped its header).
+        (f"{VISITOR}, {HOSTING}", VISITOR),
+        # Direct at run.app with no header of its own: 1 entry, fewer than the hops. Every entry
+        # present was appended by Cloud Run, so the left-most (the only one) is the caller: right.
+        (VISITOR, VISITOR),
+        # Direct at run.app with a made-up header: Cloud Run appends the caller to it, and the
+        # second entry from the right, which the CALLER wrote, becomes the key.
+        (f"192.0.2.1, {VISITOR}", "192.0.2.1"),
+        (f"192.0.2.1, 192.0.2.2, {VISITOR}", "192.0.2.2"),
+        # Text in that position: one shared bucket, not a fresh one per value.
+        (f"not-an-address, {VISITOR}", UNPARSEABLE),
+    ],
+)
+def test_two_hops_through_hosting_and_directly(xff: str, expected: str) -> None:
+    assert client_address(xff, "169.254.1.1", 2) == expected
+
+
+def test_two_hops_a_direct_caller_choosing_its_key_is_not_held_by_the_per_address_limit(
+    tmp_path,
+) -> None:
+    h = build_harness(tmp_path, trusted_proxy_hops=2)
+    # One real caller at run.app, a new made-up left entry each time: 20 wrong guesses, more
+    # than 5 per window from one machine, and none refused by the per-address limit.
+    for n in range(20):
+        assert _login(h, "wrong", xff=f"192.0.2.{n + 1}, {VISITOR}").status_code == 401
+    # Without the made-up entry the same caller is keyed on its own address and IS limited.
+    for _ in range(5):
+        assert _login(h, "wrong", xff=VISITOR).status_code == 401
+    assert _login(h, "wrong", xff=VISITOR).status_code == 429
+
+
+def test_two_hops_a_direct_caller_can_fill_a_known_reviewers_bucket(tmp_path) -> None:
+    h = build_harness(tmp_path, trusted_proxy_hops=2)
+    reviewer = "203.0.113.9"
+    # Five wrong guesses sent straight to run.app, each claiming the reviewer's address ...
+    for _ in range(5):
+        assert _login(h, "wrong", xff=f"{reviewer}, {VISITOR}").status_code == 401
+    # ... and the reviewer, arriving through Hosting with the right password, is refused for
+    # the window (the per-address limit is checked before the password).
+    assert _login(h, PASSWORD, xff=f"{reviewer}, {HOSTING}").status_code == 429
+    h.clock.advance(61)
+    assert _login(h, PASSWORD, xff=f"{reviewer}, {HOSTING}").status_code == 200
+
+
 # ---- the total limit never locks out a correct password (review M1) ------------------------------
 
 

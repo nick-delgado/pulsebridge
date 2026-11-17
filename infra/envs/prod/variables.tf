@@ -381,9 +381,9 @@ variable "openemr_scopes" {
 # ---------------------------------------------------------------------------------------------
 
 variable "trusted_proxy_hops" {
-  description = "fhir-proxy's TRUSTED_PROXY_HOPS: how many X-Forwarded-For entries, from the right, Google's proxies added. 1 until measured on the first deploy (phr README, \"Verify on the first real deploy\", step 1; infra/envs/README.md, step 12)."
+  description = "fhir-proxy's TRUSTED_PROXY_HOPS: how many X-Forwarded-For entries, from the right, Google's proxies added; the login limit keys on the entry left of them. Default 2, measured behind Firebase Hosting, the page's only way to the proxy (infra/envs/README.md, checklist P1): Hosting replaces the visitor's header with \"<visitor>, <Hosting>\". Use 1 only if nothing sits in front of the proxy's run.app URL; the known limit of 2 for direct run.app callers is in the phr README, \"The client address and the direct run.app URL\"."
   type        = number
-  default     = 1
+  default     = 2
   nullable    = false
 
   validation {
