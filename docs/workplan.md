@@ -503,7 +503,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
 | T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | done |
 | T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
-| T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | in-progress |
+| T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -791,6 +791,16 @@ hop the login limit was keyed on Hosting's addresses.
   writes the entry that is then trusted), what still protects the login, and what would close it.
 - AC: tests pin the default and an override, and the client-address behaviour for fewer entries
   than hops and for a direct call with a made-up left entry; break-checked; all gates pass.
+
+T40 outcome: reviewed (pass with notes; documentation fixes made) and merged; the user chose 2
+hops on 17 November knowing the limit below. Module phr and both env roots default to 2; the
+service's own default stays 1 (alone at `run.app` it has one hop). Known limit, measured on dev
+and written up in the phr README: the proxy's `run.app` URL must stay public for Hosting's
+rewrite, Cloud Run appends to a caller's `X-Forwarded-For`, so under 2 hops a direct caller
+chooses its key: it can evade the per-address login limit and keep a visitor whose public address
+it knows at 429 for up to a minute at a time. The login is protected by the password's strength
+(generate it). Possible follow-up, unverified: trust the second entry only when the right-most
+one is in Google's published service ranges, else use the right-most.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
