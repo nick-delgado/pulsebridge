@@ -543,6 +543,9 @@ scripts/secrets/set-reviewer-password.sh --generate             # prints the new
   `--replace` (rotation: see the scripts' README).
 - `set-reviewer-password.sh --generate` prints the password once, after it is stored, and only to
   a terminal (add `--show` to send it to a pipe on purpose). Without `--generate` it prompts.
+  Prefer `--generate` (24 random characters): direct callers of the proxy's `run.app` URL are not
+  held by the per-address login limit, so the password's strength is what stops guessing, and a
+  password you chose is only as strong as that choice.
 - `openemr-admin-password` is OpenEMR's `admin` login, which you only need to look at OpenEMR's
   own screens through IAP; if you generate it, nobody can read it except through Secret Manager.
 
@@ -749,7 +752,7 @@ Hosting role alone is enough is *not yet verified on a real project* (P12).
 ### 3.11 First-deploy checks
 
 The runbook's [step 12](../infra/envs/README.md#12-the-front-doors-first-deploy-checks-deployer)
-(the front door: measure `trusted_proxy_hops` first, then logins, the rewrite, the security
+(the front door: confirm `trusted_proxy_hops` first, then logins, the rewrite, the security
 policy, the time limits) and
 [step 13](../infra/envs/README.md#13-the-ingestion-checks-deployer) (first and second sync run,
 alerts) are first-deployment checks, listed in the master checklist's tables
@@ -757,8 +760,11 @@ alerts) are first-deployment checks, listed in the master checklist's tables
 [The setup step and ingestion (steps 9, 10 and 13)](../infra/envs/README.md#the-setup-step-and-ingestion-steps-9-10-and-13). Please record what you find there:
 that is how this project's open assumptions get closed. Most of them read log lines, which the
 deployer cannot do: run those as the project's owner or with `roles/logging.viewer`. The 16
-November dev deploy did not do the hop measurement (P1), so `trusted_proxy_hops` is still at its
-default. Then run the end-to-end smoke test,
+November dev deploy did not do the hop measurement; a session on 17 November did (P1): behind
+Firebase Hosting the proxy sees 2 forwarding hops, and 2 is now the default of
+`trusted_proxy_hops`, so you set nothing unless your measurement shows another shape. (The
+proxy service's own default is 1, right only when it is called at its `run.app` URL with nothing
+in front; Terraform sets 2 for it.) Then run the end-to-end smoke test,
 [step 14](../infra/envs/README.md#14-end-to-end-t29) (`make smoke`, see
 [`tests/e2e/README.md`](../tests/e2e/README.md)): it checks the cuff path from the front door to
 OpenEMR and, on a real-data stack, the first-sync checks of step 13 from health-sync's logs.

@@ -111,7 +111,7 @@ module "phr" {
   #   client_secret_id = module.openemr.client_secret_id
   # }
 
-  trusted_proxy_hops = var.trusted_proxy_hops # 1 until measured (see "Verify on the first real deploy")
+  trusted_proxy_hops = var.trusted_proxy_hops # 2 behind Firebase Hosting (measured); see "The client address ..."
 
   # project-base enables the Cloud Run, Firebase Hosting and Compute APIs; identity's secret
   # accessor grants must exist first, because Cloud Run checks at deploy time that the service
@@ -334,15 +334,102 @@ lists it among the services that call the default URL: "Disabling the default ru
 these services ... from working as expected: ... Firebase Hosting". So Hosting reaches
 `*.run.app` as an outside caller, and only `INGRESS_TRAFFIC_ALL` admits it. A consequence: the
 proxy's `*.run.app` URL is reachable directly from the internet too, which is why the page must
-use only the rewrite and why `TRUSTED_PROXY_HOPS` must be measured (a direct caller and a
-Hosting-forwarded caller put different entries at the right of `X-Forwarded-For`). Restricting
-the proxy to Hosting alone would need a load balancer in front (billed hourly, against D4).
+use only the rewrite, and why the hop count chosen for Hosting has a known limit for direct
+callers (next section). Restricting the proxy to Hosting alone would need a load balancer in
+front (billed hourly, against D4).
 
 **cuff-sim** is `INGRESS_TRAFFIC_INTERNAL_ONLY` with the invoker check on. fhir-proxy's calls
 count as internal because they go through the VPC: "When calling from Cloud Run ... to a Cloud
 Run service that's set to "Internal" ..., traffic must route through a VPC network that's
 considered internal" (ingress page) — hence `ALL_TRAFFIC` on the proxy (the proxy README and
 module ingestion's README, "For T22").
+
+## The client address and the direct run.app URL
+
+The login limit (services/fhir-proxy/README.md, "Reviewer login") counts failed logins per
+**client address**: the rate-limit **key**, and each key's count is its **bucket**. The proxy
+takes the key from `X-Forwarded-For`, counting `TRUSTED_PROXY_HOPS` entries from the right
+(`client_address.py`). Each proxy in front of the service is one **hop**. The hop count says how
+many right-hand entries were written by Google's proxies; the key is the entry just left of
+them. Anything further left was written by the caller and can be anything.
+
+**What the proxy receives, and the key it takes.** All rows measured on dev on 17 November 2026
+(infra/envs/README.md, checklist P1). The Hosting rows were measured from a machine with no proxy
+of its own. The direct rows with a header were measured with 2 hops configured from a session
+behind an egress proxy, so the right-most entry there is not the session's own address; the
+entries the caller wrote were logged exactly as sent.
+
+| Path | `X-Forwarded-For` at the proxy | Key with 2 hops | Key with 1 hop |
+| --- | --- | --- | --- |
+| through Hosting | `<visitor>, <Hosting>` | the visitor | a Hosting address (it changed between two requests; how many there are was not measured) |
+| through Hosting, sending `X-Forwarded-For: 192.0.2.1` | `<visitor>, <Hosting>`: Hosting **replaced** the header | the visitor | a Hosting address |
+| straight to `run.app` | `<caller>` (1 entry, appended by Cloud Run) | the caller (fewer entries than hops: the left-most is used, and every entry present was appended by Cloud Run) | the caller |
+| straight to `run.app`, sending `X-Forwarded-For: 192.0.2.1` | `192.0.2.1, <caller>`: Cloud Run **appended** | `192.0.2.1`, **chosen by the caller** (logged as such) | the caller |
+| straight to `run.app`, sending `X-Forwarded-For: 192.0.2.1, 198.51.100.9` | `192.0.2.1, 198.51.100.9, <caller>` (3 entries) | `198.51.100.9`, **chosen by the caller** (logged as such) | the caller |
+
+**1 hop or 2: what each gives up.** The env roots and this module default to 2; fhir-proxy's own
+default stays 1, because the service alone, called at `run.app` with nothing in front, has one
+hop (a deployment of the service without Hosting should keep 1).
+
+| | 1 hop | 2 hops (the default) |
+| --- | --- | --- |
+| Key through Hosting (the page's only path) | a Hosting address, shared by visitors | the visitor; a header the visitor sends cannot move it (Hosting replaces it) |
+| Key straight to `run.app` | the caller's own address | the caller's own address without a header; with one, a value the caller chose |
+| Who evades the per-address limit | nobody | a caller of the `run.app` URL that sends its own header |
+| Who can lock whom out | anyone, through the public page and knowing nothing: five wrong guesses fill one Hosting key, so failures spread over Hosting's addresses (about 5 × their number a minute; the number was not measured) keep every visitor at `429` | a `run.app` caller that knows a visitor's public address can keep that visitor at `429`, even with the right password, because the address's slot is reserved before the password is read; it ends within 60 s of the attacker stopping |
+| What bounds guessing | 5 a minute per key (per instance) | for `run.app` callers with a header, only throughput, so the password's strength |
+
+Two hops is chosen because the first column's lockout needs no knowledge and hits everyone, while
+the second column's cost is carried by the password. That holds only for a strong password:
+**store it with `scripts/secrets/set-reviewer-password.sh --generate`** (24 random letters and
+digits). A password a person chose is only as strong as that choice; the script's 16-character
+minimum is a length rule, not a randomness check. The decision between 1 and 2 is the deployer's;
+the default can be overridden per environment with `trusted_proxy_hops`.
+
+**The run.app URL is public in this design, and must be.** fhir-proxy has
+`ingress = "INGRESS_TRAFFIC_ALL"` and `invoker_iam_disabled = true` (`fhir_proxy.tf`; tested by
+`real_data.tftest.hcl` and `tests/static_checks.sh`): Hosting calls the default `run.app` URL as an
+outside caller and does not authenticate to it (Firebase's guide has the service allow
+unauthenticated invocations), so neither lock can be closed without breaking the rewrite
+("Public access and ingress"). The URL (output `fhir_proxy_url`) is not a secret; treat it as
+known.
+
+**What a direct caller can do under 2 hops** (the last two rows of the first table; tested in
+`services/fhir-proxy/tests/test_login.py`, "two hops ... run.app"):
+
+- **Escape the per-address limit.** Writing a different address on each request gives each
+  guess a fresh bucket (any IPv4 address, or one per IPv6 /64). Text in that position is no help
+  to it: it falls into one shared `unparseable` bucket.
+- **Fill a known visitor's bucket.** Five wrong guesses claiming a reviewer's public address
+  make that reviewer's next attempts, through Hosting and with the right password, get `429`
+  until 60 s after the attacker stops. It needs the reviewer's address, and it works per
+  instance (the counts are in memory; there are up to two).
+- Not lock everyone out: filling the address table (10,000 live entries) makes a new address
+  count as at its limit, but its password is still checked, so a right password still gets in.
+
+**What protects the login from it.** Not the total limit: by design (fhir-proxy README, "What
+bounds guessing") once the total of 60 failures a window per instance is exceeded the password is
+still checked, answering `200` for the right one and `429` for a wrong one, so the total does not
+bound how many passwords a caller can try. Such a caller is bounded only by throughput: two
+instances × eight concurrent requests, each a digest comparison (the rate this allows was not
+measured). What protects the login is the password's strength: `--generate` stores about 143 bits
+(62^24), which no such rate exhausts; even 10,000 guesses a second would take about 3 × 10^25
+years to try one millionth of them. The costs of a flood are Cloud Run usage (capped by
+`max_instance_count = 2`) and log volume (the proxy's log sampler writes the first event of at
+most 100 addresses per window, plus the failures below the total).
+
+**What could close it, and why none is done here.** None is both cheap and clearly right, so
+this is a **known limit**:
+
+| Option | Gains | Costs, or why not now |
+| --- | --- | --- |
+| `TRUSTED_PROXY_CIDRS` (fhir-proxy README, "Possible follow-up"): trust the second entry only when the right-most one is a Hosting address, and otherwise key on the right-most | Direct callers could no longer choose their key; Hosting visitors keep their own buckets | Needs a range list that holds Hosting's addresses and not addresses any Google Cloud customer can send from. The candidate worth testing: Google's published service ranges minus the ranges Google Cloud customers use (`goog.json` minus `cloud.json`), falling back to the right-most entry on a miss. Unverified: whether Hosting's addresses are in that set was not checked. A possible follow-up |
+| Count the second and the right-most entry, with the same limit, both checked before the password | Holds direct callers to 5 a minute | Through Hosting the right-most is a shared Hosting address: the everyone-lockout of 1 hop comes back |
+| The same with a higher limit on the right-most entry | Holds one direct attacker to that higher rate | A different trade-off: a distributed attack through Hosting's shared addresses could again lock everyone out, at a higher cost to the attacker |
+| A secret header that only Hosting adds | It would mark Hosting's requests | Hosting's configuration (`firebase.json` `headers`) sets response headers; it documents no way to add a header to the forwarded request (not tried) |
+| Recognise Hosting by a header it adds | | A direct caller can send the same header; Cloud Run passes request headers through |
+| Turn off the default `run.app` URL, or ingress "internal and Cloud Load Balancing" | Closes the direct path | Breaks the rewrite; the second needs an external Application Load Balancer in front (billed hourly, against D4), which with Cloud Armor would also close this |
+| Hop count 1 | Direct callers cannot choose their key: no targeted lockout, and the per-address limit holds for them | Visitors through Hosting share keys, and anyone can lock every visitor out (the comparison table above) |
 
 ## Who may invoke what
 
@@ -411,7 +498,7 @@ module passes; a blank means the service's default applies.
 | `HEALTH_SYNC_URL` | no | `health_sync_url`, only when not null |
 | `PATIENT_ASSIGNING_AUTHORITY`, `PATIENT_FAMILY_NAME`, `PATIENT_GIVEN_NAME` | no (all or none) | all three: cuff-sim's values, so traces show a sent sample's exact bytes |
 | `PATH_PREFIX` | no | `/api` |
-| `TRUSTED_PROXY_HOPS` | no (1) | `trusted_proxy_hops` (default 1) |
+| `TRUSTED_PROXY_HOPS` | no (1) | `trusted_proxy_hops` (default 2: measured behind Hosting; "The client address and the direct run.app URL") |
 | `TOKEN_ISSUER` | no | `pulsebridge-fhir-proxy:<project_id>:<name_prefix>` (deployment-specific: salts the key derivation) |
 | `REQUEST_BUDGET_SECONDS` | no (50) | `50` |
 | `CUFF_FORWARD_TIMEOUT_SECONDS` | no (55) | `55` |
@@ -612,25 +699,24 @@ firewall allows from the serverless subnet.
 
 Nothing in this module has been applied; every test runs against mocked providers. In order:
 
-1. **`TRUSTED_PROXY_HOPS`: measure before choosing.** Through the Hosting domain, make two
-   failed logins (`POST https://<site>.web.app/api/auth/login` with a wrong password), one plain
-   and one with a made-up `X-Forwarded-For: 192.0.2.1`; then one plain failed login directly at
-   the proxy's `run.app` URL. Read the three `login-failed` log lines: `forwarded_for_entries` and
-   `client_address`.
-   - Hosting gives 1 entry and `client_address` is your own address: keep `1`.
-   - Hosting gives 2 entries and the right one is a Google/Firebase address: with `1` every
-     reviewer shares that edge address as the rate-limit key, so an attacker making 5 wrong
-     guesses a minute through Hosting locks all reviewers out; with `2` the key is right behind
-     Hosting, but a direct `run.app` caller (1 entry of its own plus whatever it sends) can forge
-     the entry used as the key, making the per-address limit void for it and bounding its
-     guesses only by throughput (harmless against a random password of 16+ characters, but it
-     costs log volume and Cloud Run usage).
-   - Nothing free closes the direct door: Hosting needs the default URL ("Disabling the default
-     run.app URL prevents these services ... from working as expected: ... Firebase Hosting",
-     Cloud Run ingress page), and only a load balancer (billed hourly) could front the proxy
-     instead. Choose with the measured shape; the follow-up `TRUSTED_PROXY_CIDRS` in the proxy
-     README would remove the trade-off. After a change, re-apply and check that the made-up
-     entry never becomes `client_address`.
+1. **`TRUSTED_PROXY_HOPS`: confirm the default of 2.** Measured on dev on 17 November 2026
+   (infra/envs/README.md, checklist P1: 2 hops; "The client address and the direct run.app URL"
+   above), and now the default. On a new deployment, confirm it: through the Hosting domain,
+   make two failed logins (`POST https://<site>.web.app/api/auth/login` with a wrong password),
+   one plain and one with a made-up `X-Forwarded-For: 192.0.2.1`; then one plain failed login
+   directly at the proxy's `run.app` URL, and one there with `X-Forwarded-For: 192.0.2.1`. Read
+   the four `login-failed` log lines: `forwarded_for_entries` and `client_address`. Through
+   Hosting both must show 2 entries and your own address, never `192.0.2.1`; directly at
+   `run.app`, 1 entry plain, and with the header 2 entries and `192.0.2.1` as `client_address`
+   (the known limit: a direct caller chooses its key under 2 hops).
+   - Hosting gives 2 entries (as measured) and the made-up entry never becomes
+     `client_address`: keep the default 2. Its known limit for direct `run.app` callers is in
+     "The client address and the direct run.app URL".
+   - Hosting gives 1 entry and `client_address` is your own address: set
+     `trusted_proxy_hops = 1`.
+   - `192.0.2.1` becomes `client_address` through Hosting: the second entry from the right is
+     not the visitor, and no hop count makes the key trustworthy. Record it in P1 and treat the
+     per-address limit as void.
 2. **`Authorization` reaches the proxy.** Log in through the page, then load the dashboard: a
    `200` from `/api/status` (not 401) proves the header was forwarded.
 3. **The rewrite path and prefix.** `GET https://<site>.web.app/api/fhir/metadata` with the token
@@ -669,8 +755,12 @@ Nothing in this module has been applied; every test runs against mocked provider
 
 ## Not verified
 
-- What Firebase Hosting puts in `X-Forwarded-For`, and that it forwards `Authorization` and the
-  full `/api/...` path (documented only indirectly; steps 1 to 3).
+- What Firebase Hosting and `run.app` put in `X-Forwarded-For` was measured on dev on 17
+  November 2026 (step 1; checklist P1): Hosting replaces a visitor's header, Cloud Run appends
+  to a direct caller's. Neither is documented by Google, so either could change; step 1
+  re-checks both.
+- That Hosting forwards `Authorization` and the full `/api/...` path (documented only
+  indirectly; steps 2 and 3).
 - That a request through Hosting reaches a service whose invoker check is disabled with no
   further setting (Firebase's guide uses "allow unauthenticated invocations", which in current
   `gcloud` is the same switch or an `allUsers` binding).
@@ -695,7 +785,7 @@ credentials removed from the environment, then `tests/static_checks.sh` and
 
 | File | Checks |
 | --- | --- |
-| `real_data.tftest.hcl` | only fhir-proxy public (invoker check off, ingress all); cuff-sim internal with the check on; the invoker bindings are exactly fhir-proxy on cuff-sim; no public member; both scale to zero; max 2 and 1; concurrency 8 and 4; the timeout relations read from the deployed values (proxy timeout = `REQUEST_TIMEOUT_SECONDS` ≤ 70, budgets < 60, each budget + 10 ≤ the request timeout, forward < cuff-sim's timeout, cuff-sim's worst cases < forward) and the documented numbers; Direct VPC egress settings of both; images, accounts, probe types and limits; `deletion_protection`; the reviewer password as a volume at `latest`, its mount, no secret in any environment variable; the exact environment of both services; custom origin, dev origin, hop count; OpenEMR settings and mount when given and absent by default; the site, `firebase_json`'s rewrite, ignore list and headers; the CSP has no unsafe source; `manage_firebase_project` |
+| `real_data.tftest.hcl` | only fhir-proxy public (invoker check off, ingress all); cuff-sim internal with the check on; the invoker bindings are exactly fhir-proxy on cuff-sim; no public member; both scale to zero; max 2 and 1; concurrency 8 and 4; the timeout relations read from the deployed values (proxy timeout = `REQUEST_TIMEOUT_SECONDS` ≤ 70, budgets < 60, each budget + 10 ≤ the request timeout, forward < cuff-sim's timeout, cuff-sim's worst cases < forward) and the documented numbers; Direct VPC egress settings of both; images, accounts, probe types and limits; `deletion_protection`; the reviewer password as a volume at `latest`, its mount, no secret in any environment variable; the exact environment of both services; custom origin, dev origin, the hop count (default 2, an override of 1); OpenEMR settings and mount when given and absent by default; the site, `firebase_json`'s rewrite, ignore list and headers; the CSP has no unsafe source; `manage_firebase_project` |
 | `synthetic.tftest.hcl` | the synthetic name by default and given explicitly, for both services; no `HEALTH_SYNC_URL`; the rewrite's region |
 | `validation.tftest.hcl` | tag, tag-plus-digest and short-digest images refused; `http`, path and synthetic-mode health-sync URLs; public origin with a path or `http`; wildcard, trailing-slash and hostless (`https://.`, `https://`, `https://-`, `https://.example.org`) origins; an `http` OpenEMR URL; hop counts −1, 6 and 1.5 refused and 5 allowed; a real name (family or given) with synthetic data; missing names without; `SYN-` rules both ways; a backslash in a name; a long assigning authority; audit store equal to the FHIR store; missing account or secret keys; a host name as `mllp_host`; a region Hosting cannot rewrite to; a subnet path; too many cuff-sim instances |
 | `static_checks.sh` | no public principal; `invoker_iam_disabled = true` and `INGRESS_TRAFFIC_ALL` exactly once, on fhir-proxy; every `min_instance_count` 0 and no manual scaling; no authoritative or project IAM; no service account key; the one reviewed IAM member resource with members from `var.service_account_emails`; no secret in an environment variable and every secret version `latest`; no hardcoded project, service account, registry path, `https://<host>` (outside variable examples), site or service ID; no child module; no Hosting version, release or channel; fhir-proxy's `depends_on` on the invoker grant |
@@ -769,7 +859,7 @@ Read directly (`curl`, 2026-11-15) unless marked otherwise:
 | `hosting_site_id` | `string` | `null` (= `project_id`) | The Hosting site. |
 | `public_origin` | `string` | `null` (= `https://<site>.web.app`) | The origin reviewers open. |
 | `extra_allowed_origins` | `list(string)` | `[]` | Further CORS origins. |
-| `trusted_proxy_hops` | `number` | `1` | `TRUSTED_PROXY_HOPS`, 0 to 5; measure on the first deploy. |
+| `trusted_proxy_hops` | `number` | `2` | `TRUSTED_PROXY_HOPS`, 0 to 5; 2 measured behind Firebase Hosting, 1 with nothing in front of `run.app`. |
 | `cuff_sim_max_instances` | `number` | `1` | 1 to 3; the cuff rate limit is per instance. |
 
 ## Outputs

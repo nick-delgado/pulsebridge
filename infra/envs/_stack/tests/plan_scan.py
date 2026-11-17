@@ -441,6 +441,7 @@ def check_front_door(s: Scan) -> None:
     s.check(
         env.get("CUFF_SIM_URL") == URIS["cuff-sim"], "fhir-proxy must forward to cuff-sim's URL"
     )
+    # stack.tftest.hcl passes 1, not module phr's default 2: a dropped pass-through fails here.
     s.check(env.get("TRUSTED_PROXY_HOPS") == "1", "trusted_proxy_hops must reach fhir-proxy")
     volumes = {
         v["name"]: v["secret"][0]["secret"] for v in proxy.get("volumes", []) if v.get("secret")

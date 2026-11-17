@@ -313,6 +313,8 @@ variables {
   openemr_https_port = 443
   enable_iap_ssh     = false
   enable_cloud_nat   = false
+  # Deliberately NOT module phr's default (2): tests/plan_scan.py checks that this 1 reaches the
+  # proxy, which a missing pass-through (module default) would fail.
   trusted_proxy_hops = 1
 
   v2_to_fhir_ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"

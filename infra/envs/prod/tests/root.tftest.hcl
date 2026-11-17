@@ -42,6 +42,13 @@ run "defaults_are_a_real_data_prod_stack_with_ingest_off" {
     condition     = output.ingest_enabled == false && output.scheduler_job_names == []
     error_message = "ingest_enabled defaults to false in prod too."
   }
+  assert {
+    # Measured behind Firebase Hosting (infra/envs/README.md, P1). That the value reaches the
+    # proxy's TRUSTED_PROXY_HOPS is checked on the planned service by
+    # infra/envs/_stack/tests/check_env_roots.py (example plans).
+    condition     = var.trusted_proxy_hops == 2
+    error_message = "trusted_proxy_hops defaults to 2: the page reaches the proxy through Firebase Hosting."
+  }
 }
 
 run "prod_refuses_the_reviewer_password_from_tfvars" {

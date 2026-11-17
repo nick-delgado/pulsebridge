@@ -107,6 +107,10 @@ is refused without being repeated, and the message tells you to remove it from y
   a terminal, because a password printed into a file or pipe you did not mean to use could end up
   on disk; add `--show` when you do mean it (for example to pipe it into a password manager).
   `--show` without `--generate` is refused: a password you typed is never shown.
+- Use `--generate` for the reviewer password: callers of fhir-proxy's public `run.app` URL are
+  not held by the per-address login limit, so the password's randomness is what stops guessing
+  (infra/modules/phr/README.md, "The client address and the direct run.app URL"); a password a
+  person chose is only as strong as that choice.
 
 ## Value rules
 

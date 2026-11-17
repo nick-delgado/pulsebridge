@@ -272,6 +272,9 @@ run "reviewer_password_is_a_file_at_latest" {
 run "fhir_proxy_environment" {
   command = apply
 
+  # TRUSTED_PROXY_HOPS "2" is the module's default, measured behind Firebase Hosting (README,
+  # "The client address and the direct run.app URL"); the service's own default is 1.
+
   assert {
     condition = { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value } == {
       GCP_PROJECT_ID               = "example-project"
@@ -290,7 +293,7 @@ run "fhir_proxy_environment" {
       PATH_PREFIX                  = "/api"
       PUBLIC_BASE_URL              = "https://example-project.web.app/api"
       ALLOWED_ORIGINS              = "https://example-project.web.app"
-      TRUSTED_PROXY_HOPS           = "1"
+      TRUSTED_PROXY_HOPS           = "2"
       TOKEN_ISSUER                 = "pulsebridge-fhir-proxy:example-project:pulsebridge"
       REQUEST_BUDGET_SECONDS       = "50"
       CUFF_FORWARD_TIMEOUT_SECONDS = "55"
@@ -328,14 +331,14 @@ run "custom_origin_hops_and_dev_origin" {
   variables {
     public_origin         = "https://phr.example.org"
     extra_allowed_origins = ["http://localhost:5173"]
-    trusted_proxy_hops    = 2
+    trusted_proxy_hops    = 1 # not the default (2): a value that ignored the variable fails
   }
 
   assert {
     condition = (
       { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["PUBLIC_BASE_URL"] == "https://phr.example.org/api" &&
       { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["ALLOWED_ORIGINS"] == "https://phr.example.org,http://localhost:5173" &&
-      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["TRUSTED_PROXY_HOPS"] == "2"
+      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["TRUSTED_PROXY_HOPS"] == "1"
     )
     error_message = "public_origin, extra_allowed_origins and trusted_proxy_hops must reach the proxy."
   }

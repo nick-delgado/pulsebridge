@@ -503,6 +503,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T37 | Dashboard browser tests independent of the time of day | T12, T14 | `web/` | done |
 | T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | done |
 | T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
+| T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -674,7 +675,7 @@ needed before T18 and T19 start.
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | done |
 | T29 | End-to-end smoke test | T25 | `tests/e2e/` | in-progress (merged; cuff path run live on dev; the health-sync checks need a real-data stack) |
-| T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | todo |
+| T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | deferred (17 Nov: the demo uses prod's Firebase Hosting address) |
 
 **First dev deploy (16 November).** A new dev project was bootstrapped and runbook steps 1 to 11
 were run with synthetic data. Working end to end: edge VM first boot (all steps ok, about 13
@@ -779,6 +780,27 @@ finalised, 0 amended. Left on dev: its earlier synthetic final windows carry sta
 and extra versions, and cannot be shared (T15 shares only `final`). Open design question, not
 changed: after any other failed read the services write every window, which overwrites withdrawn
 windows, writes `amended` back as `final` and can write a held final as `preliminary`.
+
+**T40 Default `trusted_proxy_hops` to 2 behind Firebase Hosting.** The hop measurement on dev
+(17 November, checklist P1) showed that through Hosting the visitor is the second
+`X-Forwarded-For` entry from the right and that Hosting replaces a caller's own header; with 1
+hop the login limit was keyed on Hosting's addresses.
+- AC: the Terraform default is 2 wherever a deployment default is declared; descriptions say why.
+- AC: the service's own default and the docs are consistent, and the READMEs state what a direct
+  call to the proxy's `run.app` URL means for the per-address limit under 2 hops (the caller
+  writes the entry that is then trusted), what still protects the login, and what would close it.
+- AC: tests pin the default and an override, and the client-address behaviour for fewer entries
+  than hops and for a direct call with a made-up left entry; break-checked; all gates pass.
+
+T40 outcome: reviewed (pass with notes; documentation fixes made) and merged; the user chose 2
+hops on 17 November knowing the limit below. Module phr and both env roots default to 2; the
+service's own default stays 1 (alone at `run.app` it has one hop). Known limit, measured on dev
+and written up in the phr README: the proxy's `run.app` URL must stay public for Hosting's
+rewrite, Cloud Run appends to a caller's `X-Forwarded-For`, so under 2 hops a direct caller
+chooses its key: it can evade the per-address login limit and keep a visitor whose public address
+it knows at 429 for up to a minute at a time. The login is protected by the password's strength
+(generate it). Possible follow-up, unverified: trust the second entry only when the right-most
+one is in Google's published service ranges, else use the right-most.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
@@ -896,4 +918,7 @@ Cloud Healthcare refuses, so on real data the count stays null and `/status` nev
 `backfill-needed`; its fake accepts `_summary` and should refuse it.
 
 **T30 Public demo domain.** Map the dashboard to a subdomain; the domain is a variable.
+**Deferred on 17 November 2026 by the user's decision:** the demo is presented at the Firebase
+Hosting address of the prod project (`https://<project-id>.web.app`); no custom domain for now.
+`public_origin` stays as an optional variable. If taken up later:
 - AC: TLS works; nothing about the author's domain is hardcoded outside `tfvars`.

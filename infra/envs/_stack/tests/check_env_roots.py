@@ -11,7 +11,8 @@ What `terraform test` cannot check, because it looks at one configuration at a t
 3. terraform.tfvars and backend.hcl are git-ignored; the *.example files and the roots' lock
    files are not; the examples hold placeholders only, name only declared variables, set every
    variable that has no default, and PLAN (a credential-free `terraform test` with the example as
-   its -var-file).
+   its -var-file). In that plan fhir-proxy's TRUSTED_PROXY_HOPS must be the root's default, 2,
+   and follow an override: the one place the root default is checked on the planned service.
 4. The roots' lock files exist, pin google and google-beta at a version the modules' "~> 8.11"
    allows, and cover the same platforms as bootstrap's (identical hashes).
 5. The providers: project set explicitly, google-beta with user_project_override and
@@ -22,6 +23,7 @@ Run from anywhere. Terraform runs with every Google credential source removed.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -422,7 +424,38 @@ run "example_plans_in_full_with_images" {
 %%IMAGES%%
   }
 }
+
+# fhir-proxy's TRUSTED_PROXY_HOPS as planned, with the example's trusted_proxy_hops (unset: the
+# root's default) and with an override. Synthetic data in both roots: with real data health-sync's
+# URL is known only after apply, which leaves the proxy's whole `env` unknown in a plan.
+run "example_proxy_hops_default" {
+  command = plan
+  variables {
+%%IMAGES%%
+%%SYNTHETIC%%
+  }
+}
+
+run "example_proxy_hops_override" {
+  command = plan
+  variables {
+%%IMAGES%%
+%%SYNTHETIC%%
+    trusted_proxy_hops = 1
+  }
+}
 """
+
+SYNTHETIC = """    use_synthetic_data  = true
+    patient_id          = "SYN-0001"
+    patient_family_name = null
+    patient_given_name  = null"""
+EXAMPLE_TEST = EXAMPLE_TEST.replace("%%SYNTHETIC%%", SYNTHETIC)
+
+# What fhir-proxy's planned TRUSTED_PROXY_HOPS must be in those runs: the roots' default is 2,
+# measured behind Firebase Hosting (infra/envs/README.md, checklist P1).
+PROXY = "module.stack.module.phr.google_cloud_run_v2_service.fhir_proxy"
+EXPECTED_HOPS = {"example_proxy_hops_default": "2", "example_proxy_hops_override": "1"}
 
 # The images the full-plan run sets: synthetic digests (one repeated digit), one per service.
 REGISTRY = "us-central1-docker.pkg.dev/example-project/pulsebridge-services"
@@ -437,6 +470,38 @@ EXAMPLE_TEST = EXAMPLE_TEST.replace(
     "%%IMAGES%%",
     "\n".join(f'    {v} = "{REGISTRY}/{svc}@sha256:{d * 64}"' for v, (svc, d) in IMAGES.items()),
 )
+
+
+def planned_proxy_hops(stdout: str) -> dict[str, str | None]:
+    """TRUSTED_PROXY_HOPS in fhir-proxy's planned environment, per run, from `test -json -verbose`.
+
+    With -verbose, terraform test prints each plan run's plan (the `terraform show -json` format)
+    as a `test_plan` message; child-module resources are in its `resource_changes`.
+    """
+    found: dict[str, str | None] = {}
+    run = None
+    for line in stdout.splitlines():
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        if message.get("type") == "test_run":
+            run = message["test_run"].get("run")
+        elif message.get("type") == "test_plan" and run is not None:
+            for change in message["test_plan"].get("resource_changes") or []:
+                if change.get("address") != PROXY:
+                    continue
+                after = change.get("change", {}).get("after") or {}
+                envs = [
+                    e
+                    for template in after.get("template") or []
+                    for container in template.get("containers") or []
+                    for e in container.get("env") or []
+                ]
+                found[run] = next(
+                    (e.get("value") for e in envs if e.get("name") == "TRUSTED_PROXY_HOPS"), None
+                )
+    return found
 
 
 def check_example_plans(root: str) -> None:
@@ -490,6 +555,8 @@ def check_example_plans(root: str) -> None:
                 f"-chdir={dest}",
                 "test",
                 "-no-color",
+                "-json",
+                "-verbose",
                 "-test-directory=example_tests",
                 "-var-file=terraform.tfvars.example",
             ],
@@ -499,14 +566,30 @@ def check_example_plans(root: str) -> None:
             check=False,
         )
         if result.returncode != 0:
+            messages = []
+            for line in result.stdout.splitlines():
+                try:
+                    message = json.loads(line)
+                except ValueError:
+                    continue
+                if message.get("@level") == "error" or message.get("type") == "diagnostic":
+                    messages.append(message.get("@message", ""))
             fail(
                 f"{root}/terraform.tfvars.example does not plan:\n"
-                f"{result.stdout[-2000:]}{result.stderr[-1000:]}"
+                + "\n".join(messages)[-2000:]
+                + result.stderr[-1000:]
             )
-        else:
-            print(
-                f"{root}: terraform.tfvars.example plans (targeted step 3, and in full with images)"
-            )
+            return
+        print(f"{root}: terraform.tfvars.example plans (targeted step 3, and in full with images)")
+        hops = planned_proxy_hops(result.stdout)
+        for run, expected in EXPECTED_HOPS.items():
+            if hops.get(run) != expected:
+                fail(
+                    f"{root}: run {run}: fhir-proxy's planned TRUSTED_PROXY_HOPS is "
+                    f"{hops.get(run)!r}, expected {expected!r}"
+                )
+        if all(hops.get(r) == v for r, v in EXPECTED_HOPS.items()):
+            print(f"{root}: fhir-proxy's TRUSTED_PROXY_HOPS is 2 by default, 1 when overridden")
     finally:
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(home, ignore_errors=True)
