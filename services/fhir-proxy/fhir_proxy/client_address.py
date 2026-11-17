@@ -21,16 +21,26 @@ What Google documents (checked 2026-11-15):
 So ``TRUSTED_PROXY_HOPS`` counts trusted entries **from the right**, and the client is the
 entry that many places from the end:
 
-- ``1`` (default): straight to ``*.run.app``; the last entry is the one Cloud Run appended.
-- ``2``: behind one more proxy that appends one entry (for example a load balancer's
-  ``CLIENT_IP, LOAD_BALANCER_IP`` pair: the client is second from the right). T22 must check
-  what Firebase Hosting's rewrite adds and set this accordingly (README, "For T22").
+- ``1`` (this service's default): straight to ``*.run.app``; the last entry is the one Cloud
+  Run appended.
+- ``2``: behind one more proxy that adds one entry. Behind Firebase Hosting's rewrite, the only
+  way the page reaches this service, the header arrives as ``<visitor>, <Hosting's address>``
+  (measured on dev, 17 November 2026: Hosting replaces whatever the visitor sent), so module
+  phr sets 2. A load balancer's ``CLIENT_IP, LOAD_BALANCER_IP`` pair has the same shape.
 - ``0``: no proxy in front at all (local development); the socket's peer address is used.
 
 If the header has fewer entries than the hops say, the left-most entry is used: every entry
 present was then appended by a trusted proxy. An entry that is not an IP address (a spoofed
 value cannot reach the trusted positions, but a misconfigured hop count could) puts the
 request in one shared bucket, ``unparseable``, so text cannot create unlimited buckets.
+
+A hop count cannot tell which path a request took. With 2, a request sent straight to the
+``*.run.app`` URL, which stays public because Hosting calls it, is keyed as follows: with no
+header of its own it carries 1 entry (the caller, appended by Cloud Run) and that entry is used,
+which is right; with a header ``X`` of its own it arrives as ``X, <caller>`` and ``X``, which
+the caller wrote, becomes the key. Such a caller can therefore pick a fresh key per request,
+or a reviewer's address to fill that reviewer's bucket (README, "Reviewer login"; module phr's
+README, "The client address and the direct run.app URL").
 
 IPv6 clients are grouped by their /64 network: one subscriber usually holds a whole /64, so
 per-address counting of single IPv6 addresses would give an attacker 2^64 fresh budgets.

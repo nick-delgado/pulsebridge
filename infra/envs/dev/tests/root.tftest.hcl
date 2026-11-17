@@ -44,6 +44,13 @@ run "defaults_are_a_synthetic_dev_stack_with_ingest_off" {
     condition     = output.secret_name_prefix == "pb" && output.healthcare.fhir_store_id == "pulsebridge-fhir"
     error_message = "The default prefixes must give the names the connect script and the services expect."
   }
+  assert {
+    # Measured behind Firebase Hosting (infra/envs/README.md, P1). That the value reaches the
+    # proxy's TRUSTED_PROXY_HOPS is checked on the planned service by
+    # infra/envs/_stack/tests/check_env_roots.py (example plans).
+    condition     = var.trusted_proxy_hops == 2
+    error_message = "trusted_proxy_hops defaults to 2: the page reaches the proxy through Firebase Hosting."
+  }
 }
 
 run "dev_takes_the_reviewer_password_from_tfvars" {

@@ -444,21 +444,22 @@ variable "trusted_proxy_hops" {
   description = <<-EOT
     TRUSTED_PROXY_HOPS for fhir-proxy: how many X-Forwarded-For entries, counted from the
     right, were appended by proxies Google runs in front of it. The login rate limit keys on
-    the entry just left of them. Default 1 (the right-most entry), the proxy's own default.
-    0 ignores the header (local use only). 0 to 5. Neither 1 nor 2 is safe for both paths,
-    because the proxy's run.app URL stays reachable directly (Firebase Hosting needs it, and
-    nothing free closes that door):
-      2: a direct run.app caller can forge the entry used as the rate-limit key, so the
-         per-address limit is void for it and its guesses are bounded only by throughput
-         (harmless against a random password of 16+ characters, but it costs log volume and
-         Cloud Run usage).
-      1: behind Hosting, every reviewer may share Hosting's edge address as the key, so an
-         attacker making 5 wrong guesses a minute through Hosting locks reviewers out.
-    MEASURE IT ON THE FIRST DEPLOY before choosing (README, "Verify on the first real deploy",
-    step 1).
+    the entry just left of them. 0 to 5.
+    Default 2, MEASURED (dev, 17 November 2026; infra/envs/README.md, checklist P1): the page
+    reaches the proxy only through Firebase Hosting's rewrite, and there the proxy receives two
+    entries, "<visitor>, <Hosting's address>". Hosting replaces any X-Forwarded-For the visitor
+    sent, so the second entry from the right is the visitor. With 1 the key would be Hosting's
+    address, shared by every visitor (one attacker's 5 wrong guesses a minute would lock
+    reviewers out).
+    Use another value only for another front door: 1 if the page called the run.app URL
+    directly with nothing in front (the service's own default), 0 never on Cloud Run (local
+    use: the header is ignored). The known cost of 2: the run.app URL stays publicly reachable
+    (Hosting needs it), and a direct caller there can write the entry used as the key, so the
+    per-address limit does not hold for it (README, "The client address and the direct
+    run.app URL").
   EOT
   type        = number
-  default     = 1
+  default     = 2
   nullable    = false
 
   validation {

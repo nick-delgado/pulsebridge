@@ -67,7 +67,8 @@ def test_fhir_proxy_starts_with_the_modules_environment(proxy_env: dict[str, str
     assert cfg.allowed_origins == (cfg.public_base_url.removesuffix("/api"),)
     assert cfg.request_timeout == 70
     assert cfg.cuff_forward_timeout == 55 and cfg.request_budget == 50
-    assert cfg.trusted_proxy_hops == 1
+    # Module phr's default, measured behind Firebase Hosting; the service's own default is 1.
+    assert cfg.trusted_proxy_hops == 2
     assert cfg.sample_patient is not None  # the PID values cuff-sim sends
     assert cfg.health_sync_url is not None
     assert cfg.password_file == "/secrets/reviewer-password/value"  # noqa: S105 - a path

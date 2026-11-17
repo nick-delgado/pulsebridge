@@ -60,7 +60,8 @@ VARIABLES: dict[str, Variable] = {
         "How long the password file's content is reused, 0 to 300 (rotation delay)", "30"
     ),
     "TRUSTED_PROXY_HOPS": Variable(
-        "How many X-Forwarded-For entries, from the right, trusted proxies appended, 0 to 5",
+        "How many X-Forwarded-For entries, from the right, trusted proxies appended, 0 to 5"
+        " (1: run.app alone; 2 behind Firebase Hosting, which module phr sets)",
         "1",
     ),
     "LOGIN_FAILURES_PER_ADDRESS": Variable(

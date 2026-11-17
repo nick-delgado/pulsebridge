@@ -149,7 +149,8 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
             PATH_PREFIX     = local.path_prefix
             PUBLIC_BASE_URL = "${local.public_origin}${local.path_prefix}"
             ALLOWED_ORIGINS = join(",", concat([local.public_origin], var.extra_allowed_origins))
-            # Measure on the first deploy (README, "Verify on the first real deploy").
+            # 2 by default: measured behind Firebase Hosting (README, "The client address and
+            # the direct run.app URL").
             TRUSTED_PROXY_HOPS = tostring(var.trusted_proxy_hops)
             # A deployment-specific issuer also salts the token key derivation, so a token or
             # precomputation from another PulseBridge deployment is useless here.
