@@ -669,7 +669,7 @@ needed before T18 and T19 start.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (dev deployed 16 Nov: runbook steps 1 to 11 done; the full checklist, destroy test and prod remain) |
+| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (dev deployed 16 Nov; 17 Nov: reboot, patching, seeder alert, Scheduler and rewrite-path items done on dev; hop measurement, password rotation, the shell-only items, destroy test and prod remain) |
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml` and `ci.yml`'s Terraform job, `.tflint.hcl`, the Makefile's `tf-lint`/`tf-scan`, `infra/envs/ci/`, and what its ACs needed in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/`, `infra/envs/`, plus README corrections from the T28 review | in-progress (offline part merged; first real run open) |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | done |
@@ -774,7 +774,8 @@ when asked by its base name (`effective`, `value`), so the stored end and averag
 and nothing ever compared equal. Fixed in `libs/pulsebridge_fhir` (shared by health-sync and the
 seeder); the fakes now filter `_elements` and refuse `_summary` as the real store does; a read whose
 windows all lack end or values now stops the run without writing (`stored_read:
-failed:elements-missing`). Left on dev: its earlier synthetic final windows carry status `amended`
+failed:elements-missing`). Deployed to dev the same day (images v0.1.2): the next seeder run reported 42 unchanged, 3 new, 3
+finalised, 0 amended. Left on dev: its earlier synthetic final windows carry status `amended`
 and extra versions, and cannot be shared (T15 shares only `final`). Open design question, not
 changed: after any other failed read the services write every window, which overwrites withdrawn
 windows, writes `amended` back as `final` and can write a held final as `preliminary`.
