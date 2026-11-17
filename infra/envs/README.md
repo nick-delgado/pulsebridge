@@ -133,7 +133,7 @@ Optional: `deployer_service_account_email` (impersonate the deployer), `region`/
 rewrite to; a `check` warns outside the free tier, module phr refuses a region Hosting cannot
 reach), `enable_iap_ssh` (for the first-boot checklist), `enable_cloud_nat` (billed hourly;
 fallback only), `trusted_proxy_hops` (step 12), `openemr_scopes` (step 6), `public_origin`
-(T30), `name_prefix` / `identity_name_prefix`, the two ingress fallbacks.
+(a custom domain; T30, deferred), `name_prefix` / `identity_name_prefix`, the two ingress fallbacks.
 
 Rules the root enforces before anything is created: a `SYN-` patient ID is **required** with
 synthetic data and **refused** without it; a real name is refused with synthetic data (the cuff
