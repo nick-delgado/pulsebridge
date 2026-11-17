@@ -744,7 +744,8 @@ on healthcare made its project lookup wait for any pending change in project-bas
 takes the project number and the Pub/Sub agent's address as inputs, creates the Healthcare
 service agent itself, and is ordered after the APIs through preconditions on `enabled_apis`.
 Planned against dev on 16 November (read-only): one resource to add, nothing replaced; with
-`enable_iap_ssh = true`, only the two IAP resources in addition. Not yet applied to dev. Notes
+`enable_iap_ssh = true`, only the two IAP resources in addition. Applied to dev on 17 November as the deployer: one
+resource added, nothing changed or destroyed, and a plan afterwards shows no changes. Notes
 left open: `check_agent_ordering.sh` says more broadly than is true that healthcare does not
 reach project-base's network (two resources do, through ingestion, harmlessly); its required
 line for the subscriber grant passes without the fix (the dead-letter line is the guard); static
