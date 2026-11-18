@@ -505,7 +505,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
 | T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | done |
 | T41 | Page deployer grants in code; CI checklist from the first real run | T26 | `infra/bootstrap/`, `infra/modules/phr/`, `infra/envs/`, `.github/workflows/` (comments only), `docs/setup.md` | done |
-| T42 | Edge VM: survive a slow MariaDB first initialisation | T21 | `infra/modules/edge-vm/` | in-progress |
+| T42 | Edge VM: survive a slow MariaDB first initialisation | T21 | `infra/modules/edge-vm/` | in-progress (reviewed, merged into the working branch, applied to prod; first boot on it under way) |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
