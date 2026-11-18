@@ -270,6 +270,11 @@ variable "trusted_proxy_hops" {
   nullable    = false
 }
 
+variable "page_deployer_service_account_email" {
+  description = "CI's page deployer (bootstrap output page_deployer_service_account_email), or null: module phr then grants it roles/run.viewer on fhir-proxy only (T41). No default here: the env roots pass theirs (null by default), so a root that drops it fails validation rather than silently losing the grant."
+  type        = string
+}
+
 variable "public_origin" {
   description = "The origin reviewers open; null is the Hosting site's https://<site>.web.app."
   type        = string

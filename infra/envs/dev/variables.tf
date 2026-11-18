@@ -392,6 +392,17 @@ variable "trusted_proxy_hops" {
   }
 }
 
+variable "page_deployer_service_account_email" {
+  description = "Optional: CI's page deployer service account (bootstrap's `page_deployer_service_account_email` output, with create_page_deployer). Set: module phr grants it roles/run.viewer on the fhir-proxy Cloud Run service only, because Firebase Hosting checks run.services.get on the /api rewrite's target when `firebase deploy` finalizes a version (first CI run on dev, 18 November 2026: refused without it). null (default): no grant; the CI page deploy then fails at that step. Set it in the tfvars CI reads from the state bucket (infra/envs/README.md, \"Setting it up (once)\")."
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.page_deployer_service_account_email == null || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$", coalesce(var.page_deployer_service_account_email, "x")))
+    error_message = "page_deployer_service_account_email must be a service account email such as page-deployer@<project>.iam.gserviceaccount.com, or null."
+  }
+}
+
 variable "public_origin" {
   description = "The origin reviewers open, https://<host> with no path. null (default): the Hosting site's https://<site>.web.app. A custom domain (T30) sets it."
   type        = string

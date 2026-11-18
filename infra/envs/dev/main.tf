@@ -49,6 +49,8 @@ module "stack" {
   hosting_site_id       = var.hosting_site_id
   extra_allowed_origins = var.extra_allowed_origins
 
+  page_deployer_service_account_email = var.page_deployer_service_account_email
+
   v2_to_fhir_ingress  = var.v2_to_fhir_ingress
   health_sync_ingress = var.health_sync_ingress
 
