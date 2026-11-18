@@ -322,3 +322,27 @@ run "too_many_cuff_instances_refused" {
   }
   expect_failures = [var.cuff_sim_max_instances]
 }
+
+# T41: the page deployer's member must be a service account, never a user or a group.
+run "page_deployer_user_email_refused" {
+  command = plan
+  variables {
+    page_deployer_service_account_email = "someone@example.com"
+  }
+  expect_failures = [var.page_deployer_service_account_email]
+}
+
+run "page_deployer_member_prefix_refused" {
+  command = plan
+  variables {
+    page_deployer_service_account_email = "serviceAccount:page-deployer@example-project.iam.gserviceaccount.com"
+  }
+  expect_failures = [var.page_deployer_service_account_email]
+}
+
+run "page_deployer_service_account_accepted" {
+  command = plan
+  variables {
+    page_deployer_service_account_email = "page-deployer@example-project.iam.gserviceaccount.com"
+  }
+}

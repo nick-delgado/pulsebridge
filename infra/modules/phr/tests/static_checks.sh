@@ -9,8 +9,10 @@
 #   3. any min_instance_count is not 0, or scaling uses manual_instance_count (always-on);
 #   4. any authoritative IAM resource (*_iam_binding, *_iam_policy) or project-level IAM;
 #   5. any service account key (google_service_account_key);
-#   6. any IAM member resource other than google_cloud_run_v2_service_iam_member.invoker, or a
-#      `member` not built from var.service_account_emails;
+#   6. any IAM member resource other than google_cloud_run_v2_service_iam_member.invoker and
+#      .page_deployer_viewer, a `member` not built from var.service_account_emails (or, in
+#      page_deployer_viewer only, var.page_deployer_service_account_email), or a page deployer
+#      grant that is not roles/run.viewer on google_cloud_run_v2_service.fhir_proxy (T41);
 #   7. a secret reaches an environment variable (value_source / secret_key_ref), or a secret
 #      volume is pinned to anything but "latest";
 #   8. a project or domain is hardcoded: a literal `project = "..."`, a projects/<id>/ path, a
@@ -106,16 +108,29 @@ check "no project-level IAM" \
 check "no service account key resources" \
   "$(printf '%s\n' "$code" | grep -E 'resource[[:space:]]+"google_service_account_key"' || true)"
 
-# 6. The IAM member resources are exactly the reviewed one.
+# 6. The IAM member resources are exactly the reviewed two.
 members="$(printf '%s\n' "$code" | grep -E 'resource[[:space:]]+"[a-z0-9_]+_iam_member"' || true)"
-check "IAM members are only google_cloud_run_v2_service_iam_member.invoker" \
-  "$(printf '%s\n' "$members" | grep -vE '"google_cloud_run_v2_service_iam_member"[[:space:]]+"invoker"' | grep -v '^$' || true)"
-if ! printf '%s\n' "$members" | grep -qE '"google_cloud_run_v2_service_iam_member"[[:space:]]+"invoker"'; then
-  echo "FAIL: expected IAM resource missing: google_cloud_run_v2_service_iam_member.invoker"
+check "IAM members are only google_cloud_run_v2_service_iam_member.invoker and .page_deployer_viewer" \
+  "$(printf '%s\n' "$members" | grep -vE '"google_cloud_run_v2_service_iam_member"[[:space:]]+"(invoker|page_deployer_viewer)"[[:space:]]*\{' | grep -v '^$' || true)"
+for r in invoker page_deployer_viewer; do
+  if ! printf '%s\n' "$members" | grep -qE "\"google_cloud_run_v2_service_iam_member\"[[:space:]]+\"$r\""; then
+    echo "FAIL: expected IAM resource missing: google_cloud_run_v2_service_iam_member.$r"
+    fail=1
+  fi
+done
+viewer_block="$(block main.tf google_cloud_run_v2_service_iam_member page_deployer_viewer)"
+check "every member outside page_deployer_viewer is serviceAccount:\${var.service_account_emails[...]}" \
+  "$(printf '%s\n' "$code" | grep -E '^[^:]+:[0-9]+:[[:space:]]*member[[:space:]]*=' | grep -vE 'member[[:space:]]*=[[:space:]]*"serviceAccount:\$\{var\.service_account_emails\[' | grep -vE 'member[[:space:]]*=[[:space:]]*"serviceAccount:\$\{var\.page_deployer_service_account_email\}"[[:space:]]*$' || true)"
+n_pd="$(printf '%s\n' "$code" | grep -cE 'var\.page_deployer_service_account_email\}' || true)"
+if [[ "$n_pd" -eq 1 ]] \
+  && printf '%s\n' "$viewer_block" | grep -qE 'member[[:space:]]*=[[:space:]]*"serviceAccount:\$\{var\.page_deployer_service_account_email\}"' \
+  && printf '%s\n' "$viewer_block" | grep -qE '^[[:space:]]*role[[:space:]]*=[[:space:]]*"roles/run\.viewer"[[:space:]]*$' \
+  && printf '%s\n' "$viewer_block" | grep -qE '^[[:space:]]*name[[:space:]]*=[[:space:]]*google_cloud_run_v2_service\.fhir_proxy\.name[[:space:]]*$'; then
+  echo "ok:   the page deployer gets roles/run.viewer on fhir-proxy only, in page_deployer_viewer only"
+else
+  echo "FAIL: var.page_deployer_service_account_email must be the member of page_deployer_viewer only ($n_pd uses), with role roles/run.viewer on google_cloud_run_v2_service.fhir_proxy.name"
   fail=1
 fi
-check "every member is serviceAccount:\${var.service_account_emails[...]}" \
-  "$(printf '%s\n' "$code" | grep -E '^[^:]+:[0-9]+:[[:space:]]*member[[:space:]]*=' | grep -vE 'member[[:space:]]*=[[:space:]]*"serviceAccount:\$\{var\.service_account_emails\[' || true)"
 
 # 7. Secrets only as files, always at "latest".
 check "no secret in an environment variable (value_source / secret_key_ref)" \
