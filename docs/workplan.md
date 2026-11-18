@@ -504,6 +504,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T38 | Healthcare agent grants and the edge-VM script test | T36 | `infra/modules/healthcare/`, `infra/modules/identity/` (outputs only), `infra/envs/_stack/`, `infra/modules/edge-vm/tests/` | done |
 | T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
 | T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | done |
+| T41 | Page deployer grants in code; CI checklist from the first real run | T26 | `infra/bootstrap/`, `infra/modules/phr/`, `infra/envs/`, `.github/workflows/` (comments only), `docs/setup.md` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -801,6 +802,30 @@ chooses its key: it can evade the per-address login limit and keep a visitor who
 it knows at 429 for up to a minute at a time. The login is protected by the password's strength
 (generate it). Possible follow-up, unverified: trust the second entry only when the right-most
 one is in Google's published service ranges, else use the right-most.
+
+**T41 Page deployer grants in code; CI checklist from the first real run.** The first real CI run
+on dev (18 November, pull request 15 and the apply run on its merge) showed that
+`roles/firebasehosting.admin` alone does not let the page deployer publish the page: the Firebase
+CLI first checks the Hosting API with `serviceusage.services.get`, and finalizing a version whose
+config rewrites `/api` to Cloud Run needs `run.services.get` on that service. Both were granted on
+dev by hand (Service Usage Viewer on the project; Cloud Run Viewer on the proxy service only).
+- AC: bootstrap gives the page deployer `roles/serviceusage.serviceUsageViewer` with
+  `create_page_deployer`; tests pin it and the page deployer has no other project role.
+- AC: the env roots grant the page deployer `roles/run.viewer` on fhir-proxy's service only,
+  from an optional input (null: no grant); tests pin the member and that nothing else is granted.
+- AC: on dev, a plan with the input set adopts or matches the hand-made grants without replacing
+  anything (state how; the orchestrator plans against dev).
+- AC: the checklist rows the run answered are filled in from the evidence (P12, CI2, CI4 to CI8,
+  CI12, CI15, CI16, CI17 as far as seen), and the docs no longer say Hosting admin is enough.
+
+T41 outcome: reviewed (pass with notes; wording fixes made) and merged. Dev's bootstrap applied
+by hand on 18 November (1 added: the Service Usage Viewer grant adopted; 1 description updated);
+`page_deployer_service_account_email` added to `ci/dev.tfvars`, so the next CI apply adopts the
+run.viewer grant on fhir-proxy (a read-only plan showed 1 to add, nothing else). Known exposure,
+low per the review: run.viewer lets the page deploy job read fhir-proxy's configuration, which
+holds the patient ID (and with real data the name) in plain environment variables; the planner
+already reads the same. Possible follow-up: move the patient's ID and name out of plain
+environment variables into mounted secrets.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate

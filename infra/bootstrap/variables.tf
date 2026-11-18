@@ -411,7 +411,7 @@ variable "planner_wif_contexts" {
 }
 
 variable "create_page_deployer" {
-  description = "Create the page deployer service account (ci_identities.tf, T26): roles/firebasehosting.admin only, used by CI's page deploy jobs. Default false."
+  description = "Create the page deployer service account (ci_identities.tf, T26) used by CI's page deploy jobs: roles/firebasehosting.admin and roles/serviceusage.serviceUsageViewer on the project, nothing else here (the env roots add roles/run.viewer on fhir-proxy's service only; T41). Default false."
   type        = bool
   default     = false
   nullable    = false

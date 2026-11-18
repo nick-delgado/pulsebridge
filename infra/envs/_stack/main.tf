@@ -313,8 +313,12 @@ module "phr" {
   hosting_site_id       = var.hosting_site_id
   extra_allowed_origins = var.extra_allowed_origins
 
-  # bootstrap added Firebase with the owner's credentials (add_firebase); the deployer holds only
-  # roles/firebasehosting.admin.
+  # T41: CI's page deployer may read fhir-proxy (roles/run.viewer): Firebase Hosting checks
+  # run.services.get on the /api rewrite's target when `firebase deploy` finalizes a version.
+  page_deployer_service_account_email = var.page_deployer_service_account_email
+
+  # bootstrap added Firebase with the owner's credentials (add_firebase); the deployer needs no
+  # Firebase role beyond roles/firebasehosting.admin.
   manage_firebase_project = false
 
   deletion_protection = var.protect_from_destroy

@@ -316,6 +316,9 @@ variables {
   # Deliberately NOT module phr's default (2): tests/plan_scan.py checks that this 1 reaches the
   # proxy, which a missing pass-through (module default) would fail.
   trusted_proxy_hops = 1
+  # T41: null here; the real_ingest_on scenario sets it, and tests/plan_scan.py checks the grant
+  # exists there only.
+  page_deployer_service_account_email = null
 
   v2_to_fhir_ingress  = "INGRESS_TRAFFIC_INTERNAL_ONLY"
   health_sync_ingress = "INGRESS_TRAFFIC_INTERNAL_ONLY"
@@ -425,6 +428,8 @@ run "real_ingest_on" {
 
   variables {
     ingest_enabled = true
+    # T41: tests/plan_scan.py checks roles/run.viewer on fhir-proxy for this account, here only.
+    page_deployer_service_account_email = "page-deployer@example-project.iam.gserviceaccount.com"
   }
 
   assert {

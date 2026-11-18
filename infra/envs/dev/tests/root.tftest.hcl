@@ -214,3 +214,34 @@ run "build_approval_is_on_by_default" {
     error_message = "build_trigger_approval_required must default to true in the root."
   }
 }
+
+# ---- T41: CI's page deployer -----------------------------------------------------------------
+
+# Optional, off by default. That a set value becomes exactly one roles/run.viewer grant on
+# fhir-proxy is checked on the planned resources by infra/envs/_stack/tests/plan_scan.py.
+run "page_deployer_is_off_by_default" {
+  command = plan
+
+  assert {
+    condition     = var.page_deployer_service_account_email == null
+    error_message = "page_deployer_service_account_email defaults to null: no grant until CI's page deployer exists."
+  }
+}
+
+run "page_deployer_must_be_a_service_account" {
+  command = plan
+
+  variables {
+    page_deployer_service_account_email = "someone@example.com"
+  }
+
+  expect_failures = [var.page_deployer_service_account_email]
+}
+
+run "page_deployer_service_account_plans" {
+  command = plan
+
+  variables {
+    page_deployer_service_account_email = "page-deployer@example-project.iam.gserviceaccount.com"
+  }
+}

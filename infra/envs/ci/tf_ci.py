@@ -561,7 +561,9 @@ def deploy_page(config_path: Path) -> None:
     if install.returncode != 0:
         raise CiError("npm ci of the deploy tools failed")
     # The CLI authenticates with Application Default Credentials: the external-account file the
-    # auth step wrote for the page deployer (roles/firebasehosting.admin only). --no-install:
+    # auth step wrote for the page deployer (Hosting admin and Service Usage Viewer on the project,
+    # Cloud Run Viewer on fhir-proxy only; bootstrap README, "The page deployer's three grants",
+    # T41). --no-install:
     # never fetch anything that is not in the lockfile.
     deploy = run(
         [

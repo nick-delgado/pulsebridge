@@ -44,10 +44,19 @@ URIS = {
     "cuff-sim": "https://pulsebridge-cuff-sim-abc123-uc.a.run.app",
 }
 
+# CI's page deployer, set in the real_ingest_on scenario only (T41).
+PAGE_DEPLOYER = f"page-deployer@{PROJECT}.iam.gserviceaccount.com"
+
 # Scenario runs in tests/stack.tftest.hcl and what each one is.
 SCENARIOS = {
     "real_ingest_off": {"synthetic": False, "ingest": False, "env": "dev", "patient": "PAT-0001"},
-    "real_ingest_on": {"synthetic": False, "ingest": True, "env": "dev", "patient": "PAT-0001"},
+    "real_ingest_on": {
+        "synthetic": False,
+        "ingest": True,
+        "env": "dev",
+        "patient": "PAT-0001",
+        "page_deployer": PAGE_DEPLOYER,
+    },
     "synthetic_ingest_off": {
         "synthetic": True,
         "ingest": False,
@@ -440,6 +449,30 @@ def check_front_door(s: Scan) -> None:
     )
     s.check(
         env.get("CUFF_SIM_URL") == URIS["cuff-sim"], "fhir-proxy must forward to cuff-sim's URL"
+    )
+    # T41: the page deployer reads fhir-proxy (roles/run.viewer) when set, and nothing else in
+    # Cloud Run; with it null, no Cloud Run grant names it.
+    page_deployer = s.expect.get("page_deployer")
+    viewer_grants = sorted(
+        (r["address"], r["values"]["name"], r["values"]["role"], r["values"]["member"])
+        for r in s.of_type("google_cloud_run_v2_service_iam_member")
+        if r["values"]["role"] == "roles/run.viewer" or "page-deployer@" in r["values"]["member"]
+    )
+    expected_viewer = (
+        [
+            (
+                "module.phr.google_cloud_run_v2_service_iam_member.page_deployer_viewer[0]",
+                f"{PREFIX}-fhir-proxy",
+                "roles/run.viewer",
+                f"serviceAccount:{page_deployer}",
+            )
+        ]
+        if page_deployer
+        else []
+    )
+    s.check(
+        viewer_grants == expected_viewer,
+        f"page deployer grants must be {expected_viewer}: {viewer_grants}",
     )
     # stack.tftest.hcl passes 1, not module phr's default 2: a dropped pass-through fails here.
     s.check(env.get("TRUSTED_PROXY_HOPS") == "1", "trusted_proxy_hops must reach fhir-proxy")

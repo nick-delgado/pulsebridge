@@ -68,7 +68,7 @@ run "wif_provider_is_pinned_to_one_repository" {
   }
 
   assert {
-    condition     = length(google_service_account.planner) == 0 && length(google_service_account.page_deployer) == 0 && output.planner_service_account_email == null && output.page_deployer_service_account_email == null
+    condition     = length(google_service_account.planner) == 0 && length(google_service_account.page_deployer) == 0 && length(google_project_iam_member.page_deployer) == 0 && length(google_project_iam_member.page_deployer_service_usage) == 0 && output.planner_service_account_email == null && output.page_deployer_service_account_email == null
     error_message = "The planner and the page deployer are opt-in: none by default."
   }
 }
@@ -168,10 +168,32 @@ run "prod_identities_are_bound_to_their_environments" {
     error_message = "The planner may only read the state bucket (it plans with -lock=false)."
   }
 
-  # The page deployer: Hosting and nothing else.
+  # The page deployer: Hosting admin (create, upload, release a version) and Service Usage Viewer
+  # (the Firebase CLI checks that the Hosting API is enabled; T41, first CI run on dev). Its
+  # address google_project_iam_member.page_deployer[0] keeps the Hosting role, so dev's state
+  # needs no move.
   assert {
     condition     = google_project_iam_member.page_deployer[0].role == "roles/firebasehosting.admin" && google_project_iam_member.page_deployer[0].member == "serviceAccount:page-deployer@example-project.iam.gserviceaccount.com" && length(google_project_iam_member.page_deployer) == 1
-    error_message = "The page deployer must hold roles/firebasehosting.admin only."
+    error_message = "google_project_iam_member.page_deployer[0] must stay the page deployer's roles/firebasehosting.admin grant."
+  }
+
+  assert {
+    condition     = google_project_iam_member.page_deployer_service_usage[0].role == "roles/serviceusage.serviceUsageViewer" && google_project_iam_member.page_deployer_service_usage[0].member == "serviceAccount:page-deployer@example-project.iam.gserviceaccount.com" && length(google_project_iam_member.page_deployer_service_usage) == 1
+    error_message = "The page deployer must also hold roles/serviceusage.serviceUsageViewer on the project."
+  }
+
+  # Exactly these two project roles, across every project-level grant bootstrap makes (the
+  # deployer's for_each and the planner's included): nothing else reaches the page deployer.
+  assert {
+    condition = toset([
+      for g in concat(
+        values(google_project_iam_member.deployer),
+        google_project_iam_member.planner,
+        google_project_iam_member.page_deployer,
+        google_project_iam_member.page_deployer_service_usage,
+      ) : g.role if g.member == "serviceAccount:page-deployer@example-project.iam.gserviceaccount.com"
+    ]) == toset(["roles/firebasehosting.admin", "roles/serviceusage.serviceUsageViewer"])
+    error_message = "The page deployer's project roles must be exactly roles/firebasehosting.admin and roles/serviceusage.serviceUsageViewer."
   }
 
   assert {
