@@ -11,7 +11,9 @@
 #   3. waits for Docker and configures docker-credential-gcr for the Docker Hub mirror;
 #   4. starts Google's MLLP adapter and checks a few seconds later that it stays up;
 #   5. copies the secrets it needs from Secret Manager to files on the data disk (once);
-#   6. starts MariaDB with spike S2's low-memory settings and waits until it is healthy;
+#   6. starts MariaDB with spike S2's low-memory settings and waits until it is healthy; a data
+#      directory left half-initialised by an earlier, failed first initialisation is moved aside
+#      first, and the first initialisation gets a longer wait for its temporary server (T42);
 #   7. runs the hook scripts (T23: OpenEMR) from instance metadata.
 #
 # Safe to run again: every step checks what is already there first. Nothing is formatted twice,
@@ -61,6 +63,12 @@ EDGE_MARIADB_CONTAINER="mariadb"
 EDGE_ADAPTER_CONTAINER="mllp-adapter"
 EDGE_CONFIG_LABEL="pulsebridge.config" # container label holding a hash of its run arguments
 EDGE_MARIADB_SECRET="mariadb-root-password"
+# The file the official MariaDB entrypoint writes into the data directory during a first
+# initialisation (create_healthcheck_users); healthcheck.sh logs in with it. Its presence is the
+# marker of a first initialisation that reached the step that creates the users (the file is
+# written just before that SQL runs; README, "First initialisation of MariaDB") (T42).
+EDGE_MARIADB_INIT_MARKER=".my-healthcheck.cnf"
+EDGE_MARIADB_FRESH=0 # set to 1 by prepare_mariadb_datadir when MariaDB will initialise a new database
 
 # COS mounts / read-only and does not let anything write /root, so docker-credential-gcr and the
 # docker CLI keep their configuration under the (stateful) state directory instead.
@@ -81,6 +89,9 @@ die() {
 }
 
 now() { date +%s; }
+
+# Seconds since the start of this run.
+elapsed() { echo $(($(now) - EDGE_DEADLINE + EDGE_BOOT_WAIT_SECONDS)); }
 
 # Seconds left before the shared deadline (0 when it has passed).
 remaining() {
@@ -526,12 +537,101 @@ fetch_secrets() {
 
 # ---- Step: MariaDB ----------------------------------------------------------------------------------
 
+# What is in a MariaDB data directory, as one word on stdout (T42):
+#   empty       nothing there (or no directory): MariaDB will initialise a new database;
+#   complete    the init marker is there: a first initialisation got as far as creating its users;
+#   user-data   no marker, but a database directory other than MariaDB's own system schemas
+#               (an OpenEMR database, say): real data, whatever the marker says;
+#   incomplete  none of the above: files of a first initialisation that stopped part-way.
+# The user-data rule is the second, positive signal that keeps a real database safe even if it
+# lacks the marker (a data directory made by an image older than the health-check users, or a
+# marker deleted by hand). System schemas: mysql, sys, performance_schema, test; names starting
+# with '#' or '.' are server or entrypoint internals. Runs in a subshell so shopt stays local.
+mariadb_datadir_state() (
+  local dir=$1 entry name entries=() user_dbs=()
+  shopt -s nullglob dotglob
+  [ -d "$dir" ] && entries=("$dir"/*)
+  if [ "${#entries[@]}" -eq 0 ]; then
+    echo empty
+    return 0
+  fi
+  if [ -e "$dir/$EDGE_MARIADB_INIT_MARKER" ]; then
+    echo complete
+    return 0
+  fi
+  for entry in "${entries[@]}"; do
+    [ -d "$entry" ] || continue
+    name=$(basename "$entry")
+    case "$name" in
+      mysql | sys | performance_schema | test | '#'* | .*) ;;
+      *) user_dbs+=("$name") ;;
+    esac
+  done
+  if [ "${#user_dbs[@]}" -gt 0 ]; then
+    echo "user-data ${user_dbs[*]}"
+  else
+    echo incomplete
+  fi
+)
+
+# Before MariaDB starts: decide from the data directory whether it holds a database, will get a
+# new one, or holds the remains of a failed first initialisation (T42). Only the last is changed:
+# the directory is moved aside (never deleted) to mariadb.incomplete-<UTC time> and an empty one
+# is made, so the entrypoint initialises again on this run. Older mariadb.incomplete-* copies are
+# removed (each was judged incomplete in the same way). A container left from the failed boot is
+# stopped and removed first, so the new container starts on the new, empty directory (a running
+# container keeps the directory it was started with). That container cannot be serving: without
+# the marker file its health check cannot log in.
+prepare_mariadb_datadir() {
+  local state aside old
+  state=$(mariadb_datadir_state "$EDGE_MARIADB_DIR")
+  case "$state" in
+    empty)
+      EDGE_MARIADB_FRESH=1
+      log "MariaDB data directory $EDGE_MARIADB_DIR is empty: MariaDB will initialise a new database (first boot)"
+      ;;
+    complete)
+      log "MariaDB data directory $EDGE_MARIADB_DIR holds an initialised database ($EDGE_MARIADB_INIT_MARKER present); using it as it is"
+      ;;
+    user-data*)
+      warn "MariaDB data directory $EDGE_MARIADB_DIR has no $EDGE_MARIADB_INIT_MARKER (the file a completed first initialisation leaves) but holds the database(s) ${state#user-data }: treating it as a real database and NOT moving it. If MariaDB does not become healthy, a person must look (README, 'First initialisation of MariaDB')."
+      ;;
+    incomplete)
+      aside="$EDGE_DATA_DIR/mariadb.incomplete-$(date -u +%Y%m%dT%H%M%SZ)"
+      [ ! -e "$aside" ] || die "cannot move the half-initialised MariaDB data directory aside: $aside already exists"
+      log "MariaDB data directory $EDGE_MARIADB_DIR is HALF-INITIALISED (no $EDGE_MARIADB_INIT_MARKER and no user database: an earlier first initialisation stopped part-way): moving it aside to $aside and initialising a new database"
+      if docker container inspect "$EDGE_MARIADB_CONTAINER" > /dev/null 2>&1; then
+        log "removing container $EDGE_MARIADB_CONTAINER left from the failed initialisation, so the new one starts on the empty directory"
+        docker stop --time "$EDGE_STOP_TIMEOUT_SECONDS" "$EDGE_MARIADB_CONTAINER" > /dev/null ||
+          die "could not stop container $EDGE_MARIADB_CONTAINER before moving its data directory aside"
+        docker rm "$EDGE_MARIADB_CONTAINER" > /dev/null ||
+          die "could not remove container $EDGE_MARIADB_CONTAINER before moving its data directory aside"
+      fi
+      mv "$EDGE_MARIADB_DIR" "$aside" ||
+        die "could not move the half-initialised MariaDB data directory aside to $aside; not starting MariaDB"
+      mkdir -p "$EDGE_MARIADB_DIR" ||
+        die "could not create a new, empty $EDGE_MARIADB_DIR; not starting MariaDB"
+      for old in "$EDGE_DATA_DIR"/mariadb.incomplete-*; do
+        if [ "$old" != "$aside" ] && [ -d "$old" ]; then
+          rm -rf -- "$old"
+          log "removed an older half-initialised copy, $old"
+        fi
+      done
+      EDGE_MARIADB_FRESH=1
+      ;;
+    *)
+      die "could not classify the MariaDB data directory $EDGE_MARIADB_DIR ('$state'); not starting MariaDB"
+      ;;
+  esac
+}
+
 start_mariadb() {
   local password_file="$EDGE_SECRETS_DIR/$EDGE_MARIADB_SECRET"
   is_mounted "$EDGE_DATA_DIR" || die "the data disk is not mounted; not starting MariaDB"
   [ -s "$password_file" ] || die "$password_file is missing; not starting MariaDB"
 
   pull_image "$EDGE_MARIADB_IMAGE"
+  prepare_mariadb_datadir
   # The data directory and the password are bind mounts from the data disk. A bind mount whose
   # source is missing makes `docker start` fail instead of creating an empty directory, so after
   # a reboot Docker cannot start MariaDB on an empty boot-disk directory before the disk is
@@ -540,6 +640,12 @@ start_mariadb() {
   # address. --stop-timeout gives it time to shut down cleanly on `docker stop` and when the
   # Docker daemon stops at VM shutdown (the daemon waits up to the largest container stop timeout
   # plus a few seconds). The health check is the one from spike S2's compose file.
+  # The entrypoint (T42): `--entrypoint bash` with `-c <wrapper>` runs scripts/mariadb-entrypoint-
+  # wrapper.sh (delivered in the configuration block) in front of the image's own entrypoint. The
+  # wrapper gives a first initialisation's temporary server PULSEBRIDGE_INIT_WAIT_SECONDS to start
+  # instead of 30 s, and runs the official entrypoint unchanged on an initialised data directory.
+  # The words after the wrapper are $0 (a name for error messages) and the command, as before.
+  # Docker runs this same entrypoint again on every restart (--restart unless-stopped).
   ensure_container "$EDGE_MARIADB_CONTAINER" \
     --restart unless-stopped \
     --stop-timeout "$EDGE_STOP_TIMEOUT_SECONDS" \
@@ -551,7 +657,10 @@ start_mariadb() {
     --health-start-period 2m --health-start-interval 10s \
     --health-interval 1m --health-timeout 10s --health-retries 3 \
     --log-opt max-size=10m --log-opt max-file=3 \
+    --env "PULSEBRIDGE_INIT_WAIT_SECONDS=$EDGE_MARIADB_INIT_WAIT_SECONDS" \
+    --entrypoint bash \
     "$EDGE_MARIADB_IMAGE" \
+    -c "$EDGE_MARIADB_ENTRYPOINT_WRAPPER" pulsebridge-mariadb-entrypoint \
     "${EDGE_MARIADB_COMMAND[@]}"
 
   wait_for_mariadb
@@ -562,11 +671,22 @@ wait_for_mariadb() {
   while :; do
     health=$(docker container inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$EDGE_MARIADB_CONTAINER")
     if [ "$health" = "healthy" ]; then
-      log "MariaDB is healthy"
+      if [ "$EDGE_MARIADB_FRESH" = 1 ]; then
+        log "MariaDB is healthy: first initialisation of a new database completed ($(elapsed)s into this run)"
+      else
+        log "MariaDB is healthy (existing database)"
+      fi
       return 0
     fi
     if [ "$(remaining)" -le 0 ]; then
-      error "MariaDB is not healthy by the boot deadline (health: $health); see: docker logs $EDGE_MARIADB_CONTAINER"
+      if [ "$EDGE_MARIADB_FRESH" = 1 ]; then
+        error "MariaDB is not healthy by the boot deadline (health: $health): its FIRST INITIALISATION did not complete. If it stopped before creating its users (no .my-healthcheck.cnf), the next run of this script moves the data directory aside and initialises again (sudo google_metadata_script_runner startup, or a reboot). Last lines of its log:"
+      else
+        error "MariaDB is not healthy by the boot deadline (health: $health). Last lines of its log:"
+      fi
+      # MariaDB's log holds no secret: the password reaches it as a file, and the entrypoint
+      # prints a password only for MARIADB_RANDOM_ROOT_PASSWORD, which is not used.
+      docker logs --tail 20 "$EDGE_MARIADB_CONTAINER" 2>&1 | sed 's/^/  mariadb| /' >&2 || true
       return 1
     fi
     sleep "$(min "$EDGE_POLL_SECONDS" "$(remaining)")"
