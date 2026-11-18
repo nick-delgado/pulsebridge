@@ -17,6 +17,7 @@ set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 script="$here/scripts/edge-startup.sh"
+wrapper="$here/scripts/mariadb-entrypoint-wrapper.sh"
 template="$here/templates/startup-config.sh.tftpl"
 fake="$here/tests/fakes/fake-command"
 
@@ -51,7 +52,7 @@ left_behind() {
 
 shellcheck_bin="${SHELLCHECK:-$(command -v shellcheck || true)}"
 if [ -n "$shellcheck_bin" ]; then
-  if "$shellcheck_bin" -S style "$script" "$here/tests/startup_script.sh" "$here/tests/static_checks.sh" "$fake"; then
+  if "$shellcheck_bin" -S style "$script" "$wrapper" "$here/tests/startup_script.sh" "$here/tests/static_checks.sh" "$fake"; then
     pass "shellcheck: startup script, tests and fakes are clean"
   else
     fail "shellcheck reported problems"
@@ -63,6 +64,7 @@ else
 fi
 
 if bash -n "$script"; then pass "bash -n: startup script parses"; else fail "bash -n: startup script does not parse"; fi
+if bash -n "$wrapper"; then pass "bash -n: MariaDB entrypoint wrapper parses"; else fail "bash -n: MariaDB entrypoint wrapper does not parse"; fi
 
 # ---- 2. Drift check between the template and the script ---------------------------------------------
 
@@ -154,6 +156,12 @@ write_config() {
     echo "EDGE_MLLP_PORT='2575'"
     echo "EDGE_BOOT_WAIT_SECONDS='$BOOT_WAIT'"
     echo "EDGE_HOOK_TIMEOUT_SECONDS='1800'"
+    echo "EDGE_MARIADB_INIT_WAIT_SECONDS='300'"
+    # The wrapper as the template delivers it (tests/edge_vm.tftest.hcl checks the template's form).
+    echo "EDGE_MARIADB_ENTRYPOINT_WRAPPER=''"
+    echo "IFS= read -r -d '' EDGE_MARIADB_ENTRYPOINT_WRAPPER << 'PULSEBRIDGE_WRAPPER_END' || true"
+    cat "$wrapper"
+    echo "PULSEBRIDGE_WRAPPER_END"
     echo "EDGE_MARIADB_COMMAND=('mariadbd' '--innodb-buffer-pool-size=64M' '--max-connections=30')"
     printf "EDGE_MLLP_ADAPTER_COMMAND=("
     printf "'%s' " "$@"
@@ -185,6 +193,14 @@ run_script() {
 }
 
 calls() { grep -cE "$1" "$SB/state/calls.log" || true; }
+
+# The mariadb.incomplete-* directories next to MariaDB's data directory, one per line (T42).
+incomplete_dirs() {
+  local d
+  for d in "$SB/mnt/disks/edge"/mariadb.incomplete-*; do
+    if [ -d "$d" ]; then echo "$d"; fi
+  done
+}
 elapsed() { cat "$SB/state/clock"; }
 
 expect_rc() {
@@ -295,6 +311,29 @@ else
   pass "mariadb: never published on a host port"
 fi
 
+# T42: MariaDB runs through the entrypoint wrapper: `--entrypoint bash <image> -c <wrapper>
+# pulsebridge-mariadb-entrypoint <the mariadbd command>`, the wrapper verbatim from its file.
+mapfile -d '' -t got0 < "$SB/state/containers/mariadb/args0"
+img_i=-1
+for i in "${!got0[@]}"; do
+  if [ "${got0[$i]}" = "$MARIADB_IMAGE" ]; then img_i=$i; fi
+done
+expected_tail=(-c "$(< "$wrapper")"$'\n' pulsebridge-mariadb-entrypoint mariadbd --innodb-buffer-pool-size=64M --max-connections=30)
+if [ "$img_i" -ge 2 ] && [ "${got0[img_i - 2]}" = --entrypoint ] && [ "${got0[img_i - 1]}" = bash ] &&
+  [ "${#got0[@]}" -eq $((img_i + 1 + ${#expected_tail[@]})) ] &&
+  [ "$(printf '%s\0' "${got0[@]:img_i+1}" | sha256sum)" = "$(printf '%s\0' "${expected_tail[@]}" | sha256sum)" ]; then
+  pass "mariadb: runs the entrypoint wrapper (bash -c, verbatim from its file) in front of the unchanged mariadbd command"
+else
+  fail "mariadb: not started through the entrypoint wrapper as expected (image at argument $img_i of ${#got0[@]})"
+fi
+if grep -qxF -- "PULSEBRIDGE_INIT_WAIT_SECONDS=300" <<<"$joined"; then
+  pass "mariadb: the wrapper gets the first-initialisation wait (300 s)"
+else
+  fail "mariadb: PULSEBRIDGE_INIT_WAIT_SECONDS=300 not passed"
+fi
+expect_log 'MariaDB data directory .*/mariadb is empty: MariaDB will initialise a new database' "says MariaDB will initialise a new database"
+expect_log 'MariaDB is healthy: first initialisation of a new database completed' "says the first initialisation completed"
+
 secret_file="$SB/mnt/disks/edge/secrets/mariadb-root-password"
 if [ "$(cat "$secret_file")" = "$FAKE_SECRET" ] && [ "$(stat -c %a "$secret_file")" = 600 ] && [ "$(stat -c %a "$SB/mnt/disks/edge/secrets")" = 700 ]; then
   pass "secret: decoded into a mode-600 file in a mode-700 directory"
@@ -316,6 +355,8 @@ expect_calls '^(mkswap|swapon|fallocate) ' 0 "second run leaves swap alone"
 expect_calls '^docker (run|start|stop|restart|rm|pull|kill) ' 0 "second run starts, stops, restarts, replaces and pulls nothing"
 expect_calls '^docker container inspect mariadb$' 1 "second run did look at MariaDB (so 'nothing' is a decision, not a skipped step)"
 expect_calls 'secretmanager' 0 "second run does not read the secret again"
+expect_log 'holds an initialised database \(\.my-healthcheck\.cnf present\); using it as it is' "second run finds the initialised database"
+expect_log 'MariaDB is healthy \(existing database\)' "second run reports an existing database, not a first initialisation"
 expect_no_secret_leak "second run"
 
 # -- Case: a second run while the first still holds the lock --------------------------------------------
@@ -385,6 +426,94 @@ run_script
 expect_rc 0 "MariaDB configuration change"
 expect_calls '^docker stop --time 120 mariadb$' 1 "stops MariaDB gracefully before replacing it"
 expect_calls '^docker rm --force' 0 "never force-removes MariaDB"
+
+
+# -- Cases: MariaDB's first initialisation fails part-way (T42) ------------------------------------------
+# Prod, 18 November: the official entrypoint gave up on its temporary server after 30 s and left
+# the data directory half-initialised (mysql schema and InnoDB files, no .my-healthcheck.cnf); the
+# container restarted on it and stayed unhealthy. The next run must move that directory aside,
+# replace the container and initialise again, and never touch a directory that holds a database.
+echo "== MariaDB first initialisation fails, then the next run recovers"
+new_sandbox
+run_script FAKE_MARIADB_INIT=fail FAKE_MARIADB_HEALTH=unhealthy
+expect_rc nonzero "failed first initialisation"
+expect_log 'ERROR: MariaDB is not healthy by the boot deadline .*FIRST INITIALISATION did not complete' "says the first initialisation did not complete"
+expect_log 'mariadb\| \[ERROR\] \[Entrypoint\]: Unable to start server' "shows MariaDB's last log lines in the startup log"
+datadir="$SB/mnt/disks/edge/mariadb"
+if [ -d "$datadir/mysql" ] && [ ! -e "$datadir/.my-healthcheck.cnf" ]; then
+  pass "setup: the data directory is half-initialised, as on prod"
+else
+  fail "setup: the fake did not leave a half-initialised data directory"
+fi
+echo restarting > "$SB/state/containers/mariadb/status" # restart unless-stopped, on the bad directory
+mkdir -p "$SB/mnt/disks/edge/mariadb.incomplete-20000101T000000Z/mysql"  # left by an older failure
+: > "$SB/state/calls.log"
+run_script
+expect_rc 0 "recovery run"
+expect_log 'MariaDB data directory .*/mariadb is HALF-INITIALISED .*: moving it aside to .*/mariadb\.incomplete-[0-9]{8}T[0-9]{6}Z and initialising a new database' "says the directory is half-initialised and where it went"
+aside=$(incomplete_dirs)
+if [ -n "$aside" ] && [ "$(wc -l <<<"$aside")" -eq 1 ] && [ -e "$aside/ibdata1" ] && [ -d "$aside/mysql" ]; then
+  pass "moves the half-initialised directory aside with its files (not deleted)"
+else
+  fail "the half-initialised directory was not moved aside intact (found: '${aside:-nothing}')"
+fi
+if [ -e "$SB/mnt/disks/edge/mariadb.incomplete-20000101T000000Z" ]; then
+  fail "an older half-initialised copy was kept"
+else
+  pass "removes older half-initialised copies"
+fi
+expect_log 'removed an older half-initialised copy, .*mariadb\.incomplete-20000101T000000Z' "logs the removal of the older copy"
+expect_calls '^docker stop --time 120 mariadb$' 1 "stops the container left from the failed initialisation"
+expect_calls '^docker rm mariadb$' 1 "removes it (never with --force)"
+expect_calls '^docker rm --force' 0 "never force-removes"
+expect_calls '^docker run .*--name mariadb' 1 "creates MariaDB again, on the new empty directory"
+if [ -e "$datadir/.my-healthcheck.cnf" ]; then
+  pass "the new first initialisation completed in a fresh directory"
+else
+  fail "the data directory was not initialised again"
+fi
+expect_log 'MariaDB is healthy: first initialisation of a new database completed' "reports the completed re-initialisation"
+
+echo "== MariaDB data directory with the marker is never touched"
+new_sandbox
+datadir="$SB/mnt/disks/edge/mariadb"
+mkdir -p "$datadir/mysql" "$datadir/openemr"
+: > "$datadir/.my-healthcheck.cnf"
+echo "synthetic table" > "$datadir/openemr/patient_data.ibd"
+run_script
+expect_rc 0 "completed database"
+expect_log 'holds an initialised database' "recognises the completed database"
+left=$(incomplete_dirs)
+if [ -z "$left" ] && [ -e "$datadir/.my-healthcheck.cnf" ] && [ "$(cat "$datadir/openemr/patient_data.ibd")" = "synthetic table" ]; then
+  pass "leaves a completed database where it is"
+else
+  fail "a completed database was moved or changed"
+fi
+expect_log 'MariaDB is healthy \(existing database\)' "reports an existing database"
+
+echo "== MariaDB data directory without the marker but with a user database is never moved"
+new_sandbox
+datadir="$SB/mnt/disks/edge/mariadb"
+mkdir -p "$datadir/mysql" "$datadir/openemr"
+echo "synthetic table" > "$datadir/openemr/patient_data.ibd"
+run_script
+expect_log 'WARNING: MariaDB data directory .* has no \.my-healthcheck\.cnf .* holds the database\(s\) openemr: treating it as a real database and NOT moving it' "warns and keeps a database that lacks the marker"
+left=$(incomplete_dirs)
+if [ -z "$left" ] && [ "$(cat "$datadir/openemr/patient_data.ibd")" = "synthetic table" ]; then
+  pass "a user database without the marker stays where it is"
+else
+  fail "a user database without the marker was moved"
+fi
+
+echo "== MariaDB data directory without the marker, system schemas only, is moved"
+new_sandbox
+datadir="$SB/mnt/disks/edge/mariadb"
+mkdir -p "$datadir/mysql" "$datadir/sys" "$datadir/#innodb_temp"
+: > "$datadir/ibdata1"
+run_script
+expect_rc 0 "system schemas only"
+expect_log 'is HALF-INITIALISED' "system schemas without the marker count as half-initialised"
+expect_calls '^docker (stop|rm) ' 0 "no container to remove when none exists"
 
 # -- Case: the disk already has a filesystem on first boot --------------------------------------------
 echo "== first boot, disk with an ext4 filesystem"
@@ -603,6 +732,102 @@ if [ "$(grep -nE '^docker run .*--name mariadb' "$SB/state/calls.log" | cut -d: 
 else
   fail "a hook ran before MariaDB"
 fi
+
+# -- The MariaDB entrypoint wrapper on its own (T42) --------------------------------------------------------
+# scripts/mariadb-entrypoint-wrapper.sh runs inside the container; here it runs with real bash
+# against a stand-in for the official entrypoint, pointed at by the wrapper's test seams. The
+# stand-in has the same wait loop as docker_temp_server_start: a "server" that answers on try
+# FAKE_SERVER_TRIES, `sleep` that takes no time, and "Unable to start server." when the loop runs out.
+new_sandbox
+W="$SB/wrap"
+mkdir -p "$W/datadir"
+# shellcheck disable=SC2016 # the single-quoted lines are code for the stand-in, expanded there
+write_fake_entrypoint() { # <loop line> [<loop line> ...]: the loop is written once per argument
+  local loop
+  {
+    echo '#!/bin/bash'
+    echo 'sleep() { :; }'
+    for loop in "$@"; do
+      echo 'tries=0'
+      echo "$loop"
+      echo '  tries=$((tries + 1))'
+      echo '  if [ "$tries" -ge "$FAKE_SERVER_TRIES" ]; then break; fi'
+      echo '  sleep 1'
+      echo 'done'
+      echo 'if [ "$i" = 0 ]; then echo "Unable to start server." >&2; exit 1; fi'
+    done
+    echo 'printf "ran %s after %s tries with:" "${BASH_SOURCE[0]}" "$tries"'
+    echo 'printf " [%s]" "$@"'
+    echo 'echo'
+  } > "$W/docker-entrypoint.sh"
+  chmod 755 "$W/docker-entrypoint.sh"
+}
+WRC=0
+run_wrapper() { # <server tries> [VAR=value ...]: runs the wrapper; output in $W/out, exit in $WRC
+  local tries=$1
+  shift
+  rm -f "$W/patched.sh"
+  WRC=0
+  env -i PATH="$PATH" PULSEBRIDGE_ENTRYPOINT="$W/docker-entrypoint.sh" \
+    PULSEBRIDGE_PATCHED_ENTRYPOINT="$W/patched.sh" PULSEBRIDGE_DATADIR="$W/datadir" \
+    PULSEBRIDGE_INIT_WAIT_SECONDS=300 FAKE_SERVER_TRIES="$tries" "$@" \
+    bash -c "$(< "$wrapper")" pulsebridge-mariadb-entrypoint mariadbd --max-connections=30 'an argument with spaces' \
+    > "$W/out" 2>&1 || WRC=$?
+}
+expect_wrapper() { # <regex> <description>
+  if grep -qE -- "$1" "$W/out"; then pass "$2"; else
+    fail "$2 (wrapper output has no line matching '$1')"
+    sed 's/^/      | /' "$W/out"
+  fi
+}
+official_loop='for i in {30..0}; do'
+
+echo "== wrapper: a first initialisation whose temporary server needs 45 s"
+write_fake_entrypoint "$official_loop"
+WRC=0
+env -i PATH="$PATH" FAKE_SERVER_TRIES=45 "$W/docker-entrypoint.sh" mariadbd > "$W/out" 2>&1 || WRC=$?
+if [ "$WRC" -ne 0 ] && grep -q 'Unable to start server' "$W/out"; then
+  pass "control: the official 30 s loop gives up on a 45 s start (what happened on prod)"
+else
+  fail "control: the stand-in entrypoint does not model the 30 s limit"
+fi
+run_wrapper 45
+if [ "$WRC" -eq 0 ]; then pass "wrapper: a 45 s first start completes (exit 0)"; else fail "wrapper: a 45 s first start failed (exit $WRC)"; fi
+expect_wrapper "^ran $W/patched\.sh after 45 tries with: \[mariadbd\] \[--max-connections=30\] \[an argument with spaces\]$" "wrapper: runs the patched copy with the command passed through unchanged"
+expect_wrapper '\[PulseBridge\]: first initialisation: the temporary server may take up to 300s' "wrapper: says it applied the longer wait"
+if [ "$(grep -cF 'for i in {300..0}; do' "$W/patched.sh")" = 1 ] && [ "$(grep -cF "$official_loop" "$W/patched.sh")" = 0 ] &&
+  [ "$(diff "$W/docker-entrypoint.sh" "$W/patched.sh" | grep -c '^[<>]')" = 2 ] && [ -x "$W/patched.sh" ]; then
+  pass "wrapper: the copy differs from the entrypoint in the loop bound only, and is executable"
+else
+  fail "wrapper: the patched copy is not the entrypoint with only the loop bound raised"
+fi
+run_wrapper 400
+if [ "$WRC" -ne 0 ] && grep -q 'Unable to start server' "$W/out"; then
+  pass "wrapper: the longer wait is still bounded (a server that never answers within 300 s fails)"
+else
+  fail "wrapper: no bound on the wait"
+fi
+
+echo "== wrapper: an initialised data directory runs the official entrypoint unchanged"
+mkdir -p "$W/datadir/mysql"
+run_wrapper 5
+expect_wrapper "^ran $W/docker-entrypoint\.sh after 5 tries with: \[mariadbd\] \[--max-connections=30\] \[an argument with spaces\]$" "wrapper: initialised directory: runs the official entrypoint itself"
+if [ -e "$W/patched.sh" ]; then fail "wrapper: wrote a patched copy for an initialised directory"; else pass "wrapper: writes no patched copy for an initialised directory"; fi
+rmdir "$W/datadir/mysql"
+
+echo "== wrapper: refuses when the loop text is not found exactly once"
+write_fake_entrypoint "$official_loop" "$official_loop"
+run_wrapper 5
+if [ "$WRC" -ne 0 ]; then pass "wrapper: loop found twice: exits non-zero ($WRC)"; else fail "wrapper: loop found twice: exit 0"; fi
+expect_wrapper "\[ERROR\] \[PulseBridge\]: expected 'for i in \{30\.\.0\}; do' exactly once in .*, found it 2 times" "wrapper: loop found twice: says so"
+write_fake_entrypoint 'for i in {60..0}; do'
+run_wrapper 5
+if [ "$WRC" -ne 0 ]; then pass "wrapper: loop not found: exits non-zero ($WRC)"; else fail "wrapper: loop not found: exit 0"; fi
+expect_wrapper 'found it 0 times' "wrapper: loop not found: says so"
+if grep -q '^ran ' "$W/out"; then fail "wrapper: ran an entrypoint after refusing"; else pass "wrapper: runs no entrypoint after refusing"; fi
+write_fake_entrypoint "$official_loop"
+run_wrapper 5 PULSEBRIDGE_INIT_WAIT_SECONDS=five
+if [ "$WRC" -ne 0 ] && grep -q 'must be a whole number' "$W/out"; then pass "wrapper: refuses a wait that is not a number"; else fail "wrapper: accepted a wait that is not a number"; fi
 
 # -- Case: a command the script needs is missing ----------------------------------------------------------
 for missing_cmd in docker timeout; do

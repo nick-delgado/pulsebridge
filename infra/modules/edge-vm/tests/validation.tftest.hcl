@@ -138,3 +138,36 @@ run "negative_snapshot_days_are_rejected" {
   }
   expect_failures = [var.data_disk_snapshot_days]
 }
+
+run "mariadb_init_wait_below_a_minute_is_rejected" {
+  command = plan
+  variables {
+    mariadb_init_wait_seconds = 30 # the official image's own wait: nothing gained
+  }
+  expect_failures = [var.mariadb_init_wait_seconds]
+}
+
+run "mariadb_init_wait_over_half_the_boot_deadline_is_rejected" {
+  command = plan
+  variables {
+    boot_wait_minutes         = 15
+    mariadb_init_wait_seconds = 451
+  }
+  expect_failures = [var.mariadb_init_wait_seconds]
+}
+
+run "mariadb_init_wait_at_half_the_boot_deadline_plans" {
+  command = plan
+  variables {
+    boot_wait_minutes         = 15
+    mariadb_init_wait_seconds = 450
+  }
+}
+
+run "fractional_mariadb_init_wait_is_rejected" {
+  command = plan
+  variables {
+    mariadb_init_wait_seconds = 120.5
+  }
+  expect_failures = [var.mariadb_init_wait_seconds]
+}

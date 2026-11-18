@@ -19,6 +19,8 @@
 #   FAKE_CURL_HANG=1          every curl call hangs until its --max-time (logged as HANG if none)
 #   FAKE_ADAPTER_CRASH=1      the mllp-adapter container keeps restarting
 #   FAKE_MARIADB_HEALTH=x     health status MariaDB reports (default healthy)
+#   FAKE_MARIADB_INIT=fail    `docker run` of MariaDB on an empty data directory leaves it
+#                             half-initialised (no .my-healthcheck.cnf); default: completed
 #   FAKE_SECRET_MISSING=a,b   Secret Manager answers 404 for these file names ("all" for every one)
 #   FAKE_CHMOD_FAIL=1         chmod fails on the decoded secret's temporary file
 #   FAKE_DD_READ=error|short  reading the data disk with dd fails (I/O error) or returns fewer
@@ -124,6 +126,26 @@ fake_docker() {
       echo running > "$containers/$name/status"
       echo 0 > "$containers/$name/restarts"
       printf '%s\n' "${args[@]}" > "$containers/$name/args"
+      printf '%s\0' "${args[@]}" > "$containers/$name/args0" # exact, for multi-line arguments
+      # MariaDB's first initialisation, as far as the data directory shows it: on an empty
+      # bind-mounted /var/lib/mysql it leaves the mysql schema, InnoDB files and, if it completed,
+      # .my-healthcheck.cnf (FAKE_MARIADB_INIT=fail: it stopped before that, as on prod, T42).
+      if [ "$name" = mariadb ]; then
+        local a src=""
+        for a in "${args[@]}"; do
+          case "$a" in
+            type=bind,source=*,target=/var/lib/mysql)
+              src=${a#type=bind,source=}
+              src=${src%,target=/var/lib/mysql}
+              ;;
+          esac
+        done
+        if [ -n "$src" ] && [ -d "$src" ] && [ -z "$(ls -A "$src")" ]; then
+          mkdir -p "$src/mysql"
+          : > "$src/ibdata1"
+          if [ "${FAKE_MARIADB_INIT:-ok}" != fail ]; then : > "$src/.my-healthcheck.cnf"; fi
+        fi
+      fi
       echo "fakecontainerid-$name"
       ;;
     start)
@@ -153,8 +175,15 @@ fake_docker() {
       rm -rf "${containers:?}/$name"
       ;;
     logs)
-      echo "flag provided but not defined: -fake_bad_flag"
-      echo "Usage of /usr/mllp_adapter/mllp_adapter:"
+      case "${*: -1}" in
+        mariadb)
+          echo "[ERROR] [Entrypoint]: Unable to start server."
+          ;;
+        *)
+          echo "flag provided but not defined: -fake_bad_flag"
+          echo "Usage of /usr/mllp_adapter/mllp_adapter:"
+          ;;
+      esac
       ;;
     *) return 1 ;;
   esac

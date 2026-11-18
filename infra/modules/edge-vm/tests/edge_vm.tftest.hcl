@@ -322,6 +322,38 @@ run "adapter_command_is_s4_flags_with_error_logging_off" {
   }
 }
 
+# --- MariaDB's first initialisation (T42) -------------------------------------------------------------
+
+run "mariadb_entrypoint_wrapper_in_the_script" {
+  command = plan
+
+  assert {
+    # The template's here-document must carry the wrapper file verbatim; tests/startup_script.sh
+    # writes the same block and checks the container gets exactly the file's text.
+    condition     = strcontains(google_compute_instance.this.metadata["startup-script"], "EDGE_MARIADB_ENTRYPOINT_WRAPPER=''\nIFS= read -r -d '' EDGE_MARIADB_ENTRYPOINT_WRAPPER << 'PULSEBRIDGE_WRAPPER_END' || true\n${file("${path.module}/scripts/mariadb-entrypoint-wrapper.sh")}PULSEBRIDGE_WRAPPER_END\n")
+    error_message = "The startup script must carry scripts/mariadb-entrypoint-wrapper.sh verbatim in its quoted here-document."
+  }
+
+  assert {
+    condition     = strcontains(google_compute_instance.this.metadata["startup-script"], "EDGE_MARIADB_INIT_WAIT_SECONDS='300'")
+    error_message = "MariaDB's first initialisation must wait 300 s for its temporary server by default."
+  }
+}
+
+run "mariadb_init_wait_is_a_variable" {
+  command = plan
+
+  variables {
+    boot_wait_minutes         = 20
+    mariadb_init_wait_seconds = 600
+  }
+
+  assert {
+    condition     = strcontains(google_compute_instance.this.metadata["startup-script"], "EDGE_MARIADB_INIT_WAIT_SECONDS='600'")
+    error_message = "mariadb_init_wait_seconds must reach the startup script."
+  }
+}
+
 # --- The seam for T23 --------------------------------------------------------------------------------
 
 run "hooks_are_metadata_keys_listed_in_the_script" {

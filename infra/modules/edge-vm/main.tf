@@ -98,11 +98,13 @@ locals {
     mllp_port            = tostring(var.mllp_port)
     boot_wait_seconds    = tostring(var.boot_wait_minutes * 60)
     hook_timeout_seconds = tostring(var.hook_timeout_minutes * 60)
-    mariadb_command      = local.mariadb_command
-    mllp_adapter_command = local.mllp_adapter_command
-    secret_names         = sort(keys(var.secret_files))
-    secret_files         = var.secret_files
-    hook_names           = local.hook_names
+    # T42: how long a first initialisation's temporary server may take to start.
+    mariadb_init_wait_seconds = tostring(var.mariadb_init_wait_seconds)
+    mariadb_command           = local.mariadb_command
+    mllp_adapter_command      = local.mllp_adapter_command
+    secret_names              = sort(keys(var.secret_files))
+    secret_files              = var.secret_files
+    hook_names                = local.hook_names
   }
 
   startup_config_values = flatten([
@@ -117,8 +119,14 @@ locals {
   # The script is two parts joined: a configuration block rendered by templatefile() with the
   # values above, and the logic, which is a plain bash file (no Terraform interpolation, so it can
   # be shellchecked and tested on its own; see tests/startup_script.sh).
+  # T42: the MariaDB entrypoint wrapper is a third file, placed in the configuration block inside a
+  # quoted here-document (it contains quotes, so it is not one of the single-quoted values above).
+  mariadb_entrypoint_wrapper = chomp(file("${path.module}/scripts/mariadb-entrypoint-wrapper.sh"))
+
   startup_script = join("", [
-    templatefile("${path.module}/templates/startup-config.sh.tftpl", local.startup_config),
+    templatefile("${path.module}/templates/startup-config.sh.tftpl", merge(local.startup_config, {
+      mariadb_entrypoint_wrapper = local.mariadb_entrypoint_wrapper
+    })),
     file("${path.module}/scripts/edge-startup.sh"),
   ])
 
@@ -322,6 +330,13 @@ resource "google_compute_instance" "this" {
       # validation is loosened later, because a quote would break out of the script's quoting.
       condition     = alltrue([for v in local.startup_config_values : !strcontains(v, "'")])
       error_message = "Startup-script configuration values must not contain a single quote."
+    }
+
+    precondition {
+      # The wrapper sits in a here-document ended by this word on a line of its own; a line equal
+      # to it inside the wrapper would end the here-document early and run the rest as script.
+      condition     = !contains(split("\n", local.mariadb_entrypoint_wrapper), "PULSEBRIDGE_WRAPPER_END")
+      error_message = "scripts/mariadb-entrypoint-wrapper.sh must not contain a line PULSEBRIDGE_WRAPPER_END."
     }
 
     precondition {
