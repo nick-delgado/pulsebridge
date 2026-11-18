@@ -505,7 +505,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
 | T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | done |
 | T41 | Page deployer grants in code; CI checklist from the first real run | T26 | `infra/bootstrap/`, `infra/modules/phr/`, `infra/envs/`, `.github/workflows/` (comments only), `docs/setup.md` | done |
-| T42 | Edge VM: survive a slow MariaDB first initialisation | T21 | `infra/modules/edge-vm/` | in-progress (reviewed, merged into the working branch, applied to prod; first boot on it under way) |
+| T42 | Edge VM: survive a slow MariaDB first initialisation | T21 | `infra/modules/edge-vm/` | done |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -672,11 +672,11 @@ needed before T18 and T19 start.
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (dev deployed 16 Nov; 17 Nov: reboot, patching, seeder alert, Scheduler and rewrite-path items done on dev, and the hop measurement (2 hops behind Hosting; dev runs with 2); password rotation, the shell-only items, destroy test and prod remain) |
+| T25 | Env roots `dev` and `prod` | T02 to T05, T20 to T23 | `infra/envs/`, and the module fixes its review asked for in `infra/modules/project-base/`, `infra/modules/openemr/`, `infra/modules/edge-vm/` and `scripts/connect-google-health/` | in-progress (dev deployed 16 Nov and checked 17 and 18 Nov; prod deployed 18 Nov on real data, `make smoke` passed in full; remaining: prod CI's first run, the shell-only VM items, P8, the destroy test) |
 | T26 | Terraform CI/CD | T02, T25 | `.github/workflows/terraform-*.yml` and `ci.yml`'s Terraform job, `.tflint.hcl`, the Makefile's `tf-lint`/`tf-scan`, `infra/envs/ci/`, and what its ACs needed in `infra/bootstrap/`, `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/ingestion/`, `infra/envs/`, plus README corrections from the T28 review | in-progress (offline part merged; 18 Nov: CI switched on for dev: ruleset, `dev-page` Environment, planner and page deployer in dev's bootstrap, `ci/dev.tfvars`, the five `DEV_` variables; first real run under way; prod not set up) |
 | T27 | Secret version scripts | T04, T25 | `scripts/secrets/` (`set-secret.sh`, `set-reviewer-password.sh`), root `pyproject.toml` `testpaths`, a shellcheck pre-commit hook for `scripts/secrets/` | done |
 | T28 | Setup guide and README | T25, T11 | `README.md`, `docs/setup.md`, `docs/images/` | done |
-| T29 | End-to-end smoke test | T25 | `tests/e2e/` | in-progress (merged; cuff path run live on dev; the health-sync checks need a real-data stack) |
+| T29 | End-to-end smoke test | T25 | `tests/e2e/` | done |
 | T30 | Public demo domain | T25 | `infra/envs/prod/dns.tf` | deferred (17 Nov: the demo uses prod's Firebase Hosting address) |
 
 **First dev deploy (16 November).** A new dev project was bootstrapped and runbook steps 1 to 11
@@ -847,6 +847,18 @@ November it took 3 seconds.
   completed database; the startup log says which happened.
 - AC: tests in `infra/modules/edge-vm/tests/` cover both paths with a fake docker and fail when
   either is removed; the README's first-boot and "Not verified" sections are updated.
+
+T42 outcome: reviewed (pass with notes; fixes made) and merged. On prod, the next boot moved the
+half-initialised data directory aside and completed a first initialisation ("MariaDB is healthy:
+first initialisation of a new database completed (52s into this run)"); OpenEMR then set up and
+registered fhir-proxy's client.
+
+Prod deploy, 18 November 2026: the owner's existing project (adopted), real Google Health data.
+Bootstrap (42 resources, the first apply stopped once on the IAM API), runbook steps 2 to 11 as the
+deployer, the connect script run by the owner, health-sync's first runs (Patient `200`; second run
+35 unchanged), and `make smoke` with `--allow-real-data-writes`: 36 passed, 1 skipped (the `SYN-`
+check). That closes T29's health-sync checks. Three secrets left from the early Google Health
+spike were deleted (unused). IAP SSH was on during the MariaDB investigation and is off again.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
