@@ -505,6 +505,7 @@ reviews of T08, T10 and T13 asked for, each with tests and break-checks.
 | T39 | Cloud Healthcare searches: stranded count and the stored-window read | T06, T29 | `services/health-sync/`, `libs/pulsebridge_fhir/`, `libs/pulsebridge_gcp/`, `services/seed/` | done |
 | T40 | Default `trusted_proxy_hops` to 2 behind Firebase Hosting | T22, T25 | `infra/modules/phr/`, `infra/envs/`, `services/fhir-proxy/` (README, tests), `docs/setup.md` | done |
 | T41 | Page deployer grants in code; CI checklist from the first real run | T26 | `infra/bootstrap/`, `infra/modules/phr/`, `infra/envs/`, `.github/workflows/` (comments only), `docs/setup.md` | done |
+| T42 | Edge VM: survive a slow MariaDB first initialisation | T21 | `infra/modules/edge-vm/` | in-progress |
 | T35 | Seeder image and shared stored-window logic | T09, T10, T24 | `services/seed/Dockerfile`, `libs/pulsebridge_fhir/` or a new library for the stored-window logic, the `stored.py` of `services/seed/` and `services/health-sync/`, the seeder's entries in `tests/tooling/` | done |
 
 **T17 to T19 Dashboard features.** As listed under "Product requirements" in the brief. Each
@@ -826,6 +827,26 @@ low per the review: run.viewer lets the page deploy job read fhir-proxy's config
 holds the patient ID (and with real data the name) in plain environment variables; the planner
 already reads the same. Possible follow-up: move the patient's ID and name out of plain
 environment variables into mounted secrets.
+
+**T42 Edge VM: survive a slow MariaDB first initialisation.** Prod's first boot failed twice on
+18 November: on a new, empty data disk the official MariaDB image initialises the database, then
+starts a temporary server to set the root password and create its users, and waits for it only
+30 seconds (`for i in {30..0}` in `docker_temp_server_start`, not configurable). On prod's
+e2-micro that server took over 33 seconds both times, so the entrypoint stopped with "Unable to
+start server"; Docker restarted the container on a half-initialised data directory without the
+health-check user, every health check was refused ("Access denied for user 'mysql'@'localhost'"),
+and the startup script waited out its deadline. Measured on the VM afterwards in throwaway
+containers: the same step took 1 to 16 seconds with nothing else running, on the data disk and in
+memory, with and without the module's server arguments; no single setting explains it (load and
+CPU contention on a shared-core VM at boot are the likely cause, not proven). On dev on 16
+November it took 3 seconds.
+- AC: a first initialisation that takes longer than 30 seconds completes (the temporary server's
+  wait is long enough for a slow boot, documented and bounded by the boot deadline).
+- AC: a data directory left half-initialised (by this failure or an interrupted first boot) is
+  recognised by a reliable marker and re-initialised once, never a directory that holds a
+  completed database; the startup log says which happened.
+- AC: tests in `infra/modules/edge-vm/tests/` cover both paths with a fake docker and fail when
+  either is removed; the README's first-boot and "Not verified" sections are updated.
 
 **T37 Dashboard browser tests independent of the time of day.** Three browser tests failed in CI
 between about 12:17 and 13:10 UTC: the in-page mock follows the page clock, has no heart-rate
