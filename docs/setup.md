@@ -12,8 +12,8 @@ explained the first time it appears.
 > page, a reviewer login, cuff readings over MLLP and HTTPS, and shares of a blood pressure and a
 > heart rate to OpenEMR), and its corrections are in the steps below. Later checks on
 > dev (alerts firing, patching, password rotation, CI) and a prod deploy with real watch data on
-> 18 November (Step 2, the connect script, health-sync) are recorded in the runbook too. Still **not yet
-> verified on a real project**: teardown. The runbook's
+> 18 November (Step 2, the connect script, health-sync) are recorded in the runbook too.
+> Teardown is still not yet verified on a real project. The runbook's
 > [master checklist](../infra/envs/README.md#master-checklist) lists every assumption in the order
 > you will meet them and records what the dev run confirmed. If a step below does not behave as
 > described, that checklist is where the answer is recorded.
