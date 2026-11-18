@@ -336,7 +336,21 @@ deploy jobs skip (they never fall back to the deployer).
 | --- | --- | --- | --- |
 | deployer (`terraform-deployer`) | `main` (apply on merge, nightly destroy) | `env-prod-main` (the `prod` Environment) | `deployer_roles` (above), object admin on the state bucket |
 | planner (`terraform-planner`) | `pull-request` | `env-prod-plan-main` (the `prod-plan` Environment) | one custom role (below); object **viewer** on the state bucket |
-| page deployer (`page-deployer`) | `env-dev-page-main` (the `dev-page` Environment) | `env-prod-page-main` (the `prod-page` Environment) | `roles/firebasehosting.admin` only |
+| page deployer (`page-deployer`) | `env-dev-page-main` (the `dev-page` Environment) | `env-prod-page-main` (the `prod-page` Environment) | `roles/firebasehosting.admin` and `roles/serviceusage.serviceUsageViewer` on the project; `roles/run.viewer` on fhir-proxy's Cloud Run service only, granted by the env root (below) |
+
+**The page deployer's three grants** (T41). `roles/firebasehosting.admin` alone is not enough for
+`firebase deploy --only hosting`; the first CI run on dev (18 November 2026) was refused twice
+before it passed:
+
+| Grant | Where | Why `firebase deploy` needs it |
+| --- | --- | --- |
+| `roles/firebasehosting.admin` | project (`google_project_iam_member.page_deployer`) | create a Hosting version, upload the files, release it |
+| `roles/serviceusage.serviceUsageViewer` | project (`google_project_iam_member.page_deployer_service_usage`) | before deploying, the CLI checks that the Hosting API is enabled (`serviceusage.services.get` on `firebasehosting.googleapis.com`); without it: 403 "Permission denied to get service". The role reads which APIs are enabled and nothing else |
+| `roles/run.viewer` | fhir-proxy's Cloud Run service only (module phr, from the env roots' `page_deployer_service_account_email`) | finalizing a version whose config rewrites `/api` to Cloud Run makes Hosting check `run.services.get` on the rewrite's target; without it: 403 "Permission 'run.services.get' denied" on the proxy service. Granted on that one service, not the project, so the account cannot read the other services' configuration (their environment holds the patient ID) |
+
+The third grant is not in bootstrap because the service is not: the env root creates it, and
+bootstrap runs before it exists. Copy the output `page_deployer_service_account_email` into the
+env root's tfvars (infra/envs/README.md, "Setting it up (once)").
 
 **The planner's custom role** (`planner_role_id`, default `pulsebridgeTerraformPlanner`). Predefined
 viewer roles read data: `roles/iam.securityReviewer` includes `healthcare.hl7V2Messages.list` (whose
@@ -466,6 +480,7 @@ No modules.
 | [google_project_iam_custom_role.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_custom_role) | resource |
 | [google_project_iam_member.deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.page_deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
+| [google_project_iam_member.page_deployer_service_usage](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_service.bootstrap](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_service) | resource |
 | [google_service_account.deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account) | resource |
@@ -485,7 +500,7 @@ No modules.
 | <a name="input_allow_build_trigger"></a> [allow\_build\_trigger](#input\_allow\_build\_trigger) | Grant the deployer roles/cloudbuild.builds.editor, which creating project-base's Cloud Build trigger needs (T26). Default false: set it only together with build\_trigger\_repository in an env root. The role also lets the holder start builds. | `bool` | `false` | no |
 | <a name="input_auto_create_network"></a> [auto\_create\_network](#input\_auto\_create\_network) | Only for a newly created project: keep the 'default' VPC network GCP creates automatically. Default false, because that network ships with firewall rules open to the internet (SSH, RDP, ICMP) and the stack builds its own VPC (module project-base). With false, the provider enables the Compute Engine API to delete the default network. | `bool` | `false` | no |
 | <a name="input_billing_account"></a> [billing\_account](#input\_billing\_account) | Billing account ID (format XXXXXX-XXXXXX-XXXXXX) to link to a newly created project. Required when create\_project = true; must be unset when adopting, because bootstrap does not change an existing project's billing. | `string` | `null` | no |
-| <a name="input_create_page_deployer"></a> [create\_page\_deployer](#input\_create\_page\_deployer) | Create the page deployer service account (ci\_identities.tf, T26): roles/firebasehosting.admin only, used by CI's page deploy jobs. Default false. | `bool` | `false` | no |
+| <a name="input_create_page_deployer"></a> [create\_page\_deployer](#input\_create\_page\_deployer) | Create the page deployer service account (ci\_identities.tf, T26) used by CI's page deploy jobs: roles/firebasehosting.admin and roles/serviceusage.serviceUsageViewer on the project, nothing else here (the env roots add roles/run.viewer on fhir-proxy's service only; T41). Default false. | `bool` | `false` | no |
 | <a name="input_create_planner"></a> [create\_planner](#input\_create\_planner) | Create the read-only planner service account (ci\_identities.tf, T26) that CI's terraform plan runs as. Default false. Opt in for CI. | `bool` | `false` | no |
 | <a name="input_create_project"></a> [create\_project](#input\_create\_project) | true: create a new GCP project with var.project\_id and link var.billing\_account to it. false: adopt an existing project with var.project\_id and create nothing at project level. No default, so the choice is always explicit. | `bool` | n/a | yes |
 | <a name="input_deployer_account_id"></a> [deployer\_account\_id](#input\_deployer\_account\_id) | account\_id (the part before @) of the deployer service account that env roots and CI run as. 6-30 characters. | `string` | `"terraform-deployer"` | no |

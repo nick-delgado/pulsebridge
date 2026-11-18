@@ -7,8 +7,10 @@
 #                  and the CI tfvars (which hold the patient's ID and, in prod, name, and the alert
 #                  address in clear) and the resources' configuration; no FHIR resources, HL7v2
 #                  messages, log entries or secret values. It plans with -lock=false.
-#   page deployer  roles/firebasehosting.admin only. The page deploy job runs the Firebase CLI and
-#                  its npm dependencies; with this account a compromised dependency can at worst
+#   page deployer  roles/firebasehosting.admin and roles/serviceusage.serviceUsageViewer on the
+#                  project, plus roles/run.viewer on fhir-proxy's service only (granted by module
+#                  phr from the env roots, T41). The page deploy job runs the Firebase CLI and its
+#                  npm dependencies; with this account a compromised dependency can at worst
 #                  change the Hosting site, not the infrastructure.
 #
 # Like the deployer, neither gets a key; GitHub Actions impersonates them through Workload
@@ -111,16 +113,38 @@ resource "google_service_account" "page_deployer" {
   project      = local.project_id
   account_id   = var.page_deployer_account_id
   display_name = "Dashboard page deployer"
-  description  = "Deploys web/dist to Firebase Hosting from CI. roles/firebasehosting.admin only. Created by infra/bootstrap (T26)."
+  description  = "Deploys web/dist to Firebase Hosting from CI: Hosting admin and Service Usage Viewer on the project, Cloud Run Viewer on fhir-proxy only. Created by infra/bootstrap (T26, T41)."
 
   depends_on = [google_project_service.bootstrap]
 }
 
-# The one role. Not a variable on purpose: anything broader would defeat the point of the account.
+# The page deployer's two project roles. Neither is a variable on purpose: anything broader would
+# defeat the point of the account. Two separate resources rather than one for_each, so that the
+# first one keeps the address google_project_iam_member.page_deployer[0] it had before T41 and an
+# existing state needs no `moved` block.
+#
+# roles/firebasehosting.admin: create a Hosting version, upload the files, release it.
 resource "google_project_iam_member" "page_deployer" {
   count = var.create_page_deployer ? 1 : 0
 
   project = local.project_id
   role    = "roles/firebasehosting.admin"
+  member  = google_service_account.page_deployer[0].member
+}
+
+# roles/serviceusage.serviceUsageViewer (serviceusage.services.get and .list: read whether an API
+# is enabled, nothing else). Before it deploys, the Firebase CLI checks that the Hosting API is
+# enabled (GET serviceusage.googleapis.com/v1/projects/<p>/services/firebasehosting.googleapis.com);
+# without this role that check is a 403 "Permission denied to get service" and the deploy stops
+# (first CI run on dev, 18 November 2026). Hosting admin does not include it.
+#
+# The third grant the deploy needs, run.services.get on the fhir-proxy service that /api rewrites
+# to, is NOT here: that service is created by the env root, so module phr grants roles/run.viewer
+# on that one service (its input page_deployer_service_account_email).
+resource "google_project_iam_member" "page_deployer_service_usage" {
+  count = var.create_page_deployer ? 1 : 0
+
+  project = local.project_id
+  role    = "roles/serviceusage.serviceUsageViewer"
   member  = google_service_account.page_deployer[0].member
 }

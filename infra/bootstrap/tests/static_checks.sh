@@ -18,7 +18,8 @@
 # 6. (T26) The page deployer and the planner get no role except their own: every reference to
 #    either account's identity (member or email) is counted, so a grant added through ANY
 #    resource type (a project, bucket, secret or repository binding) fails here. The page
-#    deployer: one project grant (roles/firebasehosting.admin). The planner: its custom role and
+#    deployer: two project grants (roles/firebasehosting.admin, roles/serviceusage.serviceUsageViewer;
+#    T41). The planner: its custom role and
 #    object viewer on the state bucket. The bindings in wif.tf use the accounts' `name`, which is
 #    what lets them be impersonated, not a grant to them.
 #
@@ -94,11 +95,19 @@ count_refs() {
   done
   echo "$n"
 }
+# T41: two project grants, each in its own block: Hosting admin and Service Usage Viewer. Its
+# run.viewer on fhir-proxy is module phr's (the service is not bootstrap's).
 page_refs="$(count_refs 'google_service_account\.page_deployer(\[0\])?\.(member|email)')"
-if [[ "$page_refs" == "1" ]] && grep -qE '^[[:space:]]*role[[:space:]]+=[[:space:]]*"roles/firebasehosting\.admin"' "$here/ci_identities.tf"; then
-  report "" "the page deployer has exactly one grant, roles/firebasehosting.admin"
+page_hosting="$(awk '/^resource "google_project_iam_member" "page_deployer"/{on=1} on{print} on&&/^}/{exit}' "$here"/*.tf)"
+page_usage="$(awk '/^resource "google_project_iam_member" "page_deployer_service_usage"/{on=1} on{print} on&&/^}/{exit}' "$here"/*.tf)"
+if [[ "$page_refs" == "2" ]] \
+  && grep -qE '^[[:space:]]*role[[:space:]]+=[[:space:]]*"roles/firebasehosting\.admin"[[:space:]]*$' <<<"$page_hosting" \
+  && grep -qE '^[[:space:]]*member[[:space:]]+=[[:space:]]*google_service_account\.page_deployer\[0\]\.member' <<<"$page_hosting" \
+  && grep -qE '^[[:space:]]*role[[:space:]]+=[[:space:]]*"roles/serviceusage\.serviceUsageViewer"[[:space:]]*$' <<<"$page_usage" \
+  && grep -qE '^[[:space:]]*member[[:space:]]+=[[:space:]]*google_service_account\.page_deployer\[0\]\.member' <<<"$page_usage"; then
+  report "" "the page deployer has exactly two project grants, Hosting admin and Service Usage Viewer"
 else
-  report "(page deployer identity referenced ${page_refs} times; expected 1, its Hosting grant)" "the page deployer has exactly one grant, roles/firebasehosting.admin"
+  report "(page deployer identity referenced ${page_refs} times, expected 2, or its grants changed)" "the page deployer has exactly two project grants, Hosting admin and Service Usage Viewer"
 fi
 planner_refs="$(count_refs 'google_service_account\.planner(\[0\])?\.(member|email)')"
 planner_block="$(awk '/^resource "google_project_iam_member" "planner"/{on=1} on{print} on&&/^}/{exit}' "$here"/*.tf)"
