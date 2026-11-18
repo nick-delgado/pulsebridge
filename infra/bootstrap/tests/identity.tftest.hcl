@@ -125,8 +125,8 @@ run "prod_identities_are_bound_to_their_environments" {
   }
 
   # The planner reads, never writes, and reads no data (T26 review M1): one custom role whose
-  # permissions are all get/getIamPolicy (plus serviceusage.services.use), none of the data-reading
-  # ones, and no predefined project role.
+  # permissions are all get/getIamPolicy (plus serviceusage.services.use and .list, which names
+  # the project's enabled APIs), none of the data-reading ones, and no predefined project role.
   assert {
     condition = (
       length(google_project_iam_member.planner) == 1 &&
@@ -140,9 +140,9 @@ run "prod_identities_are_bound_to_their_environments" {
   assert {
     condition = alltrue([
       for p in google_project_iam_custom_role.planner[0].permissions :
-      can(regex("\\.(get|getIamPolicy)$", p)) || p == "serviceusage.services.use"
+      can(regex("\\.(get|getIamPolicy)$", p)) || contains(["serviceusage.services.use", "serviceusage.services.list"], p)
     ])
-    error_message = "The planner's custom role may hold only get, getIamPolicy and serviceusage.services.use."
+    error_message = "The planner's custom role may hold only get, getIamPolicy, serviceusage.services.use and serviceusage.services.list."
   }
 
   assert {
@@ -158,6 +158,7 @@ run "prod_identities_are_bound_to_their_environments" {
     condition = length(setsubtract(toset([
       "resourcemanager.projects.getIamPolicy", "healthcare.fhirStores.getIamPolicy", "run.services.get",
       "compute.instances.get", "secretmanager.secrets.getIamPolicy", "serviceusage.services.use",
+      "serviceusage.services.list",
     ]), toset(google_project_iam_custom_role.planner[0].permissions))) == 0
     error_message = "The planner's custom role is missing a permission the plan needs."
   }

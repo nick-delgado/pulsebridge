@@ -37,6 +37,7 @@ locals {
     "resourcemanager.projects.get",          # data "google_project"; every provider call
     "resourcemanager.projects.getIamPolicy", # google_project_iam_member (identity)
     "serviceusage.services.get",             # google_project_service (project-base)
+    "serviceusage.services.list",            # google_project_service refreshes by listing the enabled services (first CI run on dev)
     "serviceusage.services.use",             # google-beta bills its calls to the project (user_project_override)
     "iam.serviceAccounts.get",               # google_service_account (identity)
     "iam.serviceAccounts.getIamPolicy",      # google_service_account_iam_member (identity)

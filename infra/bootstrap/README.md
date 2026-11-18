@@ -348,7 +348,7 @@ calls) and the IAM-policy read of each type that has `*_iam_member` resources:
 | Permissions | For |
 | --- | --- |
 | `resourcemanager.projects.get`, `.getIamPolicy` | `data "google_project"`, `google_project_iam_member` |
-| `serviceusage.services.get`, `serviceusage.services.use` | `google_project_service`; the beta provider bills its calls to the project (`user_project_override`) |
+| `serviceusage.services.get`, `serviceusage.services.list`, `serviceusage.services.use` | `google_project_service` (the provider refreshes it by listing the project's enabled services: without `.list` the first CI plan on dev was refused on every one); the beta provider bills its calls to the project (`user_project_override`) |
 | `iam.serviceAccounts.get`, `.getIamPolicy` | the service accounts and their bindings |
 | `secretmanager.secrets.get`, `.getIamPolicy`, `secretmanager.versions.get` | secrets' metadata, their bindings, the dev version's state; not `secretmanager.versions.access` |
 | `artifactregistry.repositories.get`, `.getIamPolicy` | the two repositories (with the cleanup policy) and their bindings; no image pull |
