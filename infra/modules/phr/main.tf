@@ -115,3 +115,18 @@ resource "google_cloud_run_v2_service_iam_member" "invoker" {
   role     = "roles/run.invoker"
   member   = "serviceAccount:${var.service_account_emails[each.value.workload]}"
 }
+
+# CI's page deployer may READ the fhir-proxy service (roles/run.viewer: run.services.get), and
+# only that service. Firebase Hosting checks run.services.get on a rewrite's Cloud Run target when
+# a version is finalized (`firebase deploy`), so without this the page deploy fails after upload.
+# Additive _iam_member on a resource this module owns, like the invoker grants; resource-level so
+# the account cannot read the other services' configuration. Optional: null means no grant.
+resource "google_cloud_run_v2_service_iam_member" "page_deployer_viewer" {
+  count = var.page_deployer_service_account_email == null ? 0 : 1
+
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.fhir_proxy.name
+  role     = "roles/run.viewer"
+  member   = "serviceAccount:${var.page_deployer_service_account_email}"
+}

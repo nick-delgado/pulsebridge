@@ -469,6 +469,30 @@ variable "trusted_proxy_hops" {
   }
 }
 
+variable "page_deployer_service_account_email" {
+  description = <<-EOT
+    Email of CI's page deployer service account (bootstrap output
+    page_deployer_service_account_email), or null (default). When set, this module grants it
+    roles/run.viewer on the fhir-proxy service, and on nothing else. Why: when `firebase deploy`
+    finalizes a Hosting version whose config rewrites /api to a Cloud Run service, Firebase
+    Hosting checks that the deploying account has run.services.get on that service; without it
+    the deploy fails with 403 "Permission 'run.services.get' denied" after the files are uploaded
+    (first CI run on dev, 18 November 2026). run.viewer on this one service reads its
+    configuration only; it cannot change, invoke or delete it. That configuration includes the
+    service's environment, so the page deploy job can read the patient's ID (and, with real
+    data, name), as the planner can; no narrower predefined role holds run.services.get (a custom role with
+    only it would expose the same configuration). null: no grant (no
+    CI page deploy, or the page is deployed by hand by someone who already holds the permission).
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.page_deployer_service_account_email == null || can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z0-9.-]+\\.iam\\.gserviceaccount\\.com$", coalesce(var.page_deployer_service_account_email, "x")))
+    error_message = "page_deployer_service_account_email must be a service account email, <account_id>@<project_id>.iam.gserviceaccount.com (bootstrap's output page_deployer_service_account_email), or null."
+  }
+}
+
 # ---------------------------------------------------------------------------------------------
 # Service settings
 # ---------------------------------------------------------------------------------------------

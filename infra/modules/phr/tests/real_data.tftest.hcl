@@ -81,6 +81,42 @@ run "only_fhir_proxy_is_public" {
   }
 }
 
+# T41: CI's page deployer may read the fhir-proxy service (Hosting checks run.services.get on a
+# rewrite's target when a version is finalized), and nothing else. Off by default.
+run "no_page_deployer_grant_by_default" {
+  command = apply
+
+  assert {
+    condition     = length(google_cloud_run_v2_service_iam_member.page_deployer_viewer) == 0
+    error_message = "With page_deployer_service_account_email null there must be no page deployer grant."
+  }
+}
+
+run "page_deployer_reads_fhir_proxy_only" {
+  command = apply
+  variables {
+    page_deployer_service_account_email = "page-deployer@example-project.iam.gserviceaccount.com"
+  }
+
+  assert {
+    condition = [
+      for b in google_cloud_run_v2_service_iam_member.page_deployer_viewer : "${b.project} ${b.location} ${b.name} ${b.role} ${b.member}"
+    ] == ["example-project us-central1 pulsebridge-fhir-proxy roles/run.viewer serviceAccount:page-deployer@example-project.iam.gserviceaccount.com"]
+    error_message = "The page deployer must get exactly one grant: roles/run.viewer on the fhir-proxy service."
+  }
+  assert {
+    condition     = google_cloud_run_v2_service_iam_member.page_deployer_viewer[0].name == google_cloud_run_v2_service.fhir_proxy.name
+    error_message = "The page deployer's grant must be on the fhir-proxy service (the /api rewrite's target), not cuff-sim."
+  }
+  assert {
+    # The invoker policy is unchanged: the page deployer may not invoke anything.
+    condition = toset([
+      for b in google_cloud_run_v2_service_iam_member.invoker : "${b.name} ${b.role} ${b.member}"
+    ]) == toset(["pulsebridge-cuff-sim roles/run.invoker serviceAccount:pb-fhir-proxy@example-project.iam.gserviceaccount.com"])
+    error_message = "Setting the page deployer must not change the invoker bindings."
+  }
+}
+
 # ---- scaling, concurrency, timeouts ---------------------------------------------------------
 
 run "both_scale_to_zero_with_caps" {

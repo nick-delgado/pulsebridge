@@ -120,7 +120,7 @@ and the MLLP adapter), `openemr` (OpenEMR on that VM and its OAuth client regist
 | OAuth 2.0, Google | authorization code flow with PKCE (S256), `state`, loopback redirect, offline access; refresh tokens in Secret Manager | [`scripts/connect-google-health/`](scripts/connect-google-health/README.md) |
 | OAuth 2.0, OpenEMR | client credentials grant with `private_key_jwt` (RS384 signed assertion), scoped `system/*` tokens; client registered on the VM | [`services/fhir-proxy/fhir_proxy/share/oauth.py`](services/fhir-proxy/fhir_proxy/share/oauth.py), [`infra/modules/openemr/README.md`](infra/modules/openemr/README.md) |
 | OIDC service-to-service | Scheduler, Pub/Sub push and fhir-proxy call Cloud Run with Google-signed identity tokens | [`infra/modules/identity/README.md`](infra/modules/identity/README.md#who-invokes-whom-decision-d10) |
-| Workload Identity Federation | GitHub Actions to a read-only planner, the deployer and a Hosting-only page deployer, restricted to one repository by numeric ID and each to its own CI contexts (pull requests, main, a protected GitHub Environment); no keys | [`infra/bootstrap/wif.tf`](infra/bootstrap/wif.tf) |
+| Workload Identity Federation | GitHub Actions to a read-only planner, the deployer and a page deployer that can change only Hosting, restricted to one repository by numeric ID and each to its own CI contexts (pull requests, main, a protected GitHub Environment); no keys | [`infra/bootstrap/wif.tf`](infra/bootstrap/wif.tf) |
 | Terraform CI/CD | plan on pull requests, apply dev on merge, prod after an approval, the page deployed after every apply | [`.github/workflows/`](.github/workflows/), [CI/CD in the runbook](infra/envs/README.md#cicd-t26) |
 
 ## Repository layout

@@ -337,8 +337,14 @@ one GitHub repository WIF trusts, only jobs on `main` (dev) or in the protected 
 `.github/workflows/terraform-*.yml` run checks and a dev plan on every pull request, apply dev on
 every merge to main, and apply prod after an approval in a protected GitHub Environment. They
 authenticate with Workload Identity Federation only: no key is stored in GitHub. A read-only
-**planner** makes the plans, the **deployer** applies, and a **page deployer** that can only touch
-Firebase Hosting deploys the page. The values they need are identifiers, not secrets, so they go
+**planner** makes the plans, the **deployer** applies, and a **page deployer** that can only change
+Firebase Hosting deploys the page. The page deployer needs three grants, not one (found in the
+first CI run on 18 November 2026): Firebase Hosting Admin to upload and release the page, Service
+Usage Viewer because the Firebase CLI first checks that the Hosting API is enabled, and Cloud Run
+Viewer on the `fhir-proxy` service only, because Hosting checks that it can read the service the
+`/api` rewrite points to. Bootstrap grants the first two; the third comes from the env root's
+`page_deployer_service_account_email`, which you set in the tfvars you upload for CI (copy it
+from bootstrap's output of the same name). The values they need are identifiers, not secrets, so they go
 in GitHub **repository variables**, five per environment: `DEV_GCP_WORKLOAD_IDENTITY_PROVIDER`,
 `DEV_TF_STATE_BUCKET`, `DEV_GCP_DEPLOYER_SA`, `DEV_GCP_PLANNER_SA`, `DEV_GCP_PAGE_DEPLOYER_SA`,
 and the same with `PROD_`; optionally `DEV_NIGHTLY_DESTROY` and `PROD_WITHOUT_DEV`. Every job
@@ -746,8 +752,11 @@ environment it does this after every apply, with the same `firebase-tools` versi
 
 **Worked when:** `terraform output -raw dashboard_url` (`https://<site>.web.app`) shows the login
 page. Runbook: [step 11](../infra/envs/README.md#11-deploy-the-page-deployer-after-every-apply).
-Confirmed on the 16 November dev deploy, with an Owner's credentials; that the deployer's
-Hosting role alone is enough is *not yet verified on a real project* (P12).
+Confirmed on the 16 November dev deploy, with an Owner's credentials, and on 18 November by CI's
+page deployer. The Hosting role alone is **not** enough (P12): the deploy also needs
+`serviceusage.services.get` on the project and `run.services.get` on `fhir-proxy`. The deployer
+has both through its other roles; CI's page deployer gets them from bootstrap and from
+`page_deployer_service_account_email`.
 
 ### 3.11 First-deploy checks
 

@@ -113,6 +113,10 @@ module "phr" {
 
   trusted_proxy_hops = var.trusted_proxy_hops # 2 behind Firebase Hosting (measured); see "The client address ..."
 
+  # Optional (T41): CI's page deployer (bootstrap output page_deployer_service_account_email) gets
+  # roles/run.viewer on fhir-proxy, which `firebase deploy` needs for the /api rewrite.
+  page_deployer_service_account_email = var.page_deployer_service_account_email
+
   # project-base enables the Cloud Run, Firebase Hosting and Compute APIs; identity's secret
   # accessor grants must exist first, because Cloud Run checks at deploy time that the service
   # account may read every mounted secret.
@@ -146,6 +150,7 @@ accepting any PID-3.4 while cuff-sim sends one.
 | `google_cloud_run_v2_service.fhir_proxy` | The dashboard's API (T14). Runs as `fhir-proxy`; public (invoker check off, ingress all; see "Public access and ingress"); `min 0`, **`max 2`**; concurrency **8** (= gunicorn's threads); request timeout **70 s** (= `REQUEST_TIMEOUT_SECONDS`); Direct VPC egress `ALL_TRAFFIC`; `reviewer-password` as a file at `latest`; TCP startup probe. |
 | `google_cloud_run_v2_service.cuff_sim` | The cuff simulator (T13). Runs as `cuff-sim`; internal-only, invoker check on; `min 0`, `max cuff_sim_max_instances` (1); concurrency 4; request timeout **60 s**; Direct VPC egress `PRIVATE_RANGES_ONLY`; `HTTPS_TIMEOUT_SECONDS=6`; HTTP startup probe on `GET /cuff/samples`. |
 | `google_cloud_run_v2_service_iam_member.invoker` | `roles/run.invoker` on cuff-sim for `fhir-proxy`'s account: the only invoker binding (`local.service_invokers`). |
+| `google_cloud_run_v2_service_iam_member.page_deployer_viewer` | Only with `page_deployer_service_account_email` (T41): `roles/run.viewer` on fhir-proxy for CI's page deployer. Firebase Hosting checks `run.services.get` on a rewrite's Cloud Run target when `firebase deploy` finalizes a version; without it the deploy fails after the upload ("Deploying the page"). Read-only, and on this one service; it does show the service's environment (the patient's ID and, with real data, name). |
 | `google_firebase_hosting_site.dashboard` | The Hosting site (`hosting_site_id`, default the project ID: the project's default site). |
 | `google_firebase_project.this` | Only with `manage_firebase_project = true`: adds Firebase to the project, which Hosting needs. |
 
@@ -281,7 +286,8 @@ ID) is deleted with its releases.
 ### Deploying the page (CI since T26, or the deployer by hand)
 
 Run after `terraform apply` (the rewrite needs the service to exist), from the repository root,
-as the deployer (`roles/firebasehosting.admin`):
+as the deployer (it holds `roles/firebasehosting.admin`, and through
+`roles/serviceusage.serviceUsageAdmin` and `roles/run.admin` the two reads listed below):
 
 ```bash
 terraform -chdir=infra/envs/<env> output -raw firebase_json > web/firebase.json   # not committed
@@ -297,11 +303,20 @@ terraform -chdir=infra/envs/<env> output -raw firebase_json > web/firebase.json 
   `firebase.json`; a Terraform change to the headers or the rewrite takes effect only on the
   next page deploy, so CI deploys the page after every apply.
 - In CI (infra/envs/README.md, "CI/CD") the page is built in a job with no cloud credential, and
-  deployed by a separate job as the **page deployer** (bootstrap `create_page_deployer`:
-  `roles/firebasehosting.admin` only) through Workload Identity Federation, with the
-  `firebase-tools` tree locked in `infra/envs/ci/deploy-tools/package-lock.json`. The CLI uses
-  Application Default Credentials; the documentation, its source and an offline experiment say it
-  accepts the external-account credential file, but that is not verified live.
+  deployed by a separate job as the **page deployer** through Workload Identity Federation, with
+  the `firebase-tools` tree locked in `infra/envs/ci/deploy-tools/package-lock.json`. The CLI uses
+  Application Default Credentials and accepted the external-account credential file in the first
+  CI run on dev (18 November 2026; checklist CI6).
+- **What `firebase deploy` needs** (measured in that run; `roles/firebasehosting.admin` alone was
+  refused twice):
+  1. `serviceusage.services.get` on the project: the CLI first checks that the Hosting API is
+     enabled; without it, 403 "Permission denied to get service". Bootstrap grants the page
+     deployer `roles/serviceusage.serviceUsageViewer`.
+  2. `run.services.get` on fhir-proxy: after the files are uploaded, finalizing the version
+     (`PATCH .../versions/<v>?updateMask=status,config`) makes Hosting check the rewrite's Cloud
+     Run target; without it, 403 "Permission 'run.services.get' denied on resource
+     'namespaces/<number>/services/<prefix>-fhir-proxy'". This module grants `roles/run.viewer`
+     on that service only when `page_deployer_service_account_email` is set.
 
 ## Public access and ingress
 
@@ -436,6 +451,7 @@ this is a **known limit**:
 | Caller | Role | On | Where |
 | --- | --- | --- | --- |
 | anyone (through the Hosting rewrite) | none needed: invoker check disabled | fhir-proxy | this module |
+| CI's page deployer (optional) | `roles/run.viewer` (read the configuration; **not** invoke) | fhir-proxy | this module (`page_deployer_service_account_email`) |
 | `fhir-proxy` | `roles/run.invoker` | cuff-sim | this module (`local.service_invokers`) |
 | `fhir-proxy` | `roles/run.invoker` | health-sync (real data) | module ingestion |
 | `scheduler-invoker` | `roles/run.invoker` | health-sync | module ingestion |
@@ -637,7 +653,8 @@ to Cloud Run need; the free quotas above still apply.
 root variable feeding both this module and module ingestion, with the `check` block in "Usage"),
 the two patient names (real data only); optionally `name_prefix`,
 `labels`, `hosting_site_id`, `public_origin` (T30), `extra_allowed_origins`,
-`trusted_proxy_hops`, `manage_firebase_project`, `cuff_sim_max_instances`, `deletion_protection`.
+`trusted_proxy_hops`, `manage_firebase_project`, `cuff_sim_max_instances`, `deletion_protection`,
+`page_deployer_service_account_email` (bootstrap's output of that name, T41).
 
 **Ordering.** Nothing here waits for `ingest_enabled`: a cuff reading before the setup step has
 written the Patient (D11) creates an identifier-only Patient by conditional create, which the
@@ -676,9 +693,10 @@ defaults, not through anything hardcoded here:
   `web/firebase.json`, the page built, and `firebase deploy --only hosting --project <project>` run
   with the locked `firebase-tools` (infra/envs/README.md, "CI/CD"). A Terraform change to the
   rewrite or the headers reaches the site only with that deploy.
-- **Identity**: the page deployer service account (`roles/firebasehosting.admin` only) through
-  Workload Identity Federation. No key in GitHub. Whether the Firebase CLI accepts WIF
-  (external-account) credentials live is checklist item CI6.
+- **Identity**: the page deployer service account through Workload Identity Federation (no key in
+  GitHub): `roles/firebasehosting.admin` and `roles/serviceusage.serviceUsageViewer` on the
+  project (bootstrap), `roles/run.viewer` on fhir-proxy only (this module, T41). The Firebase CLI
+  accepted the WIF (external-account) credentials in the first CI run on dev (checklist CI6).
 - **The nightly destroy of dev runs twice**: at 03:17 UTC, when the serverless subnet and the VPC
   may remain ("wait 1-2 hours" after the services that used the subnet are gone), and a retry at
   06:17 UTC that must leave nothing.
@@ -764,9 +782,14 @@ Nothing in this module has been applied; every test runs against mocked provider
 - That a request through Hosting reaches a service whose invoker check is disabled with no
   further setting (Firebase's guide uses "allow unauthenticated invocations", which in current
   `gcloud` is the same switch or an `allUsers` binding).
-- That the Firebase CLI accepts Workload Identity Federation credentials in CI, and that
-  `roles/firebasehosting.admin` is enough for `firebase deploy --only hosting` with a Cloud Run
-  rewrite (the CLI may read the service; the deployer has `roles/run.admin` anyway).
+- That the code-managed grant (`page_deployer_viewer`) adopts the hand-made one on dev without a
+  gap. It is the same binding: `_iam_member` reads the service's policy, adds the member only if it
+  is missing and writes it back, so the create succeeds with no real change; destroying it later
+  (or setting the input back to null) removes that one binding, hand-made or not. The first CI run
+  (18 November 2026) passed with the role granted by hand; a read-only plan with the input set
+  showed 1 to add, nothing changed or destroyed; the apply has not run yet. (Measured in
+  that run: the Firebase CLI accepts WIF credentials; `roles/firebasehosting.admin` alone is
+  NOT enough, see "Deploying the page".)
 - That creating the default site (`site_id = project_id`) through the API works on a project
   where it does not exist yet (adopting an existing one is the provider's documented code path).
 - Direct VPC egress connection delays on cold starts ("a minute or more" possible): neither
@@ -785,10 +808,10 @@ credentials removed from the environment, then `tests/static_checks.sh` and
 
 | File | Checks |
 | --- | --- |
-| `real_data.tftest.hcl` | only fhir-proxy public (invoker check off, ingress all); cuff-sim internal with the check on; the invoker bindings are exactly fhir-proxy on cuff-sim; no public member; both scale to zero; max 2 and 1; concurrency 8 and 4; the timeout relations read from the deployed values (proxy timeout = `REQUEST_TIMEOUT_SECONDS` ≤ 70, budgets < 60, each budget + 10 ≤ the request timeout, forward < cuff-sim's timeout, cuff-sim's worst cases < forward) and the documented numbers; Direct VPC egress settings of both; images, accounts, probe types and limits; `deletion_protection`; the reviewer password as a volume at `latest`, its mount, no secret in any environment variable; the exact environment of both services; custom origin, dev origin, the hop count (default 2, an override of 1); OpenEMR settings and mount when given and absent by default; the site, `firebase_json`'s rewrite, ignore list and headers; the CSP has no unsafe source; `manage_firebase_project` |
+| `real_data.tftest.hcl` | only fhir-proxy public (invoker check off, ingress all); cuff-sim internal with the check on; the invoker bindings are exactly fhir-proxy on cuff-sim; no public member; no page deployer grant by default, and with `page_deployer_service_account_email` exactly `roles/run.viewer` on fhir-proxy for that account, invokers unchanged; both scale to zero; max 2 and 1; concurrency 8 and 4; the timeout relations read from the deployed values (proxy timeout = `REQUEST_TIMEOUT_SECONDS` ≤ 70, budgets < 60, each budget + 10 ≤ the request timeout, forward < cuff-sim's timeout, cuff-sim's worst cases < forward) and the documented numbers; Direct VPC egress settings of both; images, accounts, probe types and limits; `deletion_protection`; the reviewer password as a volume at `latest`, its mount, no secret in any environment variable; the exact environment of both services; custom origin, dev origin, the hop count (default 2, an override of 1); OpenEMR settings and mount when given and absent by default; the site, `firebase_json`'s rewrite, ignore list and headers; the CSP has no unsafe source; `manage_firebase_project` |
 | `synthetic.tftest.hcl` | the synthetic name by default and given explicitly, for both services; no `HEALTH_SYNC_URL`; the rewrite's region |
-| `validation.tftest.hcl` | tag, tag-plus-digest and short-digest images refused; `http`, path and synthetic-mode health-sync URLs; public origin with a path or `http`; wildcard, trailing-slash and hostless (`https://.`, `https://`, `https://-`, `https://.example.org`) origins; an `http` OpenEMR URL; hop counts −1, 6 and 1.5 refused and 5 allowed; a real name (family or given) with synthetic data; missing names without; `SYN-` rules both ways; a backslash in a name; a long assigning authority; audit store equal to the FHIR store; missing account or secret keys; a host name as `mllp_host`; a region Hosting cannot rewrite to; a subnet path; too many cuff-sim instances |
-| `static_checks.sh` | no public principal; `invoker_iam_disabled = true` and `INGRESS_TRAFFIC_ALL` exactly once, on fhir-proxy; every `min_instance_count` 0 and no manual scaling; no authoritative or project IAM; no service account key; the one reviewed IAM member resource with members from `var.service_account_emails`; no secret in an environment variable and every secret version `latest`; no hardcoded project, service account, registry path, `https://<host>` (outside variable examples), site or service ID; no child module; no Hosting version, release or channel; fhir-proxy's `depends_on` on the invoker grant |
+| `validation.tftest.hcl` | tag, tag-plus-digest and short-digest images refused; `http`, path and synthetic-mode health-sync URLs; public origin with a path or `http`; wildcard, trailing-slash and hostless (`https://.`, `https://`, `https://-`, `https://.example.org`) origins; an `http` OpenEMR URL; hop counts −1, 6 and 1.5 refused and 5 allowed; a real name (family or given) with synthetic data; missing names without; `SYN-` rules both ways; a backslash in a name; a long assigning authority; audit store equal to the FHIR store; missing account or secret keys; a host name as `mllp_host`; a region Hosting cannot rewrite to; a subnet path; too many cuff-sim instances; a page deployer that is a user email or carries the `serviceAccount:` prefix (a service account email is accepted) |
+| `static_checks.sh` | no public principal; `invoker_iam_disabled = true` and `INGRESS_TRAFFIC_ALL` exactly once, on fhir-proxy; every `min_instance_count` 0 and no manual scaling; no authoritative or project IAM; no service account key; the two reviewed IAM member resources (`invoker` with members from `var.service_account_emails`; `page_deployer_viewer`, the only use of `var.page_deployer_service_account_email`, `roles/run.viewer` on fhir-proxy); no secret in an environment variable and every secret version `latest`; no hardcoded project, service account, registry path, `https://<host>` (outside variable examples), site or service ID; no child module; no Hosting version, release or channel; fhir-proxy's `depends_on` on the invoker grant |
 | `tests/tooling/test_phr_service_config.py` (run by `make test`) | the exact environment maps `real_data.tftest.hcl` asserts, read from that file and parsed by the services' REAL `fhir_proxy.config` and `cuff_sim.config`: each starts, every key is one the service declares (so a misspelled optional variable is not silently ignored), the parsed values are the intended ones, and both agree on the patient and stores |
 | `check_hosting_csp.py` | the header CSP equals `web/vite.config.ts`'s same-origin policy plus `frame-ancestors 'none'`, agrees with `web/scripts/check-bundle.mjs`'s required directives, has one CSP header only, allows no `unsafe-*`, wildcard or scheme source, and requires every other security header with its documented value |
 
@@ -860,6 +883,7 @@ Read directly (`curl`, 2026-11-15) unless marked otherwise:
 | `public_origin` | `string` | `null` (= `https://<site>.web.app`) | The origin reviewers open. |
 | `extra_allowed_origins` | `list(string)` | `[]` | Further CORS origins. |
 | `trusted_proxy_hops` | `number` | `2` | `TRUSTED_PROXY_HOPS`, 0 to 5; 2 measured behind Firebase Hosting, 1 with nothing in front of `run.app`. |
+| `page_deployer_service_account_email` | `string` | `null` | CI's page deployer; set: `roles/run.viewer` on fhir-proxy for it (`firebase deploy` checks `run.services.get` on the rewrite's target). |
 | `cuff_sim_max_instances` | `number` | `1` | 1 to 3; the cuff rate limit is per instance. |
 
 ## Outputs
