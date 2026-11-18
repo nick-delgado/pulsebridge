@@ -4,7 +4,7 @@
 #   build-page      build web/dist (npm ci, Vite) with NO cloud credential; upload it
 #   dev             apply infra/envs/dev as dev's deployer (no npm code runs in this job)
 #   dev-preflight   refuse to go on unless "dev-page" allows exactly main, with no admin bypass
-#   dev-page        (environment dev-page) deploy web/dist as dev's PAGE DEPLOYER (Hosting only)
+#   dev-page        (environment dev-page) deploy web/dist as dev's PAGE DEPLOYER (changes Hosting only; T41)
 #   prod-preflight  refuse to go on unless "prod-plan", "prod" and "prod-page" allow exactly
 #                   main, with no admin bypass, and "prod" has required reviewers
 #   prod-plan       (environment prod-plan) plan prod as prod's READ-ONLY PLANNER; record the
@@ -198,8 +198,9 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      # The page deployer holds roles/firebasehosting.admin only: the Firebase CLI and its npm
-      # packages run with nothing else.
+      # The page deployer holds Hosting admin and Service Usage Viewer on the project and Cloud
+      # Run Viewer on fhir-proxy only (T41: firebase deploy needs all three): the Firebase CLI and
+      # its npm packages run with nothing else.
       - id: auth
         uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         with:

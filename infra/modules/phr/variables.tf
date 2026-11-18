@@ -478,8 +478,10 @@ variable "page_deployer_service_account_email" {
     Hosting checks that the deploying account has run.services.get on that service; without it
     the deploy fails with 403 "Permission 'run.services.get' denied" after the files are uploaded
     (first CI run on dev, 18 November 2026). run.viewer on this one service reads its
-    configuration only; it cannot change, invoke or delete it. null: no grant (no CI page deploy,
-    or the page is deployed by hand by someone who already holds the permission).
+    configuration only; it cannot change, invoke or delete it. That configuration includes the
+    service's environment, so the page deploy job can read the patient's ID (and, with real
+    data, name), as the planner can; no narrower role holds run.services.get. null: no grant (no
+    CI page deploy, or the page is deployed by hand by someone who already holds the permission).
   EOT
   type        = string
   default     = null
