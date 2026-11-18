@@ -65,7 +65,8 @@ EDGE_CONFIG_LABEL="pulsebridge.config" # container label holding a hash of its r
 EDGE_MARIADB_SECRET="mariadb-root-password"
 # The file the official MariaDB entrypoint writes into the data directory during a first
 # initialisation (create_healthcheck_users); healthcheck.sh logs in with it. Its presence is the
-# marker of a first initialisation that got as far as creating the users (T42).
+# marker of a first initialisation that reached the step that creates the users (the file is
+# written just before that SQL runs; README, "First initialisation of MariaDB") (T42).
 EDGE_MARIADB_INIT_MARKER=".my-healthcheck.cnf"
 EDGE_MARIADB_FRESH=0 # set to 1 by prepare_mariadb_datadir when MariaDB will initialise a new database
 
@@ -601,11 +602,15 @@ prepare_mariadb_datadir() {
       log "MariaDB data directory $EDGE_MARIADB_DIR is HALF-INITIALISED (no $EDGE_MARIADB_INIT_MARKER and no user database: an earlier first initialisation stopped part-way): moving it aside to $aside and initialising a new database"
       if docker container inspect "$EDGE_MARIADB_CONTAINER" > /dev/null 2>&1; then
         log "removing container $EDGE_MARIADB_CONTAINER left from the failed initialisation, so the new one starts on the empty directory"
-        docker stop --time "$EDGE_STOP_TIMEOUT_SECONDS" "$EDGE_MARIADB_CONTAINER" > /dev/null
-        docker rm "$EDGE_MARIADB_CONTAINER" > /dev/null
+        docker stop --time "$EDGE_STOP_TIMEOUT_SECONDS" "$EDGE_MARIADB_CONTAINER" > /dev/null ||
+          die "could not stop container $EDGE_MARIADB_CONTAINER before moving its data directory aside"
+        docker rm "$EDGE_MARIADB_CONTAINER" > /dev/null ||
+          die "could not remove container $EDGE_MARIADB_CONTAINER before moving its data directory aside"
       fi
-      mv "$EDGE_MARIADB_DIR" "$aside"
-      mkdir -p "$EDGE_MARIADB_DIR"
+      mv "$EDGE_MARIADB_DIR" "$aside" ||
+        die "could not move the half-initialised MariaDB data directory aside to $aside; not starting MariaDB"
+      mkdir -p "$EDGE_MARIADB_DIR" ||
+        die "could not create a new, empty $EDGE_MARIADB_DIR; not starting MariaDB"
       for old in "$EDGE_DATA_DIR"/mariadb.incomplete-*; do
         if [ "$old" != "$aside" ] && [ -d "$old" ]; then
           rm -rf -- "$old"

@@ -738,11 +738,14 @@ run only against fakes. Verify at T25, in this order (each step depends on the o
 20. **MariaDB's first initialisation through the wrapper (T42)**, on a new data disk: `docker logs
     mariadb` shows `[PulseBridge]: first initialisation: the temporary server may take up to
     300s`, then the entrypoint's "MariaDB init process done"; the startup log shows `first
-    initialisation of a new database completed`. Not run on a VM: the wrapper was tested with a
-    stand-in entrypoint, and its one-line change was checked against the 11.8.9 entrypoint's source
-    from MariaDB's repository, not against the file inside the pinned image digest. Also check
-    that the container's `/tmp` is writable and executable for the copy (it is the image's own
-    directory in the container layer, not a host mount).
+    initialisation of a new database completed`. Partly seen on 18 November on prod's VM, in a
+    throwaway container with the pinned image and the module's server arguments on a fresh
+    directory of the data disk: the wrapper logged its line, the patched copy ran from the
+    container's `/tmp` (so `/tmp` is writable and executable), the temporary server answered after
+    8 s, the marker was written and the container became healthy in about 25 s; restarted on the
+    now-initialised directory it logged "running the official entrypoint unchanged" and stayed
+    healthy. Not yet seen: a first initialisation that actually takes longer than 30 s, and the
+    startup script's own log lines on a real boot.
 21. **Recovery from a half-initialised directory (T42)** on a real disk: the directory is renamed
     to `mariadb.incomplete-<time>`, the leftover container is stopped and removed, and the next
     initialisation completes. Whether the real half-initialised directory holds only `mysql`,
