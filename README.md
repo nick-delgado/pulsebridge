@@ -160,6 +160,9 @@ The full walk-through, from a fresh clone to a running stack and back to nothing
 3. Follow the [runbook](infra/envs/README.md#the-runbook): targeted applies, secret values, the
    VM's first boot, the image build, the first apply with ingest off, the first seeding, the
    second apply with ingest on, the page deploy.
+4. For your own watch data (prod, or dev with `use_synthetic_data = false`), register a Google
+   Health OAuth app in your project and run the connect script on your own computer
+   ([setup guide, Step 2 and 3.8](docs/setup.md#step-2-register-a-google-health-oauth-app-real-data-only)).
 
 To see the dashboard right now with no cloud at all:
 
@@ -270,14 +273,29 @@ secret script misread, alert filters without a resource type, a FHIR count Cloud
 refuses, the Pub/Sub service agent missing on a new project), and gaps in the runbook, now
 documented ([findings](infra/envs/README.md#findings-for-the-modules)).
 
-**Not yet verified:** the real-data path (a Pixel Watch through the Google Health API, the
-connect script, health-sync) and prod; and on dev, alerts firing, patching the VM, password
-rotation, `terraform destroy`, and CI/CD's first run.
-The runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's
-result and lists what is still open. The Terraform CI/CD workflows exist but stay switched off
-until their repository variables are set ([CI/CD](infra/envs/README.md#cicd-t26)). The
-end-to-end smoke test (`make smoke`, [`tests/e2e/`](tests/e2e/README.md)) ran against dev on
-17 November and passed: the cuff path through MLLP, the FHIR store and the share to OpenEMR.
-Its health-sync checks were skipped and have never run live: they need a real-data stack. The
-demo is shown at the Firebase Hosting address of the prod project; a custom domain (T30) is
-deferred ([`docs/workplan.md`](docs/workplan.md)).
+**Checked further on dev (17 and 18 November):** a reboot and patching the VM by replacement
+(the data disk and address kept), the seeder's and Scheduler's alerts firing by email, password
+rotation without a restart, the hop count behind Firebase Hosting (2), replay from the
+dead-letter subscription, cold-start timings, and the end-to-end smoke test (`make smoke`,
+[`tests/e2e/`](tests/e2e/README.md)). The checks found and fixed more problems, each with a test:
+the stored-window read asked Cloud Healthcare for element names it ignores (every hourly run
+rewrote everything), and the CI planner and page deployer each lacked a permission.
+
+**CI/CD runs on dev** (18 November): pull requests are planned by a read-only planner that posts
+the plan as a comment; a merge to `main` applies dev and deploys its page, through Workload
+Identity Federation with no stored keys ([CI/CD](infra/envs/README.md#cicd-t26)).
+
+**Deployed to prod with real data (18 November 2026):** the owner's existing project, adopted by
+bootstrap, then the runbook with the owner's own Google Health account connected by the connect
+script. health-sync's first sync wrote the heart-rate windows and matched the Patient the connect
+script wrote; its second run found them all unchanged. `make smoke` passed in full against prod,
+including the cuff path, the share to OpenEMR and the health-sync checks. Prod's first boot also
+found a fault: on the small VM, MariaDB's first-time setup can take longer than its image allows,
+which left the database half-made; the startup script now allows longer and recovers a half-made
+directory ([edge-vm README](infra/modules/edge-vm/README.md#first-initialisation-of-mariadb)).
+
+**Not yet verified:** prod's first approved apply through CI, `terraform destroy` and what it
+leaves behind, a forced slow cuff send, and a few inspections that need a shell on the VM. The
+runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's result and
+lists what is still open. The demo is shown at the Firebase Hosting address of the prod project;
+a custom domain (T30) is deferred ([`docs/workplan.md`](docs/workplan.md)).
