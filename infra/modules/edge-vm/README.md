@@ -147,7 +147,10 @@ non-secret values only) followed by `scripts/edge-startup.sh` (the logic, plain 
 5. **Copy MariaDB's secret** (`mariadb-root-password`) from Secret Manager to a mode-600 file in
    `/mnt/disks/edge/secrets` (mode 700), once.
 6. **Start MariaDB** and wait until its health check says `healthy`. MariaDB depends only on its
-   own secret: a missing T23 secret never keeps it down.
+   own secret: a missing T23 secret never keeps it down. Before it starts, the script looks at the
+   data directory and moves aside one left half-initialised by a failed first boot; the container
+   runs a small wrapper in front of the image's entrypoint that gives a first initialisation more
+   time. See "First initialisation of MariaDB" below.
 7. **Copy the other secrets** in `secret_files` (T23's), all retried together.
 8. **Run hooks** (T23), in name order, each under a time limit.
 
@@ -175,6 +178,101 @@ the first holds it exits at once with an error.
 
 There is deliberately no variable that forces a format. A disk that must be reformatted is wiped
 by a person, on purpose (`wipefs -a` or `blkdiscard`), after which the next boot sees a blank disk.
+
+### First initialisation of MariaDB
+
+**What happened (T42).** Prod's first boot failed twice on 18 November. On a new, empty data
+directory the official MariaDB image's entrypoint (`/usr/local/bin/docker-entrypoint.sh`) first
+creates the system tables (`mariadb-install-db`), then starts a **temporary server**, a MariaDB
+running without networking, to load the time zones, set the root password and create the
+`healthcheck` users, then stops it and starts the real server. It waits for that temporary server
+only 30 seconds (`for i in {30..0}` in `docker_temp_server_start`), and nothing configures that.
+On prod's e2-micro the server took over 33 s at boot, so the entrypoint printed "Unable to start
+server." and exited. Docker restarted the container (`--restart unless-stopped`) on the
+half-made directory; the entrypoint now saw a database (it tests for the `mysql` schema
+directory), skipped initialisation, and started a server without the health-check users, so every
+health check was refused ("Access denied for user 'mysql'@'localhost'") until the deadline. In
+throwaway containers on the same VM the same step took 1 to 16 s; on dev it took 3 s. Load and
+CPU contention on a shared-core VM at boot are the likely cause, not proven.
+
+**Fix 1: a longer wait, only on the first initialisation.** `scripts/mariadb-entrypoint-wrapper.sh`
+runs inside the container in front of the official entrypoint: the container is started with
+`--entrypoint bash` and the command `-c <wrapper> pulsebridge-mariadb-entrypoint mariadbd <S2's
+flags>`. The wrapper:
+
+- on an **initialised** data directory (it has the `mysql` directory, the entrypoint's own test)
+  runs the official entrypoint **unchanged**: restarts and reboots behave exactly as before;
+- on an **empty** one writes a copy of the entrypoint to `/tmp` in the container with the one
+  line `for i in {30..0}; do` changed to `for i in {300..0}; do` (`mariadb_init_wait_seconds`,
+  default 300), and runs the copy. The rest of the entrypoint is byte for byte the image's
+  (checked against `11.8/docker-entrypoint.sh` of MariaDB/mariadb-docker at commit `bdfe641`,
+  the commit Docker's official-images library lists for 11.8.9: the copy differs in that line
+  only);
+- **refuses** (exits non-zero with `[ERROR] [PulseBridge]: expected 'for i in {30..0}; do'
+  exactly once ...`) when that line is not in the entrypoint exactly once. A new image whose
+  entrypoint changed is then noticed at its first initialisation instead of quietly getting
+  the 30-second wait back. An already-initialised database is not affected by this check.
+
+The image on disk is not modified; the copy lives in the container's writable layer and is
+written again on every container start. The health check, restart policy, password file and
+everything else in `docker run` are as before. The wait is bounded twice: the loop gives up after
+`mariadb_init_wait_seconds`, and the variable may be at most half of `boot_wait_minutes`, so the
+startup script is still waiting when the server answers (the other half covers the image pull,
+`mariadb-install-db` and the health check's 1-minute interval).
+
+Alternatives rejected: copying the entrypoint out of the image on the host and bind-mounting a
+patched file (the entrypoint re-executes itself as the `mysql` user with `exec gosu mysql
+"${BASH_SOURCE[0]}"`, so the copy must be executable, and `/var` on COS is mounted `noexec`);
+running the first initialisation ourselves (re-implementing the entrypoint's root password,
+user and time-zone steps is far more code to get wrong); a bigger machine (billed, and the cause
+is not proven).
+
+**Fix 2: recover from a half-initialised directory.** Before MariaDB starts, the script sorts the
+data directory (`/mnt/disks/edge/mariadb`) into one of four cases and logs which:
+
+| Data directory | Log line | Action |
+| --- | --- | --- |
+| empty | `... is empty: MariaDB will initialise a new database (first boot)` | start; the wrapper applies the longer wait |
+| has `.my-healthcheck.cnf` | `... holds an initialised database (.my-healthcheck.cnf present); using it as it is` | start, never touched |
+| no marker, but a database directory other than `mysql`, `sys`, `performance_schema`, `test` | `WARNING: ... has no .my-healthcheck.cnf ... holds the database(s) openemr: ... NOT moving it` | start, never touched; a person looks |
+| no marker, system schemas and files only | `... is HALF-INITIALISED ...: moving it aside to /mnt/disks/edge/mariadb.incomplete-<UTC time> ...` | stop and remove the leftover container, rename the directory, make an empty one, remove older `mariadb.incomplete-*` copies, start: a fresh first initialisation |
+
+The marker, `.my-healthcheck.cnf`, is the file the entrypoint writes into the data directory while
+it creates the health-check users (`create_healthcheck_users`); `healthcheck.sh` logs in with it.
+Without it the health check cannot pass, so a container on such a directory was never serving and
+stopping it loses nothing. It is a **one-way** test, deliberately erring towards never moving a
+real database:
+
+- A directory that has the marker is never touched, even though the marker is written just
+  **before** the SQL that sets the root password runs: a first initialisation stopped in that
+  instant would keep the marker and stay unhealthy. Prod's failure was earlier (no marker).
+  Recovery by hand, if it ever happens: `sudo docker stop mariadb && sudo docker rm mariadb`, `sudo
+  mv /mnt/disks/edge/mariadb /mnt/disks/edge/mariadb.broken-<date>`, `sudo
+  google_metadata_script_runner startup`.
+- A complete database could lack the marker if it was created by an image older than the
+  health-check users (added to the official images around 2023) or the file was deleted. The
+  second, positive signal covers the case that matters: any database directory besides MariaDB's own system schemas (OpenEMR's
+  `openemr`, for example) means real data, and the directory is not moved whatever the marker
+  says. A marker-less directory with system schemas only would be moved, which loses no
+  application data (it is renamed, not deleted, until the next half-initialised directory
+  replaces it).
+- The decision is made once per run, before the container is (re)created, so a run never loops on
+  re-initialising. It cannot tell a failed first initialisation from one still in progress: a
+  manual re-run started while a first initialisation is still working (only possible after the
+  previous run reached its deadline, which is at least twice the temporary server's wait) would
+  stop it and start again. If the new first initialisation fails too, the run ends at the deadline with
+  `ERROR: MariaDB is not healthy by the boot deadline (...): its FIRST INITIALISATION did not
+  complete` and MariaDB's last 20 log lines (prefixed `mariadb|`); the next run (a reboot, or
+  `sudo google_metadata_script_runner startup`) tries once more.
+
+On success the startup log says `MariaDB is healthy: first initialisation of a new database
+completed (<n>s into this run)`, or `MariaDB is healthy (existing database)` on later boots. In
+`docker logs mariadb` the wrapper's lines carry `[PulseBridge]`.
+
+OpenEMR's hooks (`modules/openemr/scripts`) need only the container name `mariadb`, its health
+status and `docker exec ... mariadb`; none of that changes. The first boot after this change
+replaces the MariaDB container once (its `docker run` arguments changed, so the configuration
+hash did), with the graceful `docker stop --time 120`; the data directory is kept.
 
 ### Safe on every boot, and graceful replacement
 
@@ -223,7 +321,7 @@ Worst case with the defaults, before hooks:
 | Data disk link | 30 s |
 | `mkfs.ext4` on a blank 10 GB disk (first boot only) | not bounded by the script; with `lazy_itable_init=0` probably one to two minutes on pd-standard (not measured) |
 | Docker daemon, credential helper, network | 60 s + 90 s |
-| Pulls, adapter check, MariaDB's secret, MariaDB health (shared deadline) | 15 min |
+| Pulls, adapter check, MariaDB's secret, MariaDB health (shared deadline; a first initialisation's temporary server may take up to `mariadb_init_wait_seconds`, default 5 min, of it) | 15 min |
 | Overshoot past the deadline by the attempt in flight | about 2 min (a token call and a Secret Manager call, 60 s each) |
 | Other secrets after the deadline: one last attempt each | about 2 min per missing secret |
 
@@ -519,7 +617,10 @@ make tf-test    # runs everything below with Google credentials removed from the
   asked), also in the rendered script; digests; hooks and extra secrets reaching the script; the
   `boot_image` output; the metadata size limit counted in bytes (a hook of 100,000 three-byte
   characters is refused, one of 50,000 plans).
-- `tests/validation.tftest.hcl`: a tag instead of a digest (adapter and MariaDB), the default
+- `tests/edge_vm.tftest.hcl` also checks that the rendered script carries the wrapper file verbatim
+  in its quoted here-document and the first-initialisation wait (300 by default, or the variable).
+- `tests/validation.tftest.hcl`: `mariadb_init_wait_seconds` below 60, fractional, or over half of
+  `boot_wait_minutes` is rejected (exactly half plans); a tag instead of a digest (adapter and MariaDB), the default
   Compute account, a store path instead of a short name, a missing MariaDB secret, a secret with a
   version, a non-COS image, a zone outside the subnet's region, and more are each rejected. The
   single-quote precondition cannot be reached through any input today (every input that reaches
@@ -558,7 +659,21 @@ make tf-test    # runs everything below with Google credentials removed from the
     when the disk is missing;
   - hooks: run after MariaDB is healthy, with the documented environment, under `timeout`, without
     the lock's file descriptor; a failing first hook does not stop the second;
-  - preflight: a missing `docker` or `timeout` is named and nothing else runs.
+  - preflight: a missing `docker` or `timeout` is named and nothing else runs;
+  - MariaDB's first initialisation (T42): the container is started with `--entrypoint bash -c
+    <wrapper>` and the wrapper's text is exactly `scripts/mariadb-entrypoint-wrapper.sh`; the fake
+    `docker run` leaves an initialised (or, with `FAKE_MARIADB_INIT=fail`, a half-initialised) data
+    directory like the real entrypoint. A failed first initialisation is reported with MariaDB's
+    log lines; the next run moves the directory aside with its files, removes an older copy,
+    stops and removes the leftover container and initialises again. A directory with the marker,
+    and one without it that holds an `openemr` database, are left untouched; one with system
+    schemas only is moved;
+  - the wrapper itself, run with real bash against a stand-in entrypoint that has the same wait
+    loop: a server that needs 45 tries fails with the stand-in alone (the prod failure) and
+    succeeds through the wrapper, which passes the command through unchanged and changes only
+    the loop bound; a server that never answers still fails (the wait is bounded); an initialised
+    directory runs the official entrypoint itself; the loop found twice or not at all, or a wait
+    that is not a number, is refused and nothing runs.
 
   shellcheck is taken from PATH or `$SHELLCHECK`; without it the lint is skipped with a warning,
   except when `CI=true`. The files are clean with shellcheck 0.9.0 (the version on CI's
@@ -620,6 +735,26 @@ run only against fakes. Verify at T25, in this order (each step depends on the o
 18. **The e2-micro free tier** applies to this VM (billing report after the first month), and the
     e2-micro list price outside it.
 19. **Docker log options** (`--log-opt max-size`) are compatible with the COS logging agent.
+20. **MariaDB's first initialisation through the wrapper (T42)**, on a new data disk: `docker logs
+    mariadb` shows `[PulseBridge]: first initialisation: the temporary server may take up to
+    300s`, then the entrypoint's "MariaDB init process done"; the startup log shows `first
+    initialisation of a new database completed`. Partly seen on 18 November on prod's VM, in a
+    throwaway container with the pinned image and the module's server arguments on a fresh
+    directory of the data disk: the wrapper logged its line, the patched copy ran from the
+    container's `/tmp` (so `/tmp` is writable and executable), the temporary server answered after
+    8 s, the marker was written and the container became healthy in about 25 s; restarted on the
+    now-initialised directory it logged "running the official entrypoint unchanged" and stayed
+    healthy. Not yet seen: a first initialisation that actually takes longer than 30 s, and the
+    startup script's own log lines on a real boot.
+21. **Recovery from a half-initialised directory (T42)** on a real disk: the directory is renamed
+    to `mariadb.incomplete-<time>`, the leftover container is stopped and removed, and the next
+    initialisation completes. Whether the real half-initialised directory holds only `mysql`,
+    `sys` and files (as the rule assumes) was reasoned from the entrypoint, not listed on prod; a
+    directory with an unexpected extra directory would be left alone with a WARNING (safe, but
+    then needs the manual steps in "First initialisation of MariaDB").
+22. **The first boot after T42 on an existing VM** (dev, prod): the MariaDB container is replaced
+    once with a clean shutdown, the wrapper logs `data directory already initialised: running the
+    official entrypoint unchanged`, and the startup log says `(existing database)`.
 
 Other assumptions about other modules (exact output names): `project-base.edge_subnet_id`,
 `edge_vm_network_tag`, `mllp_port`, `dockerhub_mirror_url` (non-null: `create_dockerhub_mirror`
@@ -675,6 +810,7 @@ No modules.
 | <a name="input_labels"></a> [labels](#input\_labels) | Labels added to the VM, its disks and its address. | `map(string)` | `{}` | no |
 | <a name="input_machine_type"></a> [machine\_type](#input\_machine\_type) | Machine type of the VM. e2-micro (2 shared vCPUs, 1 GB) is the free-tier size that spike S2 measured as enough for one reviewer at a time; e2-small eases the CPU-burst limit but is outside the free tier and billed by the hour. | `string` | `"e2-micro"` | no |
 | <a name="input_mariadb_image"></a> [mariadb\_image](#input\_mariadb\_image) | MariaDB image path inside the Docker Hub mirror, pinned by digest (an optional tag before the digest is kept for readability only). Default: mariadb 11.8 as tested in spikes S1 and S2; the digest was confirmed current on Docker Hub on 2026-11-15. | `string` | `"library/mariadb:11.8@sha256:d36f18d65a0459510b8b0f643b226a6d299e3206486e2b64ff20754a6d291707"` | no |
+| <a name="input_mariadb_init_wait_seconds"></a> [mariadb\_init\_wait\_seconds](#input\_mariadb\_init\_wait\_seconds) | Longest MariaDB's FIRST initialisation waits for its temporary server to start (the server that sets the root password and creates the health-check users). The official image waits 30 s, which prod's e2-micro exceeded at boot (T42); the startup script's entrypoint wrapper raises it to this. Used only on an empty data directory; an initialised database starts exactly as the image ships it. At most half of boot\_wait\_minutes, so the startup script is still waiting when the server answers. | `number` | `300` | no |
 | <a name="input_mllp_adapter_image"></a> [mllp\_adapter\_image](#input\_mllp\_adapter\_image) | Google's MLLP adapter image, pinned by digest. The image has no version tags, only `latest` (spike S4), so a digest is the only pin. To check for a newer build without pulling: `crane digest gcr.io/cloud-healthcare-containers/mllp-adapter:latest`, or a HEAD request for /v2/cloud-healthcare-containers/mllp-adapter/manifests/latest on gcr.io and read Docker-Content-Digest. Default: the digest spike S4 tested, still `latest` on 2026-11-15. | `string` | `"gcr.io/cloud-healthcare-containers/mllp-adapter@sha256:92eaa0fc5fcd0eb7ff62bd28c9140dcd7582bfec20790e5b203ca8dc75c4a90f"` | no |
 | <a name="input_mllp_adapter_log_error_messages"></a> [mllp\_adapter\_log\_error\_messages](#input\_mllp\_adapter\_log\_error\_messages) | Pass --log\_error\_msg=true to the MLLP adapter, so it logs the store's error text for each NACK. Off by default: upstream's flag help says "These error logs will contain sensitive data", and the logs reach Cloud Logging. Spike S4 ran with it on. Off loses only the NACK reason in the adapter's own log; the cuff simulator still receives the NACK and records its MSA-3 reason in the AuditEvent. | `bool` | `false` | no |
 | <a name="input_mllp_port"></a> [mllp\_port](#input\_mllp\_port) | Port the MLLP adapter is published on at the VM's address. Must equal project-base's `mllp_port`, which is the port its firewall rule opens from the serverless subnet. | `number` | `2575` | no |

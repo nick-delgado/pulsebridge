@@ -10,10 +10,10 @@ explained the first time it appears.
 > 16 November 2026, on a new **dev** project with **synthetic data**, steps 1 to 3.10: it reached
 > a working stack (the VM's first boot, the image build, the applies, the first seeding, the
 > page, a reviewer login, cuff readings over MLLP and HTTPS, and shares of a blood pressure and a
-> heart rate to OpenEMR), and its corrections are in the steps below. What that run did not
-> touch is **not yet verified on a real project**: your own watch data (Step 2 and the connect
-> script), prod, the first-deploy measurements of 3.11, alerts firing, patching, password
-> rotation, teardown and CI. The runbook's
+> heart rate to OpenEMR), and its corrections are in the steps below. Later checks on
+> dev (alerts firing, patching, password rotation, CI) and a prod deploy with real watch data on
+> 18 November (Step 2, the connect script, health-sync) are recorded in the runbook too.
+> Teardown is still not yet verified on a real project. The runbook's
 > [master checklist](../infra/envs/README.md#master-checklist) lists every assumption in the order
 > you will meet them and records what the dev run confirmed. If a step below does not behave as
 > described, that checklist is where the answer is recorded.
@@ -311,9 +311,10 @@ brand-new project the first apply may stop with "API has not been used in projec
 disabled": wait a minute and run `terraform apply` again; it continues where it stopped.
 Runbook: [step 1](../infra/envs/README.md#1-bootstrap-the-project-once-per-project-owner).
 On the 16 November dev deploy bootstrap adopted an existing project and ended with
-`firebase_added = true`, run from a service account key rather than a person's login; creating a
-project, and Workload Identity Federation, are *not yet verified on a real project* (checklist
-A13, A14).
+`firebase_added = true`, run from a service account key rather than a person's login; adopting an
+existing project and Workload Identity Federation from this repository's workflows were verified
+on 18 November (prod and CI on dev); creating a new project with `create_project = true` is *not
+yet verified* (checklist A13, A14).
 
 ### Roles you need, and the roles the deployer gets
 
@@ -389,8 +390,8 @@ In the [Google Cloud console](https://console.cloud.google.com/), in your projec
 **How to know it worked.** In Google Auth Platform: Audience shows publishing status "Testing"
 and your account under Test users; Data Access lists the scope above; Clients lists your client
 with type "Desktop". The real proof comes in [3.8](#38-the-setup-step-write-the-patient-exactly-one-of-the-two),
-when the connect script stores a refresh token. *Not yet verified with this repository's script*
-(checklist I14, I15).
+when the connect script stores a refresh token. Verified with this repository's script on
+18 November in prod (checklist I14, I15).
 
 ### Testing status: the 7-day refresh token
 
@@ -647,9 +648,10 @@ and `terraform output push_enabled` is `false`. Real data: if it stops at
 `google_cloud_run_v2_service.health_sync` on a secret error, run the connect script (3.8) now and
 apply again. Then run checklist item E8's `AA` test (a test message through the MLLP adapter must
 get `AA`; the VM's ingest grant on the store is created by this apply). Runbook: [step 8](../infra/envs/README.md#8-first-full-apply-ingest-off-deployer).
-Confirmed on the 16 November dev deploy with synthetic data (A10, A11); A19 only partly (the
-apply did not stop at fhir-proxy, with the secret's version present; whether Cloud Run refuses a
-secret with no version is still open); the real-data health-sync case is not verified (A8).
+Confirmed on the 16 November dev deploy with synthetic data (A10, A11); With real data (prod,
+18 November) it **does** stop at health-sync: Cloud Run refuses a mounted secret with no version
+(A8, A19). Run the connect script, then follow the recovery in the runbook's step 8 (the failed
+service must be deleted and dropped from the state before the next apply).
 
 ### 3.8 The setup step: write the Patient (exactly one of the two)
 
@@ -712,7 +714,8 @@ prompt ([details](../scripts/connect-google-health/README.md#when-the-browser-is
 Worked when: it ends `Done.` after "Patient record created", with exit code 0. Exit code 3 means
 connected but the Patient write failed: run it again. Runbook:
 [step 9](../infra/envs/README.md#9-the-setup-step-write-the-patient-one-of-the-two-never-both).
-*Not yet verified against Google or a real project* (I1, I14 to I20).
+Verified in prod on 18 November: the consent flow, the stored refresh token and the Patient write
+(I1, I14, I15, I18, I19); publishing the app (I20) is not tried.
 
 ### 3.9 Second apply: ingest on
 
@@ -908,10 +911,10 @@ terraform apply -replace='module.stack.module.edge_vm.google_compute_instance.th
 
 The data disk (OpenEMR's database and site files) and the internal address survive; the new VM
 boots from the newest `cos-stable` image and starts everything on the existing data. Expect
-about **15 minutes of downtime**. Check with `terraform output edge_vm` (`boot_image`) and the
+about **10 minutes of downtime** (17 November, dev). Check with `terraform output edge_vm` (`boot_image`) and the
 startup log (`edge VM startup: done, all steps ok`). Runbook:
-[Patching the VM](../infra/envs/README.md#patching-the-vm-monthly). *Not yet verified on a real
-project* (E17).
+[Patching the VM](../infra/envs/README.md#patching-the-vm-monthly). Verified on dev on 17 November:
+about 10 minutes of downtime, the data disk and address kept (E17).
 
 ### Updating the services
 

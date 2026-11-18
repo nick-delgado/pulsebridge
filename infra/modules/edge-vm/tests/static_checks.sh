@@ -10,7 +10,8 @@
 #   - a variable is named like a password or key (no secret may enter through Terraform);
 #   - a project ID is hardcoded (a literal projects/<id>/ other than the public cos-cloud images,
 #     or a literal `project = "..."`);
-#   - the startup script turns on tracing (`set -x`), which would print secrets;
+#   - the startup script or the MariaDB entrypoint wrapper turns on tracing (`set -x`), which
+#     would print secrets;
 #   - any IAM resource is declared (grants live in the module that owns the resource);
 #   - any `module` block is declared, so none of the above can hide in a child module.
 #
@@ -33,7 +34,7 @@ for f in "$here"/*.tf; do
   case "$f" in *_override.tf | */override.tf) continue ;; esac
   tf_files+=("$f")
 done
-scripts=("$here/scripts/edge-startup.sh" "$here/templates/startup-config.sh.tftpl")
+scripts=("$here/scripts/edge-startup.sh" "$here/scripts/mariadb-entrypoint-wrapper.sh" "$here/templates/startup-config.sh.tftpl")
 
 # Code lines only: drop whole-line comments and trailing "# ..." comments, keep file:line.
 code_lines() {

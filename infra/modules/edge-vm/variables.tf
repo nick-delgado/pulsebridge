@@ -295,6 +295,17 @@ variable "boot_wait_minutes" {
   }
 }
 
+variable "mariadb_init_wait_seconds" {
+  description = "Longest MariaDB's FIRST initialisation waits for its temporary server to start (the server that sets the root password and creates the health-check users). The official image waits 30 s, which prod's e2-micro exceeded at boot (T42); the startup script's entrypoint wrapper raises it to this. Used only on an empty data directory; an initialised database starts exactly as the image ships it. At most half of boot_wait_minutes, so the startup script is still waiting when the server answers."
+  type        = number
+  default     = 300
+
+  validation {
+    condition     = var.mariadb_init_wait_seconds >= 60 && floor(var.mariadb_init_wait_seconds) == var.mariadb_init_wait_seconds && var.mariadb_init_wait_seconds <= var.boot_wait_minutes * 30
+    error_message = "mariadb_init_wait_seconds must be a whole number of seconds, at least 60 and at most half of boot_wait_minutes (in seconds)."
+  }
+}
+
 variable "hook_timeout_minutes" {
   description = "Longest one hook (T23) may run on one boot before it is stopped and logged as failed. OpenEMR's first boot takes about 15 minutes (spike S2), so the default leaves room. Hooks run one after another, so the worst case for all hooks is this times their number."
   type        = number
