@@ -782,9 +782,12 @@ Nothing in this module has been applied; every test runs against mocked provider
 - That a request through Hosting reaches a service whose invoker check is disabled with no
   further setting (Firebase's guide uses "allow unauthenticated invocations", which in current
   `gcloud` is the same switch or an `allUsers` binding).
-- That the code-managed grant (`page_deployer_viewer`) replaces the hand-made one on dev without
-  a gap: the first CI run (18 November 2026) passed with the same role granted by hand; the
-  plan and apply with `page_deployer_service_account_email` set have not run yet. (Measured in
+- That the code-managed grant (`page_deployer_viewer`) adopts the hand-made one on dev without a
+  gap. It is the same binding: `_iam_member` reads the service's policy, adds the member only if it
+  is missing and writes it back, so the create succeeds with no real change; destroying it later
+  (or setting the input back to null) removes that one binding, hand-made or not. The first CI run
+  (18 November 2026) passed with the role granted by hand; a read-only plan with the input set
+  showed 1 to add, nothing changed or destroyed; the apply has not run yet. (Measured in
   that run: the Firebase CLI accepts WIF credentials; `roles/firebasehosting.admin` alone is
   NOT enough, see "Deploying the page".)
 - That creating the default site (`site_id = project_id`) through the API works on a project

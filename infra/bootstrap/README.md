@@ -345,7 +345,7 @@ before it passed:
 | Grant | Where | Why `firebase deploy` needs it |
 | --- | --- | --- |
 | `roles/firebasehosting.admin` | project (`google_project_iam_member.page_deployer`) | create a Hosting version, upload the files, release it |
-| `roles/serviceusage.serviceUsageViewer` | project (`google_project_iam_member.page_deployer_service_usage`) | before deploying, the CLI checks that the Hosting API is enabled (`serviceusage.services.get` on `firebasehosting.googleapis.com`); without it: 403 "Permission denied to get service". The role reads which APIs are enabled and nothing else |
+| `roles/serviceusage.serviceUsageViewer` | project (`google_project_iam_member.page_deployer_service_usage`) | before deploying, the CLI checks that the Hosting API is enabled (`serviceusage.services.get` on `firebasehosting.googleapis.com`); without it: 403 "Permission denied to get service". The role reads which APIs are enabled, plus quota and operation metadata; no data and no changes |
 | `roles/run.viewer` | fhir-proxy's Cloud Run service only (module phr, from the env roots' `page_deployer_service_account_email`) | finalizing a version whose config rewrites `/api` to Cloud Run makes Hosting check `run.services.get` on the rewrite's target; without it: 403 "Permission 'run.services.get' denied" on the proxy service. Granted on that one service, not the project, so the account cannot read the other services' configuration (their environment holds the patient ID) |
 
 The third grant is not in bootstrap because the service is not: the env root creates it, and

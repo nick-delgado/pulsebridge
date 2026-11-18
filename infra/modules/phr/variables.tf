@@ -480,7 +480,8 @@ variable "page_deployer_service_account_email" {
     (first CI run on dev, 18 November 2026). run.viewer on this one service reads its
     configuration only; it cannot change, invoke or delete it. That configuration includes the
     service's environment, so the page deploy job can read the patient's ID (and, with real
-    data, name), as the planner can; no narrower role holds run.services.get. null: no grant (no
+    data, name), as the planner can; no narrower predefined role holds run.services.get (a custom role with
+    only it would expose the same configuration). null: no grant (no
     CI page deploy, or the page is deployed by hand by someone who already holds the permission).
   EOT
   type        = string

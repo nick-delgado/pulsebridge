@@ -132,8 +132,8 @@ resource "google_project_iam_member" "page_deployer" {
   member  = google_service_account.page_deployer[0].member
 }
 
-# roles/serviceusage.serviceUsageViewer (serviceusage.services.get and .list: read whether an API
-# is enabled, nothing else). Before it deploys, the Firebase CLI checks that the Hosting API is
+# roles/serviceusage.serviceUsageViewer (serviceusage.services.get and .list, plus quota and
+# operation metadata: read whether an API is enabled; no data, no changes). Before it deploys, the Firebase CLI checks that the Hosting API is
 # enabled (GET serviceusage.googleapis.com/v1/projects/<p>/services/firebasehosting.googleapis.com);
 # without this role that check is a 403 "Permission denied to get service" and the deploy stops
 # (first CI run on dev, 18 November 2026). Hosting admin does not include it.
