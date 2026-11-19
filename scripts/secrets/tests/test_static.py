@@ -29,7 +29,7 @@ def code_lines(path: Path):
 
 
 def test_the_three_files_exist():
-    assert [p.name for p in FILES] == ["lib.sh", "set-reviewer-password.sh", "set-secret.sh"]
+    assert [p.name for p in FILES] == ["lib.sh", "set-secret.sh", "set-session-signing-key.sh"]
 
 
 def test_shellcheck_clean():
@@ -80,11 +80,9 @@ def test_no_random_no_herestring_no_xtrace_no_export_of_value(path):
 
 def test_value_expanded_only_where_intended():
     """Every expansion of $sv_value / $sv_confirm, reviewed by hand once and pinned here: the
-    printf builtin into gcloud's stdin, the printed generated password, and checks that do not
-    output it. A new expansion fails this test and has to be looked at."""
+    printf builtin into gcloud's stdin, and checks that do not output it. A new expansion fails this test and has to be looked at."""
     allowed = [
         r'builtin printf \'%s\' "\$sv_value" \| sv_gcloud secrets versions add',
-        r'builtin printf \'%s\\n\' "\$sv_value"$',
         r'sv_value="\$\{sv_value%\$\'\\n\'\}"',
         r'if \[ "\$sv_value" != "\$sv_confirm" \]; then',
         r'if \[ -z "\$sv_value" \]; then',
@@ -130,3 +128,22 @@ def code_lines_of(text: str):
     for n, line in enumerate(text.splitlines(), 1):
         if not line.lstrip().startswith("#"):
             yield n, line
+
+
+def test_signing_key_is_piped_from_urandom_into_gcloud_and_nowhere_else():
+    """set-session-signing-key.sh: the key exists only in the pipe from the random device to
+    gcloud. Pinned here: the source is /dev/urandom, the only read of it that is stored is piped
+    straight into `secrets versions add`, the other is only counted, and no line captures it in a
+    variable or sends it anywhere else (no tee, redirect to a file, base64, xxd, printf of it)."""
+    path = SCRIPTS / "set-session-signing-key.sh"
+    lines = [line.strip() for _, line in code_lines(path)]
+    assert 'KEY_SOURCE=/dev/urandom' in lines
+    assert 'KEY_BYTES=32' in lines
+    reads = [line for line in lines if "$KEY_SOURCE" in line and "head" in line]
+    assert reads == [
+        'count="$(head -c "$KEY_BYTES" "$KEY_SOURCE" | wc -c)" || count=0',
+        'head -c "$KEY_BYTES" "$KEY_SOURCE" | sv_gcloud secrets versions add "$secret" \\',
+    ], reads
+    text = path.read_text()
+    for word in ("tee ", "base64", "xxd", "hexdump", "sv_value", "> /", ">/tmp", "mktemp"):
+        assert word not in text, word

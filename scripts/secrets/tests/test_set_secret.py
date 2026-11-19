@@ -97,7 +97,7 @@ def test_value_in_no_exec_argv_or_environment(sandbox, fake, strace, tmp_path):
         ("google-health-client-secret", "connect-google-health/connect.sh"),
         ("google-health-refresh-token", "connect-google-health/connect.sh"),
         ("openemr-client-private-key", "written by the edge VM itself"),
-        ("reviewer-password", "set-reviewer-password.sh"),
+        ("session-signing-key", "set-session-signing-key.sh"),
         ("pbt-db-root-password", "without the prefix, for example 'db-root-password'"),
         ("db-password", "unknown short name"),
         ("", "missing <short-name>"),

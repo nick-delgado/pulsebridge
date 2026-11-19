@@ -1,11 +1,15 @@
 # scripts/secrets
 
-Two scripts that put secret values into Google Secret Manager after `terraform apply` (task T27):
+Two scripts that put secret values into Google Secret Manager after `terraform apply` (tasks T27
+and T44):
 
 | Script | Writes | Read by |
 | --- | --- | --- |
 | `set-secret.sh <short-name>` | `<prefix>-db-root-password`, `<prefix>-openemr-db-password`, `<prefix>-openemr-admin-password` | the edge VM, into password files for MariaDB and OpenEMR |
-| `set-reviewer-password.sh` | `<prefix>-reviewer-password` | fhir-proxy, which checks it at the dashboard login (D9) |
+| `set-session-signing-key.sh` | `<prefix>-session-signing-key` | fhir-proxy, which signs and checks the public demo's `__session` cookie with it (D16) |
+
+`set-session-signing-key.sh` replaced `set-reviewer-password.sh` (T44): D16 removed the shared
+reviewer password, and the signing key is random bytes nobody types or sees.
 
 Plain bash and `gcloud`; no Python, no extra install. They run on Linux and on macOS's
 `/bin/bash` 3.2.
@@ -29,7 +33,7 @@ policies, and the value is added afterwards, outside Terraform, by whoever knows
 | Secret (`<prefix>-...`) | Version written by |
 | --- | --- |
 | `db-root-password`, `openemr-db-password`, `openemr-admin-password` | **`set-secret.sh`** (you) |
-| `reviewer-password` | **`set-reviewer-password.sh`** (you), or in dev optionally Terraform's write-only argument (identity README, "Dev only"), never both |
+| `session-signing-key` | **`set-session-signing-key.sh`** (you); generated, never shown |
 | `google-health-client-id`, `-client-secret`, `-refresh-token` | `scripts/connect-google-health/connect.sh` (after Google's consent screen) |
 | `openemr-client-private-key` | the edge VM itself, when it registers fhir-proxy with OpenEMR at first boot |
 
@@ -75,14 +79,14 @@ scripts/secrets/set-secret.sh --generate openemr-db-password
 # OpenEMR, or generate it (then see "Reading a generated admin password back").
 scripts/secrets/set-secret.sh openemr-admin-password
 
-# The reviewer password: generate one and see it once, to give to reviewers...
-scripts/secrets/set-reviewer-password.sh --generate
-# ...or type your own (16 to 128 characters, hidden prompt, typed twice).
-scripts/secrets/set-reviewer-password.sh
+# The demo's session signing key: 32 random bytes, generated and stored, never shown.
+# Run it once before the first full apply (Cloud Run will not deploy fhir-proxy without it).
+scripts/secrets/set-session-signing-key.sh
+# Later, to replace it (ends every open demo session):
+scripts/secrets/set-session-signing-key.sh --rotate
 
 # From a password manager or another program: standard input is used when it is not a terminal.
 <command that prints the value> | scripts/secrets/set-secret.sh openemr-admin-password
-scripts/secrets/set-reviewer-password.sh --generate --show | <command that saves it>
 ```
 
 `--help` on either script lists the options. Exit codes: `0` stored, `1` gcloud or a
@@ -99,18 +103,24 @@ is refused without being repeated, and the message tells you to remove it from y
   alphabet is rejection sampling, so each of the 62 symbols is equally likely. Not bash's
   `$RANDOM` (15 bits from a clock-seeded generator).
 - Letters and digits only, so the value survives any quoting in the edge VM's scripts and in
-  OpenEMR's setup. 32 characters (about 190 bits) for `set-secret.sh`; 24 (about 143 bits) for
-  the reviewer password, which a person may have to type (spike S6 asks for 24 or more).
+  OpenEMR's setup. 32 characters (about 190 bits).
 - `set-secret.sh --generate` never shows the value: nobody needs to know a database password.
-- `set-reviewer-password.sh --generate` prints the password on standard output **once, after it
-  is stored** (if storing fails, nothing is printed). It refuses to run when standard output is not
-  a terminal, because a password printed into a file or pipe you did not mean to use could end up
-  on disk; add `--show` when you do mean it (for example to pipe it into a password manager).
-  `--show` without `--generate` is refused: a password you typed is never shown.
-- Use `--generate` for the reviewer password: callers of fhir-proxy's public `run.app` URL are
-  not held by the per-address login limit, so the password's randomness is what stops guessing
-  (infra/modules/phr/README.md, "The client address and the direct run.app URL"); a password a
-  person chose is only as strong as that choice.
+
+### The session signing key
+
+- **What it is.** fhir-proxy signs each demo session token (an HS256 JWT, the `__session`
+  cookie) with this key and checks the signature on every request. Whoever holds the key can mint
+  sessions, so it is a secret; nobody needs to know it.
+- **How it is made.** `head -c 32 /dev/urandom` piped straight into
+  `gcloud secrets versions add --data-file=-`: the 32 bytes (256 bits, the length RFC 7518
+  section 3.2 asks for an HS256 key) are never in a shell variable, a file, an argument or the
+  terminal. They are **raw bytes**, stored as they are: no hex or base64, no newline. A separate
+  read first checks that the random source gives 32 bytes (only the count is kept).
+- **Run twice by mistake?** If the secret already has an enabled version the script stops with
+  exit code 0 and writes nothing; `--rotate` is the only way to replace a key, because a new key
+  ends every open session.
+- **Not here:** `--generate`, `--show` and typed values. There is nothing to choose and nothing
+  to show.
 
 ## Value rules
 
@@ -121,16 +131,15 @@ Rules for every value:
 
 | Rule | Why |
 | --- | --- |
-| Not empty | An empty value is never what was meant (an empty pipe, Enter pressed twice); fhir-proxy treats an empty password file as "not configured" and answers 503. |
-| No newline (only one newline at the very end of piped input is removed, as `echo` and most programs add one) | The edge VM writes the value into a password file and fhir-proxy strips a trailing newline; a newline inside would be read differently by each. |
+| Not empty | An empty value is never what was meant (an empty pipe, Enter pressed twice). |
+| No newline (only one newline at the very end of piped input is removed, as `echo` and most programs add one) | The edge VM writes the value into a password file; a newline inside would be read differently by each reader. |
 | No NUL, carriage return or other control character; printable ASCII only | Nothing invisible reaches a password file, and the password can be typed on any keyboard. A carriage return usually means a file with Windows line endings. |
-| 16 to 128 characters | The project's minimum for passwords (D9 for the reviewer password; the same for the others). fhir-proxy itself accepts 1 to 1024 characters; 128 keeps the login request well inside its 1 KiB limit even with JSON escaping. |
+| 16 to 128 characters | The project's minimum for passwords (set with D9; kept for the edge VM's three). |
 
 The readers do **not** all treat punctuation the same way, so each script adds its own rule:
 
 | Script, secrets | Allowed | Refused, and why |
 | --- | --- | --- |
-| `set-reviewer-password.sh`: `reviewer-password` | any printable ASCII, including spaces (leading and trailing spaces are kept: `IFS=` stops `read` from trimming them) | a value that is only spaces. fhir-proxy compares the file with what the browser sends and interprets nothing. |
 | `set-secret.sh`: `db-root-password`, `openemr-db-password`, `openemr-admin-password` | letters, digits and `!#$%&()*+,-./:;<>?@[]^_{|}~`, not starting with `-` | **space** and **`=`**: OpenEMR's image passes all three passwords to its first-time setup in one string, `server=... rootpass=<root> ... pass=<db> ... iuserpass=<admin>`, splits it on whitespace (`read -r -a`), and `auto_configure.php` keeps only the part after the first `=` of each piece. A space splits the password; an `=` cuts it short, so the database would get a different password from the file the hooks log in with. **`'`** and **`\`**: the installer writes `$pass = '<db password>';` into `sites/default/sqlconf.php` without escaping, and in PHP a single quote ends that string and a backslash can escape the closing quote. **`"`** and **`` ` ``**: nothing found breaks on them, but one more script that puts the value inside double quotes or a command substitution would. A **leading `-`**: MariaDB's entrypoint passes the root password through `echo`, which takes a value made only of `-` and the letters `n`, `e`, `E` as an option. |
 
 How the allowed punctuation was checked (by reading the code, not by running OpenEMR): the edge
@@ -169,25 +178,22 @@ gcloud's standard input (`--data-file=-`). `echo` would add a newline.
 | --- | --- | --- | --- |
 | `db-root-password` | edge VM, file `/mnt/disks/edge/secrets/mariadb-root-password` | **once, at boot**, then keeps the file | Before the VM's first boot (runbook step 6): nothing. If the VM already booted without it (its log says `ERROR: secret mariadb-root-password ... 404`): on the VM `sudo google_metadata_script_runner startup`, or reset the VM. |
 | `openemr-db-password`, `openemr-admin-password` | edge VM, files of the same name, used by OpenEMR's first-time setup | **once, at boot**, then keeps the files | The same. |
-| `reviewer-password` | fhir-proxy (Cloud Run), the secret mounted as a file at version `latest` | when the file is read; the proxy re-reads it every 30 s (`PASSWORD_CACHE_SECONDS`) | Nothing: no restart and no apply. Within about 30 s the new password works, the old one stops, and **every signed-in reviewer is signed out** (the session-token key is derived from the password). |
+| `session-signing-key` | fhir-proxy (Cloud Run), the secret mounted as a file at version `latest` | when the proxy reads the file (how often is fhir-proxy's, T43) | Nothing: no restart and no apply. Once the proxy has read the new key, **every open demo session ends** (its token was signed with the old key). The first version must exist **before** fhir-proxy is deployed: Cloud Run refuses to deploy a service whose mounted secret has no version (infra/envs/README.md, checklist A8). |
 
 "Mounted at `latest`" means Cloud Run fetches the newest enabled version when the file is read,
-not once at deploy time, which is why the reviewer password needs no redeploy. The edge VM is
+not once at deploy time, which is why a new signing key needs no redeploy. The edge VM is
 different: its startup script copies each secret into a file once and keeps it, because MariaDB
 and OpenEMR take these passwords only when they first set themselves up.
 
 ## Rotation
 
-**Reviewer password.** Run `set-reviewer-password.sh` again (with or without `--generate`). The
-older versions stay enabled; once the new one works, disable them so they cannot be read:
+**Session signing key.** `set-session-signing-key.sh --rotate`. The older versions stay enabled
+but unused (fhir-proxy reads `latest`); disable them when you like:
 
 ```bash
-gcloud secrets versions list <prefix>-reviewer-password --project <project-id>
-gcloud secrets versions disable <old version number> --secret <prefix>-reviewer-password --project <project-id>
+gcloud secrets versions list <prefix>-session-signing-key --project <project-id>
+gcloud secrets versions disable <old version number> --secret <prefix>-session-signing-key --project <project-id>
 ```
-
-In dev, if the password comes from tfvars (`reviewer_password_wo_version > 0`), rotate it the
-Terraform way instead (infra/envs/README.md, "Rotating the reviewer password"); never mix the two.
 
 **Database and OpenEMR admin passwords.** dev is destroyed nightly, secrets included, so each new
 dev starts empty and nothing needs rotating. In prod a new version alone changes nothing: the VM
@@ -274,23 +280,31 @@ make test                        # with the rest of the repository
 
 pytest runs the scripts against a stub `gcloud` written into each test's temporary directory,
 which records every call's arguments and environment and saves what it read on standard input.
-PATH contains only the stub and links to `bash`, `env`, `dirname`, `tr`, `head` and `cat`, so the
+PATH contains only the stub and links to `bash`, `env`, `dirname`, `tr`, `head`, `cat` and `wc`, so the
 real gcloud cannot be reached; values are fake, generated per test. No credentials are needed.
 
-- `tests/test_set_secret.py`, `tests/test_set_reviewer_password.py`: the exact bytes stored
-  (no newline; spaces and backslashes kept for the reviewer password); each character
-  `set-secret.sh` refuses, for each of its three secrets, and that the reviewer script accepts
-  them; every allowed punctuation character stored; arguments repeated only when they look like
+- `tests/test_set_session_signing_key.py`: exactly 32 bytes stored in
+  `<prefix>-session-signing-key` through `--data-file=-`, different on each run and not a
+  printable-only or constant value; the key (raw, hex or base64) in no output, gcloud argument,
+  gcloud environment or file but the stub's capture; describe, then the versions check, then add,
+  with nothing on the checks' standard input; an existing key kept without `--rotate` (exit 0,
+  nothing written) and replaced with it; a missing secret, an unreadable version list and a failed
+  add write nothing or report it; every refused argument and option; xtrace; the setup_env names;
+  gcloud's HTTP log off.
+- `tests/test_set_secret.py`: the exact bytes stored (no newline); each character
+  `set-secret.sh` refuses, for each of its three secrets; every allowed punctuation character stored; arguments repeated only when they look like
   names; the existence and version checks reading nothing from standard input; the project and
   prefix fallbacks and an empty `--project=` or `--prefix=`; Ctrl-D at the prompt; the value in no gcloud argument or environment, not in output, not in
   any file but the stub's capture, and (with `strace`, Linux only) in no program's argv or
   environment at all; every refused name, option and value; project and prefix; missing secret;
   existing version and `--replace`; gcloud failures; `--generate` (length, alphabet, different each
-  time, reads `/dev/urandom`); `--show`; xtrace, allexport and an inherited variable; the hidden
+  time, reads `/dev/urandom`); xtrace, allexport and an inherited variable; the hidden
   prompt on a pseudo-terminal (not echoed, typed twice, mismatch refused).
 - `tests/test_static.py`: shellcheck clean (also a pre-commit hook); none of the usual bash 4
   constructs; no `$RANDOM`, here-string, `set -x` or export of the value; every place the value is
-  expanded is on a reviewed list; the generator is exactly `tr -dc` over `/dev/urandom`.
+  expanded is on a reviewed list; the generator is exactly `tr -dc` over `/dev/urandom`; the
+  signing key's only stored read of `/dev/urandom` is piped straight into `secrets versions add`
+  and nothing captures, encodes or copies it.
 
 ## Not verified (check on the first real run)
 
@@ -317,7 +331,9 @@ Still open:
 4. The roles above are enough for a deployer who is not project Owner.
 5. macOS: bash 3.2, BSD `tr` and `head -c`. Only bash 5.2 on Linux ran the tests; bash 3.2 is
    covered by a static check of the usual bash 4 constructs, not by a run.
-6. fhir-proxy picks up a new reviewer password within about 30 s (P6).
+6. fhir-proxy picks up a new signing key without a redeploy (P6 confirmed this for the reviewer
+   password's file; the key's re-read interval is fhir-proxy's, T43). gcloud stores a binary
+   payload from `--data-file=-` byte for byte (`... access latest ... | wc -c` prints 32).
 7. The pinned OpenEMR image (8.5.0) passes the allowed punctuation through its first-time setup
    unchanged, as the 8.1.1 scripts and the installer's main branch do (read, not run); for example
    log in with a typed admin password containing `!#$%&;|<>*?` once. `--generate` avoids the
