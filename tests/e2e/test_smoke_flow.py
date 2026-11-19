@@ -4,18 +4,21 @@ configuration and the exit status."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
-from e2e_fake_stack import REAL_PATIENT, Stack, build_stack
+from e2e_fake_stack import REAL_PATIENT, TOKEN_ISSUER, Stack, build_stack
 from e2e_runs import BASE, bp_component, edit_json, run
 from fhir_proxy.share.testing import FakeOpenEmr
-from pulsebridge_smoke.cli import UsageError, secret_manager_password
 from pulsebridge_smoke.first_sync import GcloudSyncRuns
 from pulsebridge_smoke.http import Response, TransportError
+from pulsebridge_smoke.session import SigningKeyError, secret_manager_signing_key
 
 PART_A_WRITES = ("A1", "A10", "N1")
 
@@ -28,10 +31,10 @@ def _readings_and_shares(stack: Stack) -> list[str]:
     ]
 
 
-def test_synthetic_stack_passes_with_part_b_skipped(stack: Stack, password: str) -> None:
-    result = run(stack, password)
+def test_synthetic_stack_passes_with_part_b_skipped(stack: Stack, signing_key: bytes) -> None:
+    result = run(stack, signing_key)
     assert result.code == 0, result.text
-    for check_id in ("S1", "S2", "S3", "S4", "S5", "S6", "S7"):
+    for check_id in ("S1a", "S1b", "S1c", "S1", "S2", "S3", "S4", "S5", "S6", "S7"):
         assert result.status_of(check_id) == "PASS", result.text
     for check_id in ("A1", "A2", "A3", "A4", "A5", "A6", "A8", "A9", "A10", "A12"):
         assert result.status_of(check_id) == "PASS", result.text
@@ -48,8 +51,8 @@ def test_synthetic_stack_passes_with_part_b_skipped(stack: Stack, password: str)
     assert result.lines[-1].startswith("SMOKE RESULT: PASSED WITH 4 SKIPPED")
 
 
-def test_what_one_run_adds_and_reports(stack: Stack, password: str) -> None:
-    result = run(stack, password)
+def test_what_one_run_adds_and_reports(stack: Stack, signing_key: bytes) -> None:
+    result = run(stack, signing_key)
     assert result.code == 0, result.text
     # Exactly one Observation (the reading); the rejected and unmappable sends made none.
     observations = stack.observations()
@@ -71,13 +74,13 @@ def test_what_one_run_adds_and_reports(stack: Stack, password: str) -> None:
 
 
 def test_a_rerun_adds_a_new_reading_and_cross_checks_the_earlier_one(
-    stack: Stack, password: str
+    stack: Stack, signing_key: bytes
 ) -> None:
-    assert run(stack, password).code == 0
+    assert run(stack, signing_key).code == 0
     # cuff-sim stamps whole seconds and OpenEMR refuses a second reading at the same second
     # (see the next test); a live run takes longer than that anyway.
     time.sleep(1.1)
-    second = run(stack, password)
+    second = run(stack, signing_key)
     assert second.code == 0, second.text
     assert "an earlier reading names a SYN- patient" in second.line_of("S7")
     assert len(stack.observations()) == 2
@@ -85,19 +88,21 @@ def test_a_rerun_adds_a_new_reading_and_cross_checks_the_earlier_one(
 
 
 def test_two_readings_in_the_same_second_collide_at_openemr_and_say_so(
-    stack: Stack, password: str
+    stack: Stack, signing_key: bytes
 ) -> None:
     """OpenEMR keys a vitals reading on code, Encounter and effectiveDateTime. A first share
     answering already-shared fails A10 with that explanation, not a bare outcome."""
     stack.tamper("POST", "/share", edit_json(lambda body: body.update(outcome="already-shared")))
-    result = run(stack, password)
+    result = run(stack, signing_key)
     assert result.status_of("A10") == "FAIL"
     assert "at this exact second" in result.line_of("A10")
     assert result.code == 1
 
 
-def test_real_data_stack_refuses_part_a_writes_by_default(real_stack: Stack, password: str) -> None:
-    result = run(real_stack, password)
+def test_real_data_stack_refuses_part_a_writes_by_default(
+    real_stack: Stack, signing_key: bytes
+) -> None:
+    result = run(real_stack, signing_key)
     for check_id in PART_A_WRITES:
         assert result.status_of(check_id) == "SKIP", result.text
         assert "refused: the stack reports real data" in result.line_of(check_id)
@@ -111,21 +116,21 @@ def test_real_data_stack_refuses_part_a_writes_by_default(real_stack: Stack, pas
     assert result.code == 1
 
 
-def test_real_data_writes_run_only_with_the_flag(real_stack: Stack, password: str) -> None:
-    result = run(real_stack, password, "--allow-real-data-writes")
+def test_real_data_writes_run_only_with_the_flag(real_stack: Stack, signing_key: bytes) -> None:
+    result = run(real_stack, signing_key, "--allow-real-data-writes")
     assert result.status_of("A10") == "PASS", result.text
     assert result.status_of("A5") == "SKIP"  # no SYN- check on a real-data stack
     assert len(real_stack.env.openemr.observations) == 1
 
 
 def test_a_non_synthetic_patient_on_a_synthetic_stack_stops_all_writes(
-    tmp_path: Path, monkeypatch, key_and_cert, password: str
+    tmp_path: Path, monkeypatch, key_and_cert, signing_key: bytes
 ) -> None:
     """The stack says synthetic (no health-sync) but cuff-sim sends a non-SYN- patient: stop
     after the one reading, before the share and the negatives."""
     key, cert = key_and_cert
     stack = build_stack(tmp_path, monkeypatch, key, cert, patient_id=REAL_PATIENT)
-    first = run(stack, password)
+    first = run(stack, signing_key)
     assert first.status_of("A5") == "FAIL"
     assert first.code == 1
     assert not first.reported("A10")
@@ -134,40 +139,85 @@ def test_a_non_synthetic_patient_on_a_synthetic_stack_stops_all_writes(
     assert stack.env.openemr.observations == {}
     # The next run sees that earlier reading's patient and writes nothing at all.
     before = len(stack.transport.requests)
-    second = run(stack, password)
+    second = run(stack, signing_key)
     assert second.status_of("S7") == "WARN"
     assert second.status_of("A1") == "SKIP"
     posts = [r for r in stack.transport.requests[before:] if r["method"] == "POST"]
-    assert [r["path"] for r in posts] == ["/auth/login"]
+    assert [r["path"] for r in posts] == ["/auth/session"]  # the junk-token check only
 
 
-def test_the_password_and_token_never_appear_in_the_output(
-    stack: Stack, password: str, tmp_path: Path
+def _cookie_token(request: dict) -> str | None:
+    cookie = request["headers"].get("Cookie", "")
+    return cookie.removeprefix("__session=") if cookie.startswith("__session=") else None
+
+
+def test_the_key_and_token_never_appear_in_the_output(
+    stack: Stack, signing_key: bytes, tmp_path: Path
 ) -> None:
     report = tmp_path / "report.json"
-    result = run(stack, password, "--verbose", "--report-json", str(report))
+    result = run(stack, signing_key, "--verbose", "--report-json", str(report))
     assert result.code == 0, result.text
-    token = stack.transport.requests[1]["headers"]["Authorization"].removeprefix("Bearer ")
-    assert len(token) > 20
+    tokens = {_cookie_token(r) for r in stack.transport.requests} - {None}
+    assert len(tokens) == 1
+    (token,) = tokens
+    assert len(token) > 100
     for text in (result.text, report.read_text()):
-        assert password not in text
+        assert signing_key.decode() not in text
+        assert base64.urlsafe_b64encode(signing_key).decode().rstrip("=") not in text
         assert token not in text
-        assert "Authorization" not in text
-    # The token was sent, though, on every request after the login, and only there.
-    assert "Authorization" not in stack.transport.requests[0]["headers"]
-    assert all(
-        r["headers"].get("Authorization") == f"Bearer {token}" for r in stack.transport.requests[1:]
-    )
+        assert "__session" not in text
+    # No Authorization header is ever sent; the session goes as the cookie, and a POST always
+    # carries the page's own origin.
+    assert all("Authorization" not in r["headers"] for r in stack.transport.requests)
+    posts = [r for r in stack.transport.requests if r["method"] == "POST"]
+    assert posts and all(r["headers"]["Origin"] == "https://dashboard.example.test" for r in posts)
 
 
-def test_an_echoed_secret_is_redacted(stack: Stack, password: str) -> None:
-    """A server that quotes the password or a bearer token in an error is still redacted."""
+def test_the_session_routes_are_checked_before_the_session_is_used(
+    stack: Stack, signing_key: bytes
+) -> None:
+    result = run(stack, signing_key)
+    first = [(r["method"], r["path"], _cookie_token(r)) for r in stack.transport.requests[:4]]
+    assert [(m, p) for m, p, _ in first] == [
+        ("GET", "/auth/config"),
+        ("POST", "/auth/session"),
+        ("GET", "/fhir/metadata"),
+        ("GET", "/fhir/metadata"),
+    ]
+    assert [c is None for _, _, c in first] == [True, True, True, False]
+    junk = json.loads(stack.transport.requests[1]["body"])["recaptcha_token"]
+    assert junk.startswith("pulsebridge-smoke-not-a-recaptcha-token-")
+    # The junk token reached Fraud Defense (the fake) and was refused there.
+    assert stack.env.harness.fraud.assessments == 1
+    assert result.status_of("S1b") == "PASS"
+
+
+def test_the_token_has_the_proxys_claims_and_signature(stack: Stack, signing_key: bytes) -> None:
+    run(stack, signing_key)
+    token = next(_cookie_token(r) for r in stack.transport.requests if _cookie_token(r))
+    head, body, sig = token.split(".")
+
+    def decode(part: str) -> dict:
+        return json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+
+    assert decode(head) == {"alg": "HS256", "typ": "JWT"}
+    claims = decode(body)
+    assert set(claims) == {"iss", "aud", "iat", "exp", "jti"}
+    assert claims["iss"] == claims["aud"] == TOKEN_ISSUER
+    assert claims["exp"] - claims["iat"] == 900
+    expected = hmac.new(signing_key, f"{head}.{body}".encode(), hashlib.sha256).digest()
+    assert base64.urlsafe_b64decode(sig + "=" * (-len(sig) % 4)) == expected
+
+
+def test_an_echoed_secret_is_redacted(stack: Stack, signing_key: bytes) -> None:
+    """A server that quotes the key or a token in an error is still redacted."""
+    key_text = signing_key.decode()
     stack.tamper(
         "GET",
         "/status",
-        lambda r: Response(500, json.dumps({"x": f"{password} Bearer abc.def"}).encode(), {}),
+        lambda r: Response(500, json.dumps({"x": f"{key_text} Bearer abc.def"}).encode(), {}),
     )
-    leaky = TransportError(f"connection to {BASE} failed: {password}")
+    leaky = TransportError(f"connection to {BASE} failed: {key_text}")
 
     class Echo:
         def __init__(self) -> None:
@@ -175,57 +225,95 @@ def test_an_echoed_secret_is_redacted(stack: Stack, password: str) -> None:
 
         def send(self, method, path, **kwargs):  # noqa: ANN001, ANN201
             self.calls += 1
-            if self.calls == 1:
+            if self.calls <= 4:
                 return stack.transport.send(method, path, **kwargs)
             raise leaky
 
-    result = run(stack, password, transport=Echo())
+    result = run(stack, signing_key, transport=Echo())
     assert result.status_of("X1") == "FAIL"
-    assert password not in result.text
+    assert key_text not in result.text
     assert "[redacted]" in result.line_of("X1")
 
 
-def test_wrong_password_fails_the_login_and_stops(stack: Stack) -> None:
-    result = run(stack, "not-the-synthetic-password-0000")
+def test_a_key_the_stack_does_not_use_fails_the_session_and_stops(stack: Stack) -> None:
+    result = run(stack, b"not-the-synthetic-signing-key-for-this-stack")
     assert result.status_of("S1") == "FAIL"
     assert "HTTP 401" in result.line_of("S1")
+    assert "session-required" in result.line_of("S1")
     assert result.code == 1
-    assert len(stack.transport.requests) == 1
+    assert len(stack.transport.requests) == 4  # the three route checks and the refused session
+
+
+def test_a_wrong_issuer_fails_the_session(stack: Stack, signing_key: bytes) -> None:
+    result = run(stack, signing_key, "--token-issuer", "pulsebridge-fhir-proxy")
+    assert result.status_of("S1") == "FAIL"
+    assert "--token-issuer" in result.line_of("S1")
+
+
+def test_a_junk_token_that_is_accepted_fails_s1b(stack: Stack, signing_key: bytes) -> None:
+    stack.tamper("POST", "/auth/session", lambda r: Response(200, b'{"expires_at": "x"}', {}))
+    result = run(stack, signing_key)
+    assert result.status_of("S1b") == "FAIL"
+    assert "HTTP 200" in result.line_of("S1b")
+    assert result.code == 1
+
+
+def test_a_busy_demo_skips_s1b(stack: Stack, signing_key: bytes) -> None:
+    busy = json.dumps(
+        {
+            "resourceType": "OperationOutcome",
+            "issue": [{"code": "throttled", "details": {"coding": [{"code": "demo-busy"}]}}],
+        }
+    ).encode()
+    stack.tamper("POST", "/auth/session", lambda r: Response(503, busy, {}))
+    result = run(stack, signing_key)
+    assert result.status_of("S1b") == "SKIP"
+    assert "demo-busy" in result.line_of("S1b")
+
+
+def test_a_broken_config_route_or_open_gate_fails(stack: Stack, signing_key: bytes) -> None:
+    stack.tamper("GET", "/auth/config", lambda r: Response(200, b"{}", {}))
+    stack.tamper(
+        "GET",
+        "/fhir/metadata",
+        lambda r: Response(200, b"{}", {}) if r.status == 401 else r,
+    )
+    result = run(stack, signing_key)
+    assert result.status_of("S1a") == "FAIL"
+    assert result.status_of("S1c") == "FAIL"
 
 
 @pytest.mark.parametrize(
     ("env", "args", "message"),
     [
         ({"PULSEBRIDGE_BASE_URL": ""}, [], "set PULSEBRIDGE_BASE_URL"),
-        (
-            {"PULSEBRIDGE_REVIEWER_PASSWORD": "abc"},
-            [],
-            "shorter than 4 characters, so it cannot be the stack's reviewer password",
-        ),
         ({"PULSEBRIDGE_BASE_URL": "http://dashboard.example.test/api"}, [], "https://"),
         ({"PULSEBRIDGE_BASE_URL": "https://x.example.test/api?a=1"}, [], "no query"),
-        ({"PULSEBRIDGE_REVIEWER_PASSWORD": ""}, [], "no password"),
+        ({"SECRET_NAME_PREFIX": ""}, [], "no session: set CLOUDSDK_CORE_PROJECT and"),
+        ({"CLOUDSDK_CORE_PROJECT": ""}, [], "no session: set CLOUDSDK_CORE_PROJECT and"),
+        ({"SECRET_NAME_PREFIX": "PB; rm"}, [], "not a valid name prefix"),
+        ({}, ["--token-issuer", "bad issuer"], "not a valid TOKEN_ISSUER"),
         ({}, ["--sync-runs-from", "gcloud"], "PULSEBRIDGE_HEALTH_SYNC_SERVICE"),
     ],
 )
 def test_configuration_errors_exit_2_naming_the_setting(
-    stack: Stack, password: str, env: dict, args: list[str], message: str
+    stack: Stack, signing_key: bytes, env: dict, args: list[str], message: str
 ) -> None:
-    result = run(stack, password, *args, env=env)
+    result = run(stack, signing_key, *args, env=env)
     assert result.code == 2
     assert message in result.text
     assert stack.transport.requests == []
 
 
-def test_fail_on_skip_makes_skips_exit_3(stack: Stack, password: str) -> None:
-    assert run(stack, password, "--fail-on-skip").code == 3
+def test_fail_on_skip_makes_skips_exit_3(stack: Stack, signing_key: bytes) -> None:
+    assert run(stack, signing_key, "--fail-on-skip").code == 3
 
 
 def test_report_json_lists_every_result_and_the_trail(
-    stack: Stack, password: str, tmp_path: Path
+    stack: Stack, signing_key: bytes, tmp_path: Path
 ) -> None:
     path = tmp_path / "r.json"
-    assert run(stack, password, "--report-json", str(path)).code == 0
+    assert run(stack, signing_key, "--report-json", str(path)).code == 0
     report = json.loads(path.read_text())
     statuses = {r["id"]: r["status"] for r in report["results"]}
     assert statuses["A10"] == "PASS"
@@ -234,7 +322,7 @@ def test_report_json_lists_every_result_and_the_trail(
     assert any(t["key"] == "FHIR Observation" for t in report["trail"])
 
 
-def test_a_rate_limited_send_is_waited_out_and_retried(stack: Stack, password: str) -> None:
+def test_a_rate_limited_send_is_waited_out_and_retried(stack: Stack, signing_key: bytes) -> None:
     seen = [0]
 
     def first_is_429(response: Response) -> Response:
@@ -244,41 +332,76 @@ def test_a_rate_limited_send_is_waited_out_and_retried(stack: Stack, password: s
         return response
 
     stack.tamper("POST", "/cuff/readings", first_is_429)
-    result = run(stack, password)
+    result = run(stack, signing_key)
     assert result.code == 0, result.text
     assert 7 in result.sleeps
     assert "nothing was sent" in result.text
 
 
-def test_password_from_secret_manager_uses_the_callers_gcloud(stack: Stack, password: str) -> None:
+def _gcloud_answer(key: bytes) -> str:
+    """What ``gcloud ... --format=get(payload.data)`` prints: URL-safe base64, a newline."""
+    return base64.urlsafe_b64encode(key).decode() + "\n"
+
+
+def test_the_key_comes_from_secret_manager_with_the_callers_gcloud(
+    stack: Stack, signing_key: bytes
+) -> None:
     calls = []
 
     def fake_gcloud(command, **kwargs):  # noqa: ANN001, ANN202
         calls.append((command, kwargs))
-        return subprocess.CompletedProcess(command, 0, stdout=password + "\n", stderr="")
+        return subprocess.CompletedProcess(
+            command, 0, stdout=_gcloud_answer(signing_key), stderr=""
+        )
 
-    def reader(project: str, prefix: str) -> str:
-        return secret_manager_password(project, prefix, run=fake_gcloud)
+    def reader(project: str, prefix: str) -> bytes:
+        return secret_manager_signing_key(project, prefix, run=fake_gcloud)
 
-    result = run(
-        stack,
-        "",
-        "--password-source",
-        "secret-manager",
-        env={
-            "PULSEBRIDGE_REVIEWER_PASSWORD": "",
-            "CLOUDSDK_CORE_PROJECT": "example-project-1",
-            "SECRET_NAME_PREFIX": "pb",
-        },
-        secret_reader=reader,
-    )
+    result = run(stack, b"", key_reader=reader)
     assert result.code == 0, result.text
     (command, kwargs) = calls[0]
     assert command[:5] == ["gcloud", "secrets", "versions", "access", "latest"]
-    assert "--secret=pb-reviewer-password" in command
-    assert "--project=example-project-1" in command
+    assert "--secret=pbe2e-session-signing-key" in command
+    assert "--project=example-project" in command
+    assert "--format=get(payload.data)" in command  # raw bytes survive, no file
     assert kwargs["capture_output"] is True  # stdout is captured, never printed
-    assert password not in result.text
+    assert signing_key.decode() not in result.text
+
+
+def test_a_binary_key_survives_the_round_trip() -> None:
+    # 32 raw bytes, a NUL and a newline among them, whose URL-safe base64 has "-" and "_".
+    raw = bytes(range(250, 256)) + bytes(range(26))
+
+    def fake(command, **_):  # noqa: ANN001, ANN202
+        return subprocess.CompletedProcess(command, 0, stdout=_gcloud_answer(raw), stderr="")
+
+    assert secret_manager_signing_key("example-project-1", "pb", run=fake) == raw
+
+
+@pytest.mark.parametrize(
+    ("stdout", "message"),
+    [
+        ("", "empty latest version"),
+        ("!!not base64!!\n", "not base64"),
+        (_gcloud_answer(b"short-key"), "shorter than 32 bytes"),
+    ],
+)
+def test_an_unusable_key_is_a_clear_usage_error(stdout: str, message: str) -> None:
+    def fake(command, **_):  # noqa: ANN001, ANN202
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    with pytest.raises(SigningKeyError, match=message):
+        secret_manager_signing_key("example-project-1", "pb", run=fake)
+
+
+def test_an_unreadable_key_exits_2(stack: Stack) -> None:
+    def failing(project: str, prefix: str) -> bytes:
+        raise SigningKeyError("could not read pbe2e-session-signing-key with gcloud (exit 1).")
+
+    result = run(stack, b"", key_reader=failing)
+    assert result.code == 2
+    assert "could not read pbe2e-session-signing-key" in result.text
+    assert stack.transport.requests == []
 
 
 def test_secret_manager_failure_is_a_clear_usage_error() -> None:
@@ -289,21 +412,19 @@ def test_secret_manager_failure_is_a_clear_usage_error() -> None:
     def failing(command, **_):  # noqa: ANN001, ANN202
         return subprocess.CompletedProcess(command, 1, stdout="", stderr=stderr)
 
-    with pytest.raises(UsageError) as caught:
-        secret_manager_password("example-project-1", "pb", run=failing)
+    with pytest.raises(SigningKeyError) as caught:
+        secret_manager_signing_key("example-project-1", "pb", run=failing)
     message = str(caught.value)
-    assert message.startswith("could not read pb-reviewer-password with gcloud (exit 1).")
+    assert message.startswith("could not read pb-session-signing-key with gcloud (exit 1).")
     assert "roles/secretmanager.secretAccessor" in message
     # gcloud's whole message, on one line, limited: not just its last line.
     assert "gcloud said: ERROR: (gcloud.secrets.versions.access) PERMISSION_DENIED" in message
     assert message.endswith(" [...]")
     assert len(message) < 1000
-    with pytest.raises(UsageError, match="not a valid name prefix"):
-        secret_manager_password("example-project-1", "PB; rm", run=failing)
 
 
-def test_gcloud_never_gets_the_password_in_its_environment(
-    monkeypatch: pytest.MonkeyPatch,
+def test_gcloud_never_gets_the_old_password_variable(
+    monkeypatch: pytest.MonkeyPatch, signing_key: bytes
 ) -> None:
     monkeypatch.setenv("PULSEBRIDGE_REVIEWER_PASSWORD", "synthetic-password-in-env-0001")
     monkeypatch.setenv("CLOUDSDK_CORE_PROJECT", "example-project-1")
@@ -311,10 +432,10 @@ def test_gcloud_never_gets_the_password_in_its_environment(
 
     def fake(command, **kwargs):  # noqa: ANN001, ANN202
         seen.append(kwargs["env"])
-        out = "[]" if command[1] == "logging" else "synthetic-value-0001\n"
+        out = "[]" if command[1] == "logging" else _gcloud_answer(signing_key)
         return subprocess.CompletedProcess(command, 0, stdout=out, stderr="")
 
-    secret_manager_password("example-project-1", "pb", run=fake)
+    secret_manager_signing_key("example-project-1", "pb", run=fake)
     GcloudSyncRuns("example-project-1", "pb-health-sync", run=fake).fetch()
     assert len(seen) == 2
     for env in seen:
@@ -322,56 +443,59 @@ def test_gcloud_never_gets_the_password_in_its_environment(
         assert env.get("CLOUDSDK_CORE_PROJECT") == "example-project-1"  # the rest is passed on
 
 
-# A password with every character repr() or json.dumps() escapes: backslash, newline, both
-# quotes and non-ASCII. Synthetic.
-ESCAPED_PASSWORD = "syn\\the\"tic\nPässwörd-'0001"  # noqa: S105 - synthetic
+# A key whose text has every character repr() or json.dumps() escapes: backslash, newline, both
+# quotes and non-ASCII. Synthetic, and over 32 bytes.
+ESCAPED_KEY = "syn\\the\"tic\nKëy-für-tésts-'0001-padding".encode()
 
 
-def test_an_echoed_password_is_redacted_in_every_escaped_form(stack: Stack, tmp_path: Path) -> None:
-    stack.env.harness.password_file.write_text(ESCAPED_PASSWORD + "\n", encoding="utf-8")
+def test_an_echoed_key_is_redacted_in_every_escaped_form(stack: Stack, tmp_path: Path) -> None:
+    stack.env.harness.key_file.write_bytes(ESCAPED_KEY)
+    text = ESCAPED_KEY.decode()
 
     def echo(body: dict) -> None:
         # The detail is shown with !r; the apostrophe makes repr choose double quotes there.
-        body["fhirStore"].update(reachable=False, detail=f"it's {ESCAPED_PASSWORD}")
-        body["observationCounts"]["cuff"] = {"echo": ESCAPED_PASSWORD}  # shown as a dict
+        body["fhirStore"].update(reachable=False, detail=f"it's {text}")
+        body["observationCounts"]["cuff"] = {"echo": text}  # shown as a dict
 
     stack.tamper("GET", "/status", edit_json(echo))
     report = tmp_path / "report.json"
-    result = run(stack, ESCAPED_PASSWORD, "--report-json", str(report))
-    assert result.status_of("S1") == "PASS", result.text  # the login really used it
+    result = run(stack, ESCAPED_KEY, "--report-json", str(report))
+    assert result.status_of("S1") == "PASS", result.text  # the proxy really used this key
     assert result.status_of("S4") == "FAIL"
     assert "[redacted]" in result.line_of("S4")
     assert "[redacted]" in result.line_of("S5")
     raw = report.read_text(encoding="utf-8")
     decoded = json.dumps(json.loads(raw), ensure_ascii=False)
     forms = {
-        ESCAPED_PASSWORD,
-        repr(ESCAPED_PASSWORD)[1:-1],
-        repr("'\"" + ESCAPED_PASSWORD)[3:-1],
-        json.dumps(ESCAPED_PASSWORD)[1:-1],
-        json.dumps(ESCAPED_PASSWORD, ensure_ascii=False)[1:-1],
-        "Pässwörd",
-        "P\\u00e4ssw",
+        text,
+        repr(text)[1:-1],
+        repr("'\"" + text)[3:-1],
+        json.dumps(text)[1:-1],
+        json.dumps(text, ensure_ascii=False)[1:-1],
+        "Këy-für",
+        "K\\u00eby",
     }
-    for text in (result.text, raw, decoded, json.loads(raw)["results"].__repr__()):
+    for out in (result.text, raw, decoded, json.loads(raw)["results"].__repr__()):
         for form in forms:
-            assert form not in text, (form, text[:200])
+            assert form not in out, (form, out[:200])
 
 
-def test_an_unexpected_answer_shape_is_a_fail_not_a_traceback(stack: Stack, password: str) -> None:
+def test_an_unexpected_answer_shape_is_a_fail_not_a_traceback(
+    stack: Stack, signing_key: bytes
+) -> None:
     class Boom:
         def __init__(self) -> None:
             self.calls = 0
 
         def send(self, method, path, **kwargs):  # noqa: ANN001, ANN201
             self.calls += 1
-            if self.calls == 1:
+            if self.calls <= 4:
                 return stack.transport.send(method, path, **kwargs)
-            raise RuntimeError(f"a library bug quoting {password}")
+            raise RuntimeError(f"a library bug quoting {signing_key.decode()}")
 
-    result = run(stack, password, transport=Boom())
+    result = run(stack, signing_key, transport=Boom())
     assert result.code == 1
     assert result.status_of("X2") == "FAIL"
     assert "unexpected RuntimeError" in result.line_of("X2")
-    assert password not in result.text
+    assert signing_key.decode() not in result.text
     assert "a library bug" not in result.text  # the type only, never the text

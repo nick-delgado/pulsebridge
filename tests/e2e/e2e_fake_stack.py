@@ -48,8 +48,8 @@ from fhir_proxy.testing import (
     HEALTH_URL,
     HL7_STORE,
     LOCATION,
-    PASSWORD,  # obviously synthetic; the proxy's test configuration writes it to its file
     PROJECT,
+    SIGNING_KEY,  # obviously synthetic; the proxy's test configuration writes it to its file
     STORE_NAME,
     FakeHealthcare,
     apply_transaction,
@@ -61,6 +61,10 @@ from pulsebridge_smoke.http import Response
 from v2_to_fhir.mapping import MappingConfig, map_message
 
 SYNTHETIC_PATIENT = "SYN-E2E-0001"
+# The deployment the smoke test is told about: module identity's name prefix, and the proxy's
+# TOKEN_ISSUER as module phr builds it from the project and the prefix.
+SECRET_PREFIX = "pbe2e"  # noqa: S105 - a name prefix, not a secret
+TOKEN_ISSUER = f"pulsebridge-fhir-proxy:{PROJECT}:{SECRET_PREFIX}"
 REAL_PATIENT = "E2E-PERSON-0001"  # what a real-data stack's patient id looks like (no SYN-)
 
 SEGMENT = re.compile(rb"[A-Z][A-Z0-9]{2}")
@@ -258,6 +262,7 @@ def build_stack(
         # Synthetic data: the stack deploys no health-sync, so the proxy has no URL for it.
         health_sync_url=HEALTH_URL if real_data else None,
         sample_patient=SamplePatient("PULSEBRIDGE", "Synthetic", "Demo"),
+        token_issuer=TOKEN_ISSUER,
     )
     env.store.put(FHIR_STORE, stored_patient(value=patient))
     edge = FakeEdge(env.store, patient)
@@ -296,4 +301,4 @@ def build_stack(
     return Stack(env, edge, transport, cuff_client, patient)
 
 
-__all__ = ["PASSWORD", "Stack", "build_stack"]
+__all__ = ["SECRET_PREFIX", "SIGNING_KEY", "TOKEN_ISSUER", "Stack", "build_stack"]

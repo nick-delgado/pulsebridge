@@ -8,8 +8,8 @@ through its public front door only (the `fhir-proxy` behind the Firebase Hosting
 make smoke          # runs: PYTHONPATH=tests/e2e .venv/bin/python -m pulsebridge_smoke
 ```
 
-It is not part of `make check`: it needs a deployment, the network and the reviewer password,
-and it writes a synthetic reading into the stack. Its own tests run in `make test`, against an
+It is not part of `make check`: it needs a deployment, the network and read access to the
+stack's session-signing key, and it writes a synthetic reading into the stack. Its own tests run in `make test`, against an
 in-process stack, with no network and no credentials ("Tests", below).
 
 ## Terms
@@ -33,12 +33,13 @@ in-process stack, with no network and no credentials ("Tests", below).
 
 ## Run it against dev
 
-You need: the dashboard URL, the reviewer password (from Secret Manager, read with **your own**
-`gcloud` login), and Python from the repository's venv (`make smoke` creates it).
+You need: the dashboard URL, read access to the stack's session-signing key in Secret Manager
+(with **your own** `gcloud` login), and Python from the repository's venv (`make smoke`
+creates it).
 
 ```bash
 # From the repository root. CLOUDSDK_CORE_PROJECT names the dev project (already set in a cloud
-# session); your gcloud account needs secretAccessor on <prefix>-reviewer-password.
+# session); your gcloud account needs secretAccessor on <prefix>-session-signing-key.
 PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/dev output -raw dashboard_url)/api" \
 SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/dev output -raw secret_name_prefix)" \
 make smoke
@@ -53,25 +54,38 @@ Hosting site `https://<hosting_site_id>.web.app`), and the prefix is module iden
 | Variable | Needed for | Value |
 | --- | --- | --- |
 | `PULSEBRIDGE_BASE_URL` | always | `<dashboard_url>/api` (`https://` only; `http://` only for `localhost`) |
-| `CLOUDSDK_CORE_PROJECT` | the password from Secret Manager; Part B | the project id |
-| `SECRET_NAME_PREFIX` | the password from Secret Manager | `terraform output -raw secret_name_prefix` |
-| `PULSEBRIDGE_REVIEWER_PASSWORD` | instead of Secret Manager | the password (see below for why this is second best) |
+| `CLOUDSDK_CORE_PROJECT` | always (the signing key); Part B | the project id |
+| `SECRET_NAME_PREFIX` | always (the signing key, and the token's issuer) | `terraform output -raw secret_name_prefix` |
 | `PULSEBRIDGE_HEALTH_SYNC_SERVICE` | Part B on a real-data stack | `terraform output -raw health_sync_service_name` |
 
 Flags (pass them through `SMOKE_ARGS="..."`): `--verbose` (one line per request: method, path,
 status, milliseconds), `--report-json <path>` (the results as JSON), `--fail-on-skip`,
 `--allow-real-data-writes`, `--sync-runs-from gcloud|<file>`, `--log-freshness 12h`,
-`--status-max-seconds 5`, `--poll-timeout 180`, `--transport mllp|https`. `--help` lists them.
+`--status-max-seconds 5`, `--poll-timeout 180`, `--transport mllp|https`, `--token-issuer`
+(default module phr's `pulsebridge-fhir-proxy:<project>:<prefix>`). `--help` lists them.
 
-**The password.** By default it is read at run time with
-`gcloud secrets versions access latest --secret=<prefix>-reviewer-password`: it then exists only
-in the smoke test's memory, never on a command line, in a file, in shell history or in the
-environment of other processes. `PULSEBRIDGE_REVIEWER_PASSWORD` works too (for a runner without
-`gcloud`), but an environment variable is visible to every child process of that shell; never
-type the value on the command line. Either way the password and the session token are
-registered with a redactor before first use, and every printed line, failure message and the
-JSON report are redacted (`Bearer ...` and anything shaped like a JWT too). Neither is ever
-written to disk.
+**The session (D16).** The proxy has no password, and no way around its bot check: a visitor
+gets a session after an invisible reCAPTCHA check in a browser, which a command line cannot
+pass. So the smoke test signs its own session token, exactly as the proxy does after a pass, with
+the stack's signing key:
+
+1. `gcloud secrets versions access latest --secret=<prefix>-session-signing-key
+   --format='get(payload.data)'`, with your own login. The `get(payload.data)` form prints the
+   raw bytes as base64 (gcloud's reference: plain output "can corrupt binary secrets"), so the
+   key never goes through a file. It exists only in the smoke test's memory: never on a command
+   line, in a file, in shell history or in another process's environment.
+2. An HS256 JWT with the proxy's claims (`iss` and `aud` the proxy's `TOKEN_ISSUER`, `iat`,
+   `exp` 15 minutes later, a random `jti`), built with the standard library
+   (`pulsebridge_smoke/session.py`), not with the proxy's code: the check is that the deployed
+   proxy accepts a standard token.
+3. Sent as the `__session` cookie on every request after the session checks, and every `POST`
+   carries the front door's own `Origin`, as the page's requests do.
+
+Whoever can read the signing key can already forge any session, so this adds no new trust; it
+needs `roles/secretmanager.secretAccessor` on that secret. The key (in its text and base64
+forms) and the token are registered with a redactor before first use, and every printed line,
+failure message and the JSON report are redacted (`Bearer ...` and anything shaped like a JWT
+too). Neither is ever written to disk.
 
 ## What it checks
 
@@ -81,7 +95,10 @@ Each line of output is `PASS`, `FAIL`, `SKIP` (deliberately not run, with the re
 
 | Id | Check |
 | --- | --- |
-| S1 | reviewer login (`POST /auth/login`) gives a session token |
+| S1a | `GET /auth/config` answers 200 with the bot check's `recaptcha_site_key` and `recaptcha_action` |
+| S1b | `POST /auth/session` refuses a token no browser made with `403 bot-check-failed` (it reaches Fraud Defense, so it costs the stack **one assessment** of its daily cap; `SKIP` when the proxy answers `rate-limited` or `demo-busy` first) |
+| S1c | without the cookie, `GET /fhir/metadata` is `401 session-required` |
+| S1 | the locally signed session is accepted (`GET /fhir/metadata` with the cookie answers 200; otherwise everything stops) |
 | S2 to S6 | fhir-proxy's `GET /status` answers 200, within `--status-max-seconds` (5 s), FHIR store reachable, observation counts known, OpenEMR reachable |
 | S7 | the stack's data mode (below), cross-checked with the patient of the newest earlier reading |
 | B1 to B4 | Part B, health-sync's first-sync checks (real data only, below) |
@@ -164,12 +181,14 @@ patient id). On a real-data stack without a log source, B2 and B3 `FAIL` with wh
 | --- | --- |
 | 0 | no check failed (skips are listed in the summary) |
 | 1 | a check failed, or a part stopped after a failure; an answer of an unexpected shape is a `FAIL` too (`X2`, naming only the exception's type), never a traceback |
-| 2 | configuration: no base URL (the message names `PULSEBRIDGE_BASE_URL`), no password or one under 4 characters, an unreadable secret (with what to check and gcloud's own message), a bad setting |
+| 2 | configuration: no base URL (the message names `PULSEBRIDGE_BASE_URL`), no project or prefix, a signing key that cannot be read (with what to check and gcloud's own message) or is shorter than 32 bytes, a bad setting |
 | 3 | with `--fail-on-skip`: nothing failed, but something was skipped |
 
 ## What each run adds, and cleanup
 
-All values are synthetic. A run on a synthetic stack adds:
+All values are synthetic. Every run spends **one Fraud Defense assessment** (check S1b) of the
+stack's daily cap (`BOT_CHECKS_PER_DAY`, 300 by default) and one of the runner's five session
+attempts an hour. A run on a synthetic stack adds:
 
 - **one blood-pressure reading**: an HL7v2 message (new control ID), its AuditEvent, one
   `Observation` and one `Provenance` in the FHIR store, labelled `accepted`;
@@ -204,10 +223,11 @@ Observation (v2-to-fhir keys the Observation on MSH-3, MSH-4 and MSH-10). Two ca
 ```text
 tests/e2e/
   pulsebridge_smoke/     the command (stdlib urllib, plus hl7apy through T07's parser)
-    cli.py               flags, environment, the password and log sources, exit status
-    http.py              transport (no redirects), the API client, OperationOutcome reasons
-    redact.py            the password and token, and their escaped forms, out of every line
-    children.py          gcloud's environment (without the password) and its error text
+    cli.py               flags, environment, the session checks, the log sources, exit status
+    session.py           the signing key from Secret Manager; the session token signed with it
+    http.py              transport (no redirects), the API client (cookie, Origin), reasons
+    redact.py            the key and token, and their escaped forms, out of every line
+    children.py          gcloud's environment and its error text
     report.py            PASS/FAIL/SKIP/WARN, the trail, the summary
     cuff_path.py         status, the real-data guard, Part A
     first_sync.py        Part B and its Cloud Logging source

@@ -6,7 +6,8 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from e2e_fake_stack import Stack
+from e2e_fake_stack import SECRET_PREFIX, Stack
+from fhir_proxy.testing import PROJECT
 from pulsebridge_smoke.cli import main
 from pulsebridge_smoke.http import Response
 
@@ -44,16 +45,23 @@ class Run:
 
 def run(
     stack: Stack | None,
-    password: str,
+    signing_key: bytes,
     *args: str,
     env: dict | None = None,
     transport: object | None = None,
     **kwargs: object,
 ) -> Run:
+    """Run the command as an operator would: the project and prefix in the environment, and
+    the signing key from "Secret Manager" (``key_reader``, a fake unless a test passes one)."""
     lines: list[str] = []
     sleeps: list[float] = []
-    environment = {"PULSEBRIDGE_BASE_URL": BASE, "PULSEBRIDGE_REVIEWER_PASSWORD": password}
+    environment = {
+        "PULSEBRIDGE_BASE_URL": BASE,
+        "CLOUDSDK_CORE_PROJECT": PROJECT,
+        "SECRET_NAME_PREFIX": SECRET_PREFIX,
+    }
     environment.update(env or {})
+    kwargs.setdefault("key_reader", lambda _project, _prefix: signing_key)
     code = main(
         ["--poll-timeout", "0", "--poll-interval", "0", *args],
         env=environment,

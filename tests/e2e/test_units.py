@@ -84,7 +84,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     seen: list[tuple[str, str, str | None]] = []
 
     def do_GET(self) -> None:  # noqa: N802 - the stdlib's name
-        _Handler.seen.append((self.command, self.path, self.headers.get("Authorization")))
+        _Handler.seen.append((self.command, self.path, self.headers.get("Cookie")))
         if self.path == "/redirect":
             self.send_response(302)
             self.send_header("Location", "/elsewhere")
@@ -122,13 +122,42 @@ def test_transport_answers_and_errors_come_back_as_responses(server: str) -> Non
     assert problem_reason(missing) == "not-found"
 
 
-def test_a_redirect_is_not_followed_and_the_token_goes_nowhere_else(server: str) -> None:
+def test_a_redirect_is_not_followed_and_the_cookie_goes_nowhere_else(server: str) -> None:
     client = ApiClient(UrllibTransport(server), Redactor())
-    client._token = "synthetic-session-token-0001"  # noqa: S105, SLF001 - synthetic
+    client.use_session("synthetic-session-token-0001")
     answer = client.call("GET", "/redirect")
     assert answer.status == 302
     assert [path for _, path, _ in _Handler.seen] == ["/redirect"]
-    assert _Handler.seen[0][2] == "Bearer synthetic-session-token-0001"
+    assert _Handler.seen[0][2] == "__session=synthetic-session-token-0001"
+
+
+def test_origin_of_the_front_door() -> None:
+    from pulsebridge_smoke.http import origin_of
+
+    assert origin_of("https://dash.example.test/api") == "https://dash.example.test"
+    assert origin_of("https://dash.example.test:8443/api/") == "https://dash.example.test:8443"
+    assert origin_of("http://localhost:5173/api") == "http://localhost:5173"
+
+
+def test_origin_goes_on_posts_and_the_cookie_only_when_asked() -> None:
+    sent = []
+
+    class Record:
+        def send(self, method, path, *, headers, body, timeout):  # noqa: ANN001, ANN201, ARG002
+            sent.append((method, dict(headers)))
+            return Response(200, b"{}")
+
+    client = ApiClient(Record(), Redactor(), origin="https://dash.example.test")
+    client.use_session("synthetic-session-token-0002")
+    client.call("GET", "/status")
+    client.call("POST", "/cuff/readings", {})
+    client.call("POST", "/auth/session", {}, with_session=False)
+    assert sent[0][1].get("Cookie") == "__session=synthetic-session-token-0002"
+    assert "Origin" not in sent[0][1]
+    assert sent[1][1]["Origin"] == "https://dash.example.test"
+    assert "Cookie" in sent[1][1]
+    assert "Cookie" not in sent[2][1] and sent[2][1]["Origin"] == "https://dash.example.test"
+    assert all("Authorization" not in h for _, h in sent)
 
 
 def test_problem_reason_reads_the_proxys_fixed_code() -> None:
@@ -254,34 +283,61 @@ def test_provenance_must_target_the_observation_and_name_the_message() -> None:
     assert fhir.provenance_problem(None, "obs-1", full_name) is not None
 
 
-def test_an_opaque_session_token_is_redacted_once_issued() -> None:
-    """The token pattern catches JWTs; a token of another shape is redacted because the client
-    registers it at login. A server quoting it in an error must not reach the output."""
+def test_the_signed_token_is_redacted_even_when_echoed() -> None:
+    """The JWT pattern catches the token anyway; it is also registered before first use. A
+    server quoting it (or the key) in an error must not reach the output."""
     from pulsebridge_smoke.cli import main
     from pulsebridge_smoke.http import TransportError
 
-    token = "opaque-session-value-0001"  # noqa: S105 - synthetic
+    key = b"synthetic-signing-key-for-a-unit-test-0001"
+    echoed: list[str] = []
 
     class Fake:
-        def send(self, method, path, **_):  # noqa: ANN001, ANN003, ANN201
-            if path == "/auth/login":
-                return Response(200, ('{"token": "%s"}' % token).encode())  # noqa: UP031
-            raise TransportError(f"{method} {path}: upstream said {token}")
+        def send(self, method, path, *, headers, **_):  # noqa: ANN001, ANN003, ANN201
+            cookie = headers.get("Cookie", "")
+            if cookie:
+                echoed.append(cookie.removeprefix("__session="))
+                raise TransportError(f"{method} {path}: upstream said {cookie} {key.decode()}")
+            return Response(404, b"{}")
 
     lines: list[str] = []
     code = main(
         [],
         env={
             "PULSEBRIDGE_BASE_URL": "https://dash.example.test/api",
-            "PULSEBRIDGE_REVIEWER_PASSWORD": "synthetic-password-0001",
+            "CLOUDSDK_CORE_PROJECT": "example-project-1",
+            "SECRET_NAME_PREFIX": "pb",
         },
         transport=Fake(),
+        key_reader=lambda _p, _s: key,
         out=lines.append,
     )
     assert code == 1
     text = "\n".join(lines)
-    assert "upstream said [redacted]" in text
-    assert token not in text
+    assert echoed and echoed[0] not in text
+    assert key.decode() not in text
+    assert "upstream said __session=[redacted] [redacted]" in text
+
+
+def test_the_signing_key_rule_matches_the_proxys() -> None:
+    import tempfile
+    from pathlib import Path
+
+    from fhir_proxy.signing_key import SigningKeyFile
+    from pulsebridge_smoke.session import SigningKeyError, key_from_secret_bytes
+
+    for data in (
+        bytes(range(32)),
+        bytes(range(31)) + b"\n",
+        b"k" * 44 + b"\n",
+        b"k" * 44 + b"\r\n",
+    ):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "key"
+            path.write_bytes(data)
+            assert key_from_secret_bytes(data) == SigningKeyFile(str(path)).current()
+    with pytest.raises(SigningKeyError):
+        key_from_secret_bytes(b"x" * 30 + b"\n")
 
 
 def test_the_report_stores_details_and_trail_values_already_redacted() -> None:
