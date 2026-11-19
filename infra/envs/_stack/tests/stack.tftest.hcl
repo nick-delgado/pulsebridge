@@ -569,6 +569,43 @@ run "another_project_base_change_keeps_the_agent_grants" {
   expect_failures = [check.cloud_nat_is_billed_hourly]
 }
 
+# ---- T44: the demo settings pass through, null keeps module phr's defaults ---------------------
+
+run "demo_settings_default_to_module_phr" {
+  command = plan
+
+  assert {
+    condition = module.phr.demo_settings == {
+      recaptcha_min_score           = 0.5
+      session_ttl_seconds           = 86400
+      sessions_per_address_per_hour = 5
+      bot_checks_per_day            = 300
+    }
+    error_message = "Unset (null) demo settings must give module phr's defaults."
+  }
+}
+
+run "demo_settings_reach_module_phr" {
+  command = plan
+
+  variables {
+    recaptcha_min_score           = 0.7
+    bot_checks_per_day            = 120
+    session_ttl_seconds           = 3600
+    sessions_per_address_per_hour = 9
+  }
+
+  assert {
+    condition = module.phr.demo_settings == {
+      recaptcha_min_score           = 0.7
+      session_ttl_seconds           = 3600
+      sessions_per_address_per_hour = 9
+      bot_checks_per_day            = 120
+    }
+    error_message = "Each demo setting set at the stack must reach module phr."
+  }
+}
+
 # ---- images: a full plan needs them; the targeted first applies do not ----------------------
 
 run "full_plan_without_images_is_refused" {

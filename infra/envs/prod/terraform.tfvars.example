@@ -44,6 +44,12 @@ ingest_enabled = false
 # v2_to_fhir_image  = "us-central1-docker.pkg.dev/your-prod-project-id/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
 
 # --- Optional -------------------------------------------------------------------------------------
+# The public demo (D16). Leave unset for module phr's defaults (0.5, 300, 86400, 5); tune the score
+# threshold after the first real deploy, from the scores real visitors get.
+# recaptcha_min_score           = 0.5
+# bot_checks_per_day            = 300
+# session_ttl_seconds           = 86400
+# sessions_per_address_per_hour = 5
 # enable_iap_ssh     = true   # during the first-boot checklist only; set false again afterwards
 # enable_cloud_nat   = false  # BILLED HOURLY; only if the VM cannot pull through Private Google Access
 # trusted_proxy_hops = 2      # the default: measured behind Firebase Hosting (README, step 12, P1);

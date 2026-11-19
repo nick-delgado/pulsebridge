@@ -236,3 +236,29 @@ run "page_deployer_service_account_plans" {
     page_deployer_service_account_email = "page-deployer@example-project.iam.gserviceaccount.com"
   }
 }
+
+# T44: the demo settings pass through the root; unset keeps module phr's defaults.
+run "demo_settings_pass_through_the_root" {
+  command = plan
+
+  variables {
+    recaptcha_min_score           = 0.7
+    bot_checks_per_day            = 120
+    session_ttl_seconds           = 3600
+    sessions_per_address_per_hour = 9
+  }
+
+  assert {
+    condition     = output.demo_settings == { recaptcha_min_score = 0.7, session_ttl_seconds = 3600, sessions_per_address_per_hour = 9, bot_checks_per_day = 120 }
+    error_message = "Each demo setting set in tfvars must reach module phr."
+  }
+}
+
+run "demo_settings_default_at_the_root" {
+  command = plan
+
+  assert {
+    condition     = output.demo_settings == { recaptcha_min_score = 0.5, session_ttl_seconds = 86400, sessions_per_address_per_hour = 5, bot_checks_per_day = 300 }
+    error_message = "Unset demo settings must give module phr's defaults."
+  }
+}

@@ -696,8 +696,8 @@ mounts the old secret, whose read grant step 4 removes) and accepted for prod (D
    deploy); put the new `fhir_proxy_image` digest in the tfvars. The old proxy image cannot run
    with the new environment (it requires `REVIEWER_PASSWORD_FILE`).
 2. **Bootstrap, by hand, as the owner** (infra/bootstrap/README.md, "Re-applying for the public
-   demo"): `terraform -chdir=infra/bootstrap apply`. It adds `roles/recaptchaenterprise.editor` and
-   the custom bucket role to the deployer, and the planner's read permissions. Do this **before**
+   demo"): `terraform -chdir=infra/bootstrap apply`. It adds the deployer's two custom roles
+   (reCAPTCHA keys, buckets), and the planner's read permissions. Do this **before**
    CI plans or applies the stack, or the planner's refresh and the deployer's create are refused.
 3. **tfvars.** Remove `reviewer_password` and `reviewer_password_wo_version` from the local
    `terraform.tfvars` and from the CI tfvars object ("Where the tfvars come from"): the variables

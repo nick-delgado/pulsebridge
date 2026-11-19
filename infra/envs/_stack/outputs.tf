@@ -186,3 +186,8 @@ output "next_steps" {
     secret_prefix      = var.identity_name_prefix
   })
 }
+
+output "demo_settings" {
+  description = "The public demo's settings fhir-proxy gets (D16): recaptcha_min_score, session_ttl_seconds, sessions_per_address_per_hour, bot_checks_per_day (module phr's defaults where unset)."
+  value       = module.phr.demo_settings
+}

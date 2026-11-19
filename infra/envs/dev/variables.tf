@@ -434,3 +434,31 @@ variable "build_trigger_approval_required" {
   default     = true
   nullable    = false
 }
+
+# ---------------------------------------------------------------------------------------------
+# The public demo (D16, T44): optional; null keeps module phr's default
+# ---------------------------------------------------------------------------------------------
+
+variable "recaptcha_min_score" {
+  description = "fhir-proxy's RECAPTCHA_MIN_SCORE: the lowest reCAPTCHA score (0.0 likely a bot, 1.0 likely a person) that gets a demo session, above 0 and at most 1. null (default): module phr's 0.5. Tune it after the first real deploy, from the scores real visitors get."
+  type        = number
+  default     = null
+}
+
+variable "bot_checks_per_day" {
+  description = "fhir-proxy's BOT_CHECKS_PER_DAY: the most reCAPTCHA assessments in one UTC day across all instances (the counter bucket), 1 to 3000; past it the page says the demo is busy. null (default): module phr's 300 (about 9,000 a month, under the 10,000 free per organisation)."
+  type        = number
+  default     = null
+}
+
+variable "session_ttl_seconds" {
+  description = "fhir-proxy's SESSION_TTL_SECONDS: how long a demo session lasts, 300 to 86400. null (default): module phr's 86400 (24 hours, D16)."
+  type        = number
+  default     = null
+}
+
+variable "sessions_per_address_per_hour" {
+  description = "fhir-proxy's SESSIONS_PER_ADDRESS_PER_HOUR: session attempts per client address an hour, per instance, checked before any assessment, 1 to 100. null (default): module phr's 5."
+  type        = number
+  default     = null
+}

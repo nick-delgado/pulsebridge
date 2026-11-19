@@ -47,6 +47,11 @@ module "stack" {
 
   page_deployer_service_account_email = var.page_deployer_service_account_email
 
+  recaptcha_min_score           = var.recaptcha_min_score
+  bot_checks_per_day            = var.bot_checks_per_day
+  session_ttl_seconds           = var.session_ttl_seconds
+  sessions_per_address_per_hour = var.sessions_per_address_per_hour
+
   v2_to_fhir_ingress  = var.v2_to_fhir_ingress
   health_sync_ingress = var.health_sync_ingress
 
