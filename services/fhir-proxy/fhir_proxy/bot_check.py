@@ -38,14 +38,28 @@ a copy of it elsewhere using our public site key), and the score is at least
 and user agent are not sent (``event.userIpAddress``, ``event.userAgent`` are optional): the
 token already carries what the browser script saw, and less personal data leaves the proxy.
 
-Sources (19 November 2026; README "The bot check" says what was read how): the REST reference
-for ``projects.assessments.create``
-(docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.assessments/create) and
-"Create assessments for websites" (docs.cloud.google.com/recaptcha/docs/create-assessment) for
-the endpoint and fields, checked against the field definitions in Google's client library
-``google-cloud-recaptcha-enterprise`` 1.34.0 (``Event``, ``TokenProperties``, ``RiskAnalysis``,
-default host ``recaptchaenterprise.googleapis.com``); "Google Cloud Fraud Defense roles and
-permissions" (docs.cloud.google.com/iam/docs/roles-permissions/recaptchaenterprise) for the role.
+**An invalid token is an answer, not an error.** The reference documents ``valid`` ("If false,
+the token is invalid, either because the user failed the challenge or for a reason provided in
+the invalidReason field") and the ``InvalidReason`` values ``MALFORMED``, ``EXPIRED``, ``DUPE``,
+``MISSING``, ``BROWSER_ERROR``, ``UNEXPECTED_ACTION`` and ``KEY_MISMATCH`` ("The key used to
+generate the token does not match the siteKey"), and asks applications to "handle values not
+explicitly listed". So a junk token, a reused one ("Each token can be used only once, and it
+expires after two minutes") or one made with another key comes back as ``200`` with ``valid``
+false, which is ``bot-check-failed`` here; only a non-200 status is ``bot-check-unavailable``.
+Google compares ``UNEXPECTED_ACTION`` without regard to case and only for policy-based keys; this
+proxy compares the action itself, exactly, since the page uses our own fixed action name.
+
+Sources, read directly on 19 November 2026 (README, "The bot check"):
+the REST reference for ``projects.assessments.create``
+(docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.assessments/create: the URL,
+the ``cloud-platform`` scope, the permission ``recaptchaenterprise.assessments.create``) and for
+the ``Assessment`` resource (.../rest/v1/projects.assessments: ``TokenProperties``,
+``InvalidReason``, ``RiskAnalysis.score``); "Create assessments for websites"
+(docs.cloud.google.com/recaptcha/docs/create-assessment-website: the request and a sample
+answer, the role); "Google Cloud Fraud Defense roles and permissions"
+(docs.cloud.google.com/iam/docs/roles-permissions/recaptchaenterprise: what
+``roles/recaptchaenterprise.agent`` contains). Google's client library
+``google-cloud-recaptcha-enterprise`` 1.34.0 has the same field definitions.
 """
 
 from __future__ import annotations
@@ -131,8 +145,8 @@ class FraudDefense:
             code = "timeout" if isinstance(exc, TimedOutError) else "unreachable"
             raise BotCheckUnavailable(code) from None
         if response.status != 200:
-            # 400 (a request we built wrongly, or a key that does not exist), 403 (the role is
-            # missing or the API is off), 429 (quota), 5xx: none is the visitor's fault.
+            # 400 (a request we built wrongly), 403 (the role is missing or the API is off),
+            # 429 (quota), 5xx: none is the visitor's fault. A bad token is a 200 (above).
             raise BotCheckUnavailable(f"http-{response.status}")
         if len(response.body) > MAX_ANSWER_BYTES:
             raise BotCheckUnavailable("bad-answer")

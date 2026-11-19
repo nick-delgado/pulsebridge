@@ -503,9 +503,11 @@ class FakeFraudDefense:
     the REST reference describes it, behind the proxy's real ``FraudDefense`` client.
 
     :meth:`issue` stands in for the browser's ``grecaptcha.enterprise.execute``: it returns a
-    synthetic token and what Google will say about it. A token is good for one assessment (a
-    second one says ``DUPE``, as Google's ``invalidReason`` does); an unknown token is
-    ``MALFORMED``. ``failure`` makes every call fail: ``"timeout"``, ``"unreachable"``, an HTTP
+    synthetic token and what Google will say about it. As the reference documents, a bad token
+    is still a ``200`` assessment with ``valid`` false: a token is good for one assessment (a
+    second one says ``DUPE``), an unknown token is ``MALFORMED``, and a request whose ``siteKey``
+    is not the key the token was made with says ``KEY_MISMATCH``. A request the API cannot parse
+    is ``400``. ``failure`` makes every call fail: ``"timeout"``, ``"unreachable"``, an HTTP
     status, or ``"not-json"``. The answer leaves out default values, as protobuf's JSON form
     does (no ``valid`` when false, no ``score`` when 0.0)."""
 
@@ -564,7 +566,6 @@ class FakeFraudDefense:
                 or params
                 or headers.get("Content-Type") != "application/json"
                 or not isinstance(event, dict)
-                or event.get("siteKey") != self.site_key
                 or set(event) - {"token", "siteKey", "expectedAction"}
             ):
                 return _json(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT"}})
@@ -573,12 +574,17 @@ class FakeFraudDefense:
             name = f"projects/123456789/assessments/{secrets.token_hex(8)}"
             props: dict = {"createTime": "2026-01-02T12:00:00.000Z"}
             answer: dict = {"name": name, "event": event, "tokenProperties": props}
-            if facts is None or token in self._used or not facts["valid"]:
-                reason = (
-                    "MALFORMED"
-                    if facts is None
-                    else ("DUPE" if token in self._used else facts["invalid_reason"])
-                )
+            if facts is None:
+                reason = "MALFORMED"
+            elif event.get("siteKey") != self.site_key:
+                reason = "KEY_MISMATCH"
+            elif token in self._used:
+                reason = "DUPE"
+            elif not facts["valid"]:
+                reason = facts["invalid_reason"]
+            else:
+                reason = None
+            if reason is not None:
                 props["invalidReason"] = reason
                 return _json(200, answer)
             self._used.add(token)

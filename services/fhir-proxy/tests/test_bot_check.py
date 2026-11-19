@@ -124,10 +124,21 @@ def test_failures_are_fixed_codes(failure: object, code: str) -> None:
     assert str(raised.value) == code
 
 
-def test_a_wrong_site_key_is_refused_by_the_api_and_is_no_verdict() -> None:
+def test_a_token_made_with_another_key_is_an_invalid_token() -> None:
+    # The reference: KEY_MISMATCH, "The key used to generate the token does not match the
+    # siteKey", inside a normal (200) assessment.
     fake = FakeFraudDefense()
-    with pytest.raises(BotCheckUnavailable, match="http-400"):
-        client(fake, site_key="another-site-key-00000000000").assess(fake.issue())
+    verdict = client(fake, site_key="another-site-key-00000000000").assess(fake.issue())
+    assert not verdict.passed
+    assert (verdict.reason, verdict.invalid_reason) == ("invalid-token", "KEY_MISMATCH")
+
+
+def test_an_unlisted_invalid_reason_is_still_a_failure() -> None:
+    # "Ensure that applications can handle values not explicitly listed."
+    verdict = client(FakeFraudDefense()).judge(
+        {"tokenProperties": {"valid": False, "invalidReason": "SOME_FUTURE_REASON"}}
+    )
+    assert (verdict.passed, verdict.invalid_reason) == (False, "SOME_FUTURE_REASON")
 
 
 @pytest.mark.parametrize(

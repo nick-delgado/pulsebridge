@@ -278,26 +278,42 @@ The narrowest predefined role that grants it is **reCAPTCHA Enterprise Agent**
 (`roles/recaptchaenterprise.agent`, "Access to create and annotate reCAPTCHA Enterprise
 assessments"); T44 grants it.
 
-**Sources**, 19 November 2026. Google's documentation site (docs.cloud.google.com) could not be
-fetched from the build session (its network does not allow that host), so the pages were read
-through search results and checked against Google's own client library:
+**An invalid token is an answer, not an error.** The reference says `valid` false means "the
+token is invalid, either because the user failed the challenge or for a reason provided in the
+invalidReason field", lists `MALFORMED`, `EXPIRED`, `DUPE`, `MISSING`, `BROWSER_ERROR`,
+`UNEXPECTED_ACTION` and `KEY_MISMATCH` ("The key used to generate the token does not match the
+siteKey"), and asks applications to "handle values not explicitly listed". "Each token can be
+used only once, and it expires after two minutes." So a junk, reused or foreign-key token is a
+`200` assessment with `valid` false, answered `403 bot-check-failed`; only a non-200 answer is
+`503 bot-check-unavailable`. A wrong `RECAPTCHA_SITE_KEY` therefore shows as every visitor
+failing, with `invalid_reason=KEY_MISMATCH` in the log, not as an outage.
 
-- REST reference, `projects.assessments.create`:
+**Sources**, all read directly on 19 November 2026:
+
+- REST reference, `projects.assessments.create` (the URL `POST
+  https://recaptchaenterprise.googleapis.com/v1/{parent=projects/*}/assessments`, scope
+  `https://www.googleapis.com/auth/cloud-platform`, "Requires the following IAM permission on
+  the parent resource: `recaptchaenterprise.assessments.create`"):
   https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.assessments/create
-- "Create assessments for websites" (the endpoint as `POST
-  https://recaptchaenterprise.googleapis.com/v1/projects/PROJECT_ID/assessments`, the
-  `tokenProperties` and `riskAnalysis` fields, one read per token):
-  https://docs.cloud.google.com/recaptcha/docs/create-assessment
-- "Google Cloud Fraud Defense roles and permissions" (`roles/recaptchaenterprise.agent`
-  contains `recaptchaenterprise.assessments.create`):
-  https://docs.cloud.google.com/iam/docs/roles-permissions/recaptchaenterprise, and "Access
-  control with IAM": https://docs.cloud.google.com/recaptcha/docs/access-control
-- `google-cloud-recaptcha-enterprise` 1.34.0 from PyPI (read, not installed): the field
-  definitions of `Event` (`token`, `site_key`, `expected_action`, `user_agent`,
-  `user_ip_address`), `TokenProperties` (`valid`, `invalid_reason` with `MALFORMED`, `EXPIRED`,
-  `DUPE`, `MISSING`, `BROWSER_ERROR`, `hostname`, `action`, `create_time`), `RiskAnalysis`
-  (`score`, "from 0.0 to 1.0 (1.0 means very likely legitimate traffic ...)") and the default
-  host `recaptchaenterprise.googleapis.com`.
+- REST reference, the `Assessment` resource (`TokenProperties.valid`, `invalidReason` and its
+  values, `hostname` "of the page on which the token was generated (Web keys only)", `action`;
+  `RiskAnalysis.score` "from 0.0 to 1.0 (1.0 means very likely legitimate traffic ...)"):
+  https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.assessments
+- "Create assessments for websites" (the request body with `token`, `siteKey`,
+  `expectedAction` and the optional `userAgent`, `userIpAddress`, `ja3`, `ja4`; a sample
+  answer; "verify that the return value of action matches expectedAction"; the role
+  "reCAPTCHA Enterprise Agent (`roles/recaptchaenterprise.agent`)"; one use per token, two
+  minutes): https://docs.cloud.google.com/recaptcha/docs/create-assessment-website
+- "Interpret assessments" (`valid = false` "can also indicate ... a siteKey mismatch"):
+  https://docs.cloud.google.com/recaptcha/docs/interpret-assessment-website
+- "Google Cloud Fraud Defense roles and permissions": `roles/recaptchaenterprise.agent`, "Access
+  to create and annotate reCAPTCHA Enterprise assessments", holds
+  `recaptchaenterprise.assessments.create` and `.annotate`, `firewallpolicies.list`,
+  `relatedaccountgroupmemberships.list`, `relatedaccountgroups.list`,
+  `resourcemanager.projects.get` and `.list`:
+  https://docs.cloud.google.com/iam/docs/roles-permissions/recaptchaenterprise
+- Google's client library `google-cloud-recaptcha-enterprise` 1.34.0 (PyPI) has the same field
+  definitions and the default host `recaptchaenterprise.googleapis.com`.
 
 ### The daily cap, and why not a counter in memory
 
@@ -325,17 +341,24 @@ Cloud Storage allows about one write a second to one object name (`429` above th
 1 s and retries), so the counter admits about one assessment a second across all visitors:
 plenty for a demo. The bucket's lifecycle rule deletes old days after 7 days (T44). Any other
 failure is `bot-check-unavailable`, and so is an object whose count is not a number (fail
-closed). Sources: https://docs.cloud.google.com/storage/docs/request-preconditions,
-https://docs.cloud.google.com/storage/docs/json_api/v1/objects/insert, "Quotas and limits"
-(https://docs.cloud.google.com/storage/quotas).
+closed). Sources, read directly on 19 November 2026: "Request preconditions" (a mismatch "fails
+with a 412 Precondition Failed response"; with `0` "the request only proceeds if no object with
+the specified name exists"), https://docs.cloud.google.com/storage/docs/request-preconditions;
+`objects.insert` (needs `storage.objects.create`, and "to overwrite the existing object" also
+`storage.objects.delete`), https://docs.cloud.google.com/storage/docs/json_api/v1/objects/insert;
+"Quotas and limits" ("Maximum rate of writes to the same object name: One write per second"),
+https://docs.cloud.google.com/storage/quotas; `roles/storage.objectUser` holds
+`storage.objects.get`, `create` and `delete`,
+https://docs.cloud.google.com/storage/docs/access-control/iam-roles.
 
 ### The cookie and the session token
 
 `Set-Cookie: __session=<token>; Path=/api; Max-Age=86400; HttpOnly; Secure; SameSite=Strict`
 
-- **`__session`** is the only cookie name Firebase Hosting passes on to Cloud Run (it strips the
-  others, and adds this one to its CDN cache key; firebase.google.com/docs/hosting/manage-cache,
-  "Using cookies"). `Cache-Control: no-store` on every response keeps the CDN from caching anyway.
+- **`__session`** is the only cookie name Firebase Hosting passes on to Cloud Run: "Only the
+  specially-named __session cookie is permitted to pass through to the execution of your app",
+  and it "is automatically made a part of the cache key" (read 19 November 2026,
+  https://firebase.google.com/docs/hosting/manage-cache). `Cache-Control: no-store` on every response keeps the CDN from caching anyway.
 - **`Path`** is `PATH_PREFIX` (`/` when empty): the browser sends the cookie only to the proxy.
 - **`Max-Age`** is `SESSION_TTL_SECONDS`, the token's own lifetime.
 - **`HttpOnly`**: page script cannot read it, so a script injected into the page cannot steal
@@ -1017,9 +1040,10 @@ in this order:
    and a `session-created` line with a score; `curl` with a made-up token gives `403` and a
    `bot-check-failed` line with `reason=invalid-token`, `invalid_reason=MALFORMED`. This shows
    the endpoint, the request body, the role and the answer's field names.
-2. **Whether Fraud Defense answers a well-shaped junk token with `200` and `valid: false`** (as
-   assumed) or with `400`: a `400` would show as `503 bot-check-unavailable` and
-   `bot-check-unavailable problem=http-400` in the log. Then map that 400 to `bot-check-failed`.
+2. **A well-shaped junk token** is documented to come back as `200` with `valid: false` and
+   `invalidReason` `MALFORMED` (see "The bot check"); `make smoke` checks that it is answered
+   `403 bot-check-failed`. A `bot-check-unavailable problem=http-400` line instead would mean
+   the documentation and the service disagree.
 3. **A real token's length and alphabet** fit the shape check `[A-Za-z0-9_-]{20,8192}` (a pass
    in step 1 shows it does; a `reason=malformed-token` line for a real click would show it
    does not).

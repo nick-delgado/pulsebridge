@@ -144,6 +144,14 @@ def test_an_unknown_token_fails(harness) -> None:
     assert harness.fraud.assessments == 1
 
 
+def test_a_site_key_mismatch_is_a_failed_check_not_an_outage(harness) -> None:
+    # Google answers a token made with another key as valid: false, KEY_MISMATCH (a 200).
+    harness.fraud.site_key = "another-site-key-0000000000000000000000"
+    response = harness.start_session()
+    assert response.status_code == 403
+    assert reason(response) == "bot-check-failed"
+
+
 def test_a_token_cannot_be_used_twice(harness) -> None:
     token = harness.fraud.issue()
     assert harness.start_session(token).status_code == 200
