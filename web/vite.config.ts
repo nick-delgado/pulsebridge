@@ -15,12 +15,12 @@ import { defineConfig, loadEnv, type Plugin } from 'vite';
  * A <meta> policy cannot set frame-ancestors; that needs the header.
  */
 /**
- * What reCAPTCHA needs, from Google's reCAPTCHA FAQ ("Can I use reCAPTCHA with a Content Security
- * Policy?", https://docs.cloud.google.com/recaptcha/docs/faq): enterprise.js and the code it loads
- * come from www.google.com/recaptcha/ and www.gstatic.com/recaptcha/; its invisible frame from
- * www.google.com/recaptcha/ or recaptcha.google.com/recaptcha/; and the English FAQ also lists
- * www.google.com/recaptcha/ for connect-src. Paths, not whole hosts, so nothing else on those
- * hosts is admitted.
+ * What reCAPTCHA needs, exactly as Google's reCAPTCHA FAQ lists it ("Can I use reCAPTCHA with a
+ * Content Security Policy?", https://docs.cloud.google.com/recaptcha/docs/faq, read directly on
+ * 19 November 2026; page last updated 2026-11-13): script-src https://www.google.com/recaptcha/
+ * and https://www.gstatic.com/recaptcha/; frame-src https://www.google.com/recaptcha/ and
+ * https://recaptcha.google.com/recaptcha/; connect-src https://www.google.com/recaptcha/. Paths,
+ * not whole hosts, so nothing else on those hosts is admitted.
  */
 export const RECAPTCHA_CSP = {
   script: ['https://www.google.com/recaptcha/', 'https://www.gstatic.com/recaptcha/'],

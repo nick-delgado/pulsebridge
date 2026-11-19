@@ -749,7 +749,7 @@ export type ShareFailureReason =
   | 'share-internal-error'
   /** 429 (T46), before OpenEMR is called: too many shares; `retryAfterSeconds` says how long. */
   | 'rate-limited'
-  /** Any other status or reason (including the gate's 503 `login-not-configured`, or a 429). */
+  /** Any other status or reason (including the gate's 503 `session-not-configured`, or a 429). */
   | 'other';
 
 // ---------------------------------------------------------------------------------------------

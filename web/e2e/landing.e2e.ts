@@ -71,6 +71,9 @@ const REFUSALS: [outcome: string, text: string | RegExp][] = [
   ['origin-refused', /does not accept requests from this address/],
   ['rate-limited', 'Too many requests. Wait 42 seconds, then try again.'],
   ['config-unreachable', /The server could not be reached/],
+  ['session-not-configured', /The demo is not set up on the server yet/],
+  // Google's script blocked (for example by a content blocker): the mock bot check throws.
+  ['bot-check-not-loaded', /The bot check could not load in this browser/],
 ];
 
 for (const [outcome, text] of REFUSALS) {

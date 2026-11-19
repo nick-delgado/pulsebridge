@@ -19,6 +19,7 @@ import type { ClientDeps } from '../api/index';
 import {
   ApiError,
   isServiceNotConfigured,
+  NOT_CONFIGURED_MESSAGE,
   rateLimitMessage,
   UnauthorizedError,
 } from '../api/errors';
@@ -281,6 +282,10 @@ export async function startApp(options: AppOptions): Promise<App> {
   } catch (error) {
     if (error instanceof ApiError && error.status === 429) {
       notice = rateLimitMessage(error.retryAfterSeconds);
+    } else if (isServiceNotConfigured(error)) {
+      // A cookie the proxy cannot check (T43's 503 `session-not-configured`): say so now rather
+      // than on the click, where starting a session would be refused the same way.
+      notice = NOT_CONFIGURED_MESSAGE;
     }
   }
   if (state === 'active') showDashboard();

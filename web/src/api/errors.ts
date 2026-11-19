@@ -24,6 +24,7 @@ export class UnauthorizedError extends Error {
  *   429     rate-limited            too many sessions from this address; `Retry-After`
  *   503     demo-busy               the day's bot-check cap is reached
  *   503     bot-check-unavailable   Fraud Defense or the counter could not be reached
+ *   503     not-configured          `session-not-configured` (T43): the signing key is missing
  *   -       bot-check-not-loaded    Google's script did not load or run in the browser
  *                                   (often a content blocker)
  *   any     unavailable             anything else: no connection, a 400, another status
@@ -35,7 +36,12 @@ export type SessionFailure =
   | 'demo-busy'
   | 'bot-check-unavailable'
   | 'bot-check-not-loaded'
+  | 'not-configured'
   | 'unavailable';
+
+/** What the visitor reads when the proxy answers 503 `session-not-configured`. */
+export const NOT_CONFIGURED_MESSAGE =
+  'The demo is not set up on the server yet (it has no session-signing key), so it cannot start. Try again later.';
 
 /** The exact sentence the contract fixes for `demo-busy`. */
 export const DEMO_BUSY_MESSAGE = 'The demo is busy, try again tomorrow.';
@@ -49,6 +55,7 @@ export const SESSION_REFUSALS = {
   'demo-busy': DEMO_BUSY_MESSAGE,
   'bot-check-unavailable':
     'The bot check is not available right now, so the demo cannot start. Try again in a few minutes.',
+  'not-configured': NOT_CONFIGURED_MESSAGE,
   'bot-check-not-loaded':
     "The bot check could not load in this browser, so the demo cannot start. If a content blocker is on, allow Google's reCAPTCHA for this page, then reload.",
 } as const satisfies Partial<Record<SessionFailure, string>>;
@@ -115,16 +122,17 @@ export function proxyReason(outcome: OperationOutcome | null): string | null {
 }
 
 /**
- * True for the proxy's 503 that means it cannot check sessions at all (amendment 11; with D16
- * its session-signing key is missing): then EVERY protected route answers 503
- * `login-not-configured`. The session is not over (no 401): the page stays and says the service
- * is not configured.
+ * True for the proxy's 503 `session-not-configured` (T43; amendment 11 before it): its
+ * session-signing key is missing, so it cannot check or create sessions. It answers so on
+ * `POST /auth/session` and on every protected route that carries a cookie (without a cookie a
+ * protected route is still 401). The session is not over (no 401): the page stays and says the
+ * service is not configured.
  */
 export function isServiceNotConfigured(error: unknown): boolean {
   return (
     error instanceof ApiError &&
     error.status === 503 &&
-    proxyReason(error.outcome) === 'login-not-configured'
+    proxyReason(error.outcome) === 'session-not-configured'
   );
 }
 

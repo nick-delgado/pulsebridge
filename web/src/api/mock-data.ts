@@ -165,7 +165,9 @@ export type MockShareFailure =
 /**
  * How `POST /auth/session` (or the config before it) answers in mock mode: the proxy's refusals
  * (workplan "The contract T43 to T45 share"), plus `config-unreachable`, where `GET /auth/config`
- * gets no answer at all.
+ * gets no answer at all, and `bot-check-not-loaded`, where the bot check itself fails in the
+ * browser. (`?mock-status=not-configured` is the other side of `session-not-configured`: a
+ * session that started before the key went missing, so the dashboard's 503s can be seen.)
  */
 export type MockDemoOutcome =
   | 'bot-check-failed'
@@ -173,7 +175,11 @@ export type MockDemoOutcome =
   | 'rate-limited'
   | 'demo-busy'
   | 'bot-check-unavailable'
-  | 'config-unreachable';
+  | 'config-unreachable'
+  /** T43's 503 `session-not-configured`: the proxy has no session-signing key. */
+  | 'session-not-configured'
+  /** Google's script cannot load (a content blocker): the mock bot check throws. */
+  | 'bot-check-not-loaded';
 
 export interface MockSwitches {
   demoOutcome: MockDemoOutcome | null;
@@ -192,6 +198,8 @@ const DEMO_OUTCOMES: readonly MockDemoOutcome[] = [
   'demo-busy',
   'bot-check-unavailable',
   'config-unreachable',
+  'session-not-configured',
+  'bot-check-not-loaded',
 ];
 const LOOKUP_FAILURES: readonly MockLookupFailure[] = ['not-found', 'failed'];
 const STATUS_MODES: readonly MockStatusMode[] = [

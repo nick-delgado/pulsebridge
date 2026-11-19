@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { BotCheck } from '../bot-check/index';
+import { NOT_CONFIGURED_MESSAGE } from '../api/errors';
 import { HttpClient } from '../api/http-client';
 import { MockClient, type MockClientOptions } from '../api/mock-client';
 import { DEFAULT_FEATURES, RATE_LIMIT_NOTICE_DEFAULT_MS, SESSION_ENDED, startApp } from './app';
@@ -367,6 +368,35 @@ describe('app against the HTTP client', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('a 503 session-not-configured at start says so on the landing view, before any click', async () => {
+    const outcome = {
+      resourceType: 'OperationOutcome',
+      issue: [
+        {
+          severity: 'error',
+          code: 'transient',
+          diagnostics: 'x',
+          details: {
+            coding: [
+              { system: 'urn:pulsebridge:fhir-proxy:reason', code: 'session-not-configured' },
+            ],
+          },
+        },
+      ],
+    };
+    const f = demoProxy({
+      override: (path) => (path === '/api/status' ? json(503, outcome) : undefined),
+    });
+    const el = root();
+    const app = await startApp({
+      root: el,
+      makeClient: http(f.fetch),
+      botCheck: recordingBotCheck().botCheck,
+    });
+    expect(app.view()).toBe('landing');
+    expect(el.querySelector('.landing__notice')?.textContent).toBe(NOT_CONFIGURED_MESSAGE);
   });
 
   it('a 429 when checking for a session at start shows the wait on the landing view', async () => {

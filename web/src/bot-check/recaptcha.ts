@@ -1,7 +1,8 @@
 /**
  * reCAPTCHA (Google Cloud Fraud Defense) with a score-based web key, as Google's guide "Install
  * score-based keys on websites" describes it
- * (https://docs.cloud.google.com/recaptcha/docs/instrument-web-pages):
+ * (https://docs.cloud.google.com/recaptcha/docs/instrument-web-pages, read directly on
+ * 19 November 2026; page last updated 2026-11-10). Its example, for a login action:
  *
  *   <script src="https://www.google.com/recaptcha/enterprise.js?render=KEY_ID"></script>
  *   grecaptcha.enterprise.ready(async () => {
@@ -12,7 +13,8 @@
  * - `execute` is called on the interaction being protected (here the "View the live demo"
  *   click) with a meaningful action name; the proxy's assessment checks the token's action and
  *   hostname against what it expects (`view_demo`, the page's hosts).
- * - Tokens expire after two minutes, so one is asked for on each click, never kept.
+ * - The guide says to create the assessment within two minutes of the token being made, so one
+ *   is asked for on each click, posted at once, and never kept.
  *
  * Where this differs from the guide: the guide puts the script in the page's <head>. Here it is
  * added only after `GET /auth/config` answered, because the key is not in the page or its build

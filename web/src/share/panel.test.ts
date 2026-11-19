@@ -424,6 +424,33 @@ describe('failures say what did and did not happen', () => {
     expect(m.notified).toEqual([]);
   });
 
+  it('503 session-not-configured (T43): names the missing signing key and keeps the session', async () => {
+    const m = mount();
+    await toConfirm(m);
+    m.send()?.click();
+    const outcome: OperationOutcome = {
+      resourceType: 'OperationOutcome',
+      issue: [
+        {
+          severity: 'error',
+          code: 'transient',
+          diagnostics: 'x',
+          details: {
+            coding: [
+              { system: 'urn:pulsebridge:fhir-proxy:reason', code: 'session-not-configured' },
+            ],
+          },
+        },
+      ],
+    };
+    m.shares[0]?.answer.reject(ShareError.from(new ApiError(503, 'x', outcome)));
+    await flush();
+    const alert = m.byId('share-alert')?.textContent ?? '';
+    expect(alert).toContain('the server is missing its session-signing key');
+    expect(alert).toContain('Your demo session is kept.');
+    expect(alert).not.toContain('password');
+  });
+
   // F1: anything but the proxy's own refusal before OpenEMR may come after the clinic was
   // changed: never "nothing was sent", the others are told, and sharing again is offered as safe.
   it.each([

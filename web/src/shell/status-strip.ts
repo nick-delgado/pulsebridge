@@ -33,7 +33,7 @@ export function statusStrip(): { root: HTMLElement; render(state: StripState): v
 export type StripState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
-  /** Every route answers 503 `login-not-configured` (amendment 11): the session is kept. */
+  /** Every route answers 503 `session-not-configured` (amendment 11): the session is kept. */
   | { kind: 'not-configured' }
   | { kind: 'ready'; status: StatusSummary; now: number };
 

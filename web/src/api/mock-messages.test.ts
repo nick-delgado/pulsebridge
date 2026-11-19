@@ -3,7 +3,7 @@
  * (services/fhir-proxy/README.md, "Contract amendments"; messages.py, status.py, app.py).
  * Synthetic data only.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MessagesLogEntry, MessagesLogQuery, SendAttemptEntry } from './contract';
 import { MESSAGES_DEFAULT_COUNT, MESSAGES_MAX_COUNT } from './contract';
 import { ApiError, proxyReason } from './errors';
@@ -270,8 +270,9 @@ describe('mock refusals (amendments 7, 11, 12)', () => {
     expect([odd.status, proxyReason(odd.outcome)]).toEqual([400, 'invalid-id']);
   });
 
-  it('?mock-status=not-configured: every protected route is 503 login-not-configured; the session stays', async () => {
-    const { c } = await client({ statusMode: 'not-configured' });
+  it('?mock-status=not-configured: every protected route is 503 session-not-configured; the session stays', async () => {
+    const onUnauthorized = vi.fn<() => void>();
+    const { c } = await client({ statusMode: 'not-configured', onUnauthorized });
     for (const call of [
       () => c.getStatus(),
       () => c.listMessages(),
@@ -279,9 +280,12 @@ describe('mock refusals (amendments 7, 11, 12)', () => {
       () => c.listMalformedSamples(),
     ]) {
       const e = await errorOf(call());
-      expect([e.status, proxyReason(e.outcome)]).toEqual([503, 'login-not-configured']);
+      expect([e.status, proxyReason(e.outcome)]).toEqual([503, 'session-not-configured']);
     }
-    expect(await c.checkSession()).toBe('active');
+    // The start-up probe gets the same 503 (T43: with a cookie), and nothing ended the session.
+    const probe = await errorOf(c.checkSession());
+    expect([probe.status, proxyReason(probe.outcome)]).toEqual([503, 'session-not-configured']);
+    expect(onUnauthorized).not.toHaveBeenCalled();
   });
 });
 

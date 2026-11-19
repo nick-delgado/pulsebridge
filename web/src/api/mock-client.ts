@@ -22,7 +22,7 @@
  *   of 25 (at most 50) cut BEFORE the kind/outcome filter (so a filtered page can be short or
  *   empty while `nextCursor` is set), an opaque cursor refused with 400 `invalid-cursor`;
  * - its refusals are the proxy's: 400 for a refused search, 422 for an unreadable attempt's
- *   trace, 503 `login-not-configured` on every route when its secret is missing (a switch);
+ *   trace, 503 `session-not-configured` on every route when its secret is missing (a switch);
  * - the share walks the sequence T15 will (contract.ts `ShareStepName`), with trace steps
  *   redacted exactly as T14's `extensions.trace_step` does it (`traceStep` below).
  */
@@ -298,6 +298,12 @@ export class MockClient implements PulseBridgeApi {
         );
       case 'demo-busy':
         throw new SessionError('demo-busy', DEMO_BUSY_MESSAGE);
+      case 'session-not-configured':
+        throw new SessionError('not-configured', SESSION_REFUSALS['not-configured']);
+      case 'bot-check-not-loaded':
+        // The mock bot check refuses before any token exists (src/bot-check/mock.ts); a token
+        // that still arrives here is from a test calling startSession directly: a pass.
+        break;
       default:
         // The same sentences the HTTP client gives (http-client.ts, `sessionError`).
         throw new SessionError(outcome, SESSION_REFUSALS[outcome]);
@@ -310,7 +316,10 @@ export class MockClient implements PulseBridgeApi {
   async checkSession(options: CallOptions = {}): Promise<SessionState> {
     await this.#delay();
     options.signal?.throwIfAborted();
-    return this.#hasSession() ? 'active' : 'none';
+    if (!this.#hasSession()) return 'none';
+    // With a cookie, a proxy without its signing key answers 503 (T43), as #authorised does.
+    if (this.options.statusMode === 'not-configured') throw sessionNotConfigured();
+    return 'active';
   }
 
   logout(): Promise<void> {
@@ -1149,12 +1158,7 @@ export class MockClient implements PulseBridgeApi {
     if (active && this.options.statusMode === 'not-configured') {
       // The proxy cannot check any session without its signing key, so every protected route
       // answers 503 (amendment 11). The session is not ended: there was no 401.
-      throw proxyProblem(
-        503,
-        'transient',
-        'login-not-configured',
-        'Demo sessions are not configured on the server.',
-      );
+      throw sessionNotConfigured();
     }
     if (!active) {
       this.options.onUnauthorized();
@@ -1701,6 +1705,16 @@ function proxyProblem(
 /** A refusal of the share route, before anything is sent (no steps). */
 function shareProblem(status: number, code: string, reason: string, text: string): ShareError {
   return ShareError.from(proxyProblem(status, code, reason, text));
+}
+
+/** T43's 503 when the session-signing key is missing (issue code `transient`). */
+function sessionNotConfigured(): ApiError {
+  return proxyProblem(
+    503,
+    'transient',
+    'session-not-configured',
+    'Demo sessions are not configured on the server.',
+  );
 }
 
 function notFound(what: string): ApiError {

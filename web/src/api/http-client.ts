@@ -508,6 +508,9 @@ async function sessionError(response: Response): Promise<SessionError> {
     403: ['bot-check-failed', 'origin-refused'],
     503: ['demo-busy', 'bot-check-unavailable'],
   };
+  if (status === 503 && reason === 'session-not-configured') {
+    return new SessionError('not-configured', SESSION_REFUSALS['not-configured']);
+  }
   const match = known[status]?.find((r) => r === reason);
   if (match) return new SessionError(match, SESSION_REFUSALS[match]);
   return new SessionError('unavailable', `The demo could not start (HTTP ${status}). Try again.`);

@@ -4,10 +4,12 @@
  * a 429 from a protected route that does not end the session.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { BotCheckLoadError, type BotCheck } from '../bot-check/index';
 import { MockBotCheck } from '../bot-check/mock';
 import {
   ApiError,
   DEMO_BUSY_MESSAGE,
+  NOT_CONFIGURED_MESSAGE,
   proxyReason,
   SessionError,
   UnauthorizedError,
@@ -94,6 +96,21 @@ describe('MockClient demo session', () => {
     else expect(error.message).toMatch(text);
     expect(error.retryAfterSeconds).toBe(wait);
     expect(await client.checkSession()).toBe('none');
+  });
+
+  it('?mock-demo=session-not-configured: the not-configured sentence, no session', async () => {
+    const client = make({ demoOutcome: 'session-not-configured' });
+    const error = (await startWithBotCheck(client).catch((e: unknown) => e)) as SessionError;
+    expect([error.reason, error.message]).toEqual(['not-configured', NOT_CONFIGURED_MESSAGE]);
+    expect(await client.checkSession()).toBe('none');
+  });
+
+  it('the mock bot check with failLoad refuses like a blocked script, before any token', async () => {
+    const check: BotCheck = new MockBotCheck({ failLoad: true });
+    const config = await make().getAuthConfig();
+    await expect(check.prepare(config)).rejects.toBeInstanceOf(BotCheckLoadError);
+    await expect(check.token(config)).rejects.toBeInstanceOf(BotCheckLoadError);
+    await expect(new MockBotCheck().token(config)).resolves.toMatch(/^mock-recaptcha-/);
   });
 
   it('demo-busy says exactly "The demo is busy, try again tomorrow."', async () => {

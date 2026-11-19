@@ -33,8 +33,12 @@ export class BotCheckLoadError extends Error {
 export async function createBotCheck(): Promise<BotCheck> {
   // Compare import.meta.env.MODE here (as api/index.ts does), so the bundler drops the branch.
   if (import.meta.env.MODE === 'mock') {
-    const { MockBotCheck } = await import('./mock');
-    return new MockBotCheck();
+    const [{ MockBotCheck }, { mockSwitchesFromSearch }] = await Promise.all([
+      import('./mock'),
+      import('../api/mock-data'),
+    ]);
+    const { demoOutcome } = mockSwitchesFromSearch(globalThis.location.search);
+    return new MockBotCheck({ failLoad: demoOutcome === 'bot-check-not-loaded' });
   }
   return new RecaptchaBotCheck();
 }

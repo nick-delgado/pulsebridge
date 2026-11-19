@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, SessionError, UnauthorizedError } from './errors';
+import { ApiError, NOT_CONFIGURED_MESSAGE, SessionError, UnauthorizedError } from './errors';
 import { LOINC } from './fhir';
 import type { PulseBridgeApi } from './contract';
 import { HttpClient } from './http-client';
@@ -237,6 +237,14 @@ describe('HttpClient', () => {
       expect(error.reason).toBe(reason);
       expect(error.message).toMatch(text);
       expect(onUnauthorized).not.toHaveBeenCalled();
+    });
+
+    it('startSession: 503 session-not-configured (T43) is SessionError not-configured', async () => {
+      const error = (await client(fakeFetch(json(503, problem('session-not-configured'))).fetch)
+        .startSession('t')
+        .catch((e: unknown) => e)) as SessionError;
+      expect(error.reason).toBe('not-configured');
+      expect(error.message).toBe(NOT_CONFIGURED_MESSAGE);
     });
 
     it('startSession: a 503 page from the hosting layer (not JSON) is not "busy"', async () => {

@@ -72,9 +72,10 @@ Two more switches exist for browser tests, in mock builds only (both are parsed 
 
 T45 added three for the demo session (D16), used by `e2e/landing.e2e.ts`:
 
-- `?mock-demo=bot-check-failed|origin-refused|rate-limited|demo-busy|bot-check-unavailable|config-unreachable`:
+- `?mock-demo=bot-check-failed|origin-refused|rate-limited|demo-busy|bot-check-unavailable|session-not-configured|config-unreachable|bot-check-not-loaded`:
   how "View the live demo" ends; a pass without it. The mock's bot check (`src/bot-check/mock.ts`)
-  loads nothing and gives a token only the mock client accepts.
+  loads nothing and gives a token only the mock client accepts; with `bot-check-not-loaded` it
+  fails as Google's script does when a content blocker stops it.
 - `?mock-session-seconds=<1..86400>`: the session's lifetime (default 86400, as the proxy's), so
   a test can see a 401 mid-session by moving the page clock forward.
 - `?mock-throttle=status`: every status load answers 429 `rate-limited` with `Retry-After: 30`.
@@ -88,7 +89,7 @@ fails the bundle check):
   a store-only row with a `possibleDuplicateOf` hint.
 - `?mock-log=partial`: every messages-log page says `partial: true`.
 - `?mock-status=openemr-not-checked|counts-unknown|health-sync-timeout|not-configured`: the
-  status (or, for `not-configured`, a 503 `login-not-configured` on every protected route) the
+  status (or, for `not-configured`, a 503 `session-not-configured` on every protected route) the
   proxy sends in that state.
 - `?mock-share=patient-incomplete|not-configured|openemr-unreachable|encounter-refused|observation-timeout|read-back|hosting-timeout`:
   where a share is refused or stops.
@@ -107,11 +108,15 @@ There is no password. The landing view (`src/shell/landing.ts`) says what the de
    (`view_demo`), then loads Google's `enterprise.js?render=<key>` (`src/bot-check/recaptcha.ts`).
    Loading early gives reCAPTCHA the whole visit to observe, not only the click.
 2. On the click it runs `grecaptcha.enterprise.ready`, then `grecaptcha.enterprise.execute(key,
-{action})`, which returns a token valid for two minutes, and posts it to `POST /auth/session`.
+{action})`, which returns a token, and posts it at once to `POST /auth/session` (Google's guide
+   "Install score-based keys on websites", read directly on 19 November 2026: the assessment must
+   be made within two minutes of the token).
 3. The proxy asks Google to assess the token (a score from 0.0, likely a bot, to 1.0, likely a
    person) and, on a pass, sets the `__session` cookie. The page never sees the score or a token.
 4. A refusal stays on the landing view with a sentence per reason (`SESSION_REFUSALS` in
-   `src/api/errors.ts`; `demo-busy` is exactly "The demo is busy, try again tomorrow."). A
+   `src/api/errors.ts`; `demo-busy` is exactly "The demo is busy, try again tomorrow."; a 503
+   `session-not-configured` says the demo is not set up on the server yet, and says it already on
+   arrival when the start-up check gets that answer). A
    script that cannot load (a content blocker, offline) says so; nothing is posted.
 
 A reload asks `checkSession` first: if the cookie is still good the dashboard opens directly.
@@ -494,7 +499,7 @@ onUnauthorized, latencyMs: 0, now: () => fixedTime })` and `await client.startSe
 - **Refusals are the proxy's**: a refused search is 400 `not-supported`; the trace of an
   unreadable AuditEvent is 422; a store-only name as a trace id is 404 `unknown-route` (its slashes
   match no route), another id that is not a FHIR id 400 `invalid-id`; with
-  `?mock-status=not-configured` every protected route is 503 `login-not-configured`. Each error
+  `?mock-status=not-configured` every protected route is 503 `session-not-configured`. Each error
   carries an OperationOutcome with the proxy's reason code.
 - **Status**: `lastSyncAt` in UTC with milliseconds; `observationCounts` null when not known
   (switch); OpenEMR reachable (as with T15's probe) or `not-checked` (switch, the proxy before T15).
@@ -542,7 +547,8 @@ onUnauthorized, latencyMs: 0, now: () => fixedTime })` and `await client.startSe
 - **Content-Security-Policy.** The build adds a `<meta>` policy (`vite.config.ts`):
   `default-src 'none'; script-src 'self' <reCAPTCHA>; style-src 'self'; img-src 'self';
 connect-src 'self' <reCAPTCHA>; frame-src <reCAPTCHA>; base-uri 'none'; form-action 'none';
-object-src 'none'`, where reCAPTCHA is the paths Google's reCAPTCHA FAQ lists
+object-src 'none'`, where reCAPTCHA is the paths Google's reCAPTCHA FAQ lists (read directly
+  on 19 November 2026, https://docs.cloud.google.com/recaptcha/docs/faq)
   (`https://www.google.com/recaptcha/` and `https://www.gstatic.com/recaptcha/` for scripts,
   `https://www.google.com/recaptcha/` and `https://recaptcha.google.com/recaptcha/` for its frame,
   `https://www.google.com/recaptcha/` for connections). A mock build has none of them and
@@ -553,8 +559,9 @@ object-src 'none'`, where reCAPTCHA is the paths Google's reCAPTCHA FAQ lists
   `frame-ancestors 'none'` (a `<meta>` policy cannot); a browser enforces both, so the header must
   admit reCAPTCHA too.
 - **The reCAPTCHA badge is hidden** (`.grecaptcha-badge { visibility: hidden; }` in
-  `src/styles/layout.css`). Google's FAQ allows that when the visitor's flow says the site uses
-  reCAPTCHA; the landing view says "This site is protected by reCAPTCHA." under the button. Since
+  `src/styles/layout.css`). Google's FAQ (same page, same date) allows that when the site says it
+  uses reCAPTCHA, with exactly the text the landing view shows under the button: "This site is
+  protected by reCAPTCHA." Since
   2 April 2026 Google asks sites not to link its Privacy Policy and Terms in that notice (Google is
   now the data processor; the site owner is the controller), so it does not.
 - **No secrets in the bundle.** The page holds no key, password or token. The reCAPTCHA site
@@ -616,8 +623,10 @@ are the parsed shapes. Paths are relative to the base URL (default `/api`).
 `__session` cookie and answers `401` `session-required` without a valid one, including
 `GET /fhir/metadata` and unknown paths; `Authorization: Bearer` is no longer accepted. Every
 `POST` also needs an allowed `Origin` (`403` `origin-refused`). Any route can answer `429`
-`rate-limited` with `Retry-After` (T46). When the proxy cannot check sessions, EVERY protected
-route answers `503` `login-not-configured`. Every error body is an `OperationOutcome` with
+`rate-limited` with `Retry-After` (T46). When the proxy has no session-signing key,
+`POST /auth/session` and every protected route that carries a cookie answer `503`
+`session-not-configured` (issue code `transient`; without a cookie a protected route is still
+`401`). Every error body is an `OperationOutcome` with
 a fixed `diagnostics` sentence and a reason code in `issue[0].details.coding[0]` (system
 `urn:pulsebridge:fhir-proxy:reason`); the client shows the sentence.
 

@@ -297,14 +297,14 @@ describe('GET /status (amendments 9, 10, 13, 15)', () => {
     expect(s.openemr).toMatchObject({ reachable: false, detail: 'not-checked' });
   });
 
-  it('a 503 login-not-configured is a "service not configured" error and keeps the session', async () => {
+  it('a 503 session-not-configured is a "service not configured" error and keeps the session', async () => {
     const e = await rejection(
       client(
         json(
           503,
           problem(
             'transient',
-            'login-not-configured',
+            'session-not-configured',
             'Reviewer login is not configured on the server.',
           ),
         ),
@@ -318,6 +318,11 @@ describe('GET /status (amendments 9, 10, 13, 15)', () => {
       client(json(503, problem('transient', 'upstream-unavailable', 'x'))).getStatus(),
     );
     expect(isServiceNotConfigured(other)).toBe(false);
+    // The code T43 replaced is no longer recognised.
+    const old = await rejection(
+      client(json(503, problem('transient', 'login-not-configured', 'x'))).getStatus(),
+    );
+    expect(isServiceNotConfigured(old)).toBe(false);
   });
 });
 

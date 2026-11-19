@@ -3,7 +3,7 @@
  * notice. No password, no account. The flow, with the contract's routes (under `/api`):
  *
  *   render ── GET /auth/config ──▶ {site key, action} ──▶ load Google's enterprise.js (prepare)
- *   click ── grecaptcha.enterprise.execute(key, {action}) ──▶ token (valid two minutes)
+ *   click ── grecaptcha.enterprise.execute(key, {action}) ──▶ token (assessed within 2 min)
  *         ── POST /auth/session {recaptcha_token} ──▶ 200 + Set-Cookie __session ──▶ dashboard
  *                                                 └─▶ 403/429/503 ──▶ a message, stay here
  *
@@ -11,10 +11,12 @@
  * key. The script is loaded only once the key is known, and as soon as it is, so reCAPTCHA can
  * observe the visit before the click (its score is better for it).
  *
- * The badge Google's script shows in the corner is hidden (`.grecaptcha-badge`, layout.css),
- * which Google's FAQ (https://docs.cloud.google.com/recaptcha/docs/faq) allows when the page
- * says it uses reCAPTCHA in the visitor's flow: the notice under the button. Since 2 April 2026 the notice no longer links Google's Privacy Policy
- * and Terms (Google became the data processor, the site owner the controller), so it does not.
+ * The badge Google's script shows in the corner is hidden (`.grecaptcha-badge`, layout.css).
+ * Google's FAQ (https://docs.cloud.google.com/recaptcha/docs/faq, read directly on
+ * 19 November 2026) allows that when the page says it uses reCAPTCHA, with exactly the text
+ * "This site is protected by reCAPTCHA.": the notice under the button. Since 2 April 2026 the FAQ
+ * no longer asks for links to Google's Privacy Policy and Terms (the site owner is the data
+ * controller, Google the processor), so there are none.
  */
 import type { PulseBridgeApi, AuthConfig } from '../api/contract';
 import { SESSION_REFUSALS, SessionError } from '../api/errors';
@@ -81,7 +83,7 @@ export function landingView(options: LandingViewOptions): HTMLElement {
     error.textContent = '';
     try {
       const c = await loadConfig();
-      // A fresh token on each click: they expire after two minutes and are good for one check.
+      // A fresh token on each click, posted at once: the proxy must assess it within two minutes.
       const token = await botCheck.token(c);
       await client.startSession(token);
       options.onSuccess();

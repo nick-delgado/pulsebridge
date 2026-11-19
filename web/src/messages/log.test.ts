@@ -259,7 +259,7 @@ describe('empty, loading and error states', () => {
     expect(m.q('#log-alert').textContent).toBe('');
   });
 
-  it('503 login-not-configured: "the service is not configured", the session is kept', async () => {
+  it('503 session-not-configured: "the service is not configured", the session is kept', async () => {
     const m = mount();
     m.calls[0]?.answer.reject(
       new ApiError(503, 'x', {
@@ -270,7 +270,7 @@ describe('empty, loading and error states', () => {
             code: 'transient',
             details: {
               coding: [
-                { system: 'urn:pulsebridge:fhir-proxy:reason', code: 'login-not-configured' },
+                { system: 'urn:pulsebridge:fhir-proxy:reason', code: 'session-not-configured' },
               ],
             },
           },
