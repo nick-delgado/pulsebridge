@@ -82,9 +82,9 @@ JSON_TYPE = "application/json"
 # {"recaptcha_token": "<token>"}: a token is at most 8 KiB (bot_check.TOKEN_SHAPE).
 MAX_SESSION_BODY_BYTES = 10 * 1024
 QUERY_TOKEN_NAMES = ("access_token", "token", "id_token", "__session")
-# The one cookie: Firebase Hosting strips every other cookie before it calls Cloud Run ("Manage
-# cache behavior", firebase.google.com/docs/hosting/manage-cache: "__session is the only cookie
-# allowed to pass through").
+# The one cookie: Firebase Hosting strips the cookies of a request it passes to Cloud Run, except
+# one named __session, which it also adds to the CDN cache key ("Manage cache behavior",
+# firebase.google.com/docs/hosting/manage-cache, "Using cookies").
 COOKIE_NAME = "__session"
 # RFC 9110 section 15.5.2: a 401 MUST carry WWW-Authenticate. No registered scheme describes a
 # cookie session, so this names the cookie in the form of the (expired) HTTP Cookie

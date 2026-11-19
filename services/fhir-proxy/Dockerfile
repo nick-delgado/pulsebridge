@@ -76,11 +76,11 @@ USER 10001:10001
 EXPOSE 8080
 
 # Exec form: gunicorn is PID 1 and receives Cloud Run's SIGTERM directly. The arguments are the
-# README's ("Running"): ONE worker (the login rate limit is per process, so more workers would
-# multiply it), eight threads (the messages log looks stored messages up in parallel; Cloud Run's
-# per-instance concurrency is set to the same 8 by module phr), request deadlines left to Cloud
-# Run, and --preload: the app (and its configuration check) loads in the master before the port
-# opens, so a bad configuration exits before anything listens and Cloud Run's startup probe
-# fails. create_app() starts no thread before the fork (its thread pools start threads on first
+# README's ("Running"): ONE worker (the per-address session limit is per process, so more
+# workers would multiply it), eight threads (the messages log looks stored messages up in
+# parallel; Cloud Run's per-instance concurrency is set to the same 8 by module phr), request
+# deadlines left to Cloud Run, and --preload: the app (and its configuration check) loads in the
+# master before the port opens, so a bad configuration exits before anything listens and Cloud
+# Run's startup probe fails. create_app() starts no thread before the fork (its thread pools start threads on first
 # use) and opens no connection (services/README.md, "Fork safety").
 CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "0", "--preload", "fhir_proxy.app:create_app()"]

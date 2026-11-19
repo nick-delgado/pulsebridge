@@ -1,4 +1,4 @@
-"""Which client a login attempt came from, for the per-address rate limit.
+"""Which client a request came from, for the per-address limit on ``POST /auth/session``.
 
 ``X-Forwarded-For`` (XFF) is a comma-separated list. Each proxy **appends** the address it
 received the connection from; it never removes what was already there. So only the entries at
@@ -41,8 +41,8 @@ A hop count cannot tell which path a request took. With 2, a request sent straig
 header of its own it carries 1 entry (the caller, appended by Cloud Run) and that entry is used,
 which is right; with a header ``X`` of its own it arrives as ``X, <caller>`` and ``X``, which
 the caller wrote, becomes the key (measured; with ``A, B`` it is ``B``). Such a caller can
-therefore pick a fresh key per request, or a reviewer's address to fill that reviewer's bucket
-(README, "Reviewer login"; module phr's README, "The client address and the direct run.app
+therefore pick a fresh key per request, or a visitor's address to fill that visitor's bucket
+(README, "Demo sessions"; module phr's README, "The client address and the direct run.app
 URL").
 
 IPv6 clients are grouped by their /64 network: one subscriber usually holds a whole /64, so

@@ -2,9 +2,10 @@
 
 What may be logged is decided at each call site, by passing explicit fields: event names, codes,
 counts, HTTP statuses, durations, resource ids that are hashes (AuditEvent and message ids), and
-the client address of a failed login (docs/spikes/s6.md: "time, client address").
+the client address of a refused session request (the per-address limit, a refused Origin), and
+a bot check's score and reason code.
 
-Never logged: a submitted password, a token (session or identity), the patient identifier or
+Never logged: a signing key, a token (session, bot-check or identity), the patient identifier or
 name, observation values, message or ACK text, request or response bodies, query strings,
 exception messages or server error text. Exceptions are logged by class name only.
 """

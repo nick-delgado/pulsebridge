@@ -1,15 +1,17 @@
 # fhir-proxy
 
 The dashboard's only backend (task T14, decision D10), and the only public service in
-PulseBridge. It checks the shared reviewer password and issues a signed session token (D9),
-serves a narrow read API over the two FHIR stores and the HL7v2 store, assembles the messages
+PulseBridge. It runs an invisible bot check and gives a visitor an anonymous 24-hour demo
+session in a cookie (D16, task T43; this replaced D9's shared reviewer password), serves a narrow read API over the two FHIR stores and the HL7v2 store, assembles the messages
 log, and forwards cuff readings to the private cuff simulator with its own identity. The share
 to OpenEMR (T15) plugs in as an extension (see "Share to OpenEMR (T15)").
 
 ```
-browser ──HTTPS, Authorization: Bearer <session token>──> fhir-proxy
-                                                           │ token check (HS256, key = scrypt(password))
-             mounted secret file (reviewer-password) ──────┤
+browser ──HTTPS, same origin, Cookie: __session=<token>──> fhir-proxy (behind Hosting's /api)
+                                                           │ token check (HS256, key = the mounted secret)
+         mounted secret file (session-signing-key) ────────┤
+Fraud Defense (reCAPTCHA)  <── assessments.create ─────────┤ POST /auth/session only
+Cloud Storage (demo-counters) <── one counter object a day ┤ POST /auth/session only
 FHIR store (health data)   <── read/search, patient-pinned ┤
 audit FHIR store (D15)     <── AuditEvent search/read ─────┤
 HL7v2 store                <── messages.get / list ────────┤
@@ -28,10 +30,13 @@ services/fhir-proxy/
   pyproject.toml        the three libs, Flask, gunicorn, PyJWT, cryptography (exact pins)
   fhir_proxy/
     config.py           environment variables, checked at start-up (errors name variables only)
-    password.py         the mounted reviewer-password file, re-read after a short cache
-    session_token.py    the session token: scrypt key from the password, HS256 JWT, constant-time check
+    signing_key.py      the mounted session-signing-key file, re-read after a short cache
+    session_token.py    the session token: HS256 JWT signed with that key
+    bot_check.py        the Fraud Defense assessment and the pass rule (valid, action, host, score)
+    demo_counter.py     the daily bot-check cap: a counter object per UTC day in Cloud Storage
+    session_limit.py    the per-address limit on POST /auth/session (a sliding hour)
+    flood_log.py        one log line per address per minute under a flood of refusals
     client_address.py   which X-Forwarded-For entry is the client (TRUSTED_PROXY_HOPS)
-    login_limit.py      failed-login sliding windows, per address and in total
     search.py           GET /fhir/Observation: strict validation, the R4 date rule, paging links
     store.py            reads from the three stores; the patient pin
     hl7.py              stored message -> control ID, and the Observation identifier v2-to-fhir writes
@@ -45,7 +50,7 @@ services/fhir-proxy/
     share/              T15: POST /share to OpenEMR, the token, the pinned TLS, the probe
     errors.py           OperationOutcome with fixed wording; upstream errors to bounded reasons
     logs.py             JSON log lines, values never logged
-    app.py              Flask app: the gate, CORS, security headers, thin handlers
+    app.py              Flask app: the gate (cookie, Origin), security headers, thin handlers
     testing.py          test fakes (synthetic data only), like pulsebridge_gcp.testing
   tests/                pytest; no network beyond 127.0.0.1, no credentials, no GCP
 ```
@@ -53,15 +58,19 @@ services/fhir-proxy/
 ## Routes as built
 
 Paths are relative to `PATH_PREFIX` (empty by default; `/api` behind the Firebase Hosting
-rewrite, see "For T22"). Every route except `POST /auth/login` needs
-`Authorization: Bearer <token>` and answers `401` with `WWW-Authenticate: Bearer` otherwise,
-**including** `GET /fhir/metadata` and unknown paths. Every error body is a FHIR
+rewrite, see "For T22"). Every route except the three under `/auth/` needs a valid `__session`
+cookie and answers `401 session-required` otherwise, **including** `GET /fhir/metadata` and
+unknown paths. Every `POST` (any method but `GET` and `HEAD`) also needs an `Origin` header
+that is exactly one of `ALLOWED_ORIGINS`, otherwise `403 origin-refused`, checked before the
+cookie. Every error body is a FHIR
 `OperationOutcome` whose `issue[0].details.coding[0]` (system `urn:pulsebridge:fhir-proxy:reason`)
 is a fixed reason code and whose `diagnostics` is a fixed sentence.
 
 | Method and path | Answer |
 | --- | --- |
-| `POST /auth/login` | `{"password": "..."}` (exactly that, strict JSON, at most 1 KiB) → `200 {"token", "expires_at"}`; `401` wrong password; `429` + `Retry-After`; `503` secret missing or empty; `400` bad body; `413`; `415` not `application/json` |
+| `GET /auth/config` | no session: `{"recaptcha_site_key", "recaptcha_action"}` (the site key is public; the page fetches it rather than building it in) |
+| `POST /auth/session` | no session: `{"recaptcha_token": "..."}` (exactly that, strict JSON, `application/json`, at most 10 KiB) → `200 {"expires_at"}` and `Set-Cookie: __session=<token>; Path=<PATH_PREFIX or />; Max-Age=86400; HttpOnly; Secure; SameSite=Strict`; `400 invalid-body`; `403 origin-refused`; `403 bot-check-failed`; `429 rate-limited` + `Retry-After`; `503 demo-busy` ("The demo is busy, try again tomorrow.", `Retry-After` to the next UTC midnight); `503 bot-check-unavailable`; `503 session-not-configured` (no usable signing key); `413` |
+| `POST /auth/logout` | no session needed (so an expired cookie can be cleared), `Origin` needed: `204`, `Set-Cookie: __session=; Path=...; Max-Age=0; HttpOnly; Secure; SameSite=Strict` |
 | `GET /status` | always `200` once authenticated: `{"watchSync": {state, reason, notes, strandedPreliminary, checkedAt, lastSyncAt}, "observationCounts": {watch: number \| null, cuff: number \| null}, "fhirStore": {reachable, checkedAt, detail}, "openemr": {...}}` |
 | `GET /fhir/metadata` | the CapabilityStatement (`application/fhir+json`) |
 | `GET /fhir/Observation?code=&date=&_sort=&_count=` | `searchset` Bundle of the configured patient's Observations; each entry has `fullUrl` = `PUBLIC_BASE_URL/fhir/Observation/<id>`; `link` `self` and `next` are path-absolute links to the proxy; `400` OperationOutcome for anything unsupported |
@@ -72,11 +81,11 @@ is a fixed reason code and whose `diagnostics` is a fixed sentence.
 | `GET /cuff/samples` | cuff-sim's list, forwarded |
 | `POST /share` | `{"observationId"}` → `200 {"outcome", "steps", "readBack"}`; `400`/`404`/`422`/`503` OperationOutcome before OpenEMR is called; `502`/`504` `{"operationOutcome", "steps"}` after (see "Share to OpenEMR (T15)") |
 | `POST /cuff/readings` | forwarded to cuff-sim unchanged; its `200/400/413/422/429/500`, body and `Retry-After` unchanged; `502` cuff-sim unreachable or unusable; `504` timed out (may have been sent) |
-| `OPTIONS <any path>` | CORS preflight, no token: `204` for a known route from an allowed origin with its method and headers; the same `403` for anything else, an unknown path included |
+| `OPTIONS <any path>` | not a CORS preflight any more: it goes through the gate like any other method (`403 origin-refused` without an allowed `Origin`, else `401` or `405`), and no `Access-Control-*` header is ever sent |
 
-A token in the query string (`access_token`, `token`, `id_token`) is refused with `400` and
-`WWW-Authenticate: Bearer error="invalid_request"`, even beside a valid header. The `Bearer`
-scheme name is matched without regard to case (RFC 9110 section 11.1).
+A token in the query string (`access_token`, `token`, `id_token`, `__session`) is refused with
+`400 token-in-query`, even beside a valid cookie and on the public routes. `Authorization:
+Bearer` is not accepted (a request carrying only that is `401 session-required`).
 
 **Time budget.** Every request has one budget for all its upstream calls together:
 `CUFF_FORWARD_TIMEOUT_SECONDS` (55 s) for `POST /cuff/readings`, `REQUEST_BUDGET_SECONDS`
@@ -103,7 +112,7 @@ Each is a deliberate change from T16/T34's proposal; the client and mock should 
 | 8 | Search Bundle | `link[next]` under the base URL, no `fullUrl` | `link` has `self` and `next` as **path-absolute** URLs (`/api/fhir/Observation?...`), never built from `Host`; **every entry has `fullUrl`** `"<PUBLIC_BASE_URL>/fhir/Observation/<id>"` (R4: SHALL for search results), which the new read route answers; no `total` (entries are post-filtered) | none (the client already resolves relative links; it can ignore `fullUrl`) |
 | 9 | `watchSync.reason` when health-sync fails | `health-sync-unreachable` (example) | one of `health-sync-timeout` (no answer, or the request's budget ran out), `health-sync-unreachable`, `health-sync-error` (non-200, or any unexpected failure), `health-sync-bad-answer`, `health-sync-identity-token-unavailable`, `health-sync-not-deployed`; `state` is `unknown` | T17 (shows it as detail text) |
 | 10 | `openemr` in `/status` | mock: reachable | `{"reachable": false, "detail": "not-checked"}` until T15 installs a probe; since T15 a real probe (`not-configured` without the settings; codes in "Share to OpenEMR") | T15 (done) |
-| 11 | `503` on protected routes | only login | when the secret is missing **every** route answers `503` (`login-not-configured`): no token can be checked | none (an `ApiError`) |
+| 11 | `503` on protected routes | only login | when the signing-key secret is missing or unusable **every** route answers `503` (`session-not-configured`; D9's `login-not-configured` until T43): no token can be checked | none (an `ApiError`) |
 | 12 | Cuff trace of an unreadable AuditEvent | `404` (mock) | **`422`** (`unreadable-send-attempt`); the row is in the log. The page treats only 404/410 as final today: it should treat 422 as final too (retrying cannot help) | T18 follow-up |
 | 13 | `lastSyncAt` | ISO | ISO in UTC with milliseconds (`2026-01-02T12:00:01.000Z`) | none |
 | 14 | `store-only` row `possibleDuplicateOf` | absent | **new**: `string \| null`, an AuditEvent id. Set only when exactly **one** attempt qualifies as the one this message may belong to: an accepted MLLP attempt with the same control ID, whose own derived name the store does not have (`not-found`), sent at most 120 s before the message was created. Show it as a hint ("this may be the message of that send"); it moves nothing: the attempt keeps `application: null`, the message keeps its own outcome. Two or more candidates give `null` | T19, contract |
@@ -115,7 +124,7 @@ Each is a deliberate change from T16/T34's proposal; the client and mock should 
 | 20 | `GET /fhir/Observation/{id}` | absent | **new** read route, what each search `fullUrl` names: the Observation if it is the configured patient's, else `404` (another patient's answers like a missing one); any query parameter (`_format`, `_elements`, `_summary`, ...) `400`; `ETag: W/"<meta.versionId>"` and `Last-Modified` from `meta.lastUpdated` when present; listed as `read` in the CapabilityStatement | none (the page need not call it) |
 | 21 | Cursor | opaque | still opaque; a cursor whose instant is before 1970 or more than a day ahead is refused with `400` (`invalid-cursor`) | none |
 
-Unchanged and as proposed: the login body and `expires_at`; `getHeartRateTrace`'s wire shape
+Unchanged and as proposed: `expires_at` (now from `POST /auth/session`); `getHeartRateTrace`'s wire shape
 with `kind: "reconstructed"`; `getCuffAttemptTrace`'s wire shape; `CommitAck` (`raw` decoded,
 `controlId` null in a log row); `application` from the labels with `pending`; cuff refusals;
 `502`/`504` for cuff-sim; `messageName` only ever store-returned and `derivedMessageName` only
@@ -175,116 +184,262 @@ derived.
     + 10 min), read to its end; if it cannot be read completely, no message is called
     store-only and the page says `partial: true`.
 
-## Reviewer login (D9, docs/spikes/s6.md)
+## Demo sessions (D16, T43)
 
-- **The password** is read from the mounted secret file (`REVIEWER_PASSWORD_FILE`, version
-  `latest`) and reused for `PASSWORD_CACHE_SECONDS` (30 s), so a new version takes effect within
-  that time with no redeploy. Missing, empty, unreadable, not UTF-8 or over 1 KiB → `503`
-  "Reviewer login is not configured". A trailing newline is not part of the password.
-- **Comparison** is constant-time: `hmac.compare_digest` over the SHA-256 digests of both sides,
-  so it always compares 32 bytes and leaks neither content nor length.
-- **The token** is an HS256 JWT (PyJWT), claims `iss`, `aud`, `iat`, `exp`, `jti`, no personal
-  data. Its key is `scrypt(password, salt = "pulsebridge/fhir-proxy/session-token/v1|" + issuer,
-  N=2^14, r=8, p=1)`, 32 bytes, derived once per password. Why scrypt and not a plain HMAC of
-  the password (s6's sketch): a token is an HMAC under that key, so anyone holding a token can
-  test password guesses offline; a password KDF makes each guess cost ~16 MiB and tens of
-  milliseconds. The long random password (s6: 24+ characters, at least 16 enforced) is still the
-  real defence. Because the key comes from the password, **a new password version ends every
-  session at once**. Verification accepts `HS256` only (no `none`, no `HS512`/`RS256` confusion),
-  requires all claims, checks `iss`/`aud`, refuses a lifetime longer than configured, and checks
-  expiry against an injected clock: valid while `now < exp`. Lifetime `SESSION_TTL_SECONDS`
-  (28800 = 8 hours).
-- **No cookie** is ever set (`Set-Cookie` is stripped from every response); the token travels
-  only in `Authorization: Bearer`, so there is nothing for cross-site request forgery to ride on.
-- **Rate limit** (`login_limit.py`): failed logins in a sliding window (`LOGIN_WINDOW_SECONDS`,
-  60), two limits with different jobs:
-  - **5 per client address, checked before the password.** Once an address has 5 failures, its
-    sixth attempt and every one after it in the window get `429` with `Retry-After` (whole
-    seconds until the oldest failure ages out), right password or not, so a blocked address
-    learns nothing more. The slot is reserved under one lock before the password is checked, so
-    concurrent attempts from one address cannot all slip through (tested with 12 threads: 5 get
-    `401`, 7 get `429`). A success gives its own slot back but does not clear earlier failures (a
-    NAT-mate attacker could otherwise reset the count on every reviewer login). A malformed body
-    is not a guess and uses no slot. IPv6 clients are counted per /64.
-  - **60 in total per instance, for failures only.** Checking the total before the password
-    would let about one wrong login a second, spread over twelve addresses, lock every reviewer
-    out for good. So once the total is exceeded the password is still checked (a digest
-    comparison and a cached key): a correct one gets in (`200`), a wrong one gets `429` and is
-    not counted again.
-  - **What bounds guessing, stated plainly.** Once the total is exceeded it no longer limits
-    how many passwords can be tried; verifications are bounded only per address:
+The demo is public: no password, no sign-up. A visitor clicks "View the live demo"; the page
+runs an invisible bot check in the browser, and the proxy, after asking Google about it, sets a
+signed 24-hour session cookie. The author accepts that their own data in the shown window is
+public (D16). The contract the proxy, the page (T45) and the infrastructure (T44) share is in
+docs/workplan.md, "The contract T43 to T45 share".
 
-    | Attacker | Guesses a minute |
-    | --- | --- |
-    | one address (an IPv6 /64 counts as one) | 5 |
-    | N addresses | 5 × N |
-    | a wrong `TRUSTED_PROXY_HOPS`, or a direct `*.run.app` caller sending its own `X-Forwarded-For` while the hop count is 2 (the key is then a value the caller writes) | as many as the service answers: bounded only by throughput (instances × threads) |
+### The flow of `POST /auth/session`
 
-    What protects the login then is the password: a random one has far more values than any
-    of these rates can try. Store it with `set-reviewer-password.sh --generate` (24 random
-    letters and digits); the script's 16-character minimum is a length rule, not a randomness
-    check, and a password a person chose is only as strong as that choice. `TRUSTED_PROXY_HOPS` must be right for the one path the page uses (module phr sets
-    2 for Firebase Hosting, measured; see "For T22: deploying it" below).
-    The costs of a flood are log volume and Cloud Run usage (requests, CPU, instances up to
-    `max_instance_count`). No hard ceiling on verifications is applied: it would bring the
-    lockout back.
-  - **Log volume under a flood.** Below the total every failure is logged (at most 60 a minute
-    per instance). Above it, and for refusals by the per-address limit, the first event per
-    address per window is logged and the rest only counted; when the window has passed, one
-    `login-events-suppressed` line reports the count (tested: 200 refused attempts from 20
-    addresses write 3 + 20 + 20 lines, then two summaries).
-  - **The address table is capped** (10,000). Only entries whose window has expired are dropped
-    to make room, so a flood of fresh addresses cannot evict an attacker's history. When the
-    table is full of live entries, a new address is treated as at its limit: its password is
-    still checked, so a correct one gets in, and a wrong one gets `429`.
-- **The client address** (`client_address.py`): `X-Forwarded-For` is appended to by each proxy,
-  so only right-hand entries are trustworthy. Google documents the load balancer's behaviour
-  ("appends two IP addresses ... `EXISTING_VALUE, CLIENT_IP, LOAD_BALANCER_IP`" and "does not
-  verify any IP addresses that precede", docs.cloud.google.com/load-balancing/docs/https,
-  "X-Forwarded-For header", read 2026-11-15). Cloud Run's own documentation (container contract,
-  HTTPS invocation) says nothing about the header. Measured on dev on 17 November 2026
-  (infra/envs/README.md, P1): `*.run.app` appends one entry, the address it saw, after whatever
-  the caller sent (`192.0.2.1` arrived as 2 entries, `192.0.2.1, 198.51.100.9` as 3), as a
-  Google developer forum thread had reported. So the default
-  `TRUSTED_PROXY_HOPS=1` takes the **last** entry (the service alone at `*.run.app`); `2` takes
-  the second from the right (one more proxy in front: Firebase Hosting, measured, which module
-  phr sets); `0` ignores the header (no proxy, local use). With the right count for the path a
-  request took, a spoofed left-hand entry never moves the key (tested); with fewer entries than
-  hops the left-most is used. Under 2, a request sent straight to `*.run.app` with its own
-  header does choose its key (measured: the logged `client_address` was the caller's
-  second-from-right value; tested; module phr's README, "The client address and the direct
-  run.app URL"). Failed logins log the address and the number of XFF entries, never the values
-  to their left.
-- **Logs** record `login-failed` (client address, XFF entry count), `login-rate-limited`,
-  `login-succeeded`, `token-refused` (reason code); never a submitted password or a token.
+Every step is cheaper than the next, so a flood of junk is refused before it costs anything:
 
-What it is not: per-user sign-in. Everyone with the password is the same "reviewer"; nothing
-records who viewed what. A real multi-patient deployment would use SMART on FHIR or an identity
-provider and an audit log. The CapabilityStatement says so and claims no
-`restful-security-service` code.
+1. **`Origin`** must be one of `ALLOWED_ORIGINS` (the gate, for every `POST`): `403
+   origin-refused`. A refused request uses none of the address's attempts.
+2. **Per-address limit** (`session_limit.py`): `SESSIONS_PER_ADDRESS_PER_HOUR` (5) attempts per
+   client address in a sliding hour, checked and recorded under one lock before the body is
+   read. **Every attempt counts**, a pass included: counting only failures would let a bot that
+   passes mint sessions without limit, and a visitor needs one session a day. The next attempt
+   gets `429 rate-limited` with `Retry-After` (whole seconds until the oldest attempt ages
+   out). The address is the same key as D9's login limit (`client_address.py`, below), an IPv6
+   /64 counted as one. The table is capped at 10,000 addresses; only fully aged-out entries
+   make room, so a flood of fresh addresses cannot evict an abuser's history (a new address is
+   refused for 60 s while the table is full of live entries). In memory per process: the real
+   limit is up to 5 x instances. That is acceptable because the daily cap, which spans
+   instances, bounds the cost.
+3. **The body** `{"recaptcha_token": "<text>"}`, strict JSON, nothing else: `400 invalid-body`.
+4. **A shape check of the token** (`[A-Za-z0-9_-]{20,8192}`): anything else is `403
+   bot-check-failed` without an assessment or a count.
+5. **The signing key** is read now: without one no session could be issued, so nothing is
+   spent (`503 session-not-configured`).
+6. **The daily cap** (`demo_counter.py`): one more assessment is counted for today **before**
+   it is made. Reached: `503 demo-busy`, "The demo is busy, try again tomorrow.", with
+   `Retry-After` until the next UTC midnight. Counter unreachable: `503 bot-check-unavailable`
+   (fail closed: no counter, no assessment).
+7. **The assessment** (`bot_check.py`). Fraud Defense unreachable, slow, refusing or answering
+   nonsense: `503 bot-check-unavailable`. Not a pass: `403 bot-check-failed`.
+8. **A pass**: `200 {"expires_at": "<RFC 3339>"}` and the cookie.
 
-## CORS and response headers
+### Details the contract left open (for T44, T45 and the orchestrator)
 
-- `Access-Control-Allow-Origin` is set only to an origin listed **exactly** in
-  `ALLOWED_ORIGINS` (never `*`); no `Allow-Credentials` (a bearer token is attached by script,
-  not by the browser); `Vary: Origin` on every response; `Retry-After` and `WWW-Authenticate`
-  exposed. Preflight: the route's one method, headers `Authorization` and `Content-Type` only,
-  `Max-Age` 600.
-- On every response: `Cache-Control: no-store` (also keeps Firebase Hosting's CDN from caching
-  health data), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
-  frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, HSTS. No
-  server version (gunicorn's `Server` header carries none; Cloud Run's front end adds its own).
+- **Logout needs no session**, only an allowed `Origin`, so the page can always clear the
+  cookie, an expired one included (with a valid session it behaves as the contract says).
+- **`503 session-not-configured`** when the signing-key file is missing, shorter than 32 bytes
+  or unreadable: on `POST /auth/session` (before anything is spent) and on every protected
+  route. The page can treat it like any other 503.
+- **`demo-busy` carries `Retry-After`** (seconds to the next UTC midnight); `413` when the body
+  is over 10 KiB; a wrong `Content-Type` is `400 invalid-body`.
+- **The key file's format**: the key is the file's bytes, at least 32; T44's script may store
+  32 raw bytes or a base64 or hex text of them.
+- **`Origin` is checked on every method but `GET` and `HEAD`**, not only `POST` (only `POST`
+  routes exist).
+
+### The bot check (Google Cloud Fraud Defense, formerly reCAPTCHA Enterprise)
+
+Terms. The **site key** (`RECAPTCHA_SITE_KEY`) identifies a score-based web key; it is public,
+because the page hands it to Google's script. That script runs in the visitor's browser,
+watches how the page is used, and returns a **token**: a one-time, short-lived proof of what it
+saw, tied to an **action** name (`view_demo`). The browser cannot be trusted to say "I passed",
+so the proxy asks Google itself by creating an **assessment**: it sends the token and gets back
+whether the token is genuine, which action and page host it was made for, and a **score** from
+0.0 (very likely a bot) to 1.0 (very likely a person).
+
+The request (`POST https://recaptchaenterprise.googleapis.com/v1/projects/<GCP_PROJECT_ID>/assessments`,
+OAuth scope `cloud-platform`):
+
+```json
+{"event": {"token": "<token>", "siteKey": "<RECAPTCHA_SITE_KEY>", "expectedAction": "view_demo"}}
+```
+
+The fields of the answer the proxy reads (protobuf's JSON form leaves out default values, so a
+missing `valid` is false and a missing `score` is 0.0):
+
+```json
+{"name": "projects/<number>/assessments/<id>",
+ "tokenProperties": {"valid": true, "invalidReason": "INVALID_REASON_UNSPECIFIED",
+                     "hostname": "<site>.web.app", "action": "view_demo", "createTime": "..."},
+ "riskAnalysis": {"score": 0.9, "reasons": []}}
+```
+
+**A pass needs all four**: `tokenProperties.valid` is true; `action` is `RECAPTCHA_ACTION` (a
+token made for another action is not replayable here); `hostname` is the host of one of
+`ALLOWED_ORIGINS` (compared without case; someone copying our page elsewhere with our public
+site key gets tokens for their own host); `riskAnalysis.score` is at least `RECAPTCHA_MIN_SCORE`
+(0.5, inclusive). The caller is told only `bot-check-failed`, with the same bytes whatever
+failed, so a bot learns nothing about what to change; the log says which (`invalid-token` with
+Google's `invalidReason`, `wrong-action`, `wrong-hostname`, `low-score`) and the score, for
+tuning the threshold. The visitor's IP address and user agent are not sent (both are optional
+`event` fields): the token already carries what the browser script saw.
+
+**The IAM role**: the proxy's service account needs `recaptchaenterprise.assessments.create`.
+The narrowest predefined role that grants it is **reCAPTCHA Enterprise Agent**
+(`roles/recaptchaenterprise.agent`, "Access to create and annotate reCAPTCHA Enterprise
+assessments"); T44 grants it.
+
+**Sources**, 19 November 2026. Google's documentation site (docs.cloud.google.com) could not be
+fetched from the build session (its network does not allow that host), so the pages were read
+through search results and checked against Google's own client library:
+
+- REST reference, `projects.assessments.create`:
+  https://docs.cloud.google.com/recaptcha/docs/reference/rest/v1/projects.assessments/create
+- "Create assessments for websites" (the endpoint as `POST
+  https://recaptchaenterprise.googleapis.com/v1/projects/PROJECT_ID/assessments`, the
+  `tokenProperties` and `riskAnalysis` fields, one read per token):
+  https://docs.cloud.google.com/recaptcha/docs/create-assessment
+- "Google Cloud Fraud Defense roles and permissions" (`roles/recaptchaenterprise.agent`
+  contains `recaptchaenterprise.assessments.create`):
+  https://docs.cloud.google.com/iam/docs/roles-permissions/recaptchaenterprise, and "Access
+  control with IAM": https://docs.cloud.google.com/recaptcha/docs/access-control
+- `google-cloud-recaptcha-enterprise` 1.34.0 from PyPI (read, not installed): the field
+  definitions of `Event` (`token`, `site_key`, `expected_action`, `user_agent`,
+  `user_ip_address`), `TokenProperties` (`valid`, `invalid_reason` with `MALFORMED`, `EXPIRED`,
+  `DUPE`, `MISSING`, `BROWSER_ERROR`, `hostname`, `action`, `create_time`), `RiskAnalysis`
+  (`score`, "from 0.0 to 1.0 (1.0 means very likely legitimate traffic ...)") and the default
+  host `recaptchaenterprise.googleapis.com`.
+
+### The daily cap, and why not a counter in memory
+
+`BOT_CHECKS_PER_DAY` (300) caps **assessments** (what costs money and what Google's free tier
+counts), not sessions: a failed check is counted too. It must hold across instances and
+restarts, which a counter in memory cannot: Cloud Run scales the proxy to **zero** when idle and
+runs up to `max_instance_count` instances under load, so an in-memory count would start again
+at 0 after every quiet spell and be kept separately per instance. A bot could reset the cap
+simply by waiting for scale-to-zero. A Cloud Storage bucket shares the count, survives restarts
+and costs nothing when idle (a database or Memorystore would bill by the hour).
+
+One object per UTC day, `bot-checks/<YYYY-MM-DD>` in `DEMO_COUNTER_BUCKET`, the count in its
+custom metadata (`metadata.count`). An increment cannot lose a count (**optimistic
+concurrency**):
+
+1. `objects.get` reads the count and the object's **generation** (a number Cloud Storage
+   changes on every write); no object yet means count 0, generation 0.
+2. At the cap: `demo-busy`.
+3. A multipart `objects.insert` writes count + 1 with the **precondition**
+   `ifGenerationMatch=<generation>`: Cloud Storage writes only if the object is still the one
+   read (`0`: only if it still does not exist). If another instance wrote in between, the
+   answer is `412` and nothing was written: read again and retry, at most 8 times.
+
+Cloud Storage allows about one write a second to one object name (`429` above that, which waits
+1 s and retries), so the counter admits about one assessment a second across all visitors:
+plenty for a demo. The bucket's lifecycle rule deletes old days after 7 days (T44). Any other
+failure is `bot-check-unavailable`, and so is an object whose count is not a number (fail
+closed). Sources: https://docs.cloud.google.com/storage/docs/request-preconditions,
+https://docs.cloud.google.com/storage/docs/json_api/v1/objects/insert, "Quotas and limits"
+(https://docs.cloud.google.com/storage/quotas).
+
+### The cookie and the session token
+
+`Set-Cookie: __session=<token>; Path=/api; Max-Age=86400; HttpOnly; Secure; SameSite=Strict`
+
+- **`__session`** is the only cookie name Firebase Hosting passes on to Cloud Run (it strips the
+  others, and adds this one to its CDN cache key; firebase.google.com/docs/hosting/manage-cache,
+  "Using cookies"). `Cache-Control: no-store` on every response keeps the CDN from caching anyway.
+- **`Path`** is `PATH_PREFIX` (`/` when empty): the browser sends the cookie only to the proxy.
+- **`Max-Age`** is `SESSION_TTL_SECONDS`, the token's own lifetime.
+- **`HttpOnly`**: page script cannot read it, so a script injected into the page cannot steal
+  the session. The page keeps no token at all; the browser attaches the cookie.
+- **`Secure`**: sent over HTTPS only. **No `Domain`**: a host-only cookie.
+- **`SameSite=Strict`**: see "Cross-site request forgery" below.
+
+`POST /auth/logout` sends the same cookie with an empty value and `Max-Age=0`, which tells the
+browser to delete it. Every other `Set-Cookie` is removed from every response.
+
+The token inside is an HS256 JWT (PyJWT): claims `iss`, `aud` (both `TOKEN_ISSUER`), `iat`,
+`exp`, `jti` (random; T46 keys its per-session limits on it), no personal data. The HMAC key is
+the mounted `session-signing-key` secret (`SESSION_SIGNING_KEY_FILE`, version `latest`): at least
+32 random bytes, used as they are (raw bytes, or a base64 or hex text of them: one trailing
+newline is dropped when the rest is still 32 bytes or more). With 256 random bits nothing can be
+guessed offline from a token, so D9's scrypt derivation is gone. The file is re-read after 30 s,
+so **a new secret version ends every session** within that time. Verification accepts `HS256`
+only, requires every claim, checks `iss`/`aud`, refuses a lifetime longer than configured, and
+checks expiry against an injected clock (valid while `now < exp`). A missing cookie, an expired
+or altered token and one signed with another key all answer `401 session-required` with
+`WWW-Authenticate: Cookie realm="pulsebridge", cookie-name="__session"` (RFC 9110 section
+15.5.2: a 401 must carry a challenge; no registered scheme describes a cookie session).
+
+### Cross-site request forgery, and why both defences
+
+**Cross-site request forgery (CSRF)**: a page on another site (say, `evil.example`) makes the
+visitor's browser send a request to our proxy, for example a form that posts to
+`/api/cuff/readings`. With an ordinary cookie the browser would attach our session cookie
+automatically, and the proxy would accept a request the visitor never meant to make. The attacker
+cannot read the answer, but it does not need to: the write (a cuff reading, a share to OpenEMR)
+has already happened. Two independent defences:
+
+1. **`SameSite=Strict`** on the cookie: the browser attaches it only to requests that the page's
+   own site starts. A request started from another site, by a link, a form or a script, goes
+   without it and gets `401`.
+2. **The `Origin` check**: every `POST` must carry `Origin` equal to one of `ALLOWED_ORIGINS`.
+   Browsers set `Origin` themselves on every `POST` (Fetch standard), and page script cannot
+   change it, so a request from another site says so.
+
+Why both: `SameSite` is a browser feature, and its "site" is the registrable domain, not the
+exact origin (a sibling subdomain counts as the same site, older browsers ignore the
+attribute, and its rules have changed over the years). The `Origin` check is the server's own,
+exact, and it also protects `POST /auth/session`, which runs before any cookie exists (a
+foreign page could otherwise spend our assessments). Neither alone is something to rely on for
+writes; together a forged request needs both a browser bug and a lie in `Origin`. A `GET`
+needs no `Origin`: every `GET` is read-only (D12), and a cross-site page cannot read the answer
+because no CORS header is ever sent.
+
+**No CORS** (cross-origin resource sharing, the headers that let a page on another origin read
+an answer): the page and the proxy share one origin through Hosting's `/api` rewrite, so the
+proxy sends no `Access-Control-*` header and `OPTIONS` is not answered as a preflight. Local
+development uses the page's mock client or Vite's dev-server proxy (T45).
+
+### The client address
+
+`client_address.py` decides which `X-Forwarded-For` entry is the client, for the per-address
+limit and the logs (unchanged from D9). `X-Forwarded-For` is appended to by each proxy, so only
+right-hand entries are trustworthy. Google documents the load balancer's behaviour ("appends two
+IP addresses ... `EXISTING_VALUE, CLIENT_IP, LOAD_BALANCER_IP`" and "does not verify any IP
+addresses that precede", docs.cloud.google.com/load-balancing/docs/https, "X-Forwarded-For
+header", read 2026-11-15). Cloud Run's own documentation says nothing about the header. Measured
+on dev on 17 November 2026 (infra/envs/README.md, P1): `*.run.app` appends one entry, the
+address it saw, after whatever the caller sent. So the default `TRUSTED_PROXY_HOPS=1` takes the
+**last** entry (the service alone at `*.run.app`); `2` takes the second from the right (Firebase
+Hosting in front, measured, which module phr sets); `0` ignores the header (local use). With
+fewer entries than hops the left-most is used; an entry that is not an address goes to one
+shared bucket. Under 2, a request sent straight to `*.run.app` with its own header chooses its
+key (module phr's README, "The client address and the direct run.app URL"): such a caller is
+not held by the per-address limit, and can fill another visitor's bucket if it knows the
+address. What bounds it then is the daily cap.
+
+### Logs
+
+`session-created` (`score`, `checks_today`), `bot-check-failed` (`reason`, `invalid_reason`,
+`score`, `checks_today`; `reason=malformed-token` for the shape check), `bot-check-unavailable`
+and `demo-counter-unavailable` (`problem`: a fixed code such as `timeout`, `http-403`,
+`bad-object`, `contention`), `demo-busy` (`cap`), `session-rate-limited` (`client_address`,
+`retry_after`) and `origin-refused` (`client_address`, `origin_present`), both sampled under a
+flood (the first per address per minute, then one `session-events-suppressed` count),
+`session-signing-key-unavailable` (`problem`), `token-refused` (`reason`). Never a token, the
+key or the refused `Origin` value.
+
+What it is not: sign-in. Every visitor is the same anonymous "demo"; nothing records who viewed
+what. A real multi-patient deployment would use SMART on FHIR or an identity provider and an
+audit log. The CapabilityStatement says so and claims no `restful-security-service` code.
+
+## Response headers
+
+On every response: `Cache-Control: no-store` (also keeps Firebase Hosting's CDN from caching
+health data), `X-Content-Type-Options: nosniff`, `Content-Security-Policy: default-src 'none';
+frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, HSTS,
+`Vary: Origin, Cookie`. No `Access-Control-*` header. No `Set-Cookie` except the session's. No
+server version (gunicorn's `Server` header carries none; Cloud Run's front end adds its own).
 
 ## Robustness
 
-- Request bodies are capped at 16 KiB (cuff-sim's own limit; `413` in cuff-sim's shape), login
-  bodies at 1 KiB, by the proxy itself (`bodies.read_body`): it reads at most limit + 1 bytes
+- Request bodies are capped at 16 KiB (cuff-sim's own limit; `413` in cuff-sim's shape),
+  session bodies at 10 KiB, by the proxy itself (`bodies.read_body`): it reads at most limit + 1 bytes
   and refuses when there are more, and refuses a body shorter than its `Content-Length`.
   Werkzeug's `MAX_CONTENT_LENGTH` is not used, because under gunicorn a chunked body (no
   `Content-Length`, `wsgi.input_terminated`) is silently cut at the limit and would have been
   forwarded truncated. Tested with gunicorn's environ at 16384, 16385 and 40000 bytes and against
-  a real gunicorn on 127.0.0.1 with `Transfer-Encoding: chunked`. Login JSON is strict: UTF-8,
-  no `NaN`, no repeated keys, exactly one field.
+  a real gunicorn on 127.0.0.1 with `Transfer-Encoding: chunked`. Session JSON is strict:
+  UTF-8, no `NaN`, no repeated keys, exactly one field.
 - Ids from the path must be FHIR ids (1-64 of `[A-Za-z0-9.-]`) **with at least one letter or
   digit**: `..` is a valid R4 id pattern but would climb a path segment once in a URL.
   `pulsebridge_gcp`'s own check allows it (a follow-up for that library).
@@ -614,7 +769,7 @@ whether OpenEMR's zone was other than UTC was not checked). Not done: 7, 8, 9.
 - Its `__init__.py` defines `register(proxy: ProxyContext) -> None`. `create_app` imports it if
   present and calls it once at start-up (`extensions.load_extension`). In `register`:
   - `proxy.add_route(Route("POST", "/share", "share", "view", "<summary>"), handler)`: the route
-    joins the same table, so it gets the token check, CORS, the headers, the request budget,
+    joins the same table, so it gets the cookie and `Origin` checks, the headers, the request budget,
     error handling and a line in the CapabilityStatement. Refused: a public route (the public
     set comes from the core table only), a core endpoint name, or a method and path that exist.
   - Register only token-gated routes with **distinct literal paths** (no converters that could
@@ -655,18 +810,22 @@ whether OpenEMR's zone was other than UTC was not checked). Not done: 7, 8, 9.
 | `AUDIT_FHIR_STORE_ID` | yes | | the audit FHIR store (D15); must differ |
 | `HL7V2_STORE_ID` | yes | | the HL7v2 store |
 | `PATIENT_ID` | yes | | the configured patient (the same as cuff-sim's and v2-to-fhir's) |
-| `REVIEWER_PASSWORD_FILE` | yes | | absolute path of the mounted `reviewer-password` secret file |
-| `ALLOWED_ORIGINS` | yes | | comma-separated exact origins (`https://...`; `http://localhost:<port>` for development) |
+| `SESSION_SIGNING_KEY_FILE` | yes | | absolute path of the mounted `<prefix>-session-signing-key` secret file (at least 32 random bytes) |
+| `ALLOWED_ORIGINS` | yes | | comma-separated exact origins of the page (`https://<site>.web.app`, ...; `http://localhost:<port>` for development): every `POST`'s `Origin` must be one, and the bot check's hostname must be one of their hosts |
+| `RECAPTCHA_SITE_KEY` | yes | | the score-based reCAPTCHA key's ID (public; `GET /auth/config` returns it) |
+| `DEMO_COUNTER_BUCKET` | yes | | the counter bucket's name (`<prefix>-demo-counters`) |
+| `RECAPTCHA_ACTION` | no | `view_demo` | the action name; `[A-Za-z0-9/_]`, 1-100 |
+| `RECAPTCHA_MIN_SCORE` | no | `0.5` | lowest passing score, 0-1, inclusive |
+| `SESSIONS_PER_ADDRESS_PER_HOUR` | no | `5` | 1-100; every attempt counts |
+| `BOT_CHECKS_PER_DAY` | no | `300` | assessments per UTC day across all instances, 1-100000 |
 | `CUFF_SIM_URL` | yes | | cuff-sim's Cloud Run URL (`https://...run.app`); also the identity token's audience |
 | `PUBLIC_BASE_URL` | yes | | the URL the page reaches the proxy at, for `Bundle.entry.fullUrl`: behind the Firebase Hosting rewrite `https://<hosting domain>/api` (its path must equal `PATH_PREFIX`). Never taken from `Host` or forwarded headers |
 | `HEALTH_SYNC_URL` | no | empty | health-sync's Cloud Run URL; empty: `state: unknown`, `health-sync-not-deployed` |
 | `PATIENT_ASSIGNING_AUTHORITY`, `PATIENT_FAMILY_NAME`, `PATIENT_GIVEN_NAME` | no | empty | the same values as cuff-sim's; all or none. With them the trace shows a sent sample's exact bytes |
 | `PATH_PREFIX` | no | empty | `/api` when the page reaches the proxy through the Firebase Hosting rewrite (Hosting forwards the full path) |
-| `SESSION_TTL_SECONDS` | no | `28800` | token lifetime, 60-86400 |
-| `TOKEN_ISSUER` | no | `pulsebridge-fhir-proxy` | JWT `iss`/`aud`; also salts the key derivation (set a deployment-specific value to defeat shared precomputation) |
-| `PASSWORD_CACHE_SECONDS` | no | `30` | rotation delay, 0-300 |
+| `SESSION_TTL_SECONDS` | no | `86400` | session lifetime (token `exp` and cookie `Max-Age`), 60-86400 |
+| `TOKEN_ISSUER` | no | `pulsebridge-fhir-proxy` | JWT `iss`/`aud` |
 | `TRUSTED_PROXY_HOPS` | no | `1` | `1` for the service alone at `*.run.app`; **`2` behind Firebase Hosting** (measured; module phr sets it). See below |
-| `LOGIN_FAILURES_PER_ADDRESS` / `LOGIN_FAILURES_TOTAL` / `LOGIN_WINDOW_SECONDS` | no | `5` / `60` / `60` | the login limit |
 | `FHIR_TIMEOUT_SECONDS` | no | `10` | per Cloud Healthcare request, 1-30 |
 | `CUFF_FORWARD_TIMEOUT_SECONDS` | no | `55` | 10-3000, at least 10 s below `REQUEST_TIMEOUT_SECONDS`; the budget of the cuff send (below) |
 | `REQUEST_BUDGET_SECONDS` | no | `50` | 5-3000, at least 10 s below `REQUEST_TIMEOUT_SECONDS`; the budget of every other request |
@@ -677,10 +836,23 @@ whether OpenEMR's zone was other than UTC was not checked). Not done: 7, 8, 9.
 | `OPENEMR_SITE_ADDRESS`, `OPENEMR_TOKEN_URL`, `OPENEMR_FHIR_BASE_URL`, `OPENEMR_SCOPES`, `OPENEMR_CLIENT_FILE` | no (all or none) | empty | the share to OpenEMR (T15); see "Share to OpenEMR (T15)", "Configuration" |
 | `OPENEMR_TIMEOUT_SECONDS` | no | `10` | per OpenEMR call, 1-30 |
 
-**Secret mount.** Mount `reviewer-password` as a **file volume** with version **`latest`**
-(not an environment variable, which is read once at start), and point
-`REVIEWER_PASSWORD_FILE` at the file. Only the proxy's service account has
-`secretAccessor` on it (`infra/modules/identity`).
+Removed by T43 (D16): `REVIEWER_PASSWORD_FILE`, `PASSWORD_CACHE_SECONDS`,
+`LOGIN_FAILURES_PER_ADDRESS`, `LOGIN_FAILURES_TOTAL`, `LOGIN_WINDOW_SECONDS`.
+
+**Secret mount.** Mount `<prefix>-session-signing-key` as a **file volume** with version
+**`latest`** (not an environment variable, which is read once at start), and point
+`SESSION_SIGNING_KEY_FILE` at the file. Only the proxy's service account has `secretAccessor`
+on it (`infra/modules/identity`). A volume secret needs a version at deploy time: add it with
+T44's script before deploying a proxy that mounts it.
+
+**Google APIs the proxy calls for sessions** (T44): `recaptchaenterprise.googleapis.com`
+enabled; `roles/recaptchaenterprise.agent` for the proxy's service account (in
+`GCP_PROJECT_ID`, where the assessment is created and where the key must live); on the counter
+bucket only, a role with `storage.objects.get`, `storage.objects.create` and
+`storage.objects.delete` (overwriting an object needs delete as well as create;
+`roles/storage.objectUser` has all three, `roles/storage.objectCreator` alone does not). The
+proxy uses the same Application Default Credentials (scope `cloud-platform`) as for Cloud
+Healthcare.
 
 **Invoker bindings the proxy needs**: `roles/run.invoker` for the `fhir-proxy` service account
 on **cuff-sim** (D10, already in the identity README) **and on health-sync** (its README, "For
@@ -701,11 +873,11 @@ therefore sets 2 (its default). This service's own default stays **1**: called a
 with nothing in front, it receives exactly one entry, and a default of 2 would let any direct
 caller write its own key. While `*.run.app` stays reachable directly (Hosting needs it), the
 hop count of 2 lets a direct caller that sends its own header choose its key (the left of two
-entries), and then only throughput bounds its guesses; the password is what protects the login
-(see "Reviewer login" and module phr's README, "The client address and the direct run.app URL").
-On a new deployment, confirm the shape with two failed logins through the hosting domain (one
-with a made-up `X-Forwarded-For: 192.0.2.1`) and read `forwarded_for_entries` and
-`client_address` in the `login-failed` lines.
+entries), so the per-address session limit does not hold it; the daily cap does (see "Demo
+sessions" and module phr's README, "The client address and the direct run.app URL"). On a new
+deployment, confirm the shape with session requests through the hosting domain (one with a
+made-up `X-Forwarded-For: 192.0.2.1`) and read `client_address` in the `session-rate-limited`
+lines (set `SESSIONS_PER_ADDRESS_PER_HOUR=1` for the test).
 
 **Possible follow-up: `TRUSTED_PROXY_CIDRS`.** A hop count cannot tell a Hosting-forwarded request
 from a direct `*.run.app` one. A setting listing Firebase Hosting's egress address ranges would:
@@ -733,9 +905,9 @@ current.
   worst case (95 for its defaults), `REQUEST_BUDGET_SECONDS` as wanted, and
   `REQUEST_TIMEOUT_SECONDS` at least 10 s above both.
 
-**Instances and concurrency.** `max_instance_count = 2` (s6). The login limit is in memory per
-process and the image runs one worker, so the real per-address limit is up to 5 × instances a
-minute and the total up to 60 × instances. Do not raise `--workers`. Set Cloud Run's
+**Instances and concurrency.** `max_instance_count = 2` (s6). The per-address session limit is
+in memory per process and the image runs one worker, so the real limit is up to 5 × instances
+an hour (the daily cap is in the bucket and holds across instances). Do not raise `--workers`. Set Cloud Run's
 **per-instance concurrency to the thread count (8)**: each request holds one gunicorn thread
 for its whole life, and a slow unauthenticated client trickling a body holds one until the body
 is complete or Cloud Run's request timeout (`REQUEST_TIMEOUT_SECONDS`: 120 s by default, 70 s as deployed by module `phr`) ends it. That is
@@ -767,9 +939,9 @@ The Dockerfile was added by T22, following services/README.md "Adding an image":
   package data: the cuff trace loads T07's samples) and `libs/pulsebridge_gcp`, then
   `services/fhir-proxy`.
 - `CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "0", "--preload", "fhir_proxy.app:create_app()"]`
-  (the "Running" command without `--bind`). **One worker**: the login limit is per process.
+  (the "Running" command without `--bind`). **One worker**: the session limit is per process.
 - `.dockerignore` allow-list: `services/fhir-proxy/pyproject.toml`, `README.md`, `fhir_proxy/`.
-- Smoke case: `GET /status` with no token answers `401` without calling Google; start-up with
+- Smoke case: `GET /status` with no cookie answers `401 session-required` without calling Google; start-up with
   `CUFF_SIM_URL` unset fails naming `CUFF_SIM_URL`.
 - `fhir_proxy/testing.py` is in the package (as in health-sync); it imports nothing beyond the
   service's own dependencies and does nothing unless called.
@@ -788,7 +960,7 @@ The Dockerfile was added by T22, following services/README.md "Adding an image":
 gunicorn --bind ":${PORT:-8080}" --workers 1 --threads 8 --timeout 0 --preload "fhir_proxy.app:create_app()"
 ```
 
-One worker (the login limit is per process), eight threads (the messages log looks up stored
+One worker (the per-address session limit is per process), eight threads (the messages log looks up stored
 messages in parallel), `--timeout 0` (Cloud Run's request timeout is the limit), `--preload`
 (`create_app()`, which checks the configuration, runs in gunicorn's master before the port
 opens, so a bad configuration exits without ever listening and Cloud Run's startup probe fails;
@@ -798,15 +970,17 @@ services/README.md, "Start-up failures"). The image (`Dockerfile`) runs this com
 connection; on Cloud Run, finding Application Default Credentials asks the metadata server
 once, as for the other services. Credentials are
 Application Default Credentials: on Cloud Run the `fhir-proxy` service account (FHIR reader on
-both FHIR stores, HL7v2 consumer, secret accessor on `reviewer-password`); identity tokens for
+both FHIR stores, HL7v2 consumer, secret accessor on `session-signing-key`, reCAPTCHA
+Enterprise Agent, object read and write on the counter bucket); identity tokens for
 cuff-sim and health-sync come from the metadata server. No key file.
 
 ## Logging
 
-One JSON object per line on stdout. Events: `login-failed` (`client_address`,
-`forwarded_for_entries`), `login-rate-limited` (`client_address`, `retry_after`),
-`login-succeeded`, `token-refused` (`reason`), `reviewer-password-unavailable` (`problem`:
-`missing`/`empty`/`unreadable`), `unreadable-send-attempt` (`attempt_id`), `attempts-skipped`
+One JSON object per line on stdout. Events: the session events in "Demo sessions", "Logs"
+(`session-created`, `bot-check-failed`, `bot-check-unavailable`, `demo-counter-unavailable`,
+`demo-busy`, `session-rate-limited`, `origin-refused`, `session-events-suppressed`,
+`session-signing-key-unavailable` with `problem` `missing`/`too-short`/`unreadable`),
+`token-refused` (`reason`), `unreadable-send-attempt` (`attempt_id`), `attempts-skipped`
 (`count`), `message-lookup-failed` (`error_type`), `store-only-scan-truncated`,
 `store-only-check-truncated`, `messages-frontier-degenerate` (`rows`), `paging-link-unrecognised`, `health-sync-status` (`outcome`,
 `http_status`), `fhir-store-status`, `cuff-forwarded` / `cuff-forward-failed` (`route`,
@@ -814,7 +988,7 @@ One JSON object per line on stdout. Events: `login-failed` (`client_address`,
 `share-finished` (`outcome`, `steps`, `duration_ms`), `share-failed` (`reason`, `step`,
 `http_status`, `steps`), `openemr-client-document-unusable` (`problem`, `field`: a field
 name), `bug` (`error_type`,
-`endpoint`). Never logged: passwords, tokens, the patient identifier or name, observation
+`endpoint`). Never logged: the signing key, tokens of any kind, the patient identifier or name, observation
 values, message or ACK text, request or response bodies, query strings, exception messages,
 server error text. A test pushes distinctive values through every route, including a
 deliberate exception that quotes them, and checks every record with and without its traceback.
@@ -827,9 +1001,38 @@ R4 rule is what is tested. Heart-rate data is written through T06's real `heart_
 blood-pressure data through v2-to-fhir's real `map_message` over T07's samples; the five
 AuditEvent fixtures are T31's examples as committed. cuff-sim and health-sync are a fake sender;
 the real `requests` sender is tested against an HTTP server on 127.0.0.1 (bytes, timeout, no
-redirect, size cap). All data is synthetic; the test password is obviously fake.
+redirect, size cap). Fraud Defense and the counter bucket are fakes of their REST APIs
+(`FakeFraudDefense`, `FakeBucket`) behind the proxy's real clients: the fake bucket keeps
+generations and answers `412` to a failed precondition, so the counter race is tested for real
+(an injected write between read and write; threads on two instances sharing one bucket). All data
+is synthetic; the signing keys are obviously fake.
 
 ## Not verified
+
+**T43 (demo sessions) made no call to Google.** Fraud Defense and Cloud Storage were tested
+against fakes built from the documentation. To confirm on the first real deploy (the rollout),
+in this order:
+
+1. With the real key, a click on "View the live demo" through the hosting domain gives `200`
+   and a `session-created` line with a score; `curl` with a made-up token gives `403` and a
+   `bot-check-failed` line with `reason=invalid-token`, `invalid_reason=MALFORMED`. This shows
+   the endpoint, the request body, the role and the answer's field names.
+2. **Whether Fraud Defense answers a well-shaped junk token with `200` and `valid: false`** (as
+   assumed) or with `400`: a `400` would show as `503 bot-check-unavailable` and
+   `bot-check-unavailable problem=http-400` in the log. Then map that 400 to `bot-check-failed`.
+3. **A real token's length and alphabet** fit the shape check `[A-Za-z0-9_-]{20,8192}` (a pass
+   in step 1 shows it does; a `reason=malformed-token` line for a real click would show it
+   does not).
+4. **`tokenProperties.hostname`** is the bare host (`<site>.web.app`, no port), as compared.
+5. **Firebase Hosting forwards `Origin`** on a `POST` to Cloud Run (step 1 passes only if it
+   does), passes `__session` in both directions (`Set-Cookie` on the answer, `Cookie` on later
+   requests), and does not cache any `/api` answer.
+6. **The counter bucket**: the first check of the day creates `bot-checks/<day>`; a second
+   check updates it (this needs `storage.objects.delete` as well as `create`); the object shows
+   `metadata.count`. A `403` here shows as `demo-counter-unavailable problem=http-403`.
+7. The assessment is billed to and counted in `GCP_PROJECT_ID`, and the key belongs to the same
+   project (a key from another project would be refused).
+8. Rotating the signing key (a new secret version) ends sessions within about 30 s.
 
 T15 made no call to a real OpenEMR: the share was tested against `fhir_proxy.share.testing`'s
 fake (S1's recorded behaviour, over an injected transport and over real TLS on 127.0.0.1). The
@@ -854,8 +1057,8 @@ notes, and must be confirmed on the first deployment (T25):
   or not the visitor sent its own header (Hosting replaces it). The direct measurement with a
   header ran behind an egress proxy, so its right-most entry was not the session's own address;
   the caller's entries were logged exactly as sent. See "For T22".
-- Firebase Hosting's rewrite forwards the `Authorization` header (confirmed on the first dev
-  deploy: login, `/status` and the searches worked through `/api`); the full path and its 60 s
+- Firebase Hosting's rewrite forwards the `Authorization` header (D9's login, no longer used
+  since T43; confirmed on the first dev deploy: login, `/status` and the searches worked through `/api`); the full path and its 60 s
   timeout in practice are still open.
 - Cloud Healthcare FHIR search: `gt`/`lt` on `effectivePeriod` (the proxy re-applies R4's rule,
   but cannot add windows the store left out); `_sort=date` on Observation; reusing a
