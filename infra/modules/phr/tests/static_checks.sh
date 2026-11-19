@@ -24,7 +24,8 @@
 #   9. a `module` block is declared (resources could hide in a child module);
 #  10. a Firebase Hosting version or release is declared (Terraform cannot upload the page; a
 #      release would replace the live site with an empty one; hosting.tf explains);
-#  11. fhir-proxy lost its depends_on on the cuff-sim invoker grant;
+#  11. fhir-proxy lost its depends_on on the cuff-sim invoker grant or on the counter bucket's
+#      grant (T44);
 #  12. the demo (T44): a bucket without uniform access or enforced public access prevention, a
 #      reCAPTCHA key that allows all domains or has testing options (a fixed testing score
 #      would let every bot through), or a key that is not SCORE.
@@ -175,12 +176,15 @@ check "no google_firebase_hosting_version / _release" \
   "$(printf '%s\n' "$code" | grep -E 'resource[[:space:]]+"google_firebase_hosting_(version|release|channel)"' || true)"
 
 # 11. Ordering: the proxy's revision waits for its invoker grant on cuff-sim.
-if printf '%s\n' "$proxy_block" | grep -qE 'depends_on[[:space:]]*=[[:space:]]*\[[^]]*google_cloud_run_v2_service_iam_member\.invoker'; then
-  echo "ok:   fhir-proxy depends on the cuff-sim invoker binding"
-else
-  echo "FAIL: google_cloud_run_v2_service.fhir_proxy must have depends_on = [google_cloud_run_v2_service_iam_member.invoker]"
-  fail=1
-fi
+# T44: and on the counter bucket grant, so the first demo session does not meet a 403 there.
+for edge in google_cloud_run_v2_service_iam_member.invoker google_storage_bucket_iam_member.demo_counter_writer; do
+  if printf '%s\n' "$proxy_block" | grep -qE "depends_on[[:space:]]*=[[:space:]]*\[[^]]*${edge//./\\.}([^a-z_]|$)"; then
+    echo "ok:   fhir-proxy depends on $edge"
+  else
+    echo "FAIL: google_cloud_run_v2_service.fhir_proxy's depends_on must include $edge"
+    fail=1
+  fi
+done
 
 # 12. The demo's bucket and key (T44).
 bucket_block="$(block demo.tf google_storage_bucket demo_counters)"

@@ -426,7 +426,7 @@ variable "public_origin" {
 }
 
 variable "extra_allowed_origins" {
-  description = "Further origins allowed to call fhir-proxy cross-origin (CORS), for example \"http://localhost:5173\" for a development page. Empty (default): only public_origin, and the page itself needs no CORS at all because it calls /api on its own origin. Each entry exactly as a browser sends Origin."
+  description = "Further entries for fhir-proxy's Origin check (ALLOWED_ORIGINS), after the page's own origins (public_origin, https://<site>.web.app, https://<site>.firebaseapp.com). Since D16 there is no cross-origin use: the session cookie is SameSite=Strict and the proxy sends no CORS credentials, so a page must reach the proxy on its own origin. An entry here only lets a same-origin setup elsewhere pass the Origin check on POST, for example \"http://localhost:5173\" for Vite's dev-server proxy (web/README.md, PULSEBRIDGE_DEV_PROXY_TARGET). Empty (default) in prod. Each entry exactly as a browser sends Origin."
   type        = list(string)
   default     = []
   nullable    = false
@@ -443,15 +443,15 @@ variable "extra_allowed_origins" {
 variable "trusted_proxy_hops" {
   description = <<-EOT
     TRUSTED_PROXY_HOPS for fhir-proxy: how many X-Forwarded-For entries, counted from the
-    right, were appended by proxies Google runs in front of it. The per-address limits (demo
-    sessions per hour, D16) key on the entry just left of them. 0 to 5.
+    right, were appended by proxies Google runs in front of it. The per-address demo session
+    limit (SESSIONS_PER_ADDRESS_PER_HOUR, D16) keys on the entry just left of them. 0 to 5.
     Default 2, MEASURED (dev, 17 November 2026; infra/envs/README.md, checklist P1): the page
     reaches the proxy only through Firebase Hosting's rewrite, and there the proxy receives two
     entries, "<visitor>, <Hosting's address>". Hosting replaces any X-Forwarded-For the visitor
     sent, so the second entry from the right is the visitor. With 1 the key would be a
-    Hosting address shared by visitors, so anyone could lock every visitor out through the
-    public page (5 failures fill one such key; how many Hosting addresses there are was not
-    measured).
+    Hosting address shared by visitors, so anyone could keep every visitor from starting a
+    demo session through the public page (5 attempts an hour fill one such key; how many
+    Hosting addresses there are was not measured).
     Use another value only for another front door: 1 if the page called the run.app URL
     directly with nothing in front (the service's own default), 0 never on Cloud Run (local
     use: the header is ignored). The known cost of 2: the run.app URL stays publicly reachable

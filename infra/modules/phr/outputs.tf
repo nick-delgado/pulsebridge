@@ -40,6 +40,11 @@ output "public_origin" {
   value       = local.public_origin
 }
 
+output "allowed_origins" {
+  description = "fhir-proxy's ALLOWED_ORIGINS: public_origin, https://<site>.web.app and https://<site>.firebaseapp.com (the page's origins, also the reCAPTCHA key's domains), then extra_allowed_origins; no duplicates."
+  value       = local.allowed_origins
+}
+
 output "public_base_url" {
   description = "fhir-proxy's PUBLIC_BASE_URL: public_origin plus /api."
   value       = "${local.public_origin}${local.path_prefix}"
@@ -78,4 +83,14 @@ output "recaptcha_allowed_domains" {
 output "demo_counter_bucket" {
   description = "Name of the bucket that holds the daily bot-check counters (fhir-proxy's DEMO_COUNTER_BUCKET)."
   value       = google_storage_bucket.demo_counters.name
+}
+
+output "demo_settings" {
+  description = "The public demo's settings as fhir-proxy gets them (D16): RECAPTCHA_MIN_SCORE, SESSION_TTL_SECONDS, SESSIONS_PER_ADDRESS_PER_HOUR and BOT_CHECKS_PER_DAY."
+  value = {
+    recaptcha_min_score           = var.recaptcha_min_score
+    session_ttl_seconds           = var.session_ttl_seconds
+    sessions_per_address_per_hour = var.sessions_per_address_per_hour
+    bot_checks_per_day            = var.bot_checks_per_day
+  }
 }

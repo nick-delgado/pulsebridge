@@ -122,6 +122,44 @@ run "public_origin_equal_to_the_web_app_host_is_listed_once" {
   }
 }
 
+# ---- the Origin check accepts every page origin the key accepts ----------------------------------
+
+run "allowed_origins_cover_both_hosting_hosts" {
+  command = apply
+
+  assert {
+    condition = (
+      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["ALLOWED_ORIGINS"] ==
+      "https://example-project.web.app,https://example-project.firebaseapp.com"
+    )
+    error_message = "Without a custom domain ALLOWED_ORIGINS must be the site's web.app and firebaseapp.com origins (a visitor on either gets a token from the key)."
+  }
+}
+
+run "allowed_origins_with_custom_domain_and_extras_deduplicated" {
+  command = apply
+  variables {
+    public_origin         = "https://phr.example.org"
+    extra_allowed_origins = ["http://localhost:5173", "https://example-project.web.app"]
+  }
+
+  assert {
+    condition = (
+      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["ALLOWED_ORIGINS"] ==
+      "https://phr.example.org,https://example-project.web.app,https://example-project.firebaseapp.com,http://localhost:5173"
+    )
+    error_message = "ALLOWED_ORIGINS must be public_origin, the two Hosting origins, then the extras, each once."
+  }
+  # Every domain the key accepts tokens from has its https origin in ALLOWED_ORIGINS.
+  assert {
+    condition = alltrue([
+      for d in google_recaptcha_enterprise_key.demo.web_settings[0].allowed_domains :
+      contains(output.allowed_origins, "https://${d}")
+    ])
+    error_message = "Every reCAPTCHA domain must be an allowed origin, or its visitors get 403 origin-refused after passing the bot check."
+  }
+}
+
 # ---- the counter bucket -----------------------------------------------------------------------
 
 run "counter_bucket_is_private_short_lived_and_destroyable_in_dev" {

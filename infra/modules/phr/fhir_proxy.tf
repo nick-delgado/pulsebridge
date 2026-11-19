@@ -155,7 +155,9 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
             # One front door: the page reaches the proxy only through the rewrite.
             PATH_PREFIX     = local.path_prefix
             PUBLIC_BASE_URL = "${local.public_origin}${local.path_prefix}"
-            ALLOWED_ORIGINS = join(",", concat([local.public_origin], var.extra_allowed_origins))
+            # Every page origin (main.tf, local.allowed_origins) plus extra_allowed_origins:
+            # the list the proxy's Origin check accepts on POST /auth/session and every POST.
+            ALLOWED_ORIGINS = join(",", local.allowed_origins)
             # 2 by default: measured behind Firebase Hosting (README, "The client address and
             # the direct run.app URL").
             TRUSTED_PROXY_HOPS = tostring(var.trusted_proxy_hops)

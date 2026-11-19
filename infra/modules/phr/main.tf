@@ -77,6 +77,18 @@ locals {
   site_id       = coalesce(var.hosting_site_id, var.project_id)
   public_origin = coalesce(var.public_origin, "https://${local.site_id}.web.app")
 
+  # Every origin the page is served from (D16, T44). Firebase Hosting serves a site on both
+  # <site>.web.app and <site>.firebaseapp.com, and a custom domain adds public_origin. The
+  # reCAPTCHA key accepts tokens from all of them (demo.tf), so fhir-proxy's Origin check must
+  # accept all of them too, or a visitor on one gets a token and then 403 origin-refused.
+  page_origins = distinct([
+    local.public_origin,
+    "https://${local.site_id}.web.app",
+    "https://${local.site_id}.firebaseapp.com",
+  ])
+  # ALLOWED_ORIGINS: the page's origins first (public_origin leads), then extra_allowed_origins.
+  allowed_origins = distinct(concat(local.page_origins, var.extra_allowed_origins))
+
   # The secrets fhir-proxy mounts, one directory each (Cloud Run refuses two secret volumes in
   # one directory). Key = volume name; the file inside is always "value"; env is the variable
   # that tells the service where the file is.

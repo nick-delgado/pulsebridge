@@ -64,7 +64,10 @@ def test_fhir_proxy_starts_with_the_modules_environment(proxy_env: dict[str, str
     # What the module means to set, as the service understands it.
     assert cfg.path_prefix == "/api"
     assert cfg.public_base_url.endswith("/api")
-    assert cfg.allowed_origins == (cfg.public_base_url.removesuffix("/api"),)
+    # The page's origin first, then the site's other Hosting origin: the reCAPTCHA key accepts
+    # tokens from both, so the Origin check must too (T44).
+    origin = cfg.public_base_url.removesuffix("/api")
+    assert cfg.allowed_origins == (origin, origin.replace(".web.app", ".firebaseapp.com"))
     assert cfg.request_timeout == 70
     assert cfg.cuff_forward_timeout == 55 and cfg.request_budget == 50
     # Module phr's default, measured behind Firebase Hosting; the service's own default is 1.

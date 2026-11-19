@@ -26,10 +26,9 @@ locals {
   # A web key accepts tokens only from pages on these domains (and their subdomains: "All
   # subdomains of an allowed domain are automatically allowed", provider docs for
   # web_settings.allowed_domains). Host names only: no scheme, port or path.
-  recaptcha_allowed_domains = distinct(concat(
-    ["${local.site_id}.web.app", "${local.site_id}.firebaseapp.com"],
-    var.public_origin == null ? [] : [trimprefix(var.public_origin, "https://")],
-  ))
+  # The same hosts as local.page_origins (main.tf), whose origins ALLOWED_ORIGINS accepts, so
+  # the key and the proxy's Origin check can never disagree.
+  recaptcha_allowed_domains = [for o in local.page_origins : trimprefix(o, "https://")]
 
   # Bucket names are GLOBAL across all of Cloud Storage, so the project ID (itself globally
   # unique) is part of it; name_prefix keeps two stacks in one project apart. The work plan

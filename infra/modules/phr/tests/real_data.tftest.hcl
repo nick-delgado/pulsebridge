@@ -333,7 +333,7 @@ run "fhir_proxy_environment" {
       HEALTH_SYNC_URL               = "https://pulsebridge-health-sync-abc123-uc.a.run.app"
       PATH_PREFIX                   = "/api"
       PUBLIC_BASE_URL               = "https://example-project.web.app/api"
-      ALLOWED_ORIGINS               = "https://example-project.web.app"
+      ALLOWED_ORIGINS               = "https://example-project.web.app,https://example-project.firebaseapp.com"
       TRUSTED_PROXY_HOPS            = "2"
       TOKEN_ISSUER                  = "pulsebridge-fhir-proxy:example-project:pulsebridge"
       REQUEST_BUDGET_SECONDS        = "50"
@@ -385,7 +385,7 @@ run "custom_origin_hops_and_dev_origin" {
   assert {
     condition = (
       { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["PUBLIC_BASE_URL"] == "https://phr.example.org/api" &&
-      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["ALLOWED_ORIGINS"] == "https://phr.example.org,http://localhost:5173" &&
+      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["ALLOWED_ORIGINS"] == "https://phr.example.org,https://example-project.web.app,https://example-project.firebaseapp.com,http://localhost:5173" &&
       { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["TRUSTED_PROXY_HOPS"] == "1"
     )
     error_message = "public_origin, extra_allowed_origins and trusted_proxy_hops must reach the proxy."
