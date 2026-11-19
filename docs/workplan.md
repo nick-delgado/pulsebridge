@@ -991,12 +991,12 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` | in-progress |
-| T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/` | in-progress |
-| T45 | Dashboard: "View the live demo" | D16 | `web/` | in-progress |
+| T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` (but including `fhir_proxy/share/testing.py`, the share tests' harness), `tests/e2e/`, and the proxy's entries in `tests/tooling/test_image_smoke.py` (added 19 Nov so the suite stays green) | in-progress |
+| T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/`, and `tests/tooling/test_phr_service_config.py` (added 19 Nov) | in-progress |
+| T45 | Dashboard: "View the live demo" | D16 | `web/` | in-review (reviewed 19 Nov: approve with minor fixes; fixes under way) |
 | T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | todo |
 | T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, and the minimum needed elsewhere in `web/` | todo |
-| T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/`, service and module READMEs not owned above | todo |
+| T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/` (beyond what T43 changed), service and module READMEs not owned above | todo |
 
 ### The contract T43 to T45 share
 
@@ -1059,6 +1059,12 @@ above.
 - AC: the Fraud Defense API (endpoint, request and response fields, the IAM role it needs) is
   checked against Google's current documentation and cited; what could not be checked without a
   real project is listed for the rollout.
+- AC (added 19 Nov, moved from T48): everything that calls the proxy's login follows the session
+  flow, so `make test` stays green: the share tests' harness, the image smoke test's proxy
+  environment, and `tests/e2e/`. `make smoke` gets its session without a bot-check bypass in the
+  service: it signs a session token locally with the signing key read from Secret Manager by the
+  operator's credentials, and checks that `/auth/session` refuses a junk token (`403`) and that
+  `/auth/config` answers.
 
 **T44 Infrastructure for demo sessions.**
 - AC: `recaptchaenterprise.googleapis.com` is in project-base's API list.
@@ -1137,9 +1143,7 @@ measured), and by the attempt time for send attempts.
   the reviewer-password steps), the reCAPTCHA key, the counter bucket, the limits, the 7-day
   window, the cost of Fraud Defense (10,000 assessments a month free per organisation, then a
   flat charge; cited) and that the real data is public within the window.
-- AC: `make smoke` gets its session without a bot-check bypass in the service: it signs a session
-  token locally with the signing key read from Secret Manager by the operator's credentials, and
-  it checks that `/auth/session` refuses a junk token (`403`) and that `/auth/config` answers.
+- AC: `make smoke` is checked live at rollout (T43 moved it to the session flow).
 - AC: the master checklist gets rows for what only a real deployment can show (the assessment
   call, the score a real browser gets, the CSP with reCAPTCHA, the cookie through Hosting's
   rewrite, the counter under two instances, the quota override if any).
