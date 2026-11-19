@@ -35,7 +35,7 @@ variables {
   create_seeder_account = true # the seeder must not get any secret either
 }
 
-run "eight_secrets_without_versions" {
+run "eight_secrets" {
   command = apply
 
   assert {
@@ -44,17 +44,12 @@ run "eight_secrets_without_versions" {
       "pb-google-health-client-secret",
       "pb-google-health-refresh-token",
       "pb-openemr-client-private-key",
-      "pb-reviewer-password",
+      "pb-session-signing-key",
       "pb-db-root-password",
       "pb-openemr-db-password",
       "pb-openemr-admin-password",
     ])
-    error_message = "Expected exactly the eight secrets from the brief (three Google Health, OpenEMR key, reviewer password, three database/OpenEMR passwords)."
-  }
-
-  assert {
-    condition     = length(google_secret_manager_secret_version.reviewer_password) == 0 && output.reviewer_password_version_created == false
-    error_message = "By default no secret has a version; values are added by scripts after apply."
+    error_message = "Expected exactly the eight secrets (three Google Health, OpenEMR key, session signing key, three database/OpenEMR passwords); the reviewer password is gone (D16)."
   }
 
   assert {
@@ -76,7 +71,7 @@ run "accessor_bindings_match_the_table" {
       (google_secret_manager_secret.this["google-health-client-secret"].id) = ["serviceAccount:${google_service_account.this["health-sync"].email}"]
       (google_secret_manager_secret.this["google-health-refresh-token"].id) = ["serviceAccount:${google_service_account.this["health-sync"].email}"]
       (google_secret_manager_secret.this["openemr-client-private-key"].id)  = ["serviceAccount:${google_service_account.this["fhir-proxy"].email}"]
-      (google_secret_manager_secret.this["reviewer-password"].id)           = ["serviceAccount:${google_service_account.this["fhir-proxy"].email}"]
+      (google_secret_manager_secret.this["session-signing-key"].id)         = ["serviceAccount:${google_service_account.this["fhir-proxy"].email}"]
       (google_secret_manager_secret.this["db-root-password"].id)            = ["serviceAccount:${google_service_account.this["edge-vm"].email}"]
       (google_secret_manager_secret.this["openemr-db-password"].id)         = ["serviceAccount:${google_service_account.this["edge-vm"].email}"]
       (google_secret_manager_secret.this["openemr-admin-password"].id)      = ["serviceAccount:${google_service_account.this["edge-vm"].email}"]
@@ -111,9 +106,9 @@ run "workloads_without_secrets_read_none" {
   assert {
     condition = toset([
       for b in google_secret_manager_secret_iam_member.accessor : b.member
-      if b.secret_id == google_secret_manager_secret.this["reviewer-password"].id || b.secret_id == google_secret_manager_secret.this["openemr-client-private-key"].id
+      if b.secret_id == google_secret_manager_secret.this["session-signing-key"].id || b.secret_id == google_secret_manager_secret.this["openemr-client-private-key"].id
     ]) == toset(["serviceAccount:${google_service_account.this["fhir-proxy"].email}"])
-    error_message = "Only fhir-proxy may read the reviewer password and the OpenEMR private key."
+    error_message = "Only fhir-proxy may read the session signing key and the OpenEMR private key."
   }
 
   assert {
@@ -138,7 +133,7 @@ run "labels_merge_and_deletion_protection_option" {
   }
 
   assert {
-    condition     = google_secret_manager_secret.this["reviewer-password"].labels == tomap({ component = "pulsebridge", managed-by = "terraform", env = "dev" })
+    condition     = google_secret_manager_secret.this["session-signing-key"].labels == tomap({ component = "pulsebridge", managed-by = "terraform", env = "dev" })
     error_message = "secret_labels must be merged over the module's own labels."
   }
 

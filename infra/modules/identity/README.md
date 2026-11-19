@@ -9,14 +9,16 @@ This module creates:
 - **eight Secret Manager secrets without values**, each readable only by the account that needs
   it;
 - the IAM bindings on resources it owns itself: those secrets and its own service accounts; plus
-  one project-level grant (Cloud Logging for the edge VM; a second, the same role, for the build
-  account when it exists);
-- optionally, for dev only, a `reviewer-password` version, written through the write-only
-  argument `secret_data_wo` so the value never enters Terraform state.
+  the project-level grants that have no narrower resource: Cloud Logging for the edge VM (the
+  same role for the build account when it exists), and reCAPTCHA assessments for fhir-proxy
+  (T44, D16).
+
+It writes **no secret value**: since D16 (no reviewer password) every version is added by a
+script after apply, and `tests/static_checks.sh` refuses a secret version in this module.
 
 No service account keys are created: every workload gets short-lived tokens from Google (Cloud
 Run, Compute Engine, Cloud Scheduler and Pub/Sub all do this), so no key file exists to leak.
-No Identity Platform resources (decision D9).
+No Identity Platform resources (decisions D9 and D16).
 
 ## Design: who creates which binding
 
@@ -58,7 +60,8 @@ on exactly that resource, for the account `module.identity.service_account_email
 | `v2-to-fhir` | `roles/healthcare.hl7V2Consumer` | the HL7v2 store | `healthcare` (T05) | Reads the ingested message and writes the `application_outcome` labels on it (T12, D7). **Unconfirmed:** that Consumer includes updating message labels comes only from search-result summaries of Google's roles page; confirm on first apply, else T05 moves to `hl7V2Editor`. |
 | `cuff-sim` | `roles/healthcare.fhirResourceEditor` | the **audit** FHIR store only | `healthcare` (T32) | D12, D15: writes one `AuditEvent` per send attempt (`PUT AuditEvent/<id>`). The role also lets it read, search and delete audit records; it reaches no health data. `cuff-sim` has **no** binding on the main FHIR store. The audit store exists so that this write access does not extend to health data, which the editor role on the main store would have (read and delete included); see the healthcare README. |
 | `cuff-sim` | `roles/healthcare.hl7V2Ingest` | the HL7v2 store | `healthcare` (T05) | Only for the HTTPS-ingest transport (T13); the default MLLP transport needs no IAM, only the firewall rule in `edge-vm`. |
-| `fhir-proxy` | `roles/secretmanager.secretAccessor` | secrets `reviewer-password`, `openemr-client-private-key` (each) | **this module** | D9 login check; S1 `private_key_jwt` assertion for OpenEMR (T14, T15). |
+| `fhir-proxy` | `roles/secretmanager.secretAccessor` | secrets `session-signing-key`, `openemr-client-private-key` (each) | **this module** | D16 demo session tokens (HS256 key); S1 `private_key_jwt` assertion for OpenEMR (T14, T15). |
+| `fhir-proxy` | `roles/recaptchaenterprise.agent` | the project | **this module** | D16 bot check: `projects.assessments.create` (T43). An assessment's parent is the project, so there is no narrower resource. The role holds `recaptchaenterprise.assessments.create` and `.annotate` only, no key access ([access control](https://docs.cloud.google.com/recaptcha/docs/access-control), [roles](https://docs.cloud.google.com/iam/docs/roles-permissions/recaptchaenterprise)). |
 | `fhir-proxy` | `roles/healthcare.fhirResourceReader` | the FHIR store | `healthcare` (T05) | Read API, trace lookups, share source data. Read and search only, no writes. |
 | `fhir-proxy` | `roles/healthcare.fhirResourceReader` | the audit FHIR store | `healthcare` (T32) | D15: reads the send-attempt AuditEvents for the messages log (T14, T19). Read and search only. The healthcare module's tests and static check assert that its role table gives `fhir-proxy` only the reader role on both FHIR stores. |
 | `fhir-proxy` | `roles/healthcare.hl7V2Consumer` | the HL7v2 store | `healthcare` (T05) | Trace panel and messages log: original v2 message and its outcome labels. |
@@ -195,7 +198,7 @@ These are open in other tasks. Each may add a row to the table above; none is gr
 
 | Caller | Target | How the call is authorised | Binding created in |
 | --- | --- | --- | --- |
-| The browser (anyone) | `fhir-proxy` | Public: Cloud Run invoker IAM check disabled (`invoker_iam_disabled = true`); no `allUsers` binding; the reviewer password and signed token (D9) are the gate | `phr` (T22) |
+| The browser (anyone) | `fhir-proxy` | Public: Cloud Run invoker IAM check disabled (`invoker_iam_disabled = true`); no `allUsers` binding; the bot check and the signed `__session` cookie (D16) are the gate | `phr` (T22) |
 | `fhir-proxy` | `cuff-sim` | OIDC token for `fhir-proxy`; `cuff-sim` is **not** public and has no other invoker | `phr` (T22) |
 | Cloud Scheduler job | `health-sync` | OIDC token for `scheduler-invoker` | `ingestion` (T20) |
 | Cloud Scheduler job (synthetic data) | seeder Cloud Run job, via the Cloud Run Admin API `jobs.run` | OAuth token for `scheduler-invoker` | `ingestion` (T20) |
@@ -218,7 +221,7 @@ the script named below, so no value is in code or state.
 | `google-health-client-secret` | `health-sync` | `scripts/connect-google-health` (T11), run by the deployer |
 | `google-health-refresh-token` | `health-sync` | `scripts/connect-google-health` (T11), run by the deployer |
 | `openemr-client-private-key` | `fhir-proxy` | OpenEMR client registration script (T23), run **on the edge VM as `edge-vm`**. The value is the OpenEMR client document (JSON, format `pulsebridge.openemr-client.v1`): the client's private key with its client ID, key ID and OpenEMR's certificate (module `openemr` README) |
-| `reviewer-password` | `fhir-proxy` | `scripts/secrets/set-reviewer-password.sh` (T27), or in dev this module (below), not both |
+| `session-signing-key` | `fhir-proxy` | `scripts/secrets/set-session-signing-key.sh` (T44): 32 random bytes, generated by the script and never shown. A new version ends every demo session |
 | `db-root-password` | `edge-vm` | `scripts/secrets` (T27), run by the deployer |
 | `openemr-db-password` | `edge-vm` | `scripts/secrets` (T27), run by the deployer |
 | `openemr-admin-password` | `edge-vm` | `scripts/secrets` (T27), run by the deployer |
@@ -230,35 +233,13 @@ add `roles/secretmanager.secretVersionAdder` on that one secret here.
 
 The OpenEMR client ID is plain configuration, not a secret (spike S1). It is generated by OpenEMR at registration on the VM and travels in the same secret version as the key, so the two always match.
 
-### Dev only: reviewer password from tfvars (D9)
+### No secret value from Terraform (D16)
 
-```hcl
-module "identity" {
-  source     = "../../modules/identity"
-  project_id = var.project_id
-
-  reviewer_password            = var.reviewer_password # declare it `sensitive` and `ephemeral` in the env root too
-  reviewer_password_wo_version = 1                     # 0 = no version; raise to write a new password
-}
-```
-
-`reviewer_password` is `ephemeral`: Terraform does not save it in the plan or state, and it can
-only flow into write-only arguments. Because an ephemeral value cannot decide whether a resource
-exists (`count`), the non-secret `reviewer_password_wo_version` is the switch. Terraform keeps no
-copy of a write-only value, so it cannot notice a new password; raise the number to send one.
-Prod leaves both unset; the secret stays empty until T27's script sets it, and the proxy answers
-`503` until then.
-
-Rules for dev (not verified against a real apply):
-
-- Set the password **either** through Terraform (these two variables) **or** with the T27
-  script, never both. While Terraform manages a version, a script that adds a newer version and
-  disables the older ones is partly undone by the next apply, which re-enables or re-creates the
-  version Terraform manages.
-- Raising `reviewer_password_wo_version` may replace the version (the old one destroyed, then
-  the new one created). If it does, there is a moment with no enabled version, and the proxy's
-  login answers `503` until the new one exists. The mock provider used in the tests does not run
-  the real provider's planning logic, so the tests cannot show which happens.
+Until T44, dev could write the reviewer password from tfvars through the write-only argument
+`secret_data_wo`. D16 removed the password; the session signing key is random bytes nobody needs
+to type, so the script generates it in both environments, and the two dev-only variables
+(`reviewer_password`, `reviewer_password_wo_version`) are gone. One way to set each secret means
+an apply can never undo a rotation done by the script.
 
 ## Usage from other modules
 
@@ -286,17 +267,18 @@ module "healthcare" {
 
 Run from this directory. No credentials are needed, and none should be present: run with Google
 credentials removed from the environment so that, if a mock ever failed to apply, the real
-provider could not reach a project. `state_scan.py` removes them itself.
+provider could not reach a project.
 
 ```bash
 env -u GOOGLE_APPLICATION_CREDENTIALS -u CLOUDSDK_CORE_PROJECT -u GOOGLE_CLOUD_PROJECT \
     -u GOOGLE_PROJECT -u GOOGLE_CREDENTIALS HOME="$(mktemp -d)" GCE_METADATA_HOST=127.0.0.1:9 \
-    sh -c 'terraform init -backend=false && terraform test'   # 32 runs, mock google and google-beta
-python3 tests/state_scan.py                                    # reviewer password absent from state
+    sh -c 'terraform init -backend=false && terraform test'   # mock google and google-beta
+bash tests/static_checks.sh                                    # no secret version, key or authoritative IAM
 ```
 
 - `tests/service_accounts.tftest.hcl`: exactly one account per workload; the email keys are
-  known at plan time; the only project-level grant is the edge VM's log writer; no build account by
+  known at plan time; the only project-level grants are the edge VM's log writer and fhir-proxy's
+  `roles/recaptchaenterprise.agent` (its only project role; nobody else holds a reCAPTCHA role); no build account by
   default, and with `create_build_account` exactly one (`<prefix>-build`) whose only project grant
   is the log writer and which reads and writes no secret; Token Creator is
   on by default, can be turned off and is on the push account only; the Pub/Sub service agent is
@@ -304,21 +286,14 @@ python3 tests/state_scan.py                                    # reviewer passwo
   `serviceAccount:service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com` and known at
   plan time (so an existing grant is not replaced); an agent with another address stops the apply; `project_id` and
   `name_prefix` validation.
-- `tests/secrets.tftest.hcl`: the eight secrets; no versions by default; the accessor bindings
-  compared as a whole table; `cuff-sim` and the others read nothing; the only write access is
+- `tests/secrets.tftest.hcl`: the eight secrets (`session-signing-key`, no
+  `reviewer-password`); the accessor bindings compared as a whole table; `cuff-sim` and the others read nothing; the only write access is
   `edge-vm` on the OpenEMR key, which it cannot read; `secret_labels` validation.
-- `tests/reviewer_password.tftest.hcl`: the write-only version and the input rules.
-- `tests/state_scan.py` with `tests/state_scan/`: checks that `reviewer_password` is declared
-  `sensitive` and `ephemeral`, then applies the module with a random dummy password and searches
-  the resulting state for it, verbatim, hex-encoded and base64-encoded (standard and URL-safe, at
-  any byte alignment). `terraform test` keeps state in memory, so the script takes the state from
-  `terraform test -json -verbose` (the `terraform show -json` format, which shows sensitive values
-  in clear), writes it to files and searches them. A helper module (`tests/control/`) stores the
-  dummy verbatim and base64-encoded; the scan must find both there, which proves it would find
-  such a leak. It cannot prove that no other transformation of the value (a hash, a substring)
-  reaches state, nor what a real provider does.
+- `tests/static_checks.sh`: no secret version resource, no `secret_data` or `secret_data_wo`,
+  no data source reading a secret version, no service account key, no authoritative IAM, and no
+  leftover reviewer password. It replaces `state_scan.py`, which proved dev's write-only password
+  stayed out of state: with no value written by Terraform there is nothing left to scan for.
 
-<!-- BEGIN_TF_DOCS -->
 ## Requirements
 
 | Name | Version |
@@ -347,7 +322,6 @@ No modules.
 | [google_secret_manager_secret.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/secret_manager_secret) | resource |
 | [google_secret_manager_secret_iam_member.accessor](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/secret_manager_secret_iam_member) | resource |
 | [google_secret_manager_secret_iam_member.writer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/secret_manager_secret_iam_member) | resource |
-| [google_secret_manager_secret_version.reviewer_password](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/secret_manager_secret_version) | resource |
 | [google_service_account.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account) | resource |
 | [google_service_account_iam_member.pubsub_token_creator](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/service_account_iam_member) | resource |
 | [google_project.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/data-sources/project) | data source |
@@ -362,8 +336,6 @@ No modules.
 | <a name="input_grant_pubsub_token_creator"></a> [grant\_pubsub\_token\_creator](#input\_grant\_pubsub\_token\_creator) | Let the project's Pub/Sub service agent (service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com) mint OIDC tokens for the pubsub-push account. Projects created before 8 April 2021 need it; newer ones already allow it, so granting it is harmless there. On by default because it is scoped to the pubsub-push account only, never the project. This module is the only owner of this grant; the healthcare module must not also create it. | `bool` | `true` | no |
 | <a name="input_name_prefix"></a> [name\_prefix](#input\_name\_prefix) | Prefix for every service account ID and secret ID this module creates, for example "pb" gives "pb-health-sync". Keeps PulseBridge's identities recognisable in a shared project. | `string` | `"pb"` | no |
 | <a name="input_project_id"></a> [project\_id](#input\_project\_id) | ID of the GCP project that holds the service accounts and secrets. | `string` | n/a | yes |
-| <a name="input_reviewer_password"></a> [reviewer\_password](#input\_reviewer\_password) | Dev only: the shared reviewer password, written as a version of the reviewer-password secret through the write-only argument secret\_data\_wo, so it never enters Terraform state or plan files. Used only when reviewer\_password\_wo\_version > 0. At least 16 characters. Set the password EITHER this way OR with scripts/secrets/set-reviewer-password.sh (T27), never both: while Terraform manages a version, the next apply undoes a script that disabled it. Leave unset in prod. | `string` | `null` | no |
-| <a name="input_reviewer_password_wo_version"></a> [reviewer\_password\_wo\_version](#input\_reviewer\_password\_wo\_version) | Dev only: 0 (the default) creates no reviewer-password version. 1 or more creates one from reviewer\_password; increase it to write a new password, because Terraform cannot see a write-only value change and only sends it when this number changes. Raising it may replace the version (old one destroyed, then the new one created); if so, for a moment the secret has no enabled version and the proxy's login answers 503. Not verified against a real apply: the mock provider used in tests does not run the real provider's planning logic. | `number` | `0` | no |
 | <a name="input_secret_deletion_protection"></a> [secret\_deletion\_protection](#input\_secret\_deletion\_protection) | Refuse to destroy the secrets (Secret Manager deletion\_protection). Leave false in dev, which is destroyed nightly; consider true in prod so a stray destroy cannot drop the refresh token or the OpenEMR key. | `bool` | `false` | no |
 | <a name="input_secret_labels"></a> [secret\_labels](#input\_secret\_labels) | Extra labels for every Secret Manager secret, merged over the module's own labels (component, managed-by). | `map(string)` | `{}` | no |
 
@@ -373,8 +345,7 @@ No modules.
 |------|-------------|
 | <a name="output_project_number"></a> [project\_number](#output\_project\_number) | The project's number, read at plan time by data.google\_project. Module healthcare builds the Healthcare service agent's address from it. |
 | <a name="output_pubsub_service_agent_email"></a> [pubsub\_service\_agent\_email](#output\_pubsub\_service\_agent\_email) | The project's Pub/Sub service agent, service-<project number>@gcp-sa-pubsub.iam.gserviceaccount.com. Known at plan (built from the number), and declared to depend on google\_project\_service\_identity.pubsub, so any resource that uses it, such as module healthcare's dead-letter and subscriber grants, is created after the agent exists. |
-| <a name="output_reviewer_password_version_created"></a> [reviewer\_password\_version\_created](#output\_reviewer\_password\_version\_created) | True when this module wrote a reviewer-password version from tfvars (dev). False means the secret is empty until scripts/secrets/set-reviewer-password.sh runs, and the proxy's login answers 503. |
-| <a name="output_secret_ids"></a> [secret\_ids](#output\_secret\_ids) | Secret ID (the short name, e.g. "pb-reviewer-password") per secret key. Cloud Run secret references and the scripts that add versions use this. |
+| <a name="output_secret_ids"></a> [secret\_ids](#output\_secret\_ids) | Secret ID (the short name, e.g. "pb-session-signing-key") per secret key. Cloud Run secret references and the scripts that add versions use this. |
 | <a name="output_secret_readers"></a> [secret\_readers](#output\_secret\_readers) | Which workloads may read each secret (the accessor bindings this module creates). Informational, for READMEs and checks in other modules. |
 | <a name="output_secret_resource_ids"></a> [secret\_resource\_ids](#output\_secret\_resource\_ids) | Full secret resource ID (projects/<project>/secrets/<secret\_id>) per secret key. |
 | <a name="output_service_account_emails"></a> [service\_account\_emails](#output\_service\_account\_emails) | Service account email per workload, keyed health-sync, v2-to-fhir, cuff-sim, fhir-proxy, edge-vm, scheduler-invoker, pubsub-push (and seeder and build when created). Other modules use these for resource-level bindings and as the identity their resources run as. |

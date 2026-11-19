@@ -1,6 +1,6 @@
 terraform {
-  # 1.11 is the first release with write-only arguments (`secret_data_wo`), which the optional
-  # reviewer-password version relies on to keep the value out of state.
+  # The same floor as every other module and root (1.11, the first with write-only arguments).
+  # This module no longer writes any secret version (T44 removed dev's reviewer password).
   required_version = ">= 1.11"
 
   required_providers {

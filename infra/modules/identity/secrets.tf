@@ -50,18 +50,3 @@ resource "google_secret_manager_secret_iam_member" "writer" {
   role      = each.value.role
   member    = "serviceAccount:${google_service_account.this[each.value.workload].email}"
 }
-
-# Dev only (decision D9): the first reviewer-password version, from tfvars.
-#
-# `secret_data_wo` is a write-only argument (Terraform 1.11+): Terraform passes the value to the
-# provider during apply and then forgets it. It is never written to the state file or a saved plan,
-# unlike `secret_data`, which would be stored in state as plain text. Because Terraform keeps no
-# copy, it cannot tell when the value changes; `secret_data_wo_version` is the trigger, and a new
-# number makes the provider write the new value as a new secret version.
-resource "google_secret_manager_secret_version" "reviewer_password" {
-  count = var.reviewer_password_wo_version > 0 ? 1 : 0
-
-  secret                 = google_secret_manager_secret.this["reviewer-password"].id
-  secret_data_wo         = var.reviewer_password
-  secret_data_wo_version = tostring(var.reviewer_password_wo_version)
-}

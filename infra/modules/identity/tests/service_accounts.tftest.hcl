@@ -104,7 +104,7 @@ run "seeder_account_when_requested" {
   }
 }
 
-run "only_project_role_is_edge_vm_log_writer" {
+run "only_project_roles_are_log_writer_and_assessment_creator" {
   command = apply
 
   variables {
@@ -116,8 +116,27 @@ run "only_project_role_is_edge_vm_log_writer" {
   assert {
     condition = toset([for b in google_project_iam_member.this : "${b.role}=${b.member}"]) == toset([
       "roles/logging.logWriter=${"serviceAccount:${google_service_account.this["edge-vm"].email}"}",
+      "roles/recaptchaenterprise.agent=${"serviceAccount:${google_service_account.this["fhir-proxy"].email}"}",
     ])
-    error_message = "The only project-level grant must be roles/logging.logWriter for the edge VM."
+    error_message = "The only project-level grants must be roles/logging.logWriter for the edge VM and roles/recaptchaenterprise.agent (create assessments, T44) for fhir-proxy."
+  }
+
+  # fhir-proxy's project-wide rights are exactly the assessment role (T44 AC: nothing more is
+  # granted project-wide), and no other account can create assessments.
+  assert {
+    condition = toset([
+      for b in google_project_iam_member.this : b.role
+      if b.member == "serviceAccount:${google_service_account.this["fhir-proxy"].email}"
+    ]) == toset(["roles/recaptchaenterprise.agent"])
+    error_message = "fhir-proxy's only project-level role must be roles/recaptchaenterprise.agent."
+  }
+
+  assert {
+    condition = toset([
+      for b in google_project_iam_member.this : b.member
+      if startswith(b.role, "roles/recaptchaenterprise.")
+    ]) == toset(["serviceAccount:${google_service_account.this["fhir-proxy"].email}"])
+    error_message = "Only fhir-proxy may hold a reCAPTCHA role."
   }
 
   assert {
@@ -158,6 +177,7 @@ run "build_account_gets_only_the_log_writer_role" {
     condition = toset([for b in google_project_iam_member.this : "${b.role}=${b.member}"]) == toset([
       "roles/logging.logWriter=${"serviceAccount:${google_service_account.this["edge-vm"].email}"}",
       "roles/logging.logWriter=${"serviceAccount:${google_service_account.this["build"].email}"}",
+      "roles/recaptchaenterprise.agent=${"serviceAccount:${google_service_account.this["fhir-proxy"].email}"}",
     ])
     error_message = "The build account's only project-level grant must be roles/logging.logWriter."
   }
