@@ -3,7 +3,9 @@
 #   browser ──HTTPS──> Firebase Hosting site (static page from web/dist, security headers)
 #                        │ rewrite /api/**  (same origin: no CORS needed)
 #                        ▼
-#                      fhir-proxy  (Cloud Run, public: the session token is the gate, D9/D10)
+#                      fhir-proxy  (Cloud Run, public: the __session cookie is the gate, D10/D16)
+#                        ├── reCAPTCHA (Fraud Defense): one assessment per demo session (demo.tf)
+#                        ├── Cloud Storage: the daily bot-check counter bucket (demo.tf)
 #                        │ Direct VPC egress, ALL_TRAFFIC, serverless subnet (D14)
 #                        ├── Cloud Healthcare API: FHIR store, audit FHIR store, HL7v2 store (read)
 #                        ├── cuff-sim   (internal only; invoker = fhir-proxy's account only)
@@ -80,9 +82,10 @@ locals {
   # that tells the service where the file is.
   proxy_secret_files = merge(
     {
-      "reviewer-password" = {
-        secret = var.secret_ids["reviewer-password"]
-        env    = "REVIEWER_PASSWORD_FILE"
+      # D16: the HS256 key of the demo session token (32 random bytes).
+      "session-signing-key" = {
+        secret = var.secret_ids["session-signing-key"]
+        env    = "SESSION_SIGNING_KEY_FILE"
       }
     },
     var.openemr == null ? {} : {

@@ -275,17 +275,17 @@ variable "service_account_emails" {
 }
 
 variable "secret_ids" {
-  description = "Module identity's map of secret key to Secret Manager secret ID (module.identity.secret_ids), passed as it is. fhir-proxy mounts \"reviewer-password\" as a file; other keys are ignored (the OpenEMR client secret comes through var.openemr)."
+  description = "Module identity's map of secret key to Secret Manager secret ID (module.identity.secret_ids), passed as it is. fhir-proxy mounts \"session-signing-key\" (D16: the HS256 key of the demo session cookie) as a file; other keys are ignored (the OpenEMR client secret comes through var.openemr)."
   type        = map(string)
 
   validation {
-    condition     = contains(keys(var.secret_ids), "reviewer-password")
-    error_message = "secret_ids must contain the key reviewer-password (module identity creates it)."
+    condition     = contains(keys(var.secret_ids), "session-signing-key")
+    error_message = "secret_ids must contain the key session-signing-key (module identity creates it)."
   }
   validation {
     # Secret Manager secret IDs: letters, digits, '_' and '-', at most 255.
-    condition     = can(regex("^[A-Za-z0-9_-]{1,255}$", lookup(var.secret_ids, "reviewer-password", "")))
-    error_message = "secret_ids[\"reviewer-password\"] must be a short secret ID (letters, digits, '_', '-'), not a projects/... path."
+    condition     = can(regex("^[A-Za-z0-9_-]{1,255}$", lookup(var.secret_ids, "session-signing-key", "")))
+    error_message = "secret_ids[\"session-signing-key\"] must be a short secret ID (letters, digits, '_', '-'), not a projects/... path."
   }
 }
 
@@ -443,8 +443,8 @@ variable "extra_allowed_origins" {
 variable "trusted_proxy_hops" {
   description = <<-EOT
     TRUSTED_PROXY_HOPS for fhir-proxy: how many X-Forwarded-For entries, counted from the
-    right, were appended by proxies Google runs in front of it. The login rate limit keys on
-    the entry just left of them. 0 to 5.
+    right, were appended by proxies Google runs in front of it. The per-address limits (demo
+    sessions per hour, D16) key on the entry just left of them. 0 to 5.
     Default 2, MEASURED (dev, 17 November 2026; infra/envs/README.md, checklist P1): the page
     reaches the proxy only through Firebase Hosting's rewrite, and there the proxy receives two
     entries, "<visitor>, <Hosting's address>". Hosting replaces any X-Forwarded-For the visitor
@@ -506,5 +506,59 @@ variable "cuff_sim_max_instances" {
   validation {
     condition     = var.cuff_sim_max_instances >= 1 && var.cuff_sim_max_instances <= 3 && floor(var.cuff_sim_max_instances) == var.cuff_sim_max_instances
     error_message = "cuff_sim_max_instances must be a whole number from 1 to 3."
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# The public demo (D16, T44): bot check and session settings. The names and defaults are the T43
+# to T45 contract (docs/workplan.md, "The contract T43 to T45 share"); fhir-proxy checks them
+# again at start.
+# ---------------------------------------------------------------------------------------------
+
+variable "recaptcha_min_score" {
+  description = "RECAPTCHA_MIN_SCORE: the lowest reCAPTCHA score (0.0 likely a bot, 1.0 likely a person) that gets a demo session. 0.5 (default) is Google's suggested starting threshold for score keys. Above 0 and at most 1."
+  type        = number
+  default     = 0.5
+  nullable    = false
+
+  validation {
+    condition     = var.recaptcha_min_score > 0 && var.recaptcha_min_score <= 1
+    error_message = "recaptcha_min_score must be greater than 0 and at most 1."
+  }
+}
+
+variable "session_ttl_seconds" {
+  description = "SESSION_TTL_SECONDS: how long a demo session (the __session cookie and the token's exp) lasts. 86400 (default, 24 hours, D16). From 300 to 86400."
+  type        = number
+  default     = 86400
+  nullable    = false
+
+  validation {
+    condition     = var.session_ttl_seconds >= 300 && var.session_ttl_seconds <= 86400 && floor(var.session_ttl_seconds) == var.session_ttl_seconds
+    error_message = "session_ttl_seconds must be a whole number from 300 to 86400."
+  }
+}
+
+variable "sessions_per_address_per_hour" {
+  description = "SESSIONS_PER_ADDRESS_PER_HOUR: how many POST /auth/session attempts one client address may make in an hour, checked BEFORE any assessment is created, so a flood from one address costs nothing. Per proxy instance (in memory), so the real limit is this times the instance cap (2). 5 (default). From 1 to 100."
+  type        = number
+  default     = 5
+  nullable    = false
+
+  validation {
+    condition     = var.sessions_per_address_per_hour >= 1 && var.sessions_per_address_per_hour <= 100 && floor(var.sessions_per_address_per_hour) == var.sessions_per_address_per_hour
+    error_message = "sessions_per_address_per_hour must be a whole number from 1 to 100."
+  }
+}
+
+variable "bot_checks_per_day" {
+  description = "BOT_CHECKS_PER_DAY: the most reCAPTCHA assessments fhir-proxy creates in one UTC day, counted across instances in the demo counter bucket; past it the page says \"The demo is busy, try again tomorrow.\" 300 (default): about 9,000 a month, under the 10,000 assessments a month that are free per organisation. From 1 to 3000. Google offers no per-day quota on assessments to back this with a hard cap (README, \"The public demo\")."
+  type        = number
+  default     = 300
+  nullable    = false
+
+  validation {
+    condition     = var.bot_checks_per_day >= 1 && var.bot_checks_per_day <= 3000 && floor(var.bot_checks_per_day) == var.bot_checks_per_day
+    error_message = "bot_checks_per_day must be a whole number from 1 to 3000."
   }
 }

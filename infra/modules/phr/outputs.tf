@@ -1,7 +1,7 @@
 # Outputs are this module's contract with the env roots (T25) and the page deploy (T26).
 
 output "fhir_proxy_url" {
-  description = "fhir-proxy's own run.app URL. The page does NOT use it: it calls /api on its own origin through the Hosting rewrite (one front door; a direct call would put a different X-Forwarded-For shape in front of the login limit)."
+  description = "fhir-proxy's own run.app URL. The page does NOT use it: it calls /api on its own origin through the Hosting rewrite (one front door; a direct call would put a different X-Forwarded-For shape in front of the per-address session limit)."
   value       = google_cloud_run_v2_service.fhir_proxy.uri
 }
 
@@ -63,4 +63,19 @@ output "timeouts" {
 output "cuff_sim_rate_limit_per_minute" {
   description = "The effective service-wide cuff send limit: cuff-sim's per-instance 6 a minute times cuff_sim_max_instances."
   value       = 6 * var.cuff_sim_max_instances
+}
+
+output "recaptcha_site_key" {
+  description = "The reCAPTCHA score key's ID (D16): fhir-proxy's RECAPTCHA_SITE_KEY, which the page fetches from /api/auth/config. Public by design (every visitor's browser sees it); not a secret."
+  value       = google_recaptcha_enterprise_key.demo.name
+}
+
+output "recaptcha_allowed_domains" {
+  description = "The domains the reCAPTCHA key accepts tokens from: <site>.web.app, <site>.firebaseapp.com and public_origin's host when set."
+  value       = local.recaptcha_allowed_domains
+}
+
+output "demo_counter_bucket" {
+  description = "Name of the bucket that holds the daily bot-check counters (fhir-proxy's DEMO_COUNTER_BUCKET)."
+  value       = google_storage_bucket.demo_counters.name
 }

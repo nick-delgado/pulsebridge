@@ -13,7 +13,17 @@ they disagree:
 The header must have every directive of the <meta> policy with the same value, plus
 `frame-ancestors 'none'` (a <meta> policy cannot set it; web/README.md, "Security basics"), and
 nothing else. No source may be `'unsafe-inline'`, `'unsafe-eval'`, `'unsafe-hashes'`,
-`'strict-dynamic'`, a wildcard, or a scheme (`data:`, `http:`, `https:`, `blob:`).
+`'strict-dynamic'`, a wildcard, a bare scheme (`data:`, `http:`, `https:`, `blob:`) or an
+`http://` URL.
+
+The only external sources are reCAPTCHA's (D16, T44), exactly as Google's CSP guidance lists them
+for a page that does not use nonces (reCAPTCHA FAQ, "I'm using Content Security Policy (CSP) on
+my website. How can I configure it to work with reCAPTCHA?", docs.cloud.google.com/recaptcha/
+docs/faq and developers.google.com/recaptcha/docs/faq): script-src www.google.com/recaptcha/
+and www.gstatic.com/recaptcha/; frame-src www.google.com/recaptcha/ and
+recaptcha.google.com/recaptcha/; connect-src www.google.com/recaptcha/. Each of those
+directives must hold exactly these https:// sources (path-restricted, so the rest of google.com
+stays blocked), and no other directive may hold any.
 The other security headers must have their documented values (REQUIRED_HEADERS).
 
 Usage: python3 infra/modules/phr/tests/check_hosting_csp.py   (standard library only)
@@ -46,8 +56,17 @@ REQUIRED_HEADERS = {
     "Strict-Transport-Security": "max-age=31536000",
 }
 FORBIDDEN_SOURCES = re.compile(
-    r"'unsafe-inline'|'unsafe-eval'|'unsafe-hashes'|'strict-dynamic'|\*|\b(data|https?|blob):",
+    r"'unsafe-inline'|'unsafe-eval'|'unsafe-hashes'|'strict-dynamic'|\*|http://"
+    r"|(^|\s)(data|https?|blob|wss?|filesystem|mediastream):(\s|$)",
 )
+# reCAPTCHA's sources per directive (the module docstring cites Google's guidance). The page loads
+# https://www.google.com/recaptcha/enterprise.js, which loads its code from www.gstatic.com and
+# runs the check in an iframe from www.google.com (or recaptcha.google.com).
+RECAPTCHA_SOURCES = {
+    "script-src": {"https://www.google.com/recaptcha/", "https://www.gstatic.com/recaptcha/"},
+    "frame-src": {"https://www.google.com/recaptcha/", "https://recaptcha.google.com/recaptcha/"},
+    "connect-src": {"https://www.google.com/recaptcha/"},
+}
 
 
 def parse_policy(policy: str) -> dict[str, str]:
@@ -112,6 +131,16 @@ def main() -> int:
     for name, value in header.items():
         if FORBIDDEN_SOURCES.search(value):
             problems.append(f"{name} allows a forbidden source: {value!r}")
+        external = {src for src in value.split() if src.startswith("https://")}
+        wanted_external = RECAPTCHA_SOURCES.get(name, set())
+        if external != wanted_external:
+            problems.append(
+                f"{name} external sources {sorted(external)} are not exactly reCAPTCHA's "
+                f"{sorted(wanted_external)}"
+            )
+    for name in RECAPTCHA_SOURCES:
+        if name not in header:
+            problems.append(f"{name} is missing: reCAPTCHA needs {sorted(RECAPTCHA_SOURCES[name])}")
 
     meta = meta_policy_for_same_origin_build()
     wanted = {**meta, **HEADER_ONLY}
