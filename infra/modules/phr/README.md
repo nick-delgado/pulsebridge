@@ -480,8 +480,9 @@ integration type") and `challenge_security_preference` (for CHECKBOX and INVISIB
 set). `deletion_policy` follows `deletion_protection` (`PREVENT` in prod).
 
 **The assessment role** is module identity's: `roles/recaptchaenterprise.agent` on the project
-for `fhir-proxy` (an assessment's parent is the project; the role holds
-`recaptchaenterprise.assessments.create` and `.annotate` only). Because the contract creates the
+for `fhir-proxy` (an assessment's parent is the project; `CreateAssessment` needs
+`recaptchaenterprise.assessments.create`, and Agent is the narrowest predefined role with it; it
+has no key permission; module identity's README lists what else it holds). Because the contract creates the
 assessment in `GCP_PROJECT_ID`, which this module sets to the Healthcare project, the key refuses
 a `healthcare_project_id` different from `project_id` (a precondition).
 
@@ -501,19 +502,22 @@ has no bucket-level rights.
 
 **Is there a hard cap from Google?** The T44 work plan asked whether Fraud Defense has a per-day
 assessments quota that `google_service_usage_consumer_quota_override` could lower, as a second
-cap a little above `BOT_CHECKS_PER_DAY`. Checked 19 November 2026: **no**. Google's quota page
-for reCAPTCHA (docs.cloud.google.com/recaptcha/quotas) lists a per-minute request quota (60,000
-requests a minute per project) and the monthly free allowance (10,000 assessments per
-organisation), no per-day quota. A per-minute override would not bound a day the way the counter
-does (1 a minute is still 1,440 a day), and `google_service_usage_consumer_quota_override` exists
-only in the google-beta provider (it is absent from google 8.11's schema; GA has
-`google_cloud_quotas_quota_preference` instead). So nothing is set; the bucket counter is the
-only cap. The documentation could not be opened directly from the build session (only search
-results), so the rollout checklist re-checks the quota page (T48).
+cap a little above `BOT_CHECKS_PER_DAY`. Read directly on 19 November 2026: **no**. Google's
+"Quotas and limits" page for Fraud Defense (docs.cloud.google.com/recaptcha/quotas) lists, as rate
+quotas: "Requests per calendar month per organization (if billing is not enabled) 10,000",
+"Requests per minute 60,000", and per-day quotas only for MFA requests (email and SMS), which
+the demo does not use; "All rate limits (such as requests per minute) apply separately for each
+Google Cloud project". There is no per-day assessments quota. A per-minute override would not
+bound a day the way the counter does (1 a minute is still 1,440 a day), and
+`google_service_usage_consumer_quota_override` exists only in the google-beta provider (it is
+absent from google 8.11's schema; GA has `google_cloud_quotas_quota_preference` instead). So
+nothing is set; the bucket counter is the only cap. One consequence the page states: past the
+monthly free 10,000 without billing, "CreateAssessment: Requests that exceed the quota fail in a
+closed state" (the proxy then answers `503 bot-check-unavailable`).
 
-**The page's Content-Security-Policy.** Google's guidance for a CSP without nonces (reCAPTCHA
-FAQ, "I'm using Content Security Policy (CSP) on my website. How can I configure it to work with
-reCAPTCHA?", docs.cloud.google.com/recaptcha/docs/faq): `script-src https://www.google.com/recaptcha/
+**The page's Content-Security-Policy.** Google's guidance for a CSP without nonces (Fraud Defense
+FAQ, docs.cloud.google.com/recaptcha/docs/faq, read directly 19 November 2026: "Alternatively, add
+the following values to the directives"): `script-src https://www.google.com/recaptcha/
 https://www.gstatic.com/recaptcha/`, `frame-src https://www.google.com/recaptcha/
 https://recaptcha.google.com/recaptcha/` and `connect-src https://www.google.com/recaptcha/`. The
 header adds exactly these to the same-origin policy and nothing else: each source ends in

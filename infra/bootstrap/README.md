@@ -179,7 +179,7 @@ predefined admin role per product the stack uses, rather than `roles/owner` or `
 | `roles/monitoring.alertPolicyEditor` | alert policies on those metrics (only with an alert address or channel) |
 | `roles/monitoring.notificationChannelEditor` | the optional email notification channel (module ingestion's `alert_email`) |
 | `roles/firebasehosting.admin` | module phr's Firebase Hosting site, and deploying the page to it (T26) |
-| `roles/recaptchaenterprise.admin` | module phr's reCAPTCHA (Fraud Defense) score key for the public demo (D16, T44): create, update, delete keys ([access control](https://docs.cloud.google.com/recaptcha/docs/access-control)). Not assessments: fhir-proxy creates those with its own `roles/recaptchaenterprise.agent` |
+| `roles/recaptchaenterprise.editor` | module phr's reCAPTCHA (Fraud Defense) score key for the public demo (D16, T44): the key methods need `recaptchaenterprise.keys.get`, `.create`, `.update`, `.delete` ([access control](https://docs.cloud.google.com/recaptcha/docs/access-control), API permissions table, read 19 November 2026). Editor holds them; Admin (`recaptchaenterprise.*`) is broader and not needed. fhir-proxy creates assessments with its own `roles/recaptchaenterprise.agent` |
 | `roles/cloudbuild.builds.editor` (only with `allow_build_trigger = true`) | project-base's opt-in Cloud Build trigger on release tags (T26): creating, changing and deleting a trigger needs `cloudbuild.builds.create`, which also lets the holder start builds, so it is not in the default list |
 
 The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only object
@@ -238,7 +238,7 @@ step 4).
 
 ## Re-applying for the public demo (T44)
 
-T44 added three things to bootstrap: `roles/recaptchaenterprise.admin` in the default
+T44 added three things to bootstrap: `roles/recaptchaenterprise.editor` in the default
 `deployer_roles`, the deployer's custom bucket role (above), and three read permissions for the
 planner (`recaptchaenterprise.keys.get`, `storage.buckets.get`, `storage.buckets.getIamPolicy`).
 CI never applies bootstrap (its state is the owner's, and the deployer cannot grant itself
@@ -247,7 +247,7 @@ applies the stack** with T44's modules:
 
 ```bash
 cd infra/bootstrap
-terraform plan    # expect 3 to add (the bucket role, its grant, the recaptchaenterprise.admin grant)
+terraform plan    # expect 3 to add (the bucket role, its grant, the recaptchaenterprise.editor grant)
                   # and, with create_planner, 1 to change (the planner's role: three reads added,
                   # secretmanager.versions.get removed); nothing to destroy
 terraform apply
@@ -255,7 +255,7 @@ terraform apply
 
 Without it the prod plan is refused on the key and the bucket (the planner cannot read them),
 and the apply on creating them (the deployer may not). A deployment that set its own
-`deployer_roles` in `terraform.tfvars` must add `roles/recaptchaenterprise.admin` to that list
+`deployer_roles` in `terraform.tfvars` must add `roles/recaptchaenterprise.editor` to that list
 itself. The rollout order for the whole stack is in infra/envs/README.md ("Rolling out the public
 demo").
 
@@ -541,7 +541,7 @@ No modules.
 | <a name="input_create_planner"></a> [create\_planner](#input\_create\_planner) | Create the read-only planner service account (ci\_identities.tf, T26) that CI's terraform plan runs as. Default false. Opt in for CI. | `bool` | `false` | no |
 | <a name="input_create_project"></a> [create\_project](#input\_create\_project) | true: create a new GCP project with var.project\_id and link var.billing\_account to it. false: adopt an existing project with var.project\_id and create nothing at project level. No default, so the choice is always explicit. | `bool` | n/a | yes |
 | <a name="input_deployer_account_id"></a> [deployer\_account\_id](#input\_deployer\_account\_id) | account\_id (the part before @) of the deployer service account that env roots and CI run as. 6-30 characters. | `string` | `"terraform-deployer"` | no |
-| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin",<br/>  "roles/recaptchaenterprise.admin"<br/>]</pre> | no |
+| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin",<br/>  "roles/recaptchaenterprise.editor"<br/>]</pre> | no |
 | <a name="input_deployer_wif_contexts"></a> [deployer\_wif\_contexts](#input\_deployer\_wif\_contexts) | The CI contexts (wif.tf) whose jobs may impersonate the deployer. Default ["main"] is dev's: jobs on main run by push, schedule or workflow\_dispatch (the dev apply and the nightly destroy). prod: ["env-prod-main"] (only jobs in the prod GitHub Environment on main); with github\_environments set, "main" is refused. Never "pull-request". | `list(string)` | <pre>[<br/>  "main"<br/>]</pre> | no |
 | <a name="input_folder_id"></a> [folder\_id](#input\_folder\_id) | Optional numeric folder ID to create the new project under. Leave unset for a personal account. Mutually exclusive with org\_id; only used when create\_project = true. | `string` | `null` | no |
 | <a name="input_github_allowed_refs"></a> [github\_allowed\_refs](#input\_github\_allowed\_refs) | Optional list of git refs (for example ["refs/heads/main"]) allowed to obtain deployer tokens. Empty (the default) allows every branch, tag and pull-request ref in the repository; see README.md ("What the condition does not restrict"). Note that pull-request workflows run on refs/pull/N/merge, so restricting refs also blocks plan-on-PR with this identity. | `list(string)` | `[]` | no |

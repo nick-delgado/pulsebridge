@@ -310,8 +310,8 @@ run "default_deployer_roles_are_not_basic_roles" {
   }
   assert {
     # T44: module phr's reCAPTCHA score key.
-    condition     = contains(keys(google_project_iam_member.deployer), "roles/recaptchaenterprise.admin")
-    error_message = "The default deployer roles must include roles/recaptchaenterprise.admin (the demo's reCAPTCHA key, T44)."
+    condition     = contains(keys(google_project_iam_member.deployer), "roles/recaptchaenterprise.editor") && !contains(keys(google_project_iam_member.deployer), "roles/recaptchaenterprise.admin")
+    error_message = "The default deployer roles must include roles/recaptchaenterprise.editor (the demo's reCAPTCHA key, T44), not the broader .admin."
   }
   assert {
     # T26: no Cloud Build role by default; allow_build_trigger adds it (run below).

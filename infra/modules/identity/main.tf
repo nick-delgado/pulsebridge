@@ -71,11 +71,13 @@ locals {
       # T44, D16: fhir-proxy creates a reCAPTCHA (Google Cloud Fraud Defense) assessment for each
       # "View the live demo" click (projects.assessments.create). An assessment is created under
       # the PROJECT (parent = projects/<id>), not under the key, so there is no narrower resource
-      # to bind to. roles/recaptchaenterprise.agent is the narrowest predefined role with
-      # recaptchaenterprise.assessments.create: it holds that and assessments.annotate, nothing
-      # that reads or changes keys ("Access control with IAM", docs.cloud.google.com/recaptcha/
-      # docs/access-control; "Google Cloud Fraud Defense roles and permissions",
-      # docs.cloud.google.com/iam/docs/roles-permissions/recaptchaenterprise).
+      # to bind to. CreateAssessment needs recaptchaenterprise.assessments.create on the project
+      # ("Access control with IAM", API permissions table, docs.cloud.google.com/recaptcha/docs/
+      # access-control, read 19 November 2026). roles/recaptchaenterprise.agent is the narrowest
+      # predefined role with it; it holds assessments.create and .annotate, firewallpolicies.list,
+      # relatedaccountgroups.list and relatedaccountgroupmemberships.list (Account Defender data,
+      # unused here) and resourcemanager.projects.get/.list. No key permission: it cannot read,
+      # change or delete the site key. Admin, Editor and Viewer are all broader.
       "fhir-proxy" = ["roles/recaptchaenterprise.agent"]
     },
     # A build with a user-specified service account must send its log to Cloud Logging

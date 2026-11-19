@@ -17,10 +17,10 @@ nothing else. No source may be `'unsafe-inline'`, `'unsafe-eval'`, `'unsafe-hash
 `http://` URL.
 
 The only external sources are reCAPTCHA's (D16, T44), exactly as Google's CSP guidance lists them
-for a page that does not use nonces (reCAPTCHA FAQ, "I'm using Content Security Policy (CSP) on
-my website. How can I configure it to work with reCAPTCHA?", docs.cloud.google.com/recaptcha/
-docs/faq and developers.google.com/recaptcha/docs/faq): script-src www.google.com/recaptcha/
-and www.gstatic.com/recaptcha/; frame-src www.google.com/recaptcha/ and
+for a page that does not use nonces (Fraud Defense FAQ, docs.cloud.google.com/recaptcha/docs/faq,
+read 19 November 2026: "Alternatively, add the following values to the directives"):
+script-src www.google.com/recaptcha/ and www.gstatic.com/recaptcha/;
+frame-src www.google.com/recaptcha/ and
 recaptcha.google.com/recaptcha/; connect-src www.google.com/recaptcha/. Each of those
 directives must hold exactly these https:// sources (path-restricted, so the rest of google.com
 stays blocked), and no other directive may hold any.

@@ -227,12 +227,13 @@ variable "deployer_roles" {
     # Firebase to the project needs more (firebase.projects.update): bootstrap does that once
     # with the owner's credentials (add_firebase), so the deployer never needs roles/firebase.admin.
     "roles/firebasehosting.admin",
-    # The public demo's reCAPTCHA (Fraud Defense) score key (module phr, D16, T44): create, update
-    # and delete keys. "reCAPTCHA Enterprise Admin" is the predefined role that manages keys
-    # (docs.cloud.google.com/recaptcha/docs/access-control). The deployer creates no assessments;
-    # fhir-proxy's own roles/recaptchaenterprise.agent does that (module identity). The stack's one
-    # bucket is not covered by a predefined role here: see deployer.tf, deployer_buckets.
-    "roles/recaptchaenterprise.admin",
+    # The public demo's reCAPTCHA (Fraud Defense) score key (module phr, D16, T44): GetKey,
+    # CreateKey, UpdateKey and DeleteKey need recaptchaenterprise.keys.get / .create / .update /
+    # .delete on the project ("Access control with IAM", API permissions table,
+    # docs.cloud.google.com/recaptcha/docs/access-control, read 19 November 2026). Editor holds those
+    # (plus assessments, firewall policies and metrics); Admin is recaptchaenterprise.*, broader, and
+    # not needed. The stack's one bucket is not covered by a predefined role here: see deployer.tf.
+    "roles/recaptchaenterprise.editor",
   ]
 
   validation {
