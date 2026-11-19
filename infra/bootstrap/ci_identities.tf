@@ -45,7 +45,6 @@ locals {
     "iam.serviceAccounts.getIamPolicy",      # google_service_account_iam_member (identity)
     "secretmanager.secrets.get",             # google_secret_manager_secret (metadata, never a value)
     "secretmanager.secrets.getIamPolicy",    # google_secret_manager_secret_iam_member
-    "secretmanager.versions.get",            # google_secret_manager_secret_version (state of the dev version; not .access)
     "artifactregistry.repositories.get",     # google_artifact_registry_repository (project-base)
     "artifactregistry.repositories.getIamPolicy",
     "compute.networks.get",                # google_compute_network
@@ -76,6 +75,9 @@ locals {
     "firebasehosting.sites.get",           # google_firebase_hosting_site (phr)
     "firebase.projects.get",               # google_firebase_project, when phr manages it
     "cloudbuild.builds.get",               # google_cloudbuild_trigger (triggers.get needs builds.get)
+    "recaptchaenterprise.keys.get",        # google_recaptcha_enterprise_key (phr, T44): the key's settings; the ID is public anyway
+    "storage.buckets.get",                 # google_storage_bucket (phr's demo counters, T44): bucket metadata, not objects
+    "storage.buckets.getIamPolicy",        # google_storage_bucket_iam_member (phr, T44)
   ], var.planner_extra_permissions)))
 }
 

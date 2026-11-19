@@ -227,6 +227,12 @@ variable "deployer_roles" {
     # Firebase to the project needs more (firebase.projects.update): bootstrap does that once
     # with the owner's credentials (add_firebase), so the deployer never needs roles/firebase.admin.
     "roles/firebasehosting.admin",
+    # The public demo's reCAPTCHA (Fraud Defense) score key (module phr, D16, T44): create, update
+    # and delete keys. "reCAPTCHA Enterprise Admin" is the predefined role that manages keys
+    # (docs.cloud.google.com/recaptcha/docs/access-control). The deployer creates no assessments;
+    # fhir-proxy's own roles/recaptchaenterprise.agent does that (module identity). The stack's one
+    # bucket is not covered by a predefined role here: see deployer.tf, deployer_buckets.
+    "roles/recaptchaenterprise.admin",
   ]
 
   validation {
@@ -358,6 +364,18 @@ variable "planner_account_id" {
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.planner_account_id))
     error_message = "planner_account_id must be 6-30 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
+}
+
+variable "deployer_bucket_role_id" {
+  description = "ID of the deployer's custom project role for the stack's buckets (deployer.tf, T44): bucket create, update, delete and IAM, plus listing and deleting objects to empty a bucket on destroy; no object reads or writes. A deleted custom role keeps its ID reserved for about 37 days."
+  type        = string
+  default     = "pulsebridgeDeployerBuckets"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9_.]{3,64}$", var.deployer_bucket_role_id))
+    error_message = "deployer_bucket_role_id must be 3-64 letters, digits, '_' or '.'."
   }
 }
 

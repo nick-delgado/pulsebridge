@@ -156,7 +156,7 @@ in a Firebase project.
 
 The deployer must later create the whole stack: APIs, VPC and firewall, an e2-micro, Artifact
 Registry, service accounts and their IAM bindings, Secret Manager secrets, Healthcare dataset and
-stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, the Firebase Hosting site and, optionally, the image build trigger. The default `deployer_roles` is one
+stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, the Firebase Hosting site, the public demo's reCAPTCHA key and counter bucket (T44) and, optionally, the image build trigger. The default `deployer_roles` is one
 predefined admin role per product the stack uses, rather than `roles/owner` or `roles/editor`
 (which the variable's validation rejects):
 
@@ -179,10 +179,20 @@ predefined admin role per product the stack uses, rather than `roles/owner` or `
 | `roles/monitoring.alertPolicyEditor` | alert policies on those metrics (only with an alert address or channel) |
 | `roles/monitoring.notificationChannelEditor` | the optional email notification channel (module ingestion's `alert_email`) |
 | `roles/firebasehosting.admin` | module phr's Firebase Hosting site, and deploying the page to it (T26) |
+| `roles/recaptchaenterprise.admin` | module phr's reCAPTCHA (Fraud Defense) score key for the public demo (D16, T44): create, update, delete keys ([access control](https://docs.cloud.google.com/recaptcha/docs/access-control)). Not assessments: fhir-proxy creates those with its own `roles/recaptchaenterprise.agent` |
 | `roles/cloudbuild.builds.editor` (only with `allow_build_trigger = true`) | project-base's opt-in Cloud Build trigger on release tags (T26): creating, changing and deleting a trigger needs `cloudbuild.builds.create`, which also lets the holder start builds, so it is not in the default list |
 
-The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only Cloud
-Storage access (the stack creates no bucket), so it can always read and write state.
+The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only object
+read and write access, so it can always read and write state.
+
+**The bucket role (T44).** Since D16 the stack creates one bucket: module phr's demo counter
+bucket. No predefined role fits: `roles/storage.admin` also reads and writes every object in every
+bucket of the project. So bootstrap creates a **custom role** (`deployer_bucket_role_id`, default
+`pulsebridgeDeployerBuckets`; `google_project_iam_custom_role.deployer_buckets`) and grants it to
+the deployer: `storage.buckets.create`, `.get`, `.update`, `.delete`, `.getIamPolicy`,
+`.setIamPolicy`, and `storage.objects.list` and `.delete`, which `force_destroy` needs to empty
+the bucket on a dev destroy. It has no `storage.objects.get` or `.create`: the deployer can
+neither read nor forge a counter (only fhir-proxy writes them). A test pins the list.
 
 **What the role list does and does not limit.** For an account whose job is to create IAM,
 "least privilege" has a hard ceiling:
@@ -225,6 +235,29 @@ the first dev deploy the agent was created by hand, outside Terraform, before th
 existed). If the deployer is refused, run that one
 step as the owner: `terraform apply -target=module.stack.module.identity` (infra/envs/README.md,
 step 4).
+
+## Re-applying for the public demo (T44)
+
+T44 added three things to bootstrap: `roles/recaptchaenterprise.admin` in the default
+`deployer_roles`, the deployer's custom bucket role (above), and three read permissions for the
+planner (`recaptchaenterprise.keys.get`, `storage.buckets.get`, `storage.buckets.getIamPolicy`).
+CI never applies bootstrap (its state is the owner's, and the deployer cannot grant itself
+roles through a reviewed path), so **the owner must re-apply bootstrap by hand before CI plans or
+applies the stack** with T44's modules:
+
+```bash
+cd infra/bootstrap
+terraform plan    # expect 3 to add (the bucket role, its grant, the recaptchaenterprise.admin grant)
+                  # and, with create_planner, 1 to change (the planner's role: three reads added,
+                  # secretmanager.versions.get removed); nothing to destroy
+terraform apply
+```
+
+Without it the prod plan is refused on the key and the bucket (the planner cannot read them),
+and the apply on creating them (the deployer may not). A deployment that set its own
+`deployer_roles` in `terraform.tfvars` must add `roles/recaptchaenterprise.admin` to that list
+itself. The rollout order for the whole stack is in infra/envs/README.md ("Rolling out the public
+demo").
 
 ## Workload Identity Federation
 
@@ -364,7 +397,7 @@ calls) and the IAM-policy read of each type that has `*_iam_member` resources:
 | `resourcemanager.projects.get`, `.getIamPolicy` | `data "google_project"`, `google_project_iam_member` |
 | `serviceusage.services.get`, `serviceusage.services.list`, `serviceusage.services.use` | `google_project_service` (the provider refreshes it by listing the project's enabled services: without `.list` the first CI plan on dev was refused on every one); the beta provider bills its calls to the project (`user_project_override`) |
 | `iam.serviceAccounts.get`, `.getIamPolicy` | the service accounts and their bindings |
-| `secretmanager.secrets.get`, `.getIamPolicy`, `secretmanager.versions.get` | secrets' metadata, their bindings, the dev version's state; not `secretmanager.versions.access` |
+| `secretmanager.secrets.get`, `.getIamPolicy` | secrets' metadata and their bindings; not `secretmanager.versions.access`. (`secretmanager.versions.get`, for dev's tfvars-written reviewer-password version, was removed with it in T44: Terraform manages no secret version any more) |
 | `artifactregistry.repositories.get`, `.getIamPolicy` | the two repositories (with the cleanup policy) and their bindings; no image pull |
 | `compute.networks.get`, `subnetworks.get`, `firewalls.get`, `routers.get`, `addresses.get`, `disks.get`, `instances.get`, `resourcePolicies.get` | the network, the VM, its disks, address and snapshot schedule; not `getSerialPortOutput` or `getScreenshot` |
 | `healthcare.datasets.get`, `fhirStores.get`, `fhirStores.getIamPolicy`, `hl7V2Stores.get`, `hl7V2Stores.getIamPolicy` | the dataset and the stores' configuration and bindings; no `fhirResources.*` or `hl7V2Messages.*` |
@@ -375,6 +408,8 @@ calls) and the IAM-policy read of each type that has `*_iam_member` resources:
 | `monitoring.alertPolicies.get`, `monitoring.notificationChannels.get` | alert policies and the email channel |
 | `firebasehosting.sites.get`, `firebase.projects.get` | the Hosting site (and Firebase, when phr manages it) |
 | `cloudbuild.builds.get` | the build trigger (`triggers.get` needs it) |
+| `recaptchaenterprise.keys.get` | module phr's reCAPTCHA key (T44): its settings; the key ID is public anyway |
+| `storage.buckets.get`, `.getIamPolicy` | module phr's demo counter bucket (T44) and its one binding: metadata only, no `storage.objects.*` |
 
 **What the planner can still read, plainly:** the Terraform **state** and the CI tfvars (object
 viewer on the state bucket), which hold in clear the patient's identifier and, in prod, the
@@ -477,8 +512,10 @@ No modules.
 | [google_iam_workload_identity_pool.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool) | resource |
 | [google_iam_workload_identity_pool_provider.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool_provider) | resource |
 | [google_project.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project) | resource |
+| [google_project_iam_custom_role.deployer_buckets](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_custom_role) | resource |
 | [google_project_iam_custom_role.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_custom_role) | resource |
 | [google_project_iam_member.deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
+| [google_project_iam_member.deployer_buckets](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.page_deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.page_deployer_service_usage](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
@@ -504,7 +541,7 @@ No modules.
 | <a name="input_create_planner"></a> [create\_planner](#input\_create\_planner) | Create the read-only planner service account (ci\_identities.tf, T26) that CI's terraform plan runs as. Default false. Opt in for CI. | `bool` | `false` | no |
 | <a name="input_create_project"></a> [create\_project](#input\_create\_project) | true: create a new GCP project with var.project\_id and link var.billing\_account to it. false: adopt an existing project with var.project\_id and create nothing at project level. No default, so the choice is always explicit. | `bool` | n/a | yes |
 | <a name="input_deployer_account_id"></a> [deployer\_account\_id](#input\_deployer\_account\_id) | account\_id (the part before @) of the deployer service account that env roots and CI run as. 6-30 characters. | `string` | `"terraform-deployer"` | no |
-| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin"<br/>]</pre> | no |
+| <a name="input_deployer_roles"></a> [deployer\_roles](#input\_deployer\_roles) | Project-level IAM roles granted to the deployer service account. The default is the smallest set of predefined roles that can create the whole PulseBridge stack; see README.md ("Deployer roles") for the reasoning. Basic roles (owner, editor) are rejected. | `list(string)` | <pre>[<br/>  "roles/serviceusage.serviceUsageAdmin",<br/>  "roles/compute.networkAdmin",<br/>  "roles/compute.securityAdmin",<br/>  "roles/compute.instanceAdmin.v1",<br/>  "roles/artifactregistry.admin",<br/>  "roles/iam.serviceAccountAdmin",<br/>  "roles/iam.serviceAccountUser",<br/>  "roles/resourcemanager.projectIamAdmin",<br/>  "roles/secretmanager.admin",<br/>  "roles/healthcare.datasetAdmin",<br/>  "roles/healthcare.fhirStoreAdmin",<br/>  "roles/healthcare.hl7V2StoreAdmin",<br/>  "roles/pubsub.admin",<br/>  "roles/run.admin",<br/>  "roles/cloudscheduler.admin",<br/>  "roles/logging.configWriter",<br/>  "roles/monitoring.alertPolicyEditor",<br/>  "roles/monitoring.notificationChannelEditor",<br/>  "roles/firebasehosting.admin",<br/>  "roles/recaptchaenterprise.admin"<br/>]</pre> | no |
 | <a name="input_deployer_wif_contexts"></a> [deployer\_wif\_contexts](#input\_deployer\_wif\_contexts) | The CI contexts (wif.tf) whose jobs may impersonate the deployer. Default ["main"] is dev's: jobs on main run by push, schedule or workflow\_dispatch (the dev apply and the nightly destroy). prod: ["env-prod-main"] (only jobs in the prod GitHub Environment on main); with github\_environments set, "main" is refused. Never "pull-request". | `list(string)` | <pre>[<br/>  "main"<br/>]</pre> | no |
 | <a name="input_folder_id"></a> [folder\_id](#input\_folder\_id) | Optional numeric folder ID to create the new project under. Leave unset for a personal account. Mutually exclusive with org\_id; only used when create\_project = true. | `string` | `null` | no |
 | <a name="input_github_allowed_refs"></a> [github\_allowed\_refs](#input\_github\_allowed\_refs) | Optional list of git refs (for example ["refs/heads/main"]) allowed to obtain deployer tokens. Empty (the default) allows every branch, tag and pull-request ref in the repository; see README.md ("What the condition does not restrict"). Note that pull-request workflows run on refs/pull/N/merge, so restricting refs also blocks plan-on-PR with this identity. | `list(string)` | `[]` | no |
