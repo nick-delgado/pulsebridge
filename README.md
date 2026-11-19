@@ -294,8 +294,12 @@ found a fault: on the small VM, MariaDB's first-time setup can take longer than 
 which left the database half-made; the startup script now allows longer and recovers a half-made
 directory ([edge-vm README](infra/modules/edge-vm/README.md#first-initialisation-of-mariadb)).
 
-**Not yet verified:** prod's first approved apply through CI, `terraform destroy` and what it
-leaves behind, a forced slow cuff send, and a few inspections that need a shell on the VM. The
+Prod's first apply through CI followed on 18 November: the plan waited for approval, then the
+apply and the page deploy passed. On 19 November CI destroyed dev: nothing was left in its state,
+and the default Hosting site was then taken offline.
+
+**Not yet verified:** that dev's billing report shows no charges a day after the destroy, a forced
+slow cuff send, and a few inspections that need a shell on the VM. The
 runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's result and
 lists what is still open. The demo is shown at the Firebase Hosting address of the prod project;
 a custom domain (T30) is deferred ([`docs/workplan.md`](docs/workplan.md)).
