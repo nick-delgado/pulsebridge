@@ -66,7 +66,8 @@ The MVP is done when a reviewer can open the dashboard, see real heart-rate data
 
 One page, no navigation. A line-art silhouette of the patient sits in the centre with a cuff marked on the upper arm and a watch on the wrist; arrows leave the body outward to each side. Left is episodic (blood pressure cuff simulator), right is continuous (Pixel Watch heart rate). Trace panels sit under their side; one Share with clinic button sits under the silhouette where both paths converge.
 
-- [ ] Reviewer login (single shared credential handed to recruiters; no self-signup)
+- [ ] Self-serve demo access: a "View the live demo" button, a bot check (reCAPTCHA, now Google Cloud Fraud Defense) and a 24-hour session; no password, no sign-up (D16, 19 November 2026, replaces the shared reviewer password)
+- [ ] Only the last 7 days are shown: older readings stay in the store but the proxy never returns them
 - [ ] Silhouette in muted line art only; no fills, no organs; small enough that the panels and chart dominate
 - [ ] Status strip in the header: last sync, Observation count per source, FHIR store and OpenEMR reachability
 
@@ -157,7 +158,7 @@ The two goals don't conflict because they live at different layers. The enterpri
 | --- | --- | --- |
 | Who uses it | anyone who clones the repo; nightly CI | the public demo, at the prod project's Firebase Hosting address |
 | OpenEMR | included | included |
-| Reviewer login | default credential from `tfvars` | credential in Secret Manager, rotated |
+| Demo access (D16) | bot check and 24-hour session cookie; session signing key in Secret Manager | the same |
 | e2-micro | created | created |
 | Google Health | optional: a `use_synthetic_data` flag seeds the FHIR store from Synthea-style samples so a cloner never needs a Pixel Watch or OAuth setup | real token |
 | Deletion | `terraform destroy` nightly in CI | manual |
@@ -184,7 +185,7 @@ What to avoid: Terraform workspaces for environments (they share one backend and
 | Cloud Run to VM | Direct VPC egress into a dedicated subnet; the VM firewall admits only that subnet | No always-on connector, no NAT or static IP, no public MLLP port | Serverless VPC Access connector (always-on VMs); public IP limited to a NAT address (NAT cost, public port) |
 | Dashboard hosting | Firebase Hosting | No hourly charge; rewrites can serve the page and the proxy from one origin | Bucket behind a load balancer and Cloud CDN (hourly forwarding-rule charge) |
 | Dashboard framework | Vite and TypeScript with a small chart library | Small, readable, no heavy framework to explain | A full framework |
-| Reviewer login | Shared password in Secret Manager checked by the proxy, which issues an 8-hour signed bearer token | One shared credential needs no user directory; fully created and destroyed by Terraform; rotating the password revokes every session | Identity Platform (its config cannot be destroyed by Terraform and a user cannot be created in Terraform); Identity-Aware Proxy on Cloud Run (needs a Google account per reviewer) |
+| Demo access (changed 19 November 2026, D16 in the work plan) | No password: a visitor clicks "View the live demo", passes an invisible reCAPTCHA score check (Google Cloud Fraud Defense, formerly reCAPTCHA Enterprise), and the proxy sets a signed 24-hour session cookie named `__session`. Rate limits per session and per address; at most about 300 bot checks a day; only the last 7 days of data are shown. The author accepts that their real heart-rate data is public within that window | A portfolio demo should open without a credential to hand out; the bot check and the limits keep scripted traffic and cost down; `__session` is the only cookie Firebase Hosting passes to Cloud Run | The shared reviewer password with an 8-hour bearer token (the original choice: one credential to hand out); Identity Platform (its config cannot be destroyed by Terraform); Identity-Aware Proxy (needs a Google account per visitor); a synthetic patient for the public demo (rejected by the author) |
 | Wearable account | Per deployment: each deployer registers their own OAuth app and connects their own Google Health account | Keeps the PHR single-patient and the repo free of the author's credentials | Hosted multi-user connect (rejected: strangers' PHI, scope verification) |
 | CI authentication | Workload Identity Federation | No long-lived keys in GitHub | Service account key secret |
 | Product name | PulseBridge | PulseBridge; repo slug pulsebridge; demo at the prod project's Firebase Hosting address (changed 17 November 2026: no custom domain for now) |  |

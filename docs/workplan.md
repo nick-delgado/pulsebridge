@@ -25,7 +25,7 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D2 | Connecting Google Health | A CLI script runs the OAuth flow. Three values live in Secret Manager: OAuth client ID, OAuth client secret, refresh token. |
 | D3 | HL7v2 parsing | Use `hl7apy` to parse, build and validate messages. "Own parser" in the brief means the v2-to-FHIR mapping is ours (no Whistle or Dataflow). The mapping is the code a reviewer should read. |
 | D8 | Heart-rate granularity | Five-minute roll-ups from the Google Health API's `rollUp` method (about 288 Observations a day), not raw samples (about 37,000 a day). See `docs/spikes/s3.md`. |
-| D9 | Reviewer login | A shared password in Secret Manager, checked by `fhir-proxy`, which issues an 8-hour signed bearer token. No Identity Platform. See `docs/spikes/s6.md`. |
+| D9 | Reviewer login | **Superseded by D16 on 19 November 2026.** Was: a shared password in Secret Manager, checked by `fhir-proxy`, which issues an 8-hour signed bearer token. No Identity Platform. See `docs/spikes/s6.md`. |
 | D10 | One front door | `fhir-proxy` is the only public service the page calls. The cuff simulator is not publicly invocable; the proxy forwards cuff requests to it, so it sits behind the reviewer login. |
 | D11 | Who owns the Patient record | A setup step (the connect script or the seeder) writes the full Patient once with a conditional update. Ingest Bundles from `health-sync` and `v2-to-fhir` include Patient and Device as conditional creates (`POST` with `ifNoneExist`), so they never overwrite. Fallback if the store does not resolve in-Bundle references to the existing resource: a fixed Patient ID with direct references. |
 | D12 | Send attempts | Every cuff send attempt is recorded as a FHIR `AuditEvent` in the FHIR store, written by the cuff simulator (it holds the raw ACK and is not public; `fhir-proxy` stays read-only). The messages log lists attempts, including rejected and unacknowledged ones. |
@@ -35,6 +35,7 @@ one git worktree. The orchestrator assigns tasks, and updates the Status column 
 | D5 | Dashboard framework | Vite and TypeScript with a small chart library; no heavy framework. |
 | D15 | Audit data in its own FHIR store | Send-attempt AuditEvents are written to a second FHIR store. The cuff simulator can write there and has no access to the store with health data; `fhir-proxy` reads both. Chosen over giving the simulator the editor role on the main store, which would also let it read and delete health data. |
 | D6 | Task branches | Builders push `task/*` branches to GitHub so work survives a lost container. |
+| D16 | Self-serve public demo (19 November 2026, the user's decisions; replaces D9) | No password. "View the live demo" runs an invisible reCAPTCHA score check (Google Cloud Fraud Defense); the proxy creates an assessment and, on a pass, sets a signed 24-hour session cookie `__session` (HttpOnly, Secure, SameSite=Strict; the only cookie Firebase Hosting forwards to Cloud Run). Writes and session creation also check `Origin`. The author accepts that their real data is public within the shown window. Visitors may send cuff readings (3 per 10 minutes per session) and share to OpenEMR (2 per 10 minutes per session), with caps across all visitors. Only the last 7 days are shown; nothing is deleted. When the daily bot-check cap is reached the page says "The demo is busy, try again tomorrow." Tasks T43 to T48. |
 | D7 | Two acknowledgment levels | Modelled on HL7 enhanced acknowledgment mode (MSH-15 accept, MSH-16 application). The HL7v2 store's ACK is the **commit-level acknowledgment**; the mapper's result is the **application-level outcome**. Both are labelled that way in the messages log and trace panel. See "Malformed message handling" below. |
 
 ## Open decisions (need the user)
@@ -980,3 +981,172 @@ Cloud Healthcare refuses, so on real data the count stays null and `/status` nev
 Hosting address of the prod project (`https://<project-id>.web.app`); no custom domain for now.
 `public_origin` stays as an optional variable. If taken up later:
 - AC: TLS works; nothing about the author's domain is hardcoded outside `tfvars`.
+
+## Wave 5: self-serve public demo (D16)
+
+Planned 19 November 2026 from the user's decisions (D16). Order: T43, T44 and T45 can run in
+parallel (their paths do not overlap, and the contract below fixes the names they share); T46
+after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestrator's, after T48
+(see "Rollout" below). dev is destroyed, so the first real test is prod.
+
+| ID | Task | Depends on | Owns | Status |
+| --- | --- | --- | --- | --- |
+| T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` | todo |
+| T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/` | todo |
+| T45 | Dashboard: "View the live demo" | D16 | `web/` | todo |
+| T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | todo |
+| T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, and the minimum needed elsewhere in `web/` | todo |
+| T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/`, service and module READMEs not owned above | todo |
+
+### The contract T43 to T45 share
+
+Paths are under the proxy's `PATH_PREFIX` (`/api` behind Firebase Hosting). The page and the
+proxy are on one origin; cross-origin calls are no longer supported (a cookie with
+`SameSite=Strict` and no CORS credentials). Local development uses the mock client or Vite's
+dev-server proxy.
+
+- **`GET /auth/config`** (public): `{"recaptcha_site_key": "<key id>", "recaptcha_action": "view_demo"}`.
+  The site key is public but never hardcoded or baked into the page build: the page fetches it.
+- **`POST /auth/session`** (public), body `{"recaptcha_token": "<token>"}`:
+  - pass: `200`, body `{"expires_at": "<RFC 3339 instant>"}`, and
+    `Set-Cookie: __session=<token>; Path=/api; Max-Age=86400; HttpOnly; Secure; SameSite=Strict`
+    (the path follows `PATH_PREFIX`);
+  - `400` malformed body; `403` `origin-refused` (the `Origin` header missing or not in
+    `ALLOWED_ORIGINS`); `403` `bot-check-failed` (token invalid, wrong action or hostname, or
+    score under `RECAPTCHA_MIN_SCORE`); `429` `rate-limited` with `Retry-After`; `503`
+    `demo-busy` with the text "The demo is busy, try again tomorrow." (the daily cap); `503`
+    `bot-check-unavailable` (Fraud Defense or the counter unreachable: fail closed).
+- **`POST /auth/logout`**: clears the cookie (`Max-Age=0`), `204`.
+- **Every other route** needs a valid `__session` cookie, otherwise `401` `session-required`.
+  `Authorization: Bearer` is no longer accepted. A token in the query string is still refused.
+  Every `POST` also needs an allowed `Origin` (`403` `origin-refused`).
+- **`429` `rate-limited`** with `Retry-After` can come from any route (T46); the page treats it
+  the same everywhere.
+- **The session token** is an HS256 JWT as today (`iss`, `aud`, `iat`, `exp`, `jti`, no personal
+  data), signed with a 32-byte random key from Secret Manager, not derived from a password.
+  Replacing the key's version ends every session.
+- **Environment variables** (T43 reads, T44 sets): `SESSION_SIGNING_KEY_FILE` (mounted secret
+  `<prefix>-session-signing-key`), `RECAPTCHA_SITE_KEY`, `RECAPTCHA_ACTION` (`view_demo`),
+  `RECAPTCHA_MIN_SCORE` (default `0.5`), `SESSION_TTL_SECONDS` (default now `86400`),
+  `SESSIONS_PER_ADDRESS_PER_HOUR` (default `5`), `BOT_CHECKS_PER_DAY` (default `300`),
+  `DEMO_COUNTER_BUCKET`. The assessment is created in `GCP_PROJECT_ID`. Removed:
+  `REVIEWER_PASSWORD_FILE`, `PASSWORD_CACHE_SECONDS`, `LOGIN_FAILURES_PER_ADDRESS`,
+  `LOGIN_FAILURES_TOTAL`, `LOGIN_WINDOW_SECONDS`.
+
+**T43 fhir-proxy: anonymous demo sessions.** Replace the password login with the session flow
+above.
+- AC: `POST /auth/session` creates a Fraud Defense assessment
+  (`projects.assessments.create`) and passes only when the token is valid, the action is
+  `RECAPTCHA_ACTION`, the hostname is one of `ALLOWED_ORIGINS`' hosts and the score is at least
+  `RECAPTCHA_MIN_SCORE`; each failure answers as the contract says, and nothing about the score
+  or the reason beyond the code is returned.
+- AC: before any assessment, the per-address limit (`SESSIONS_PER_ADDRESS_PER_HOUR`, the same
+  client-address rules as today's login limit) and a cheap shape check of the token apply, so a
+  flood of junk costs no assessments.
+- AC: the daily cap (`BOT_CHECKS_PER_DAY`, a UTC day) counts **assessments**, not sessions, and
+  survives instance restarts and spans instances: a counter object per day in
+  `DEMO_COUNTER_BUCKET`, incremented with a generation precondition (retry on conflict) **before**
+  the assessment is made. Counter unreachable → `503 bot-check-unavailable`. Reached → `503
+  demo-busy`. The README says why not an in-memory counter (scale to zero resets it).
+- AC: the cookie is set exactly as the contract says; the proxy still strips any other
+  `Set-Cookie`; responses carry `Cache-Control: no-store`.
+- AC: the gate accepts only the `__session` cookie; the CSRF defence is `SameSite=Strict` plus the
+  `Origin` check on every `POST`, and the README explains cross-site request forgery and why both.
+- AC: the password code (password file, scrypt key derivation, login limiter) is removed, not
+  left unused; the CapabilityStatement and route table list the new routes.
+- AC: tests with a fake Fraud Defense and a fake bucket cover every outcome, the counter race,
+  expiry, a token signed with another key, a missing or foreign `Origin`; each break-checked.
+- AC: the Fraud Defense API (endpoint, request and response fields, the IAM role it needs) is
+  checked against Google's current documentation and cited; what could not be checked without a
+  real project is listed for the rollout.
+
+**T44 Infrastructure for demo sessions.**
+- AC: `recaptchaenterprise.googleapis.com` is in project-base's API list.
+- AC: a score-based web key (`google_recaptcha_enterprise_key`, `integration_type = "SCORE"`)
+  whose allowed domains are the hosts of the page's origins (`<site>.web.app`,
+  `<site>.firebaseapp.com`, `public_origin` if set), from variables, nothing hardcoded; its ID
+  goes to `RECAPTCHA_SITE_KEY`.
+- AC: the secret `<prefix>-session-signing-key` replaces `<prefix>-reviewer-password` (identity),
+  mounted into fhir-proxy as `SESSION_SIGNING_KEY_FILE`; `scripts/secrets/` gets
+  `set-session-signing-key.sh` (32 random bytes, generated, never printed) replacing
+  `set-reviewer-password.sh`; the dev-only write-only password variables are removed or replaced.
+- AC: the counter bucket (`<prefix>-demo-counters`): uniform access, public access prevented, a
+  lifecycle rule deleting objects after 7 days, fhir-proxy's service account the only one that can
+  write objects (bucket-level role, not project); it goes with `terraform destroy` (force destroy
+  in dev; in prod as `protect_from_destroy` says).
+- AC: fhir-proxy's service account can create assessments (the narrowest role, cited) and
+  nothing more is granted project-wide.
+- AC: the page's Content-Security-Policy admits exactly what reCAPTCHA's script and frame need
+  (Google's CSP guidance, cited) and nothing else; the test that pins the CSP is updated.
+- AC: bootstrap: the deployer can create and delete reCAPTCHA keys and the bucket; the read-only
+  planner can read them (`planner_permissions`, no data reads). The README says bootstrap must be
+  re-applied by hand before CI applies the stack.
+- AC: whether Fraud Defense has a per-day quota on assessments that Terraform can lower
+  (`google_service_usage_consumer_quota_override`) is checked and reported; if it has one, it is
+  set as a second, hard cap a little above `BOT_CHECKS_PER_DAY`.
+- AC: the rollout order for an existing stack is written down and works with the rule that a
+  Cloud Run volume secret needs a version at deploy time (create the secret, add its version with
+  the script, then deploy the proxy that mounts it).
+- AC: `make tf-validate tf-test tf-lint tf-scan lint test pre-commit secret-scan` pass without
+  credentials; the mocked tests cover the new resources and fail when they are removed.
+
+**T45 Dashboard: "View the live demo".**
+- AC: the password field is gone; the landing view has a "View the live demo" button, one or two
+  sentences on what the demo is, and Google's required reCAPTCHA notice (or the badge).
+- AC: the page fetches `/auth/config`, loads reCAPTCHA's script only then, runs
+  `grecaptcha.enterprise.execute` with the action on the click, and posts the token to
+  `/auth/session`; a failed or busy answer shows a clear message (`demo-busy`: exactly "The demo
+  is busy, try again tomorrow.").
+- AC: the page keeps no token: requests are same-origin and rely on the cookie; the
+  `sessionStorage` session code is removed; a `401` anywhere returns to the landing view.
+- AC: `429` `rate-limited` from any route shows a message with the wait from `Retry-After`,
+  without logging the visitor out.
+- AC: the mock client simulates the flow (including busy, failed and rate-limited) so
+  `npm run dev` and the browser tests need no Google key; the browser tests cover the landing,
+  a pass, each failure and a 401 mid-session.
+
+**T46 fhir-proxy: rate limits for a public demo.** In memory per instance, like cuff-sim's
+bucket (no shared store, no idle cost), with the instance cap documented as the multiplier.
+- AC: per session: reads (every `GET`) 120 a minute; cuff sends 3 per 10 minutes; shares 2 per 10
+  minutes. Per client address, all routes together: 300 a minute. Shares across all visitors: 30
+  an hour per instance. Each is a variable with a bounded range; the defaults are justified
+  against the dashboard's real request pattern (page load, polling), measured and stated.
+- AC: a refusal is `429` `rate-limited` with `Retry-After` in whole seconds and an
+  OperationOutcome; refusals are logged sampled (as the login flood is today).
+- AC: the per-session limit keys on the token's `jti`; the table of tracked sessions and addresses
+  is capped without letting a flood evict an abuser's history (the login limiter's rule).
+- AC: tests with an injected clock for each limit, the boundaries and the caps; break-checked.
+
+**T47 Show only the last 7 days.** `HISTORY_DAYS` (default 7, from 1 to 30); the boundary is
+"now minus `HISTORY_DAYS`" on every request, by the reading's effective time (when it was
+measured), and by the attempt time for send attempts.
+- AC: Observation searches: the proxy adds the boundary as a lower date bound; a requested lower
+  bound that is earlier is raised to it, not refused (a heart-rate window that overlaps the
+  boundary is shown). The CapabilityStatement documents it.
+- AC: a read, trace or share of anything older answers `404` exactly like a missing resource, so
+  it does not reveal that older data exists.
+- AC: the messages log, the status strip's counts and the OpenEMR read-back panel cover the same
+  window.
+- AC: the dashboard's 30 d button is gone; 24 h and 7 d remain.
+- AC: nothing is deleted from either FHIR store or OpenEMR; the README says the data stays and
+  only the proxy hides it.
+- AC: tests at the boundary (just inside, just outside, an overlapping window), break-checked.
+
+**T48 Docs, smoke test and brief.**
+- AC: README, setup guide and runbook describe the new access, the signing-key script (replacing
+  the reviewer-password steps), the reCAPTCHA key, the counter bucket, the limits, the 7-day
+  window, the cost of Fraud Defense (10,000 assessments a month free per organisation, then a
+  flat charge; cited) and that the real data is public within the window.
+- AC: `make smoke` gets its session without a bot-check bypass in the service: it signs a session
+  token locally with the signing key read from Secret Manager by the operator's credentials, and
+  it checks that `/auth/session` refuses a junk token (`403`) and that `/auth/config` answers.
+- AC: the master checklist gets rows for what only a real deployment can show (the assessment
+  call, the score a real browser gets, the CSP with reCAPTCHA, the cookie through Hosting's
+  rewrite, the counter under two instances, the quota override if any).
+
+### Rollout (orchestrator, after T48)
+
+Build and push new images; re-apply bootstrap by hand for the new deployer and planner
+permissions; apply the new secret and bucket to prod (targeted), add the key's version with the
+script, then let CI apply the rest and deploy the page; run `make smoke`; check the checklist
+rows. A short break of the live demo during the rollout is acceptable (prod is the only stack).
