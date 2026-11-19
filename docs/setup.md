@@ -12,8 +12,10 @@ explained the first time it appears.
 > page, a reviewer login, cuff readings over MLLP and HTTPS, and shares of a blood pressure and a
 > heart rate to OpenEMR), and its corrections are in the steps below. Later checks on
 > dev (alerts firing, patching, password rotation, CI) and a prod deploy with real watch data on
-> 18 November (Step 2, the connect script, health-sync) are recorded in the runbook too.
-> Teardown is still not yet verified on a real project. The runbook's
+> 18 November (Step 2, the connect script, health-sync) are recorded in the runbook too. dev was
+> torn down by CI's destroy on 19 November: nothing was left in its state, and what stays behind
+> matched the table in [Tearing it down](#tearing-it-down). Whether the billing report then shows
+> no charges is not yet verified on a real project (checked a day later). The runbook's
 > [master checklist](../infra/envs/README.md#master-checklist) lists every assumption in the order
 > you will meet them and records what the dev run confirmed. If a step below does not behave as
 > described, that checklist is where the answer is recorded.
@@ -234,7 +236,7 @@ deployments on one billing account, or change the machine type, and the VM is bi
    to stop every charge: `gcloud projects delete <project-id>` (Google keeps a deleted project
    recoverable for 30 days, then removes it).
 3. Watch the billing report for the project a day later: it should show no new charges (this is
-   checklist item [T4](../infra/envs/README.md#teardown-dev), not yet verified).
+   checklist item [T4](../infra/envs/README.md#teardown-dev), not yet checked).
 
 ## Choose your data: synthetic or your own watch
 
@@ -941,15 +943,15 @@ protected so a stray destroy cannot delete real health data. To really remove it
 | --- | --- | --- |
 | The default Firebase Hosting site **and its last page**, still public at `https://<project-id>.web.app` (every `/api` call fails) | no | `npx --yes firebase-tools@15.34.2 hosting:disable --project <project-id>` (from `web/`) if no page should stay online |
 | Firebase on the project | no | nothing; it cannot be removed |
-| The serverless subnet and the VPC, on the first try: Google needs **one to two hours** after the Cloud Run services are deleted | no | run `terraform destroy` again after one to two hours |
+| Possibly the serverless subnet and the VPC, on the first try: Google can need **one to two hours** after the Cloud Run services are deleted (on dev on 19 November it did not) | no | run `terraform destroy` again after one to two hours |
 | The enabled APIs | no | nothing |
 | `gs://<project-id>_cloudbuild` (made by `gcloud builds submit`) | yes, storage (cents) | `gcloud storage rm -r gs://<project-id>_cloudbuild` |
 | prod only: up to 7 daily snapshots of the data disk, kept on purpose so an accidental destroy can be undone | **yes**, snapshot storage, until deleted | list and delete them (runbook table) |
 | Logs in Cloud Logging | no (kept 30 days) | nothing |
 | Bootstrap's state bucket, deployer and WIF pool | the bucket: a few KB | bootstrap's [Teardown](../infra/bootstrap/README.md#teardown), after every environment is destroyed |
 
-In dev, a destroyed data disk is gone: there is no snapshot. Whether the Artifact Registry
-repositories delete while still holding images is not verified (T2). Then check the billing report
+In dev, a destroyed data disk is gone: there is no snapshot. The Artifact Registry repositories
+delete while still holding images (T2, verified on dev). Then check the billing report
 a day later. If the project exists only for PulseBridge, deleting it
 (`gcloud projects delete <project-id>`) removes everything above at once.
 
