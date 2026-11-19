@@ -47,20 +47,6 @@ def test_store_only_candidates_are_checked_with_one_audit_search(tmp_path) -> No
     assert page["partial"] is False
 
 
-def test_a_refused_guess_over_the_total_is_not_counted_again(tmp_path) -> None:
-    h = build_harness(tmp_path, login_failures_total=3)
-    login = lambda pw, ip: h.client.post(  # noqa: E731
-        "/auth/login", json={"password": pw}, headers={"X-Forwarded-For": ip}
-    )
-    for n in range(3):
-        assert login("wrong", f"198.51.100.{n}").status_code == 401
-    h.clock.advance(30)
-    for n in range(3):
-        assert login("wrong", f"198.51.100.{10 + n}").status_code == 429
-    h.clock.advance(31)  # the first three have aged out; the refused three were never counted
-    assert login("wrong", "198.51.100.20").status_code == 401
-
-
 def test_a_truncated_audit_check_lists_no_store_only_row(tmp_path, monkeypatch) -> None:
     from fhir_proxy import messages
 
@@ -128,7 +114,7 @@ def test_the_budget_ends_a_slow_log_page_with_a_partial_answer(tmp_path) -> None
     h.fake.delays.append(("GET", r"/messages/synthetic", 5))
     token = h.login()
     started = time.monotonic()
-    response = h.client.get("/messages", headers={"Authorization": f"Bearer {token}"})
+    response = h.client.get("/messages", headers=h.auth(token))
     elapsed = time.monotonic() - started
     assert response.status_code == 200
     page = response.get_json()
@@ -145,7 +131,7 @@ def test_status_parts_run_at_once_and_unanswered_parts_are_unknown(tmp_path) -> 
     h.fake.delays.append(("GET", r"/Observation$", 10))
     token = h.login()
     started = time.monotonic()
-    body = h.client.get("/status", headers={"Authorization": f"Bearer {token}"}).get_json()
+    body = h.client.get("/status", headers=h.auth(token)).get_json()
     elapsed = time.monotonic() - started
     assert elapsed < 3.5, elapsed  # not 10 + 3 x 10 s
     assert body["watchSync"]["state"] == "unknown"
@@ -161,7 +147,7 @@ def test_status_parts_overlap_when_each_is_slow_but_in_budget(tmp_path) -> None:
     h.sender.routes["/status"] = slow_answer(1, 200, {"googleHealth": "connected"}, upstream)
     h.fake.delays.append(("GET", r"/Observation$", 1))
     token = h.login()
-    body = h.client.get("/status", headers={"Authorization": f"Bearer {token}"}).get_json()
+    body = h.client.get("/status", headers=h.auth(token)).get_json()
     assert body["watchSync"]["state"] == "connected"
     assert body["observationCounts"] == {"watch": 0, "cuff": 0}
     # Event order, not wall time: health-sync's call and the store searches overlapped (each
@@ -200,16 +186,20 @@ def test_status_answers_promptly_while_the_messages_pool_is_saturated(tmp_path) 
     h.fake.delays.append(("GET", r"/messages/c2F0dXJh", 1))
     h.sender.answer("/status", 200, {"googleHealth": "connected"})
     token = h.login()
-    auth = {"Authorization": f"Bearer {token}"}
+    auth = h.auth(token)
     threads = [
-        threading.Thread(target=lambda: h.app.test_client().get("/messages?count=16", headers=auth))
+        threading.Thread(
+            target=lambda: h.app.test_client(use_cookies=False).get(
+                "/messages?count=16", headers=auth
+            )
+        )
         for _ in range(8)
     ]
     for t in threads:
         t.start()
     time.sleep(0.3)  # the shared pool is now busy with 8 x 16 one-second lookups
     started = time.monotonic()
-    response = h.app.test_client().get("/status", headers=auth)
+    response = h.app.test_client(use_cookies=False).get("/status", headers=auth)
     elapsed = time.monotonic() - started
     for t in threads:
         t.join(timeout=60)
@@ -236,7 +226,7 @@ def test_an_inner_status_search_unfinished_at_the_deadline_is_unknown(tmp_path) 
     h.sender.answer("/status", 200, {"googleHealth": "connected"})
     h.fake.delays.append(("GET", r"/Observation$", 5))
     token = h.login()
-    response = h.client.get("/status", headers={"Authorization": f"Bearer {token}"})
+    response = h.client.get("/status", headers=h.auth(token))
     assert response.status_code == 200
     body = response.get_json()
     assert body["watchSync"]["state"] == "connected"  # health-sync answered in time
@@ -250,7 +240,7 @@ def test_every_route_has_the_budget(tmp_path) -> None:
     _patient(h)
     h.fake.delays.append(("GET", r"/Observation/", 10))
     token = h.login()
-    auth = {"Authorization": f"Bearer {token}"}
+    auth = h.auth(token)
     started = time.monotonic()
     assert h.client.get("/trace/heart-rate/abc", headers=auth).status_code == 504
     assert time.monotonic() - started < 2
@@ -270,10 +260,10 @@ def test_no_call_starts_once_the_budget_is_spent(tmp_path) -> None:
         },
     )
     token = h.login()
-    h.get("/fhir/metadata", headers={"Authorization": f"Bearer {token}"})
+    h.get("/fhir/metadata", headers=h.auth(token))
     h.fake.delays.append(("GET", r"/Observation/hr-1$", 0.98))  # uses up the whole budget
     before = len(h.fake.requests)
-    response = h.client.get("/trace/heart-rate/hr-1", headers={"Authorization": f"Bearer {token}"})
+    response = h.client.get("/trace/heart-rate/hr-1", headers=h.auth(token))
     assert response.status_code == 504
     later = [r[1] for r in h.fake.requests[before:]]
     assert not [p for p in later if "/Device/" in p or "/Provenance/" in p], later
@@ -288,7 +278,7 @@ def test_a_slow_cuff_sim_ends_at_the_forward_timeout(tmp_path) -> None:
         "/cuff/readings",
         data=b"{}",
         content_type="application/json",
-        headers={"Authorization": f"Bearer {token}"},
+        headers=h.auth(token),
     )
     assert response.status_code == 504
     assert time.monotonic() - started < 2
@@ -311,7 +301,7 @@ def test_an_inner_status_search_still_running_at_the_deadline_is_never_in_the_an
     h.sender.answer("/status", 200, {"googleHealth": "connected"})
     h.fake.stubborn_delays.append(("GET", r"/Observation$", 2.5))  # outlives the budget
     token = h.login()
-    response = h.client.get("/status", headers={"Authorization": f"Bearer {token}"})
+    response = h.client.get("/status", headers=h.auth(token))
     assert response.status_code == 200
     body = response.get_json()
     assert body["observationCounts"] == {"watch": None, "cuff": None}

@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 from fhir_proxy.config import ConfigError, ServiceConfig
 from fhir_proxy.extensions import redact, trace_step
-from fhir_proxy.testing import build_harness
+from fhir_proxy.testing import ORIGIN, build_harness
 
 ENV = {
     "GCP_PROJECT_ID": "example-project",
@@ -15,22 +15,62 @@ ENV = {
     "AUDIT_FHIR_STORE_ID": "audit",
     "HL7V2_STORE_ID": "example-store",
     "PATIENT_ID": "PB-SYN-0001",
-    "REVIEWER_PASSWORD_FILE": "/secrets/reviewer-password",
+    "SESSION_SIGNING_KEY_FILE": "/secrets/session-signing-key/value",
     "ALLOWED_ORIGINS": "https://dashboard.example.test",
     "CUFF_SIM_URL": "https://cuff-sim.example.test",
     "PUBLIC_BASE_URL": "https://proxy.example.test",
+    "RECAPTCHA_SITE_KEY": "synthetic-site-key-0000000000000000000000",
+    "DEMO_COUNTER_BUCKET": "example-demo-counters",
 }
 
 
 def test_defaults() -> None:
     config = ServiceConfig.from_env(ENV)
-    assert config.session_ttl_seconds == 28800
+    assert config.session_ttl_seconds == 86400
     assert config.trusted_proxy_hops == 1
     assert config.cuff_forward_timeout == 55 and config.request_timeout == 120
     assert config.request_budget == 50  # under Firebase Hosting's 60 s
     assert config.public_base_url == "https://proxy.example.test"
-    assert config.login_failures_per_address == 5 and config.login_window_seconds == 60
     assert config.health_sync_url is None and config.sample_patient is None
+    # The demo-session defaults of the contract (docs/workplan.md, D16).
+    assert config.recaptcha_action == "view_demo"
+    assert config.recaptcha_min_score == 0.5
+    assert config.sessions_per_address_per_hour == 5
+    assert config.bot_checks_per_day == 300
+    assert config.session_key_file == "/secrets/session-signing-key/value"
+    assert config.demo_counter_bucket == "example-demo-counters"
+
+
+def test_the_password_variables_are_gone() -> None:
+    from fhir_proxy.config import VARIABLES
+
+    removed = {
+        "REVIEWER_PASSWORD_FILE",
+        "PASSWORD_CACHE_SECONDS",
+        "LOGIN_FAILURES_PER_ADDRESS",
+        "LOGIN_FAILURES_TOTAL",
+        "LOGIN_WINDOW_SECONDS",
+    }
+    assert not removed & set(VARIABLES)
+    for name in (
+        "SESSION_SIGNING_KEY_FILE",
+        "RECAPTCHA_SITE_KEY",
+        "RECAPTCHA_ACTION",
+        "RECAPTCHA_MIN_SCORE",
+        "SESSION_TTL_SECONDS",
+        "SESSIONS_PER_ADDRESS_PER_HOUR",
+        "BOT_CHECKS_PER_DAY",
+        "DEMO_COUNTER_BUCKET",
+    ):
+        assert name in VARIABLES
+
+
+@pytest.mark.parametrize(
+    "name", ["SESSION_SIGNING_KEY_FILE", "RECAPTCHA_SITE_KEY", "DEMO_COUNTER_BUCKET"]
+)
+def test_the_demo_session_variables_are_required(name: str) -> None:
+    with pytest.raises(ConfigError, match=name):
+        ServiceConfig.from_env({k: v for k, v in ENV.items() if k != name})
 
 
 @pytest.mark.parametrize(
@@ -54,7 +94,20 @@ def test_defaults() -> None:
         ({"SESSION_TTL_SECONDS": "1e9"}, "SESSION_TTL_SECONDS"),
         ({"TRUSTED_PROXY_HOPS": "9"}, "TRUSTED_PROXY_HOPS"),
         ({"PATH_PREFIX": "no-leading-slash"}, "PATH_PREFIX"),
-        ({"REVIEWER_PASSWORD_FILE": "relative/path"}, "REVIEWER_PASSWORD_FILE"),
+        ({"SESSION_SIGNING_KEY_FILE": "relative/path"}, "SESSION_SIGNING_KEY_FILE"),
+        ({"RECAPTCHA_SITE_KEY": "short"}, "RECAPTCHA_SITE_KEY"),
+        ({"RECAPTCHA_SITE_KEY": "has spaces in it, not a key id at all"}, "RECAPTCHA_SITE_KEY"),
+        ({"RECAPTCHA_ACTION": "view-demo"}, "RECAPTCHA_ACTION"),
+        ({"RECAPTCHA_MIN_SCORE": "1.5"}, "RECAPTCHA_MIN_SCORE"),
+        ({"RECAPTCHA_MIN_SCORE": "-0.1"}, "RECAPTCHA_MIN_SCORE"),
+        ({"RECAPTCHA_MIN_SCORE": "nan"}, "RECAPTCHA_MIN_SCORE"),
+        ({"SESSION_TTL_SECONDS": "86401"}, "SESSION_TTL_SECONDS"),
+        ({"SESSIONS_PER_ADDRESS_PER_HOUR": "2.5"}, "SESSIONS_PER_ADDRESS_PER_HOUR"),
+        ({"SESSIONS_PER_ADDRESS_PER_HOUR": "101"}, "SESSIONS_PER_ADDRESS_PER_HOUR"),
+        ({"BOT_CHECKS_PER_DAY": "-1"}, "BOT_CHECKS_PER_DAY"),
+        ({"BOT_CHECKS_PER_DAY": "100001"}, "BOT_CHECKS_PER_DAY"),
+        ({"DEMO_COUNTER_BUCKET": "Bad_Bucket"}, "DEMO_COUNTER_BUCKET"),
+        ({"DEMO_COUNTER_BUCKET": "gs://example-demo-counters"}, "DEMO_COUNTER_BUCKET"),
         ({"PATIENT_FAMILY_NAME": "ONLYONE"}, "PATIENT_ASSIGNING_AUTHORITY"),
         ({"GCP_PROJECT_ID": "Bad Project"}, "GCP_PROJECT_ID"),
     ],
@@ -88,11 +141,11 @@ def test_extension_routes_are_behind_the_token_check(tmp_path, monkeypatch) -> N
         "    proxy.add_route(Route('POST', '/share', 'share', 'view', 'Share'), share)\n"
         "    proxy.set_openemr_probe(lambda: {'reachable': True, 'detail': None})\n"
         "    with pytest.raises(ValueError, match='session-token'):\n"
-        "        proxy.add_route(Route('POST', '/open', 'open', 'login', 'x'), share)\n"
+        "        proxy.add_route(Route('POST', '/open', 'open', 'auth', 'x'), share)\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path / "ext"))
     h = build_harness(tmp_path, extension_module="fake_share_extension")
-    assert h.client.post("/share", json={}).status_code == 401
+    assert h.client.post("/share", json={}, headers={"Origin": ORIGIN}).status_code == 401
     assert h.client.post("/share", json={}, headers=h.auth()).status_code == 200
     h.sender.answer("/status", 200, {"googleHealth": "connected"})
     assert h.get("/status").get_json()["openemr"]["reachable"] is True
@@ -149,11 +202,11 @@ def _extension(tmp_path, monkeypatch, body: str, name: str):  # noqa: ANN001, AN
     ("line", "message"),
     [
         (
-            "    proxy.add_route(Route('POST', '/auth/login', 'login2', 'view', 'x'), handler)\n",
+            "    proxy.add_route(Route('POST', '/auth/session', 's2', 'view', 'x'), handler)\n",
             "exist",
         ),
         (
-            "    proxy.add_route(Route('GET', '/other', 'login', 'view', 'x'), handler)\n",
+            "    proxy.add_route(Route('GET', '/other', 'auth_session', 'view', 'x'), handler)\n",
             "endpoint",
         ),
         (
@@ -161,7 +214,7 @@ def _extension(tmp_path, monkeypatch, body: str, name: str):  # noqa: ANN001, AN
             "endpoint",
         ),
         (
-            "    proxy.add_route(Route('GET', '/open', 'open', 'login', 'x'), handler)\n",
+            "    proxy.add_route(Route('GET', '/open', 'open', 'auth', 'x'), handler)\n",
             "session-token",
         ),
         (
@@ -193,7 +246,7 @@ def test_the_public_set_comes_from_the_core_routes_only(tmp_path, monkeypatch) -
     name = _extension(
         tmp_path,
         monkeypatch,
-        "    proxy.add_route(Route('GET', '/open', 'open', 'login', 'x'), handler)\n",
+        "    proxy.add_route(Route('GET', '/open', 'open', 'auth', 'x'), handler)\n",
         "ext_public",
     )
     h = build_harness(tmp_path, extension_module=name)
@@ -251,7 +304,7 @@ def test_changing_the_context_s_core_table_does_not_help(tmp_path, monkeypatch) 
         tmp_path,
         monkeypatch,
         "    proxy.core_routes = ()\n"
-        "    proxy.add_route(Route('POST', '/auth/login', 'login2', 'view', 'x'), handler)\n",
+        "    proxy.add_route(Route('POST', '/auth/session', 'session2', 'view', 'x'), handler)\n",
         "ext_core_mutation",
     )
     with pytest.raises(ValueError, match="exist"):

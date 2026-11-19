@@ -1,11 +1,14 @@
-"""The gate: every route but login needs a token; CORS; security headers; hostile input."""
+"""The gate: every route but the session routes needs the __session cookie; no CORS; the
+security headers; hostile input."""
 
 from __future__ import annotations
 
 import re
 
 import pytest
-from fhir_proxy.testing import ORIGIN, PASSWORD, build_harness
+from fhir_proxy.testing import ORIGIN, build_harness
+
+PUBLIC = {("GET", "/auth/config"), ("POST", "/auth/session"), ("POST", "/auth/logout")}
 
 
 def _concrete(rule: str) -> str:
@@ -25,72 +28,62 @@ def test_the_app_serves_exactly_the_route_table(harness) -> None:
         (r.method, _concrete(r.path)) for r in harness.app.extensions["pulsebridge_routes"]
     )
     assert _routes(harness) == table
-    assert ("POST", "/auth/login") in table
+    assert set(table) >= PUBLIC
+    assert ("POST", "/auth/login") not in table
 
 
-def test_every_route_but_login_refuses_a_request_without_a_token(harness) -> None:
+def test_exactly_the_three_session_routes_are_public(harness) -> None:
+    public = {(r.method, r.path) for r in harness.app.extensions["pulsebridge_routes"] if r.public}
+    assert public == PUBLIC
+
+
+def test_every_other_route_refuses_a_request_without_the_cookie(harness) -> None:
     checked = 0
     for method, path in _routes(harness):
-        if path == "/auth/login":
+        if (method, path) in PUBLIC:
             continue
-        response = harness.client.open(path, method=method, json={})
+        response = harness.client.open(path, method=method, json={}, headers={"Origin": ORIGIN})
         assert response.status_code == 401, (method, path)
-        assert response.headers["WWW-Authenticate"] == 'Bearer realm="pulsebridge"'
-        assert response.get_json()["resourceType"] == "OperationOutcome"
+        assert response.headers["WWW-Authenticate"].startswith("Cookie ")
+        outcome = response.get_json()
+        assert outcome["resourceType"] == "OperationOutcome"
+        assert outcome["issue"][0]["details"]["coding"][0]["code"] == "session-required"
         checked += 1
     assert checked >= 8
-    # Nothing was asked of the stores or of cuff-sim on the way.
+    # Nothing was asked of the stores, of cuff-sim or of Google on the way.
     assert harness.fake.requests == []
     assert harness.sender.calls == []
+    assert harness.fraud.assessments == 0
 
 
-@pytest.mark.parametrize(
-    "header",
-    [
-        "Bearer",
-        "Bearer ",
-        "bearer abc.def.ghi",
-        "Basic dXNlcjpwYXNz",
-        "Bearer abc.def.ghi extra",
-        "Bearer abc.def",
-        "Token abc.def.ghi",
-    ],
-)
-def test_malformed_authorization_header_is_401(harness, header: str) -> None:
-    response = harness.client.get("/status", headers={"Authorization": header})
-    assert response.status_code == 401
-    assert "error=" in response.headers["WWW-Authenticate"]
-
-
-def test_unknown_paths_also_need_a_token(harness) -> None:
+def test_unknown_paths_also_need_the_cookie(harness) -> None:
     assert harness.client.get("/admin").status_code == 401
     assert harness.client.get("/fhir/Patient").status_code == 401
-    token = harness.login()
-    assert (
-        harness.get("/fhir/Patient", headers={"Authorization": f"Bearer {token}"}).status_code
-        == 404
-    )
+    assert harness.get("/fhir/Patient").status_code == 404
 
 
-@pytest.mark.parametrize("name", ["access_token", "token", "id_token"])
+@pytest.mark.parametrize("name", ["access_token", "token", "id_token", "__session"])
 def test_a_token_in_the_query_string_is_refused(harness, name: str) -> None:
     token = harness.login()
     response = harness.client.get(f"/status?{name}={token}")
     assert response.status_code == 400
-    assert 'error="invalid_request"' in response.headers["WWW-Authenticate"]
-    # Refused even together with a valid header.
-    response = harness.client.get(
-        f"/status?{name}={token}", headers={"Authorization": f"Bearer {token}"}
+    assert response.get_json()["issue"][0]["details"]["coding"][0]["code"] == "token-in-query"
+    # Refused even together with a valid cookie, and on the public routes too.
+    assert (
+        harness.client.get(f"/status?{name}={token}", headers=harness.auth(token)).status_code
+        == 400
     )
-    assert response.status_code == 400
+    assert harness.client.get(f"/auth/config?{name}=x").status_code == 400
 
 
 def test_security_headers_on_every_response(harness) -> None:
     token = harness.login()
     responses = [
         harness.client.get("/status"),  # 401
-        harness.client.post("/auth/login", json={"password": "wrong"}),  # 401
-        harness.client.get("/fhir/metadata", headers={"Authorization": f"Bearer {token}"}),
+        harness.start_session("junk"),  # 403
+        harness.client.post("/auth/session"),  # 403 origin
+        harness.client.get("/auth/config"),
+        harness.client.get("/fhir/metadata", headers=harness.auth(token)),
         harness.client.options("/status", headers={"Origin": "https://evil.example.test"}),
     ]
     for response in responses:
@@ -98,81 +91,35 @@ def test_security_headers_on_every_response(harness) -> None:
         assert response.headers["Cache-Control"] == "no-store"
         assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
         assert "Set-Cookie" not in response.headers
-        assert "Origin" in response.headers.get_all("Vary")
+        assert "Access-Control-Allow-Origin" not in response.headers
         server = response.headers.get("Server", "")
         assert not re.search(r"[0-9]", server), "no server version"
 
 
-# ---- CORS ------------------------------------------------------------------------------------
+# ---- no CORS -----------------------------------------------------------------------------------
 
 
-def test_preflight_for_the_allowed_origin_needs_no_token(harness) -> None:
+@pytest.mark.parametrize("origin", [ORIGIN, "https://evil.example.test"])
+def test_a_preflight_gets_no_cors_answer(harness, origin: str) -> None:
     response = harness.client.options(
         "/cuff/readings",
         headers={
-            "Origin": ORIGIN,
+            "Origin": origin,
             "Access-Control-Request-Method": "POST",
-            "Access-Control-Request-Headers": "authorization, content-type",
+            "Access-Control-Request-Headers": "content-type",
         },
     )
-    assert response.status_code == 204
-    assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
-    assert response.headers["Access-Control-Allow-Methods"] == "POST"
-    assert "Access-Control-Allow-Credentials" not in response.headers
-    assert response.headers["Access-Control-Allow-Origin"] != "*"
-
-
-@pytest.mark.parametrize(
-    "headers",
-    [
-        {"Origin": "https://evil.example.test", "Access-Control-Request-Method": "GET"},
-        {"Origin": ORIGIN + ".evil.test", "Access-Control-Request-Method": "GET"},
-        {"Origin": "null", "Access-Control-Request-Method": "GET"},
-        {"Origin": ORIGIN, "Access-Control-Request-Method": "DELETE"},
-        {
-            "Origin": ORIGIN,
-            "Access-Control-Request-Method": "GET",
-            "Access-Control-Request-Headers": "x-custom",
-        },
-    ],
-)
-def test_preflight_refused_for_other_origins_methods_and_headers(harness, headers) -> None:
-    response = harness.client.options("/status", headers=headers)
-    assert response.status_code == 403
-    assert "Access-Control-Allow-Origin" not in response.headers
-
-
-def test_preflight_for_an_unknown_path_looks_like_any_refusal(harness) -> None:
-    unknown = harness.client.options(
-        "/nope", headers={"Origin": ORIGIN, "Access-Control-Request-Method": "GET"}
-    )
-    refused = harness.client.options(
-        "/status",
-        headers={"Origin": "https://evil.example.test", "Access-Control-Request-Method": "GET"},
-    )
-    assert unknown.status_code == refused.status_code == 403
-    assert unknown.get_data() == refused.get_data()
-
-
-def test_actual_responses_carry_cors_only_for_the_allowed_origin(harness) -> None:
-    allowed = harness.client.post(
-        "/auth/login", json={"password": PASSWORD}, headers={"Origin": ORIGIN}
-    )
-    assert allowed.headers["Access-Control-Allow-Origin"] == ORIGIN
-    assert "Retry-After" in allowed.headers["Access-Control-Expose-Headers"]
-    other = harness.client.post(
-        "/auth/login", json={"password": PASSWORD}, headers={"Origin": "https://evil.example.test"}
-    )
-    assert "Access-Control-Allow-Origin" not in other.headers
+    assert response.status_code in (401, 403)
+    assert not [name for name, _ in response.headers if name.lower().startswith("access-control")]
 
 
 def test_several_origins_can_be_configured(tmp_path) -> None:
     h = build_harness(tmp_path, allowed_origins=(ORIGIN, "http://localhost:5173"))
-    response = h.client.options(
-        "/status",
-        headers={"Origin": "http://localhost:5173", "Access-Control-Request-Method": "GET"},
+    token = h.login()
+    response = h.client.post(
+        "/auth/logout", headers={"Origin": "http://localhost:5173", "Cookie": f"__session={token}"}
     )
-    assert response.headers["Access-Control-Allow-Origin"] == "http://localhost:5173"
+    assert response.status_code == 204
 
 
 # ---- prefix ------------------------------------------------------------------------------------
@@ -180,12 +127,12 @@ def test_several_origins_can_be_configured(tmp_path) -> None:
 
 def test_path_prefix_for_the_firebase_rewrite(tmp_path) -> None:
     h = build_harness(tmp_path, path_prefix="/api")
-    response = h.client.post("/api/auth/login", json={"password": PASSWORD})
+    response = h.start_session()
     assert response.status_code == 200
-    token = response.get_json()["token"]
-    auth = {"Authorization": f"Bearer {token}"}
+    auth = h.auth(h.login())
     assert h.client.get("/api/fhir/metadata", headers=auth).status_code == 200
     assert h.client.get("/fhir/metadata", headers=auth).status_code == 404
+    assert h.client.post("/auth/session", json={}, headers={"Origin": ORIGIN}).status_code == 401
 
 
 # ---- hostile ids and paths ---------------------------------------------------------------------
@@ -209,7 +156,7 @@ def test_hostile_ids_never_reach_the_store(harness, path: str) -> None:
     response = harness.get(path)
     assert response.status_code in (400, 404)
     assert response.get_json()["resourceType"] == "OperationOutcome"
-    # Only the login happened; no store request was built from the id.
+    # Only the session happened; no store request was built from the id.
     assert [r for r in harness.fake.requests if "/fhir/" in r[1] and "Patient" not in r[1]] == []
 
 
