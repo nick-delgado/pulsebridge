@@ -10,9 +10,6 @@ locals {
   # dataset and stores PREVENT deletion, the secrets and the Cloud Run services and job are
   # deletion-protected, so a stray `terraform destroy` fails instead of deleting them.
   protect_from_destroy = true
-
-  # prod sets and rotates the reviewer password only with scripts/secrets/set-reviewer-password.sh.
-  allow_reviewer_password_from_tfvars = false
 }
 
 variable "use_synthetic_data" {

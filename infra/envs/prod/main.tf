@@ -6,9 +6,8 @@ module "stack" {
   source = "../_stack"
 
   # Per-environment settings (env.tf).
-  environment                         = local.environment
-  protect_from_destroy                = local.protect_from_destroy
-  allow_reviewer_password_from_tfvars = local.allow_reviewer_password_from_tfvars
+  environment          = local.environment
+  protect_from_destroy = local.protect_from_destroy
 
   project_id           = var.project_id
   region               = var.region
@@ -34,9 +33,6 @@ module "stack" {
 
   alert_email                 = var.alert_email
   alert_notification_channels = var.alert_notification_channels
-
-  reviewer_password            = var.reviewer_password
-  reviewer_password_wo_version = var.reviewer_password_wo_version
 
   mllp_port          = var.mllp_port
   openemr_https_port = var.openemr_https_port

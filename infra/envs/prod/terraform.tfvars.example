@@ -43,10 +43,6 @@ ingest_enabled = false
 # seed_image        = "us-central1-docker.pkg.dev/your-prod-project-id/pulsebridge-services/seed@sha256:<64 hex>"
 # v2_to_fhir_image  = "us-central1-docker.pkg.dev/your-prod-project-id/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
 
-# --- Reviewer password ----------------------------------------------------------------------------
-# prod refuses reviewer_password from tfvars: set and rotate it with
-# scripts/secrets/set-reviewer-password.sh (README, step 5, and "Rotating the reviewer password").
-
 # --- Optional -------------------------------------------------------------------------------------
 # enable_iap_ssh     = true   # during the first-boot checklist only; set false again afterwards
 # enable_cloud_nat   = false  # BILLED HOURLY; only if the VM cannot pull through Private Google Access

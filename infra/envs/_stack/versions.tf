@@ -9,7 +9,7 @@
 # Lock files belong to root modules only: infra/envs/.gitignore keeps this directory's
 # .terraform.lock.hcl (created by `terraform init` in tests) out of git.
 terraform {
-  # Same floor as the modules: 1.11 brings write-only arguments (the dev reviewer password).
+  # Same floor as the modules (1.11, the first release with write-only arguments).
   required_version = ">= 1.11"
 
   required_providers {

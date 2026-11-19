@@ -76,7 +76,7 @@ variable "name_prefix" {
 }
 
 variable "identity_name_prefix" {
-  description = "Prefix of the service account and Secret Manager secret IDs (module identity), at most 12 characters because a service account ID is at most 30 (\"pb\" gives pb-health-sync, pb-reviewer-password). It is separate from name_prefix only because of that length limit. The connect script's PULSEBRIDGE_NAME_PREFIX must equal it (output secret_name_prefix)."
+  description = "Prefix of the service account and Secret Manager secret IDs (module identity), at most 12 characters because a service account ID is at most 30 (\"pb\" gives pb-health-sync, pb-session-signing-key). It is separate from name_prefix only because of that length limit. The connect script's PULSEBRIDGE_NAME_PREFIX must equal it (output secret_name_prefix)."
   type        = string
   default     = "pb"
   nullable    = false
@@ -281,50 +281,6 @@ variable "alert_notification_channels" {
   validation {
     condition     = alltrue([for c in var.alert_notification_channels : can(regex("^projects/[^/]+/notificationChannels/[^/]+$", c))])
     error_message = "Each notification channel must be a full name: projects/<project>/notificationChannels/<id>."
-  }
-}
-
-# ---------------------------------------------------------------------------------------------
-# Reviewer password from tfvars: DEV ONLY (prod refuses it; use scripts/secrets instead)
-# ---------------------------------------------------------------------------------------------
-
-variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password.sh, never both. Prefer giving it to one apply as TF_VAR_reviewer_password (read with `IFS= read -rs`, unset afterwards whether or not the apply succeeded; dev terraform.tfvars.example) over writing it into terraform.tfvars."
-  type        = string
-  default     = null
-  sensitive   = true
-  ephemeral   = true
-
-  validation {
-    condition     = var.reviewer_password == null ? true : length(var.reviewer_password) >= 16
-    error_message = "reviewer_password must be at least 16 characters."
-  }
-  validation {
-    # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod. In
-    # prod a password here would be silently unused; refuse it so nobody thinks it was set.
-    condition     = var.reviewer_password == null || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): unset reviewer_password (and TF_VAR_reviewer_password) and use scripts/secrets/set-reviewer-password.sh."
-  }
-}
-
-variable "reviewer_password_wo_version" {
-  description = "Dev only: 0 (default) writes no reviewer-password version from tfvars. 1 or more writes reviewer_password; raise the number to send a new password (Terraform cannot see a write-only value change). In prod a value above 0 is refused."
-  type        = number
-  default     = 0
-  nullable    = false
-
-  validation {
-    condition     = var.reviewer_password_wo_version >= 0 && floor(var.reviewer_password_wo_version) == var.reviewer_password_wo_version
-    error_message = "reviewer_password_wo_version must be a whole number, 0 or more."
-  }
-  validation {
-    # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod.
-    condition     = var.reviewer_password_wo_version == 0 || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
-  }
-  validation {
-    condition     = var.reviewer_password_wo_version == 0 || var.reviewer_password != null
-    error_message = "reviewer_password must be set when reviewer_password_wo_version is greater than 0."
   }
 }
 

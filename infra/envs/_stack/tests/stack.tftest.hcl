@@ -150,10 +150,10 @@ override_resource {
 }
 
 override_resource {
-  target = module.identity.google_secret_manager_secret.this["reviewer-password"]
+  target = module.identity.google_secret_manager_secret.this["session-signing-key"]
   values = {
-    id   = "projects/example-project/secrets/pb-reviewer-password"
-    name = "projects/100000000001/secrets/pb-reviewer-password"
+    id   = "projects/example-project/secrets/pb-session-signing-key"
+    name = "projects/100000000001/secrets/pb-session-signing-key"
   }
 }
 
@@ -279,9 +279,8 @@ override_resource {
 # Synthetic values only: no real project, patient, person or address.
 
 variables {
-  environment                         = "dev"
-  protect_from_destroy                = false
-  allow_reviewer_password_from_tfvars = true
+  environment          = "dev"
+  protect_from_destroy = false
 
   project_id           = "example-project"
   region               = "us-central1"
@@ -499,9 +498,8 @@ run "prod_settings" {
   command = apply
 
   variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
+    environment          = "prod"
+    protect_from_destroy = true
   }
 
   assert {
@@ -524,10 +522,9 @@ run "enabling_an_api_keeps_the_agent_grants" {
   command = plan
 
   variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
-    enable_iap_ssh                      = true # one more API (iap) and one more firewall rule
+    environment          = "prod"
+    protect_from_destroy = true
+    enable_iap_ssh       = true # one more API (iap) and one more firewall rule
   }
 
   assert {
@@ -550,10 +547,9 @@ run "another_project_base_change_keeps_the_agent_grants" {
   command = plan
 
   variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
-    enable_cloud_nat                    = true
+    environment          = "prod"
+    protect_from_destroy = true
+    enable_cloud_nat     = true
   }
 
   assert {
@@ -571,36 +567,6 @@ run "another_project_base_change_keeps_the_agent_grants" {
 
   # The stack's cost warning for Cloud NAT (checks.tf) fires, as it should.
   expect_failures = [check.cloud_nat_is_billed_hourly]
-}
-
-# ---- the reviewer password from tfvars: dev only -------------------------------------------
-
-run "dev_may_set_reviewer_password_from_tfvars" {
-  command = plan
-
-  variables {
-    reviewer_password            = "a-synthetic-test-password-0123"
-    reviewer_password_wo_version = 1
-  }
-
-  assert {
-    condition     = module.identity.reviewer_password_version_created
-    error_message = "In dev a reviewer-password version may come from tfvars (write-only)."
-  }
-}
-
-run "prod_refuses_reviewer_password_from_tfvars" {
-  command = plan
-
-  variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
-    reviewer_password                   = "a-synthetic-test-password-0123"
-    reviewer_password_wo_version        = 1
-  }
-
-  expect_failures = [var.reviewer_password_wo_version]
 }
 
 # ---- images: a full plan needs them; the targeted first applies do not ----------------------

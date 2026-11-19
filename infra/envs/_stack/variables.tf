@@ -1,6 +1,5 @@
 # Inputs of the stack composition. The env roots pass their own variables through unchanged and
-# add the per-environment settings (environment, protect_from_destroy,
-# allow_reviewer_password_from_tfvars) from their env.tf.
+# add the per-environment settings (environment, protect_from_destroy) from their env.tf.
 #
 # The user-facing rules (the SYN- patient rules, the synthetic name, an alert destination, the
 # zone inside the region) are validated at the ROOT, where a stranger meets them first
@@ -24,12 +23,6 @@ variable "environment" {
 
 variable "protect_from_destroy" {
   description = "true (prod): the Healthcare dataset and stores get deletion_policy PREVENT, the Secret Manager secrets deletion_protection, and the Cloud Run services and job deletion_protection, so a stray `terraform destroy` fails instead of deleting real data or taking the demo down. false (dev): everything can be destroyed, which the nightly destroy test needs."
-  type        = bool
-  nullable    = false
-}
-
-variable "allow_reviewer_password_from_tfvars" {
-  description = "true (dev only): reviewer_password and reviewer_password_wo_version may write the reviewer-password secret version from tfvars (module identity, write-only, never in state). false (prod): the password is set only with scripts/secrets/set-reviewer-password.sh (T27) and rotated there."
   type        = bool
   nullable    = false
 }
@@ -198,32 +191,6 @@ variable "alert_notification_channels" {
   type        = list(string)
   default     = []
   nullable    = false
-}
-
-# ---------------------------------------------------------------------------------------------
-# Reviewer password (dev only; see allow_reviewer_password_from_tfvars)
-# ---------------------------------------------------------------------------------------------
-
-variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, passed to module identity's write-only secret version. Ephemeral: never in plan or state."
-  type        = string
-  default     = null
-  sensitive   = true
-  ephemeral   = true
-}
-
-variable "reviewer_password_wo_version" {
-  description = "Dev only: 0 writes no version; 1 or more writes reviewer_password; raise it to send a new one."
-  type        = number
-  default     = 0
-  nullable    = false
-
-  validation {
-    # Prod rotates the password with T27's script; a tfvars-managed version would be partly undone
-    # by the script and partly undo it (module identity README, "Dev only").
-    condition     = var.reviewer_password_wo_version == 0 || var.allow_reviewer_password_from_tfvars
-    error_message = "The reviewer password may come from tfvars only in dev. In prod leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
-  }
 }
 
 # ---------------------------------------------------------------------------------------------

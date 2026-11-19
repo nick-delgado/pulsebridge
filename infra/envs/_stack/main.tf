@@ -56,10 +56,6 @@ module "identity" {
 
   secret_deletion_protection = var.protect_from_destroy
   secret_labels              = local.labels
-
-  # Dev only (validated in variables.tf): write-only, never in plan or state.
-  reviewer_password            = var.reviewer_password
-  reviewer_password_wo_version = var.reviewer_password_wo_version
 }
 
 # ---------------------------------------------------------------------------------------------

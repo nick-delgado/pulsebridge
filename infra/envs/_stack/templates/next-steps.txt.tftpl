@@ -6,8 +6,9 @@ with the same roles); "owner" = the project owner. Step numbers are the README's
 You are at ingest_enabled = false. Steps 5 to 8 come before this point; if one was skipped:
  5. Secret versions, without a trailing newline: ${secret_prefix}-db-root-password,
     ${secret_prefix}-openemr-db-password, ${secret_prefix}-openemr-admin-password,
-    ${secret_prefix}-reviewer-password. Never write ${secret_prefix}-openemr-client-private-key:
-    the VM does.
+    and the session signing key (scripts/secrets/set-session-signing-key.sh: 32 random bytes,
+    never shown; fhir-proxy will not deploy without it). Never write
+    ${secret_prefix}-openemr-client-private-key: the VM does.
  6. terraform apply -target=module.stack.module.edge_vm, then the first boot of ${vm_name}
     (${vm_zone}, about 15 minutes; the edge-vm, then the openemr checklist). Startup log:
       gcloud compute instances get-serial-port-output ${vm_name} --zone ${vm_zone} --project ${project_id}

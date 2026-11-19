@@ -43,15 +43,6 @@ ingest_enabled = false
 # seed_image        = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/seed@sha256:<64 hex>"
 # v2_to_fhir_image  = "us-central1-docker.pkg.dev/your-dev-project-id/pulsebridge-services/v2-to-fhir@sha256:<64 hex>"
 
-# --- Reviewer password (dev may set it here; prod refuses) --------------------------------------
-# Either here OR with scripts/secrets/set-reviewer-password.sh, never both. Better than writing it in
-# this file: give it to the one apply through the environment, read without echo, and remove it
-# whether or not the apply succeeds:
-#   IFS= read -rs TF_VAR_reviewer_password; export TF_VAR_reviewer_password
-#   terraform apply; unset TF_VAR_reviewer_password
-# It is write-only: never in the plan or the state. At least 16 characters.
-# reviewer_password_wo_version = 1   # raise to send a new password
-
 # --- Optional -------------------------------------------------------------------------------------
 # enable_iap_ssh     = true   # during the first-boot checklist only; set false again afterwards
 # enable_cloud_nat   = false  # BILLED HOURLY; only if the VM cannot pull through Private Google Access

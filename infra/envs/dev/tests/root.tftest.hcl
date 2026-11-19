@@ -53,15 +53,6 @@ run "defaults_are_a_synthetic_dev_stack_with_ingest_off" {
   }
 }
 
-run "dev_takes_the_reviewer_password_from_tfvars" {
-  command = plan
-
-  variables {
-    reviewer_password            = "a-synthetic-test-password-0123"
-    reviewer_password_wo_version = 1
-  }
-}
-
 # ---- use_synthetic_data and the patient ----------------------------------------------------
 
 run "synthetic_data_requires_a_syn_patient" {
