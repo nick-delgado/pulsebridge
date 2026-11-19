@@ -4,7 +4,7 @@ The single-page PHR dashboard: one page, no navigation. Vite and TypeScript, no 
 It talks to exactly one backend, `fhir-proxy` (D10), through a typed client that has a mock
 implementation, so the whole page runs locally with synthetic data and no server.
 
-This directory was set up by task T16 as a **shell**: layout, login, status strip, the figure,
+This directory was set up by task T16 as a **shell**: layout, landing view (T45; was a login), status strip, the figure,
 empty feature areas, the API client and its contract, and the conventions below. T17, T18 and T19
 fill the feature areas.
 
@@ -15,13 +15,13 @@ Needs Node 22.12 or newer.
 ```bash
 cd web
 npm ci            # exact versions from package-lock.json
-npm run dev       # mock mode on http://localhost:5173 (any non-empty password logs in)
+npm run dev       # mock mode on http://localhost:5173 ("View the live demo" always passes)
 ```
 
 | Command                | What it does                                                                    |
 | ---------------------- | ------------------------------------------------------------------------------- |
 | `npm run dev`          | Dev server in **mock mode**: synthetic data, no network.                        |
-| `npm run dev:http`     | Dev server against a real proxy (`VITE_FHIR_PROXY_URL`, see below).             |
+| `npm run dev:http`     | Dev server against a real proxy (`PULSEBRIDGE_DEV_PROXY_TARGET`, see below).    |
 | `npm run build`        | Type check, production build (HTTP client) into `dist/`, then the bundle check. |
 | `npm run build:mock`   | Mock-mode build into `dist-mock/` (used by the browser test).                   |
 | `npm test`             | Unit tests (Vitest, jsdom).                                                     |
@@ -36,9 +36,19 @@ job, browser test included (CI installs Chromium with `npx playwright install --
 
 ### Configuration
 
-| Variable              | Meaning                   | Default                                                            |
-| --------------------- | ------------------------- | ------------------------------------------------------------------ |
-| `VITE_FHIR_PROXY_URL` | Base URL of `fhir-proxy`. | `/api` on the page's own origin (the Firebase Hosting rewrite, D4) |
+| Variable                       | Meaning                                                                                                                  | Default                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------- |
+| `VITE_FHIR_PROXY_URL`          | Base **path** of `fhir-proxy` on the page's own origin. Same-origin only (D16: the session cookie is `SameSite=Strict`). | `/api` (the Firebase Hosting rewrite, D4) |
+| `PULSEBRIDGE_DEV_PROXY_TARGET` | `npm run dev:http` only: the real proxy's origin, which Vite's dev server forwards that path to. Never in the bundle.    | none                                      |
+
+**Against a real proxy locally.** The page and the proxy must share an origin, so `npm run dev:http`
+forwards `/api` to `PULSEBRIDGE_DEV_PROXY_TARGET` (Vite's `server.proxy`). For a session to start,
+the proxy must list `http://localhost:5173` in `ALLOWED_ORIGINS` and the reCAPTCHA key must allow
+`localhost` (Google's keys do not by default). Browsers accept the `Secure` cookie on
+`http://localhost`.
+
+**The reCAPTCHA site key is not configuration of the page.** The page fetches it from
+`GET /auth/config` at run time, so no build contains it and a stranger's deployment uses its own.
 
 **Mock data sets.** In mock mode, `?mock-data=<id>` on the page URL picks the data set
 (`src/api/mock-data.ts`, `MOCK_DATA_SETS`): `utc` (the default) writes every heart-rate time in
@@ -60,6 +70,15 @@ Two more switches exist for browser tests, in mock builds only (both are parsed 
 - `?mock-audit=build|write`: every cuff send fails to record its AuditEvent
   (`MockClientOptions.auditFailure`), so "not recorded" rows can be seen in the browser.
 
+T45 added three for the demo session (D16), used by `e2e/landing.e2e.ts`:
+
+- `?mock-demo=bot-check-failed|origin-refused|rate-limited|demo-busy|bot-check-unavailable|config-unreachable`:
+  how "View the live demo" ends; a pass without it. The mock's bot check (`src/bot-check/mock.ts`)
+  loads nothing and gives a token only the mock client accepts.
+- `?mock-session-seconds=<1..86400>`: the session's lifetime (default 86400, as the proxy's), so
+  a test can see a 401 mid-session by moving the page clock forward.
+- `?mock-throttle=status`: every status load answers 429 `rate-limited` with `Retry-After: 30`.
+
 T19 added four more (all parsed by `mockSwitchesFromSearch` in `src/api/mock-data.ts`; each switch
 name is a marker in `scripts/bundle-rules.mjs` `MOCK_MARKERS`, so an HTTP build that contains one
 fails the bundle check):
@@ -69,7 +88,7 @@ fails the bundle check):
   a store-only row with a `possibleDuplicateOf` hint.
 - `?mock-log=partial`: every messages-log page says `partial: true`.
 - `?mock-status=openemr-not-checked|counts-unknown|health-sync-timeout|not-configured`: the
-  status (or, for `not-configured`, a 503 `login-not-configured` on every route but login) the
+  status (or, for `not-configured`, a 503 `login-not-configured` on every protected route) the
   proxy sends in that state.
 - `?mock-share=patient-incomplete|not-configured|openemr-unreachable|encounter-refused|observation-timeout|read-back|hosting-timeout`:
   where a share is refused or stops.
@@ -78,6 +97,25 @@ Put a local value in `web/.env.local` (git-ignored); `.env.example` shows the fo
 every `VITE_` variable into the public bundle, so **never put a secret in one**. The mode (mock or
 HTTP) is not a variable: it is `vite --mode mock`, fixed at build time, and an HTTP build does not
 contain the mock client at all (`scripts/check-bundle.mjs` fails the build if it does).
+
+## The landing view and the bot check (T45, D16)
+
+There is no password. The landing view (`src/shell/landing.ts`) says what the demo is, shows one
+"View the live demo" button and the notice "This site is protected by reCAPTCHA.":
+
+1. As soon as it renders, it asks `GET /auth/config` for the reCAPTCHA site key and action
+   (`view_demo`), then loads Google's `enterprise.js?render=<key>` (`src/bot-check/recaptcha.ts`).
+   Loading early gives reCAPTCHA the whole visit to observe, not only the click.
+2. On the click it runs `grecaptcha.enterprise.ready`, then `grecaptcha.enterprise.execute(key,
+{action})`, which returns a token valid for two minutes, and posts it to `POST /auth/session`.
+3. The proxy asks Google to assess the token (a score from 0.0, likely a bot, to 1.0, likely a
+   person) and, on a pass, sets the `__session` cookie. The page never sees the score or a token.
+4. A refusal stays on the landing view with a sentence per reason (`SESSION_REFUSALS` in
+   `src/api/errors.ts`; `demo-busy` is exactly "The demo is busy, try again tomorrow."). A
+   script that cannot load (a content blocker, offline) says so; nothing is posted.
+
+A reload asks `checkSession` first: if the cookie is still good the dashboard opens directly.
+In a mock build `src/bot-check/mock.ts` stands in for Google, so nothing is loaded.
 
 ## Page layout and who fills what
 
@@ -120,7 +158,7 @@ the T16 review):
 ### Mounting
 
 Each feature exports **one** mount function from its `index.ts`. The shell (`src/shell/app.ts`)
-calls it once after login. A feature only touches the elements in its `slots`.
+calls it once after a session starts. A feature only touches the elements in its `slots`.
 
 | Directory         | Task | Export           | Slots                                                          |
 | ----------------- | ---- | ---------------- | -------------------------------------------------------------- |
@@ -138,7 +176,7 @@ signature `(context: FeatureContext<Slot>) => void` (`src/shell/features.ts`). T
 - `signal`: an `AbortSignal` aborted when the dashboard is torn down (logout or session end).
   Pass it to every client call (`{ signal }`), to `addEventListener(..., { signal })`,
   `selection.subscribe(fn, signal)`, `onDataChanged(fn, signal)` and `el(..., { signal })`, so
-  nothing outlives the dashboard and no request answers after the next login.
+  nothing outlives the dashboard and no request answers into the next session.
 - `notifyDataChanged(kind)` and `onDataChanged(listener, signal)`: see "Telling each other data changed".
 - `refreshStatus()`: reload the header's status strip. Rarely needed: the strip already reloads
   on every data change, every 5 minutes while the tab is visible (`STATUS_REFRESH_MS`) and when
@@ -165,8 +203,14 @@ const observations = await client.searchObservations(
 
 - Every method is in `PulseBridgeApi` (`src/api/contract.ts`); both the mock and the HTTP client
   implement it, so code written against the mock works unchanged against the proxy.
-- **401 is handled for you.** The client clears the token and the shell shows the login form; the
-  call rejects with `UnauthorizedError`, which you can ignore (the dashboard is about to go).
+- **401 is handled for you.** The shell returns to the landing view ("Your demo session has
+  ended"); the call rejects with `UnauthorizedError`, which you can ignore (the dashboard is about
+  to go).
+- **429 `rate-limited` is announced for you** (T46: any route). The client tells the shell, which
+  shows "Too many requests. Wait N seconds, then try again." under the header until the wait is
+  over; the visitor stays. The call rejects with `ApiError` 429 (or `CuffSendError` /
+  `ShareError` with reason `rate-limited`) whose `retryAfterSeconds` is the wait; show its
+  message as for any error.
 - **Aborted calls** (you passed `signal` and the dashboard was torn down) reject with an
   `AbortError`; ignore it.
 - Other failures reject with `ApiError` (`status`, `message`, `outcome`, the FHIR
@@ -194,8 +238,8 @@ const observations = await client.searchObservations(
   `reason` is the proxy's code (`not-found`, `observation-not-final`, `patient-incomplete`,
   `openemr-unreachable`, `openemr-refused`, `openemr-timeout`, `share-not-configured`, ...),
   and `steps` the trace steps completed before it stopped (empty when refused before OpenEMR).
-- **A 503 on every route** (`isServiceNotConfigured(error)`): the proxy's password secret is
-  missing, so no token can be checked (amendment 11). It is not a 401: the session stays, and
+- **A 503 on every route** (`isServiceNotConfigured(error)`): the proxy cannot check sessions
+  (amendment 11; with D16, its session-signing key is missing). It is not a 401: the session stays, and
   the page says the service is not configured.
 - **Final trace answers** (`isFinalTraceAnswer(error)`): 404, 410 and 422 (an unreadable
   AuditEvent, amendment 12). Retrying cannot change them.
@@ -204,7 +248,7 @@ const observations = await client.searchObservations(
 
 - **`Retry-After`** is read only in its delay-seconds form (digits only, RFC 9110 section
   10.2.3). Anything else (negative, decimal, `10abc`, an HTTP-date) gives `retryAfterSeconds: null`,
-  for the cuff route and for login alike.
+  on every route.
 
 - Never call `fetch` yourself: the page has one backend and one client.
 
@@ -280,8 +324,8 @@ a session.
 
 **What the polling costs.** About 12 status loads an hour per visible tab (one every 5 minutes,
 plus at most one per minute when the tab becomes visible again), and none while it is hidden. A
-session lasts at most 8 hours (the token's lifetime), so one tab left open makes at most about 100
-loads. Each is one proxy call; health-sync caches its own answer for 60 s.
+session lasts at most 24 hours (the `__session` cookie's lifetime, D16), so one tab left open makes
+at most about 300 loads. Each is one proxy call; health-sync caches its own answer for 60 s.
 
 **Waiting for "pending".** After a cuff send the stored message is `pending` until `v2-to-fhir`
 labels it (D7), usually seconds. The feature that shows a pending item polls for it, with
@@ -331,7 +375,7 @@ One document holds the shell and four features built in parallel, so an id must 
 - Every id you create starts with your feature's prefix, and is used once. For ids that repeat
   (one per row), use `uniqueId('cuff-row')` from `src/ui/dom.ts`.
 - Ids made by `createTabs` start with `ui-` and are unique by construction; use them as they are.
-- `main` (the skip link's target) and the login form's `login-` ids are the only shell exceptions.
+- `main` (the skip link's target) and the landing view's `landing-` ids are the only shell exceptions.
 - `src/shell/element-ids.test.ts` mounts the real features against the mock and fails on a
   duplicate id, or an id inside a feature's slot without that feature's prefix. Run it after a merge.
 - Prefer `aria-labelledby` and `aria-controls` with these ids over global selectors; tests should
@@ -361,9 +405,10 @@ it from that feature's `index.ts`; prefix class names with the feature (`.hr-…
 ### Adding tests
 
 - **Unit tests:** `*.test.ts` next to the code, inside your directory. Vitest with jsdom; build a
-  `FeatureContext` by hand (see `src/share/share.test.ts`) or use `new MockClient({ session,
-onUnauthorized, latencyMs: 0, now: () => fixedTime })` with `new Session(sessionStorage, () =>
-fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
+  `FeatureContext` by hand (see `src/share/share.test.ts`) or use `new MockClient({
+onUnauthorized, latencyMs: 0, now: () => fixedTime })` and `await client.startSession('mock-recaptcha-test')`
+  for deterministic data (see `src/api/mock-client.test.ts`). The shell's tests start the app with
+  `botCheck: mockBotCheck()` and click through `viewDemo(root)` (`src/shell/test-support.ts`).
 - **Browser tests:** `*.e2e.ts` inside your directory (Playwright picks up `src/**/*.e2e.ts`).
   They run against the built mock page; fail on any console error, as `e2e/shell.e2e.ts` does.
   The shell's keyboard test checks only the order of areas, so your controls do not break it.
@@ -449,7 +494,7 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
 - **Refusals are the proxy's**: a refused search is 400 `not-supported`; the trace of an
   unreadable AuditEvent is 422; a store-only name as a trace id is 404 `unknown-route` (its slashes
   match no route), another id that is not a FHIR id 400 `invalid-id`; with
-  `?mock-status=not-configured` every route but login is 503 `login-not-configured`. Each error
+  `?mock-status=not-configured` every protected route is 503 `login-not-configured`. Each error
   carries an OperationOutcome with the proxy's reason code.
 - **Status**: `lastSyncAt` in UTC with milliseconds; `observationCounts` null when not known
   (switch); OpenEMR reachable (as with T15's probe) or `not-checked` (switch, the proxy before T15).
@@ -476,30 +521,44 @@ fixedTime)` for deterministic data (see `src/api/mock-client.test.ts`).
 
 ## Security basics
 
-- **Token storage.** The bearer token from `POST /auth/login` is kept in `sessionStorage`
-  (`src/api/session.ts`): per tab, gone when the tab closes, and never sent automatically. No
-  cookie is used, so there is nothing for cross-site request forgery to ride on (D9,
-  docs/spikes/s6.md). Logout and any 401 delete it.
-- **A late 401 cannot end a newer session.** The client clears the session on a 401 only if the
-  stored token is still the one that request sent (or none is stored). Logout also aborts every
-  request the dashboard has in flight.
-- **Requests** are sent with `credentials: 'omit'`, `cache: 'no-store'` (health data is not kept
-  in the HTTP cache) and `redirect: 'error'`. A paging `next` link is followed only when it stays
-  inside the proxy's base URL, so the token cannot be sent to another host.
+- **No token in the page (D16).** The session is the `__session` cookie the proxy sets when the
+  bot check passes: `HttpOnly` (script cannot read it, so even an injected script could not steal
+  it), `Secure` (HTTPS only), `SameSite=Strict` (the browser does not send it on requests that
+  another site starts) and `Path=/api`. The page keeps nothing in `sessionStorage`,
+  `localStorage` or readable cookies; it cannot even tell whether it has a session, so at start it
+  asks (`checkSession`, `GET /status`: 200 or 401). Cross-site request forgery is the proxy's to
+  refuse: `SameSite=Strict` plus its `Origin` check on every `POST` (services/fhir-proxy/README.md).
+- **A late 401 cannot end a newer session.** The client counts session changes (start, logout,
+  401); a 401 calls the shell back only if no change happened since that request was sent.
+  Logout also aborts every request the dashboard has in flight, and a new session is not
+  requested until the logout's answer (which clears the cookie) is in.
+- **Requests** are sent with `credentials: 'same-origin'` (the browser attaches the cookie, only
+  to the page's own origin), `cache: 'no-store'` (health data is not kept in the HTTP cache) and
+  `redirect: 'error'`. A paging `next` link is followed only when it stays inside the proxy's base
+  path.
 - **`VITE_FHIR_PROXY_URL` is checked at build time** (`validateProxyUrl` in `vite.config.ts`):
-  empty, a same-origin path, an `https:` URL, or `http://localhost` / `http://127.0.0.1` for
-  development; anything else stops the build with a message. (A production build that points at
-  localhost still fails the bundle check.)
+  empty or a same-origin path; anything else stops the build with a message. (A production build
+  that points at localhost still fails the bundle check.)
 - **Content-Security-Policy.** The build adds a `<meta>` policy (`vite.config.ts`):
-  `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src <proxy>;
-base-uri 'none'; form-action 'none'; object-src 'none'`. A mock build has `connect-src 'none'`,
-  so mock mode cannot make a network request at all. `scripts/check-bundle.mjs` fails the build if
-  any of those directives is missing or wider, and requires `connect-src` to be exactly `'self'`
-  (or `'self'` plus the configured proxy origin). The dev server has no policy (Vite's hot reload
-  injects styles). **The hosting layer (Firebase Hosting, T22) must send the real policy as an
-  HTTP header**, which can also set `frame-ancestors 'none'` (a `<meta>` policy cannot).
-- **No secrets in the bundle.** The page holds no key or password; the only credential it ever
-  sees is the reviewer's session token, at run time.
+  `default-src 'none'; script-src 'self' <reCAPTCHA>; style-src 'self'; img-src 'self';
+connect-src 'self' <reCAPTCHA>; frame-src <reCAPTCHA>; base-uri 'none'; form-action 'none';
+object-src 'none'`, where reCAPTCHA is the paths Google's reCAPTCHA FAQ lists
+  (`https://www.google.com/recaptcha/` and `https://www.gstatic.com/recaptcha/` for scripts,
+  `https://www.google.com/recaptcha/` and `https://recaptcha.google.com/recaptcha/` for its frame,
+  `https://www.google.com/recaptcha/` for connections). A mock build has none of them and
+  `connect-src 'none'`, so mock mode cannot make a network request or load Google at all.
+  `scripts/check-bundle.mjs` fails the build if any of those directives is missing or different.
+  The dev server has no policy (Vite's hot reload injects styles). **The hosting layer must send
+  the real policy as an HTTP header** (infra/modules/phr, T44), which can also set
+  `frame-ancestors 'none'` (a `<meta>` policy cannot); a browser enforces both, so the header must
+  admit reCAPTCHA too.
+- **The reCAPTCHA badge is hidden** (`.grecaptcha-badge { visibility: hidden; }` in
+  `src/styles/layout.css`). Google's FAQ allows that when the visitor's flow says the site uses
+  reCAPTCHA; the landing view says "This site is protected by reCAPTCHA." under the button. Since
+  2 April 2026 Google asks sites not to link its Privacy Policy and Terms in that notice (Google is
+  now the data processor; the site owner is the controller), so it does not.
+- **No secrets in the bundle.** The page holds no key, password or token. The reCAPTCHA site
+  key is public (it identifies the key, it does not unlock anything) and is fetched at run time.
 
 ## Dependencies
 
@@ -513,7 +572,7 @@ Every version is pinned exactly in `package.json` (`.npmrc` sets `save-exact`), 
 | `uplot` 1.6.32 | The heart-rate chart (D5, chosen by T17; see `src/heart-rate/README.md`). MIT, no dependencies. | its own chunk, 50,990 B (22.24 kB gzip), loaded by `import()` on first draw; its stylesheet is in the page's CSS |
 
 For comparison, our own code is the main chunk, 128,483 B (41.80 kB gzip) after T19, and the CSS
-is 24,678 B (5.02 kB gzip) including uPlot's. **uPlot must stay out of the main chunk**, so the login form
+is 24,678 B (5.02 kB gzip) including uPlot's. **uPlot must stay out of the main chunk**, so the landing view
 never waits for it: `scripts/check-bundle.mjs` reads Vite's build manifest (`dist/.vite/manifest.json`,
 `build.manifest: true`) and fails the build if the entry chunk, or any chunk it imports statically,
 is uPlot's or contains uPlot's code (`scripts/bundle-rules.mjs`, tested on hand-made manifests).
@@ -552,16 +611,22 @@ the new package. `npm ci` from the lockfile works with npm 10 and 11.
 in line with it (table "What T19 changed" below). The TypeScript types in `src/api/contract.ts`
 are the parsed shapes. Paths are relative to the base URL (default `/api`).
 
-**Authentication.** Every route except `POST /auth/login` requires `Authorization: Bearer <token>`
-and answers `401` when it is missing, expired, altered or signed under a previous password,
-including `GET /fhir/metadata` and unknown paths. When the proxy's password secret is missing,
-EVERY route answers `503` `login-not-configured`. Every error body is an `OperationOutcome` with
+**Authentication (D16; workplan "The contract T43 to T45 share").** `GET /auth/config`,
+`POST /auth/session` and `POST /auth/logout` are public. Every other route requires the
+`__session` cookie and answers `401` `session-required` without a valid one, including
+`GET /fhir/metadata` and unknown paths; `Authorization: Bearer` is no longer accepted. Every
+`POST` also needs an allowed `Origin` (`403` `origin-refused`). Any route can answer `429`
+`rate-limited` with `Retry-After` (T46). When the proxy cannot check sessions, EVERY protected
+route answers `503` `login-not-configured`. Every error body is an `OperationOutcome` with
 a fixed `diagnostics` sentence and a reason code in `issue[0].details.coding[0]` (system
 `urn:pulsebridge:fhir-proxy:reason`); the client shows the sentence.
 
 | Method and path                                    | Client method          | Answer (as built)                                                                                                                                                                                                                                                                                                                                                                               |
 | -------------------------------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /auth/login`                                 | `login`                | `{"password"}` → `200 {"token", "expires_at"}`; `401`; `429` + `Retry-After`; `503` secret missing; `400`/`413`/`415` a bad body                                                                                                                                                                                                                                                                |
+| `GET /auth/config`                                 | `getAuthConfig`        | `200 {"recaptcha_site_key", "recaptcha_action"}` (checked: a key id and an action name, else `SessionError` `unavailable`)                                                                                                                                                                                                                                                                      |
+| `POST /auth/session`                               | `startSession`         | `{"recaptcha_token"}` → `200 {"expires_at"}` + `Set-Cookie: __session=...; HttpOnly; Secure; SameSite=Strict`; `403` `bot-check-failed` / `origin-refused`; `429` + `Retry-After`; `503` `demo-busy` ("The demo is busy, try again tomorrow.") / `bot-check-unavailable`; `400` a bad body. Each is a `SessionError` with that `reason`                                                         |
+| `POST /auth/logout`                                | `logout`               | clears the cookie (`Max-Age=0`), `204`; never rejects                                                                                                                                                                                                                                                                                                                                           |
+| `GET /status` (at start)                           | `checkSession`         | `200` → `active`, `401` → `none` (not a session ending), anything else rejects                                                                                                                                                                                                                                                                                                                  |
 | `GET /status`                                      | `getStatus`            | always `200`: `watchSync` (`state`, `reason` (health-sync's, or the proxy's `health-sync-*` codes), `notes`, `strandedPreliminary`, `checkedAt`, `lastSyncAt` in UTC with milliseconds), `observationCounts {watch, cuff}` each a number or `null` ("not known", never 0), `fhirStore` and `openemr` `{reachable, checkedAt, detail}` (`detail` a short code; OpenEMR `not-checked` before T15) |
 | `GET /fhir/Observation?code=&date=&_sort=&_count=` | `searchObservations`   | `searchset` Bundle pinned to the configured patient; `link` `self` and `next` path-absolute; every entry has `fullUrl` (`PUBLIC_BASE_URL/fhir/Observation/<id>`); no `total`; `400` (`not-supported`/`invalid`) for anything unsupported                                                                                                                                                        |
 | `GET /fhir/Observation/{id}`                       | `getObservation`       | the Observation if it is the configured patient's, else `404`; any query parameter `400`; `ETag`, `Last-Modified`. The share area reads the selected reading with it                                                                                                                                                                                                                            |
@@ -572,7 +637,8 @@ a fixed `diagnostics` sentence and a reason code in `issue[0].details.coding[0]`
 | `POST /cuff/readings`                              | `submitCuffReading`    | forwarded to cuff-sim; its `200/400/413/422/429/500`, body and `Retry-After` unchanged; `502` cuff-sim unreachable or unusable; `504` timed out (may have been sent)                                                                                                                                                                                                                            |
 | `POST /share`                                      | `share`                | **not built yet (T15)**: specified below                                                                                                                                                                                                                                                                                                                                                        |
 
-Field names in the JSON views are camelCase, except the login response (`token`, `expires_at`).
+Field names in the JSON views are camelCase, except the `/auth/*` bodies (`recaptcha_site_key`,
+`recaptcha_action`, `recaptcha_token`, `expires_at`).
 
 ### What T19 changed to follow the proxy (the 21 amendments)
 
