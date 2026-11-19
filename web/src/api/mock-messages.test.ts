@@ -9,15 +9,11 @@ import { MESSAGES_DEFAULT_COUNT, MESSAGES_MAX_COUNT } from './contract';
 import { ApiError, proxyReason } from './errors';
 import { LOINC } from './fhir';
 import { MockClient, type MockClientOptions } from './mock-client';
-import { Session } from './session';
 
 const NOW = Date.parse('2026-03-10T15:02:00Z');
 
 async function client(options: Partial<MockClientOptions> = {}) {
-  sessionStorage.clear();
-  const session = new Session(sessionStorage, () => NOW);
   const c = new MockClient({
-    session,
     onUnauthorized: () => undefined,
     now: () => NOW,
     latencyMs: 0,
@@ -25,8 +21,8 @@ async function client(options: Partial<MockClientOptions> = {}) {
     mappingDelayMs: 0,
     ...options,
   });
-  await c.login('x');
-  return { c, session };
+  await c.startSession('mock-recaptcha-test');
+  return { c };
 }
 
 /** Every row of the log, following nextCursor until it is null (bounded). */
@@ -274,8 +270,8 @@ describe('mock refusals (amendments 7, 11, 12)', () => {
     expect([odd.status, proxyReason(odd.outcome)]).toEqual([400, 'invalid-id']);
   });
 
-  it('?mock-status=not-configured: every route but login is 503 login-not-configured; the session stays', async () => {
-    const { c, session } = await client({ statusMode: 'not-configured' });
+  it('?mock-status=not-configured: every protected route is 503 login-not-configured; the session stays', async () => {
+    const { c } = await client({ statusMode: 'not-configured' });
     for (const call of [
       () => c.getStatus(),
       () => c.listMessages(),
@@ -285,7 +281,7 @@ describe('mock refusals (amendments 7, 11, 12)', () => {
       const e = await errorOf(call());
       expect([e.status, proxyReason(e.outcome)]).toEqual([503, 'login-not-configured']);
     }
-    expect(session.token()).not.toBeNull();
+    expect(await c.checkSession()).toBe('active');
   });
 });
 

@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, LoginError, UnauthorizedError } from './errors';
+import { ApiError, SessionError, UnauthorizedError } from './errors';
 import { LOINC } from './fhir';
 import type { PulseBridgeApi } from './contract';
 import { HttpClient } from './http-client';
-import { SESSION_KEY, Session } from './session';
 
 const ORIGIN = 'https://dashboard.example.test';
-const TOKEN = 'test-token-not-a-secret';
+/** Shaped like a key id; synthetic. */
+const SITE_KEY = 'test-site-key-0000000000000000000000000000';
 
 interface Call {
   url: string;
@@ -37,7 +37,8 @@ function header(call: Call | undefined, name: string): string | null {
 
 /** One body every method can read its fields from, so the loop below needs no per-method setup. */
 const ANSWERS_EVERYTHING = {
-  token: TOKEN,
+  recaptcha_site_key: SITE_KEY,
+  recaptcha_action: 'view_demo',
   expires_at: new Date(Date.now() + 3_600_000).toISOString(),
   resourceType: 'Bundle',
   type: 'searchset',
@@ -78,13 +79,12 @@ type Method = {
  * Every method of the API, with how to call it. Typed as a Record over the interface's method
  * names, so adding a method to PulseBridgeApi without adding it here fails the type check.
  */
-const CALLS: Record<
-  Method,
-  ((c: HttpClient, signal: AbortSignal) => Promise<unknown>) | 'no-request'
-> = {
-  login: (c, signal) => c.login('pw', { signal }),
-  logout: 'no-request',
-  isLoggedIn: 'no-request',
+const CALLS: Record<Method, (c: HttpClient, signal: AbortSignal) => Promise<unknown>> = {
+  getAuthConfig: (c, signal) => c.getAuthConfig({ signal }),
+  startSession: (c, signal) => c.startSession('recaptcha-token', { signal }),
+  checkSession: (c, signal) => c.checkSession({ signal }),
+  // Not cancellable on purpose: the dashboard's teardown must not abort the logout.
+  logout: (c) => c.logout(),
   getStatus: (c, signal) => c.getStatus({ signal }),
   searchObservations: (c, signal) =>
     c.searchObservations(
@@ -104,60 +104,63 @@ const CALLS: Record<
   getObservation: (c, signal) => c.getObservation('hr-1', { signal }),
 };
 
-const futureLogin = () => ({
-  token: TOKEN,
-  expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-});
+/** An OperationOutcome with the proxy's reason code, as every proxy refusal is sent. */
+function problem(reason: string, text = 'x') {
+  return {
+    resourceType: 'OperationOutcome',
+    issue: [
+      {
+        severity: 'error',
+        code: 'forbidden',
+        diagnostics: text,
+        details: { coding: [{ system: 'urn:pulsebridge:fhir-proxy:reason', code: reason }] },
+      },
+    ],
+  };
+}
 
 describe('HttpClient', () => {
-  let session: Session;
   let onUnauthorized: ReturnType<typeof vi.fn<() => void>>;
+  let onRateLimited: ReturnType<typeof vi.fn<(seconds: number | null) => void>>;
 
   beforeEach(() => {
-    sessionStorage.clear();
-    session = new Session(sessionStorage);
     onUnauthorized = vi.fn<() => void>();
+    onRateLimited = vi.fn<(seconds: number | null) => void>();
   });
 
   function client(f: typeof fetch, baseUrl = '/api') {
-    return new HttpClient({ baseUrl, session, onUnauthorized, fetch: f, origin: ORIGIN });
+    return new HttpClient({ baseUrl, onUnauthorized, onRateLimited, fetch: f, origin: ORIGIN });
   }
 
-  describe('bearer token', () => {
-    it('every method: one backend (D10), bearer token, no cookies, no cache, no redirects, signal', async () => {
-      session.save(futureLogin());
+  describe('the session cookie (D16)', () => {
+    it('every method: one backend (D10), no token header, same-origin cookie, no cache, no redirects, signal', async () => {
       // The read route must answer with the Observation asked for; everything else shares one body.
       const f = fakeFetch(
-        ...Object.entries(CALLS)
-          .filter(([, call]) => call !== 'no-request')
-          .map(([name]) =>
-            json(
-              200,
-              name === 'getObservation'
-                ? { resourceType: 'Observation', id: 'hr-1', status: 'final', code: {} }
-                : ANSWERS_EVERYTHING,
-            ),
+        ...Object.keys(CALLS).map((name) =>
+          json(
+            200,
+            name === 'getObservation'
+              ? { resourceType: 'Observation', id: 'hr-1', status: 'final', code: {} }
+              : ANSWERS_EVERYTHING,
           ),
+        ),
       );
       const c = client(f.fetch);
       const signal = new AbortController().signal;
       for (const [name, call] of Object.entries(CALLS)) {
-        if (call === 'no-request') continue;
         const before = f.calls.length;
         await call(c, signal);
         expect(f.calls.length, `${name} made no request`).toBeGreaterThan(before);
         for (const req of f.calls.slice(before)) {
           // One backend (D10): every request goes to fhir-proxy's base URL and nowhere else.
           expect(req.url.startsWith(`${ORIGIN}/api/`), `${name} -> ${req.url}`).toBe(true);
-          expect(header(req, 'Authorization'), name).toBe(
-            name === 'login' ? null : `Bearer ${TOKEN}`,
-          );
-          // No cookies either way, no HTTP caching of health data, a redirect is an error.
-          expect(req.init.credentials, name).toBe('omit');
+          // The page holds no token: the HttpOnly cookie is the browser's to send.
+          expect(header(req, 'Authorization'), name).toBeNull();
+          expect(req.init.credentials, name).toBe('same-origin');
           expect(req.init.cache, name).toBe('no-store');
           expect(req.init.redirect, name).toBe('error');
           // The caller's AbortSignal reaches fetch, so a torn-down dashboard cancels it.
-          expect(req.init.signal, name).toBe(signal);
+          expect(req.init.signal, name).toBe(name === 'logout' ? undefined : signal);
         }
       }
     });
@@ -169,66 +172,194 @@ describe('HttpClient', () => {
       expect(methods.sort()).toEqual(Object.keys(CALLS).sort());
     });
 
-    it('sends no Authorization header on login, even with a token already saved', async () => {
-      session.save({ token: 'older-token', expiresAt: futureLogin().expiresAt });
-      const login = futureLogin();
-      const f = fakeFetch(json(200, { token: login.token, expires_at: login.expiresAt }));
-      await client(f.fetch).login('correct horse');
+    it('getAuthConfig reads GET /auth/config', async () => {
+      const f = fakeFetch(
+        json(200, { recaptcha_site_key: SITE_KEY, recaptcha_action: 'view_demo' }),
+      );
+      expect(await client(f.fetch).getAuthConfig()).toEqual({
+        recaptchaSiteKey: SITE_KEY,
+        recaptchaAction: 'view_demo',
+      });
+      expect(f.calls[0]?.url).toBe(`${ORIGIN}/api/auth/config`);
+      expect(f.calls[0]?.init.method).toBe('GET');
+    });
 
+    it.each([
+      ['no key', { recaptcha_action: 'view_demo' }],
+      [
+        'a key that would change the script URL',
+        { recaptcha_site_key: `${SITE_KEY}&x=1`, recaptcha_action: 'view_demo' },
+      ],
+      ['a short key', { recaptcha_site_key: 'abc', recaptcha_action: 'view_demo' }],
+      ['an action with a space', { recaptcha_site_key: SITE_KEY, recaptcha_action: 'view demo' }],
+      ['no action', { recaptcha_site_key: SITE_KEY }],
+    ])('getAuthConfig refuses a config with %s', async (_what, body) => {
+      const error = await client(fakeFetch(json(200, body)).fetch)
+        .getAuthConfig()
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ name: 'SessionError', reason: 'unavailable' });
+    });
+
+    it('startSession posts exactly {recaptcha_token} to /auth/session and returns the expiry', async () => {
+      const expires = '2026-06-11T09:20:00Z';
+      const f = fakeFetch(json(200, { expires_at: expires }));
+      expect(await client(f.fetch).startSession('the-token')).toEqual({ expiresAt: expires });
       const [call] = f.calls;
-      expect(call?.url).toBe(`${ORIGIN}/api/auth/login`);
+      expect(call?.url).toBe(`${ORIGIN}/api/auth/session`);
       expect(call?.init.method).toBe('POST');
-      expect(header(call, 'Authorization')).toBeNull();
-      expect(JSON.parse(call?.init.body as string)).toEqual({ password: 'correct horse' });
-      expect(session.token()).toBe(TOKEN);
-      expect(sessionStorage.getItem(SESSION_KEY)).toContain(TOKEN);
+      expect(header(call, 'Content-Type')).toBe('application/json');
+      expect(JSON.parse(call?.init.body as string)).toEqual({ recaptcha_token: 'the-token' });
     });
 
-    it('logout() forgets the token without calling the server', () => {
-      session.save(futureLogin());
-      const f = fakeFetch();
+    it('startSession refuses a 200 without a readable expires_at', async () => {
+      for (const body of [{}, { expires_at: 'soon' }, { expires_at: 5 }]) {
+        const error = await client(fakeFetch(json(200, body)).fetch)
+          .startSession('t')
+          .catch((e: unknown) => e);
+        expect(error).toMatchObject({ reason: 'unavailable' });
+      }
+    });
+
+    it.each([
+      [403, 'bot-check-failed', 'bot-check-failed', /bot check did not let this visit through/],
+      [403, 'origin-refused', 'origin-refused', /does not accept requests from this address/],
+      [503, 'demo-busy', 'demo-busy', /^The demo is busy, try again tomorrow\.$/],
+      [503, 'bot-check-unavailable', 'bot-check-unavailable', /not available right now/],
+      // Only an exact code with its own status is trusted.
+      [503, 'bot-check-failed', 'unavailable', /HTTP 503/],
+      [403, 'demo-busy', 'unavailable', /HTTP 403/],
+      [400, 'invalid-body', 'unavailable', /HTTP 400/],
+    ])('startSession: %i %s is SessionError %s', async (status, code, reason, text) => {
+      const error = (await client(fakeFetch(json(status, problem(code))).fetch)
+        .startSession('t')
+        .catch((e: unknown) => e)) as SessionError;
+      expect(error).toBeInstanceOf(SessionError);
+      expect(error.reason).toBe(reason);
+      expect(error.message).toMatch(text);
+      expect(onUnauthorized).not.toHaveBeenCalled();
+    });
+
+    it('startSession: a 503 page from the hosting layer (not JSON) is not "busy"', async () => {
+      const page = new Response('<html>Service Unavailable</html>', { status: 503 });
+      const error = await client(fakeFetch(page).fetch)
+        .startSession('t')
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ reason: 'unavailable' });
+    });
+
+    it('startSession: 429 is rate-limited with the wait from Retry-After', async () => {
+      const f = fakeFetch(json(429, problem('rate-limited'), { 'Retry-After': '42' }));
+      const error = (await client(f.fetch)
+        .startSession('t')
+        .catch((e: unknown) => e)) as SessionError;
+      expect([error.reason, error.retryAfterSeconds]).toEqual(['rate-limited', 42]);
+      expect(error.message).toBe('Too many requests. Wait 42 seconds, then try again.');
+    });
+
+    it('startSession: no connection is "unavailable"', async () => {
+      const down = vi.fn(() => Promise.reject(new TypeError('Failed to fetch')));
+      const error = await client(down)
+        .startSession('t')
+        .catch((e: unknown) => e);
+      expect(error).toMatchObject({ reason: 'unavailable', message: /could not be reached/ });
+    });
+
+    it('checkSession: 200 is active, 401 is none without ending anything, other statuses reject', async () => {
+      const f = fakeFetch(
+        json(200, ANSWERS_EVERYTHING),
+        json(401, problem('session-required')),
+        json(500, {}),
+      );
       const c = client(f.fetch);
-      expect(c.isLoggedIn()).toBe(true);
-      c.logout();
-      expect(c.isLoggedIn()).toBe(false);
-      expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
-      expect(f.calls).toHaveLength(0);
+      expect(await c.checkSession()).toBe('active');
+      expect(await c.checkSession()).toBe('none');
+      expect(onUnauthorized).not.toHaveBeenCalled();
+      await expect(c.checkSession()).rejects.toMatchObject({ status: 500 });
+      expect(f.calls.map((call) => new URL(call.url).pathname)).toEqual([
+        '/api/status',
+        '/api/status',
+        '/api/status',
+      ]);
     });
 
-    it('does not call the server at all when there is no token', async () => {
-      const f = fakeFetch();
-      await expect(client(f.fetch).getStatus()).rejects.toBeInstanceOf(UnauthorizedError);
-      expect(f.calls).toHaveLength(0);
-      expect(onUnauthorized).toHaveBeenCalledOnce();
+    it('logout posts to /auth/logout and does not reject when the server is down', async () => {
+      const f = fakeFetch(new Response(null, { status: 204 }));
+      await client(f.fetch).logout();
+      expect(f.calls[0]?.url).toBe(`${ORIGIN}/api/auth/logout`);
+      expect(f.calls[0]?.init.method).toBe('POST');
+      const down = vi.fn(() => Promise.reject(new TypeError('Failed to fetch')));
+      await expect(client(down).logout()).resolves.toBeUndefined();
+    });
+
+    it('a new session waits until a logout still being sent has answered', async () => {
+      let answerLogout: (r: Response) => void = () => undefined;
+      const order: string[] = [];
+      const f = vi.fn((input: RequestInfo | URL) => {
+        const path = new URL(input instanceof Request ? input.url : input).pathname;
+        order.push(path);
+        if (path === '/api/auth/logout') {
+          return new Promise<Response>((resolve) => (answerLogout = resolve));
+        }
+        return Promise.resolve(json(200, { expires_at: '2026-06-11T09:20:00Z' }));
+      });
+      const c = client(f);
+      void c.logout();
+      const starting = c.startSession('t');
+      await new Promise((r) => setTimeout(r, 0));
+      // Had the session been posted now, the logout's Max-Age=0 could clear the new cookie.
+      expect(order).toEqual(['/api/auth/logout']);
+      answerLogout(new Response(null, { status: 204 }));
+      await starting;
+      expect(order).toEqual(['/api/auth/logout', '/api/auth/session']);
     });
   });
 
   describe('401 handling', () => {
-    it('clears the session and calls onUnauthorized when a protected call gets 401', async () => {
-      session.save(futureLogin());
-      const f = fakeFetch(json(401, { error: 'expired' }));
+    it('a protected call that gets 401 calls onUnauthorized and rejects with UnauthorizedError', async () => {
+      const f = fakeFetch(json(401, problem('session-required')));
       await expect(client(f.fetch).getStatus()).rejects.toBeInstanceOf(UnauthorizedError);
       expect(onUnauthorized).toHaveBeenCalledOnce();
-      expect(session.token()).toBeNull();
-      expect(sessionStorage.getItem(SESSION_KEY)).toBeNull();
     });
 
-    it('a late 401 from a request sent with an old token does not end a newer session', async () => {
-      session.save({ token: 'old-token', expiresAt: futureLogin().expiresAt });
+    it('several 401s from one session call onUnauthorized once', async () => {
+      const f = fakeFetch(json(401, {}), json(401, {}));
+      const c = client(f.fetch);
+      await Promise.allSettled([c.getStatus(), c.listMessages()]);
+      expect(onUnauthorized).toHaveBeenCalledOnce();
+    });
+
+    it('a late 401 from a request sent before a new session started does not end the new one', async () => {
       let answer: (r: Response) => void = () => undefined;
-      const slow = vi.fn(() => new Promise<Response>((resolve) => (answer = resolve)));
-      const c = client(slow);
+      const f = vi.fn((input: RequestInfo | URL) =>
+        new URL(input instanceof Request ? input.url : input).pathname === '/api/status'
+          ? new Promise<Response>((resolve) => (answer = resolve))
+          : Promise.resolve(json(200, { expires_at: '2026-06-11T09:20:00Z' })),
+      );
+      const c = client(f);
       const pending = c.getStatus();
-      // Meanwhile the user logs out and in again.
-      session.save(futureLogin());
+      // Meanwhile the visitor starts a new session.
+      await c.startSession('t');
       answer(json(401, {}));
       await expect(pending).rejects.toBeInstanceOf(UnauthorizedError);
       expect(onUnauthorized).not.toHaveBeenCalled();
-      expect(session.token()).toBe(TOKEN);
+    });
+
+    it('a late 401 from a request sent before a logout does not call back either', async () => {
+      let answer: (r: Response) => void = () => undefined;
+      const f = vi.fn((input: RequestInfo | URL) =>
+        new URL(input instanceof Request ? input.url : input).pathname === '/api/status'
+          ? new Promise<Response>((resolve) => (answer = resolve))
+          : Promise.resolve(new Response(null, { status: 204 })),
+      );
+      const c = client(f);
+      const pending = c.getStatus();
+      await c.logout();
+      answer(json(401, {}));
+      await expect(pending).rejects.toBeInstanceOf(UnauthorizedError);
+      expect(onUnauthorized).not.toHaveBeenCalled();
     });
 
     it('an aborted request rejects with the AbortError, not as a network failure', async () => {
-      session.save(futureLogin());
       const controller = new AbortController();
       const hanging = vi.fn(
         (_url: unknown, init?: RequestInit) =>
@@ -246,29 +377,52 @@ describe('HttpClient', () => {
       expect(onUnauthorized).not.toHaveBeenCalled();
     });
 
-    it('treats 401 on login as a wrong password, not as a session ending', async () => {
-      const f = fakeFetch(json(401, { error: 'no' }));
-      const error = await client(f.fetch)
-        .login('wrong')
+    it('a 401 on the session route is a refusal to read, not a session ending', async () => {
+      const error = await client(fakeFetch(json(401, {})).fetch)
+        .startSession('t')
         .catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(LoginError);
-      expect((error as LoginError).reason).toBe('wrong-password');
+      expect(error).toMatchObject({ reason: 'unavailable' });
       expect(onUnauthorized).not.toHaveBeenCalled();
     });
+  });
 
-    it('maps 429 with Retry-After and 503 to their own login failures', async () => {
-      const f = fakeFetch(json(429, {}, { 'Retry-After': '42' }), json(503, {}));
-      const c = client(f.fetch);
-      const limited = (await c.login('x').catch((e: unknown) => e)) as LoginError;
-      expect([limited.reason, limited.retryAfterSeconds]).toEqual(['rate-limited', 42]);
-      const missing = (await c.login('x').catch((e: unknown) => e)) as LoginError;
-      expect(missing.reason).toBe('not-configured');
+  describe('429 rate-limited from any route (T46)', () => {
+    it.each([
+      ['status', (c: HttpClient) => c.getStatus()],
+      ['messages', (c: HttpClient) => c.listMessages()],
+      ['share', (c: HttpClient) => c.share({ observationId: 'hr-1' })],
+    ])(
+      '%s: onRateLimited gets the wait, the error says it, the session stays',
+      async (_name, call) => {
+        const f = fakeFetch(
+          json(429, problem('rate-limited', 'slow down'), { 'Retry-After': '30' }),
+        );
+        const error = (await call(client(f.fetch)).catch((e: unknown) => e)) as ApiError;
+        expect(error).toBeInstanceOf(ApiError);
+        expect([error.status, error.retryAfterSeconds]).toEqual([429, 30]);
+        expect(onRateLimited).toHaveBeenCalledExactlyOnceWith(30);
+        expect(onUnauthorized).not.toHaveBeenCalled();
+      },
+    );
+
+    it('the message carries the wait on routes that use the generic error', async () => {
+      const f = fakeFetch(json(429, problem('rate-limited', 'slow down'), { 'Retry-After': '30' }));
+      const error = (await client(f.fetch)
+        .getStatus()
+        .catch((e: unknown) => e)) as ApiError;
+      expect(error.message).toBe('Too many requests. Wait 30 seconds, then try again.');
+    });
+
+    it('without Retry-After the wait is null', async () => {
+      await client(fakeFetch(json(429, {})).fetch)
+        .getStatus()
+        .catch(() => undefined);
+      expect(onRateLimited).toHaveBeenCalledExactlyOnceWith(null);
     });
   });
 
   describe('errors', () => {
     it('a 429 from the rate-limited cuff route carries Retry-After', async () => {
-      session.save(futureLogin());
       const f = fakeFetch(json(429, {}, { 'Retry-After': '30' }));
       const error = (await client(f.fetch)
         .submitCuffReading({ systolic: 120, diastolic: 80, transport: 'mllp', sendMalformed: null })
@@ -278,7 +432,6 @@ describe('HttpClient', () => {
     });
 
     it('keeps a FHIR OperationOutcome from an error body', async () => {
-      session.save(futureLogin());
       const outcome = {
         resourceType: 'OperationOutcome',
         issue: [{ severity: 'error', code: 'invalid', diagnostics: 'Systolic out of range' }],
@@ -297,7 +450,6 @@ describe('HttpClient', () => {
 
   describe('Observation search', () => {
     it('builds a FHIR search and follows next links inside the proxy', async () => {
-      session.save(futureLogin());
       const obs = (id: string) => ({ resource: { resourceType: 'Observation', id } });
       const f = fakeFetch(
         json(200, {
@@ -326,7 +478,6 @@ describe('HttpClient', () => {
     });
 
     it('refuses a next link to another host, so the token never leaves the proxy', async () => {
-      session.save(futureLogin());
       const f = fakeFetch(
         json(200, {
           resourceType: 'Bundle',
@@ -344,7 +495,6 @@ describe('HttpClient', () => {
     });
 
     it('uses an absolute base URL from configuration as given', async () => {
-      session.save(futureLogin());
       const f = fakeFetch(json(200, {}));
       await client(f.fetch, 'https://proxy.example.test/v1').getStatus();
       expect(f.calls[0]?.url).toBe('https://proxy.example.test/v1/status');

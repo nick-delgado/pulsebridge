@@ -3,9 +3,13 @@
  * build's Content-Security-Policy is `connect-src 'none'`, so a stray request would fail loudly).
  *
  * It behaves like the real client where the page can tell the difference:
- * - any non-empty password logs in, and the token goes into the same sessionStorage session;
- * - every other call checks that token first, and with none it clears the session and calls
- *   `onUnauthorized`, exactly as the HTTP client does on a 401;
+ * - "View the live demo" walks the proxy's session flow (D16): `getAuthConfig` gives a mock key,
+ *   `startSession` accepts only the mock bot check's tokens (src/bot-check/mock.ts) and answers
+ *   a pass or, with `?mock-demo=`, each refusal the proxy can send; the "cookie" is in memory
+ *   and expires like the real one (`?mock-session-seconds=` shortens it);
+ * - every other call checks that session first, and without one calls `onUnauthorized`, exactly
+ *   as the HTTP client does on a 401; a 429 (cuff-sim's bucket, `?mock-throttle=status`) calls
+ *   `onRateLimited`, as the HTTP client does;
  * - a cuff send is checked as cuff-sim checks it (services/cuff-sim/README.md): the same limits,
  *   the same refusals as `CuffSendError` 422 with an OperationOutcome naming the field, and the
  *   same per-instance rate limit (429 with `retryAfterSeconds`);
@@ -30,7 +34,9 @@ import type {
   CuffSendResult,
   FhirTransactionEntry,
   HeartRateTrace,
-  LoginResult,
+  AuthConfig,
+  DemoSession,
+  SessionState,
   MalformedSample,
   MessageLookup,
   MessagesLogEntry,
@@ -61,7 +67,10 @@ import {
 import {
   ApiError,
   CuffSendError,
-  LoginError,
+  DEMO_BUSY_MESSAGE,
+  rateLimitMessage,
+  SESSION_REFUSALS,
+  SessionError,
   PROXY_REASON_SYSTEM,
   ShareError,
   UnauthorizedError,
@@ -107,11 +116,18 @@ import {
   syntheticRollUp,
   windowStartFromId,
 } from './mock-data';
-import type { Session } from './session';
+import { MOCK_RECAPTCHA_TOKEN_PREFIX } from '../bot-check/mock';
+import type { MockDemoOutcome } from './mock-data';
 
 export interface MockClientOptions {
-  session: Session;
   onUnauthorized: () => void;
+  onRateLimited?: (retryAfterSeconds: number | null) => void;
+  /** `?mock-demo=`: how starting a session ends; a pass when null or absent. */
+  demoOutcome?: MockDemoOutcome | null;
+  /** `?mock-session-seconds=`: the session's lifetime; the proxy's 86400 when null or absent. */
+  sessionSeconds?: number | null;
+  /** `?mock-throttle=status`: every status load answers 429 with `Retry-After: 30`. */
+  throttle?: 'status' | null;
   /** Clock, injectable for tests. */
   now?: () => number;
   /** Simulated network delay per call; 0 in tests. */
@@ -145,9 +161,12 @@ export interface MockClientOptions {
 /** cuff-sim's defaults (RATE_LIMIT_BURST=3, RATE_LIMIT_PER_MINUTE=6). */
 export const MOCK_RATE_LIMIT = { burst: 3, perMinute: 6 } as const;
 
-/** Mock tokens look nothing like a JWT on purpose, so nobody mistakes one for a real token. */
-const MOCK_TOKEN_PREFIX = 'mock-session-';
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+/** The proxy's default `SESSION_TTL_SECONDS` (D16). */
+const SESSION_TTL_SECONDS = 86_400;
+/** Not a real key: shaped like one so it passes the same check a real config does. */
+export const MOCK_SITE_KEY = 'mock-site-key-000000000000000000000000000';
+/** `Retry-After` the mock sends for `?mock-demo=rate-limited` and `?mock-throttle=status`. */
+export const MOCK_RETRY_AFTER_SECONDS = { session: 42, status: 30 } as const;
 
 interface MockAttempt {
   entry: SendAttemptEntry;
@@ -229,6 +248,8 @@ export class MockClient implements PulseBridgeApi {
   #tokens: number;
   #tokensAt: number;
   #sequence = 0;
+  /** The mock `__session` cookie: when it expires (ms), or null when there is none. */
+  #sessionExpiresAt: number | null = null;
 
   constructor(private readonly options: MockClientOptions) {
     this.#now = options.now ?? (() => Date.now());
@@ -247,32 +268,75 @@ export class MockClient implements PulseBridgeApi {
     return lastSyncRun(this.#now());
   }
 
-  // -- login ------------------------------------------------------------------------------------
+  // -- session (D16) ----------------------------------------------------------------------------
 
-  async login(password: string, options: CallOptions = {}): Promise<LoginResult> {
+  async getAuthConfig(options: CallOptions = {}): Promise<AuthConfig> {
     await this.#delay();
     options.signal?.throwIfAborted();
-    if (password === '') throw new LoginError('wrong-password', 'Enter a password.');
-    const result = {
-      token: `${MOCK_TOKEN_PREFIX}${(this.#now() % 1e9).toString(36)}`,
-      expiresAt: new Date(this.#now() + SESSION_TTL_MS).toISOString(),
-    };
-    this.options.session.save(result);
-    return result;
+    if (this.options.demoOutcome === 'config-unreachable') {
+      throw new SessionError('unavailable', 'The server could not be reached. Try again.');
+    }
+    return { recaptchaSiteKey: MOCK_SITE_KEY, recaptchaAction: 'view_demo' };
   }
 
-  logout(): void {
-    this.options.session.clear();
+  async startSession(recaptchaToken: string, options: CallOptions = {}): Promise<DemoSession> {
+    await this.#delay();
+    options.signal?.throwIfAborted();
+    // The proxy's cheap shape check, then its "assessment": only the mock bot check's tokens.
+    const outcome = recaptchaToken.startsWith(MOCK_RECAPTCHA_TOKEN_PREFIX)
+      ? (this.options.demoOutcome ?? null)
+      : 'bot-check-failed';
+    switch (outcome) {
+      case null:
+      case 'config-unreachable':
+        break;
+      case 'rate-limited':
+        throw new SessionError(
+          'rate-limited',
+          rateLimitMessage(MOCK_RETRY_AFTER_SECONDS.session),
+          MOCK_RETRY_AFTER_SECONDS.session,
+        );
+      case 'demo-busy':
+        throw new SessionError('demo-busy', DEMO_BUSY_MESSAGE);
+      default:
+        // The same sentences the HTTP client gives (http-client.ts, `sessionError`).
+        throw new SessionError(outcome, SESSION_REFUSALS[outcome]);
+    }
+    const ttl = (this.options.sessionSeconds ?? SESSION_TTL_SECONDS) * 1000;
+    this.#sessionExpiresAt = this.#now() + ttl;
+    return { expiresAt: new Date(this.#sessionExpiresAt).toISOString() };
   }
 
-  isLoggedIn(): boolean {
-    return this.options.session.token() !== null;
+  async checkSession(options: CallOptions = {}): Promise<SessionState> {
+    await this.#delay();
+    options.signal?.throwIfAborted();
+    return this.#hasSession() ? 'active' : 'none';
+  }
+
+  logout(): Promise<void> {
+    this.#sessionExpiresAt = null;
+    return Promise.resolve();
+  }
+
+  /** The cookie is there and has not expired (Max-Age); an expired one is gone, as in a browser. */
+  #hasSession(): boolean {
+    if (this.#sessionExpiresAt !== null && this.#now() >= this.#sessionExpiresAt) {
+      this.#sessionExpiresAt = null;
+    }
+    return this.#sessionExpiresAt !== null;
   }
 
   // -- reads ------------------------------------------------------------------------------------
 
   async getStatus(options: CallOptions = {}): Promise<StatusSummary> {
     await this.#authorised(options.signal);
+    if (this.options.throttle === 'status') {
+      // T46's refusal: 429 `rate-limited` with Retry-After, the session untouched.
+      const wait = MOCK_RETRY_AFTER_SECONDS.status;
+      this.options.onRateLimited?.(wait);
+      const problem = proxyProblem(429, 'throttled', 'rate-limited', rateLimitMessage(wait));
+      throw new ApiError(429, problem.message, problem.outcome, wait);
+    }
     const now = this.#now();
     const sync = this.#lastSync();
     const written = lastHeartRateWrite(now);
@@ -1081,10 +1145,10 @@ export class MockClient implements PulseBridgeApi {
     // Like fetch: a call whose signal was aborted (the dashboard was torn down) rejects with
     // an AbortError, which callers ignore.
     signal?.throwIfAborted();
-    const token = this.options.session.token();
-    if (token !== null && this.options.statusMode === 'not-configured') {
-      // The proxy cannot check any token without its password secret, so every route but
-      // login answers 503 (amendment 11). The session is not ended: there was no 401.
+    const active = this.#hasSession();
+    if (active && this.options.statusMode === 'not-configured') {
+      // The proxy cannot check any session without its signing key, so every protected route
+      // answers 503 (amendment 11). The session is not ended: there was no 401.
       throw proxyProblem(
         503,
         'transient',
@@ -1092,8 +1156,7 @@ export class MockClient implements PulseBridgeApi {
         'Reviewer login is not configured on the server.',
       );
     }
-    if (token === null || !token.startsWith(MOCK_TOKEN_PREFIX)) {
-      this.options.session.clear();
+    if (!active) {
       this.options.onUnauthorized();
       throw new UnauthorizedError();
     }
@@ -1187,6 +1250,7 @@ export class MockClient implements PulseBridgeApi {
     }
     // Retry-After: whole seconds until a token is back, rounded up (RFC 9110 section 10.2.3).
     const wait = Math.max(1, Math.ceil((1 - this.#tokens) / perMs / 1000));
+    this.options.onRateLimited?.(wait);
     throw cuffRefusal(429, [['body', 'too many sends; try again later']], 'throttled', wait);
   }
 

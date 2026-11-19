@@ -11,7 +11,7 @@ export const CHART_MARKER = 'u-cursor-pt';
 const isChartModule = (key, record) => /(^|\/)node_modules\/uplot\//.test(record.src ?? key);
 
 /**
- * The chart library (uPlot, D5) must load only when there is something to draw: the login form
+ * The chart library (uPlot, D5) must load only when there is something to draw: the landing view
  * and the rest of the page must never wait for it. With Vite that means uPlot is a dynamic
  * import, so it lands in a chunk of its own that the entry chunk does not import statically.
  *
@@ -62,12 +62,15 @@ export function chartChunkProblems(manifest, contentOf, marker = CHART_MARKER) {
 }
 
 /**
- * Strings that exist only in the mock client and its data (src/api/mock-client.ts and
- * src/api/mock-data.ts), including every `?mock-…` switch name, so an HTTP build that pulled
+ * Strings that exist only in the mock client, its data and the mock bot check
+ * (src/api/mock-client.ts, src/api/mock-data.ts, src/bot-check/mock.ts), including every
+ * `?mock-…` switch name, so an HTTP build that pulled
  * in any of that code, even one switch parser, is caught.
  */
 export const MOCK_MARKERS = [
-  'mock-session-',
+  // The mock bot check's tokens (src/bot-check/mock.ts) and the mock's fake site key.
+  'mock-recaptcha-',
+  'mock-site-key-',
   'SYN-000123',
   'Synthetic watch (mock mode)',
   // The hostile data set and the page-URL switches (mock-data.ts).
@@ -77,6 +80,9 @@ export const MOCK_MARKERS = [
   'mock-log',
   'mock-status',
   'mock-share',
+  'mock-demo',
+  'mock-session-seconds',
+  'mock-throttle',
 ];
 
 /**

@@ -5,12 +5,11 @@
  * `store_only_row`, `unreadable_row`, `groups_from_provenances`, `page`; status.py; app.py;
  * errors.py `Problem.outcome`; extensions.py `trace_step`). All values are synthetic.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SendAttemptEntry } from './contract';
 import { SHARE_URL_HIDDEN } from './contract';
 import { ApiError, isServiceNotConfigured, proxyReason, ShareError } from './errors';
 import { HttpClient } from './http-client';
-import { Session } from './session';
 
 const ORIGIN = 'https://dashboard.example.test';
 const STORE = 'projects/p/locations/l/datasets/d/hl7V2Stores/s';
@@ -38,20 +37,17 @@ function problem(code: string, reason: string, text: string, expression?: string
   };
 }
 
-let session: Session;
 let requests: { url: string; init: RequestInit }[];
+let onUnauthorized: ReturnType<typeof vi.fn<() => void>>;
 beforeEach(() => {
-  sessionStorage.clear();
-  session = new Session(sessionStorage);
-  session.save({ token: 't', expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
   requests = [];
+  onUnauthorized = vi.fn<() => void>();
 });
 
 function client(...responses: Response[]): HttpClient {
   return new HttpClient({
     baseUrl: '/api',
-    session,
-    onUnauthorized: () => undefined,
+    onUnauthorized,
     origin: ORIGIN,
     fetch: (input, init) => {
       requests.push({ url: (input as URL).toString(), init: init ?? {} });
@@ -315,7 +311,8 @@ describe('GET /status (amendments 9, 10, 13, 15)', () => {
       ).getStatus(),
     );
     expect(isServiceNotConfigured(e)).toBe(true);
-    expect(session.token()).toBe('t');
+    // No 401, so the session was not ended.
+    expect(onUnauthorized).not.toHaveBeenCalled();
     // Another 503 is not that.
     const other = await rejection(
       client(json(503, problem('transient', 'upstream-unavailable', 'x'))).getStatus(),
@@ -621,7 +618,6 @@ describe('POST /share (the contract for T15)', () => {
   it('a network failure is a ShareError with status 0', async () => {
     const c = new HttpClient({
       baseUrl: '/api',
-      session,
       onUnauthorized: () => undefined,
       origin: ORIGIN,
       fetch: () => Promise.reject(new TypeError('Failed to fetch')),

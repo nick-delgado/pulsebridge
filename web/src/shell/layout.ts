@@ -17,6 +17,8 @@ export interface DashboardLayout {
   root: DocumentFragment;
   status: ReturnType<typeof statusStrip>;
   logoutButton: HTMLButtonElement;
+  /** A live notice under the header, empty when there is nothing to say (the rate-limit wait). */
+  notice: HTMLElement;
   messages: MessagesStrip;
   slots: {
     heartRate: Record<HeartRateSlot, HTMLElement>;
@@ -80,6 +82,13 @@ export function dashboardLayout(options: {
     attrs: { type: 'button' },
   });
   const messages = messagesStrip(options.signal);
+  const notice = el('p', {
+    id: 'shell-notice',
+    class: 'shell-notice',
+    // Always in the document, only empty, so a screen reader announces the text when it arrives
+    // (a live region that is hidden or added late is often not read).
+    attrs: { role: 'status' },
+  });
 
   const slots = {
     cuff: { panel: slot('cuff-panel', 'slot'), trace: slot('cuff-trace', 'slot') },
@@ -179,8 +188,9 @@ export function dashboardLayout(options: {
   root.append(
     el('a', { class: 'skip-link', text: 'Skip to dashboard', attrs: { href: '#main' } }),
     header,
+    notice,
     main,
     messages.root,
   );
-  return { root, status, logoutButton, messages, slots };
+  return { root, status, logoutButton, notice, messages, slots };
 }

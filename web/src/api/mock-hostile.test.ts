@@ -14,20 +14,18 @@ import {
   mockAuditFailureFromSearch,
   mockDataSetFromSearch,
 } from './mock-data';
-import { Session } from './session';
 
 const NOW = Date.parse('2026-03-10T15:02:00Z');
 
 async function client(hostile: boolean): Promise<MockClient> {
   const c = new MockClient({
-    session: new Session(sessionStorage, () => NOW),
     onUnauthorized: () => undefined,
     now: () => NOW,
     latencyMs: 0,
     rateLimit: null,
     dataSet: hostile ? MOCK_DATA_SETS.hostile : MOCK_DATA_SETS.utc,
   });
-  await c.login('x');
+  await c.startSession('mock-recaptcha-test');
   return c;
 }
 
@@ -36,9 +34,7 @@ const sample = (name: string, transport: 'mllp' | 'https' = 'mllp'): CuffReading
   sendMalformed: name,
 });
 
-beforeEach(() => {
-  sessionStorage.clear();
-});
+beforeEach(() => {});
 
 describe('?mock-audit= and ?mock-data=hostile', () => {
   it('reads the audit switch, and nothing else', () => {

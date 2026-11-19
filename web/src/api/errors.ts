@@ -2,30 +2,81 @@ import type { ShareFailureReason, ShareStep } from './contract';
 import type { OperationOutcome } from './fhir';
 
 /**
- * A protected call was refused with 401 (token missing, expired, altered, or signed under an old
- * password). By the time this is thrown the session is already cleared and the app has been told
- * to show the login form, so callers only need to stop what they were doing.
+ * A protected call was refused with 401 `session-required`: the `__session` cookie is missing,
+ * expired, altered, or signed with a key that has since been replaced. By the time this is thrown
+ * the app has been told to return to the landing view, so callers only need to stop.
  */
 export class UnauthorizedError extends Error {
   override readonly name = 'UnauthorizedError';
   constructor() {
-    super('Your session has ended. Log in again.');
+    super('Your demo session has ended.');
   }
 }
 
-export type LoginFailure = 'wrong-password' | 'rate-limited' | 'not-configured' | 'unavailable';
+/**
+ * Why a demo session could not be started. The first five are the proxy's codes for
+ * `POST /auth/session` (workplan "The contract T43 to T45 share"); the last two are the page's:
+ *
+ *   status  reason                  when
+ *   403     bot-check-failed        the token was invalid, for another action or hostname, or
+ *                                   its score was under the proxy's minimum
+ *   403     origin-refused          the request's Origin is not one of the allowed origins
+ *   429     rate-limited            too many sessions from this address; `Retry-After`
+ *   503     demo-busy               the day's bot-check cap is reached
+ *   503     bot-check-unavailable   Fraud Defense or the counter could not be reached
+ *   -       bot-check-not-loaded    Google's script did not load or run in the browser
+ *                                   (often a content blocker)
+ *   any     unavailable             anything else: no connection, a 400, another status
+ */
+export type SessionFailure =
+  | 'bot-check-failed'
+  | 'origin-refused'
+  | 'rate-limited'
+  | 'demo-busy'
+  | 'bot-check-unavailable'
+  | 'bot-check-not-loaded'
+  | 'unavailable';
 
-/** Login failed. `reason` maps the proxy's status: 401, 429, 503, anything else. */
-export class LoginError extends Error {
-  override readonly name = 'LoginError';
+/** The exact sentence the contract fixes for `demo-busy`. */
+export const DEMO_BUSY_MESSAGE = 'The demo is busy, try again tomorrow.';
+
+/** The visitor's sentence for each refusal that has a fixed one (rate-limited adds the wait). */
+export const SESSION_REFUSALS = {
+  'bot-check-failed':
+    'The automatic bot check did not let this visit through, so the demo did not start. Reload the page and try again.',
+  'origin-refused':
+    'The server does not accept requests from this address. Open the demo from its own link.',
+  'demo-busy': DEMO_BUSY_MESSAGE,
+  'bot-check-unavailable':
+    'The bot check is not available right now, so the demo cannot start. Try again in a few minutes.',
+  'bot-check-not-loaded':
+    "The bot check could not load in this browser, so the demo cannot start. If a content blocker is on, allow Google's reCAPTCHA for this page, then reload.",
+} as const satisfies Partial<Record<SessionFailure, string>>;
+
+/** Starting a demo session failed. `message` is a sentence for the visitor. */
+export class SessionError extends Error {
+  override readonly name = 'SessionError';
   constructor(
-    readonly reason: LoginFailure,
+    readonly reason: SessionFailure,
     message: string,
     /** Seconds from the 429 `Retry-After` header, when given. */
     readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
   }
+}
+
+/**
+ * The page's one wording for a 429 `rate-limited`, from any route (T46): the wait from
+ * `Retry-After`, in seconds below two minutes and in whole minutes (rounded up) above.
+ */
+export function rateLimitMessage(retryAfter: number | null): string {
+  if (retryAfter === null) return 'Too many requests. Wait a minute, then try again.';
+  const wait =
+    retryAfter < 120
+      ? `${retryAfter} ${retryAfter === 1 ? 'second' : 'seconds'}`
+      : `${Math.ceil(retryAfter / 60)} minutes`;
+  return `Too many requests. Wait ${wait}, then try again.`;
 }
 
 /** Any other non-2xx answer, or a network failure (status 0). */
@@ -37,7 +88,7 @@ export class ApiError extends Error {
     message: string,
     /** The FHIR OperationOutcome from the body, when the proxy sent one. */
     readonly outcome: OperationOutcome | null = null,
-    /** Seconds from a 429 `Retry-After` header (the rate-limited cuff route), when given. */
+    /** Seconds from a 429 `Retry-After` header (any route can be rate-limited, T46), when given. */
     readonly retryAfterSeconds: number | null = null,
   ) {
     super(message);
@@ -51,7 +102,7 @@ export class ApiError extends Error {
  */
 export const PROXY_REASON_SYSTEM = 'urn:pulsebridge:fhir-proxy:reason';
 
-/** The proxy's reason code in an OperationOutcome (for example `login-not-configured`), or null. */
+/** The proxy's reason code in an OperationOutcome (for example `demo-busy`), or null. */
 export function proxyReason(outcome: OperationOutcome | null): string | null {
   for (const issue of outcome?.issue ?? []) {
     for (const coding of issue.details?.coding ?? []) {
@@ -64,9 +115,10 @@ export function proxyReason(outcome: OperationOutcome | null): string | null {
 }
 
 /**
- * True for the proxy's 503 that means its reviewer-password secret is missing (amendment 11):
- * then EVERY route answers 503 `login-not-configured`, because no token can be checked. The
- * session is not over (no 401): the page keeps it and says the service is not configured.
+ * True for the proxy's 503 that means it cannot check sessions at all (amendment 11; with D16
+ * its session-signing key is missing): then EVERY protected route answers 503
+ * `login-not-configured`. The session is not over (no 401): the page stays and says the service
+ * is not configured.
  */
 export function isServiceNotConfigured(error: unknown): boolean {
   return (
@@ -84,8 +136,11 @@ export function isFinalTraceAnswer(error: unknown): boolean {
   return error instanceof ApiError && [404, 410, 422].includes(error.status);
 }
 
-/** The statuses the proxy uses for a share refused before OpenEMR is called. */
-const NOTHING_SENT_STATUSES: readonly number[] = [400, 404, 422, 503];
+/**
+ * The statuses the proxy uses for a share refused before OpenEMR is called. 429 is T46's rate
+ * limit, checked before the share starts.
+ */
+const NOTHING_SENT_STATUSES: readonly number[] = [400, 404, 422, 429, 503];
 
 /** The share's documented reason codes (contract.ts `ShareFailureReason`). */
 const SHARE_REASONS: readonly ShareFailureReason[] = [
@@ -100,12 +155,13 @@ const SHARE_REASONS: readonly ShareFailureReason[] = [
   'share-not-configured',
   'share-busy',
   'share-internal-error',
+  'rate-limited',
 ];
 
 /**
  * A share that did not end with the reading in OpenEMR. `reason` is the proxy's code (`other`
  * when it sent none this page knows); `steps` are the steps completed before it stopped, empty
- * when it was refused before OpenEMR was called (400, 404, 422, 503).
+ * when it was refused before OpenEMR was called (400, 404, 422, 429, 503).
  */
 export class ShareError extends ApiError {
   override readonly name: string = 'ShareError';
@@ -115,12 +171,13 @@ export class ShareError extends ApiError {
     message: string,
     outcome: OperationOutcome | null,
     readonly steps: ShareStep[],
+    retryAfterSeconds: number | null = null,
   ) {
-    super(status, message, outcome);
+    super(status, message, outcome, retryAfterSeconds);
   }
 
   /**
-   * True ONLY when the proxy refused the share before calling OpenEMR: a 400, 404, 422 or 503
+   * True ONLY when the proxy refused the share before calling OpenEMR: a 400, 404, 422, 429 or 503
    * whose body is the proxy's OperationOutcome, with no steps. Anything else (no connection, a
    * 5xx without the steps envelope, an HTML error page from the hosting layer, a 200 the page
    * could not read) may come after the proxy had already created a Patient, an Encounter or the
@@ -138,7 +195,14 @@ export class ShareError extends ApiError {
   static from(error: ApiError, steps: ShareStep[] = []): ShareError {
     const code = proxyReason(error.outcome);
     const reason = SHARE_REASONS.find((r) => r === code) ?? 'other';
-    return new ShareError(reason, error.status, error.message, error.outcome, steps);
+    return new ShareError(
+      reason,
+      error.status,
+      error.message,
+      error.outcome,
+      steps,
+      error.retryAfterSeconds,
+    );
   }
 }
 
@@ -230,7 +294,7 @@ export function issueMessage(outcome: OperationOutcome | null): string | null {
 /**
  * Seconds from a `Retry-After` header. Only the delay-seconds form (RFC 9110 section 10.2.3:
  * one or more digits) is accepted; anything else (a negative or decimal number, `10abc`, or the
- * HTTP-date form, which neither cuff-sim nor the login route sends) is null, "not given".
+ * HTTP-date form, which neither cuff-sim nor the proxy sends) is null, "not given".
  */
 export function retryAfterSeconds(header: string | null): number | null {
   if (header === null) return null;

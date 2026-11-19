@@ -24,8 +24,7 @@ async function watchErrors(page: Page): Promise<string[]> {
 
 async function logIn(page: Page, query = ''): Promise<void> {
   await page.goto(`/${query}`);
-  await page.getByLabel('Password').fill('any password works in mock mode');
-  await page.getByRole('button', { name: 'Log in' }).click();
+  await page.getByRole('button', { name: 'View the live demo' }).click();
   await expect(page.getByRole('main', { name: 'PulseBridge dashboard' })).toBeVisible();
 }
 
