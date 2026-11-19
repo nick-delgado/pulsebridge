@@ -367,8 +367,9 @@
 
 /*
  * Google's reCAPTCHA badge (bottom right, added by enterprise.js) is hidden: Google's FAQ allows
- * it when the visitor's flow says the site uses reCAPTCHA (the notice under the button). Use
- * visibility, not display: none, which the FAQ warns stops reCAPTCHA from working.
+ * it when the visitor's flow says the site uses reCAPTCHA (the notice under the button). This is
+ * the rule the FAQ gives: visibility, not display: none (which takes the element out of layout
+ * and is reported, though not by Google, to stop reCAPTCHA working).
  */
 .grecaptcha-badge {
   visibility: hidden;

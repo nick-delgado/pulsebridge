@@ -139,3 +139,22 @@ test('phone width: the landing view fits without horizontal scroll', async ({ pa
   );
   expect(overflow).toBeLessThanOrEqual(0);
 });
+
+test("Google's badge, when its script adds it, is hidden with visibility (not display: none)", async ({
+  page,
+}) => {
+  await page.goto('/');
+  await expect(start(page)).toBeVisible();
+  // enterprise.js adds <div class="grecaptcha-badge"> to the body; the mock build loads no Google
+  // script, so the test adds one the same way to check the page's own stylesheet.
+  const style = await page.evaluate(() => {
+    const badge = document.createElement('div');
+    badge.className = 'grecaptcha-badge';
+    badge.textContent = 'badge';
+    document.body.append(badge);
+    const computed = getComputedStyle(badge);
+    return { visibility: computed.visibility, display: computed.display };
+  });
+  // The rule Google's FAQ gives: visibility: hidden, the element kept in layout.
+  expect(style).toEqual({ visibility: 'hidden', display: 'block' });
+});
