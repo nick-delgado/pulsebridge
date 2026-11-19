@@ -92,6 +92,9 @@ export function landingView(options: LandingViewOptions): HTMLElement {
       button.removeAttribute('aria-busy');
       button.textContent = START_LABEL;
     }
+    // Disabling the button dropped keyboard focus; after a failure put it back for another try
+    // (the alert above it has already been announced).
+    if (button.isConnected && error.textContent !== '') button.focus();
   }
 
   // At once, not on the click: the script then has the visit to observe. Failures are handled

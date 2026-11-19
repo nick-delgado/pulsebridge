@@ -83,8 +83,9 @@ for (const [outcome, text] of REFUSALS) {
     await expect(landingError(page)).toHaveText(text);
     await expect(landingError(page)).toHaveAttribute('role', 'alert');
     await expect(dashboard(page)).toHaveCount(0);
-    // The button is back for another try.
+    // The button is back, and focused, for another try.
     await expect(start(page)).toBeEnabled();
+    await expect(start(page)).toBeFocused();
     expect(errors).toEqual([]);
   });
 }
