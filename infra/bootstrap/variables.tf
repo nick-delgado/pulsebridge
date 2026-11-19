@@ -227,13 +227,8 @@ variable "deployer_roles" {
     # Firebase to the project needs more (firebase.projects.update): bootstrap does that once
     # with the owner's credentials (add_firebase), so the deployer never needs roles/firebase.admin.
     "roles/firebasehosting.admin",
-    # The public demo's reCAPTCHA (Fraud Defense) score key (module phr, D16, T44): GetKey,
-    # CreateKey, UpdateKey and DeleteKey need recaptchaenterprise.keys.get / .create / .update /
-    # .delete on the project ("Access control with IAM", API permissions table,
-    # docs.cloud.google.com/recaptcha/docs/access-control, read 19 November 2026). Editor holds those
-    # (plus assessments, firewall policies and metrics); Admin is recaptchaenterprise.*, broader, and
-    # not needed. The stack's one bucket is not covered by a predefined role here: see deployer.tf.
-    "roles/recaptchaenterprise.editor",
+    # Not listed: module phr's reCAPTCHA key and its counter bucket. No predefined role is narrow
+    # enough for either, so bootstrap grants the deployer two custom roles (deployer.tf, T44).
   ]
 
   validation {
@@ -365,6 +360,18 @@ variable "planner_account_id" {
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.planner_account_id))
     error_message = "planner_account_id must be 6-30 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
+}
+
+variable "deployer_recaptcha_role_id" {
+  description = "ID of the deployer's custom project role for reCAPTCHA keys (deployer.tf, T44): recaptchaenterprise.keys.create, .get, .list, .update and .delete only (no legacy secret key retrieval, no assessments). A deleted custom role keeps its ID reserved for about 37 days."
+  type        = string
+  default     = "pulsebridgeDeployerRecaptchaKeys"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9_.]{3,64}$", var.deployer_recaptcha_role_id))
+    error_message = "deployer_recaptcha_role_id must be 3-64 letters, digits, '_' or '.'."
   }
 }
 

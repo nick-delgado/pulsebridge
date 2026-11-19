@@ -40,9 +40,13 @@ resource "google_project_iam_member" "deployer" {
 #   read and set its IAM policy (google_storage_bucket_iam_member, additive);
 #   list and delete objects, which `force_destroy = true` does to empty the bucket before deleting
 #   it on a dev destroy.
-# Not storage.objects.get or .create: the deployer can neither read nor forge a counter. The role
-# is project-level because storage.buckets.create has no narrower resource (the bucket does not
-# exist yet). Creating a custom role needs iam.roles.create: bootstrap runs as the owner.
+# Not storage.objects.get or .create: by default the deployer has no right to read or write an
+# object in the counter bucket. That is a default, not a wall: it holds storage.buckets.
+# setIamPolicy here and roles/resourcemanager.projectIamAdmin, so it could GRANT itself object
+# access, visibly, in the IAM policy and audit log (README, "What the role list does and does not
+# limit"). The role is project-level because storage.buckets.create has no narrower resource (the
+# bucket does not exist yet). Creating a custom role needs iam.roles.create: bootstrap runs as the
+# owner.
 locals {
   deployer_bucket_permissions = sort([
     "storage.buckets.create",
@@ -70,5 +74,41 @@ resource "google_project_iam_custom_role" "deployer_buckets" {
 resource "google_project_iam_member" "deployer_buckets" {
   project = local.project_id
   role    = google_project_iam_custom_role.deployer_buckets.name
+  member  = google_service_account.deployer.member
+}
+
+# T44 (D16): module phr's reCAPTCHA score key. The key methods need, on the project ("Access
+# control with IAM", API permissions table, docs.cloud.google.com/recaptcha/docs/access-control,
+# read 19 November 2026): CreateKey recaptchaenterprise.keys.create, GetKey .keys.get (also what
+# Terraform's refresh and import call), UpdateKey .keys.update, DeleteKey .keys.delete, ListKeys
+# .keys.list. A CUSTOM role with exactly those five, because every predefined role is wider:
+# Editor and Admin also hold recaptchaenterprise.keys.retrievelegacysecretkey (which returns a
+# key's legacy SECRET), firewall policies and, for Admin, everything in recaptchaenterprise.*.
+# The deployer creates no assessments; fhir-proxy's roles/recaptchaenterprise.agent does that
+# (module identity).
+locals {
+  deployer_recaptcha_permissions = sort([
+    "recaptchaenterprise.keys.create",
+    "recaptchaenterprise.keys.delete",
+    "recaptchaenterprise.keys.get",
+    "recaptchaenterprise.keys.list",
+    "recaptchaenterprise.keys.update",
+  ])
+}
+
+resource "google_project_iam_custom_role" "deployer_recaptcha_keys" {
+  project     = local.project_id
+  role_id     = var.deployer_recaptcha_role_id
+  title       = "PulseBridge deployer: reCAPTCHA keys"
+  description = "Create, read, list, update and delete reCAPTCHA (Fraud Defense) keys for module phr's demo bot check. Not retrievelegacysecretkey, not assessments. Created by infra/bootstrap (T44)."
+  permissions = local.deployer_recaptcha_permissions
+  stage       = "GA"
+
+  depends_on = [google_project_service.bootstrap]
+}
+
+resource "google_project_iam_member" "deployer_recaptcha_keys" {
+  project = local.project_id
+  role    = google_project_iam_custom_role.deployer_recaptcha_keys.name
   member  = google_service_account.deployer.member
 }

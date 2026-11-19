@@ -310,8 +310,10 @@ run "default_deployer_roles_are_not_basic_roles" {
   }
   assert {
     # T44: module phr's reCAPTCHA score key.
-    condition     = contains(keys(google_project_iam_member.deployer), "roles/recaptchaenterprise.editor") && !contains(keys(google_project_iam_member.deployer), "roles/recaptchaenterprise.admin")
-    error_message = "The default deployer roles must include roles/recaptchaenterprise.editor (the demo's reCAPTCHA key, T44), not the broader .admin."
+    # T44: no predefined reCAPTCHA role (all hold keys.retrievelegacysecretkey); the custom role
+    # below covers the key.
+    condition     = length([for r in keys(google_project_iam_member.deployer) : r if startswith(r, "roles/recaptchaenterprise.")]) == 0
+    error_message = "The default deployer roles must hold no predefined reCAPTCHA role: the deployer's key rights are its custom role (T44)."
   }
   assert {
     # T26: no Cloud Build role by default; allow_build_trigger adds it (run below).
@@ -422,4 +424,39 @@ run "deployer_bucket_role_id_is_validated" {
   }
 
   expect_failures = [var.deployer_bucket_role_id]
+}
+
+# ---- T44: the deployer's reCAPTCHA key role ----------------------------------------------------
+
+run "deployer_recaptcha_role_manages_keys_only" {
+  command = plan
+
+  assert {
+    condition = toset(google_project_iam_custom_role.deployer_recaptcha_keys.permissions) == toset([
+      "recaptchaenterprise.keys.create",
+      "recaptchaenterprise.keys.delete",
+      "recaptchaenterprise.keys.get",
+      "recaptchaenterprise.keys.list",
+      "recaptchaenterprise.keys.update",
+    ])
+    error_message = "The deployer's reCAPTCHA role must be exactly keys create/get/list/update/delete (no retrievelegacysecretkey, no assessments)."
+  }
+  assert {
+    condition = (
+      google_project_iam_custom_role.deployer_recaptcha_keys.role_id == "pulsebridgeDeployerRecaptchaKeys" &&
+      google_project_iam_member.deployer_recaptcha_keys.member == google_service_account.deployer.member &&
+      google_project_iam_member.deployer_recaptcha_keys.project == "example-project"
+    )
+    error_message = "The reCAPTCHA key role must be a custom role in the project, granted to the deployer."
+  }
+}
+
+run "deployer_recaptcha_role_id_is_validated" {
+  command = plan
+
+  variables {
+    deployer_recaptcha_role_id = "has spaces"
+  }
+
+  expect_failures = [var.deployer_recaptcha_role_id]
 }
