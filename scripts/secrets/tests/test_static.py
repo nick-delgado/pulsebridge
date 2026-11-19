@@ -80,7 +80,8 @@ def test_no_random_no_herestring_no_xtrace_no_export_of_value(path):
 
 def test_value_expanded_only_where_intended():
     """Every expansion of $sv_value / $sv_confirm, reviewed by hand once and pinned here: the
-    printf builtin into gcloud's stdin, and checks that do not output it. A new expansion fails this test and has to be looked at."""
+    printf builtin into gcloud's stdin, and checks that do not output it. A new expansion fails
+    this test and has to be looked at."""
     allowed = [
         r'builtin printf \'%s\' "\$sv_value" \| sv_gcloud secrets versions add',
         r'sv_value="\$\{sv_value%\$\'\\n\'\}"',
@@ -137,8 +138,8 @@ def test_signing_key_is_piped_from_urandom_into_gcloud_and_nowhere_else():
     variable or sends it anywhere else (no tee, redirect to a file, base64, xxd, printf of it)."""
     path = SCRIPTS / "set-session-signing-key.sh"
     lines = [line.strip() for _, line in code_lines(path)]
-    assert 'KEY_SOURCE=/dev/urandom' in lines
-    assert 'KEY_BYTES=32' in lines
+    assert "KEY_SOURCE=/dev/urandom" in lines
+    assert "KEY_BYTES=32" in lines
     reads = [line for line in lines if "$KEY_SOURCE" in line and "head" in line]
     assert reads == [
         'count="$(head -c "$KEY_BYTES" "$KEY_SOURCE" | wc -c)" || count=0',

@@ -110,7 +110,8 @@ def check_bundle_requirements() -> dict[str, str]:
     if block is None:
         raise AssertionError(f"the expected directives were not found in {CHECK_BUNDLE}")
     expected = dict(re.findall(r"'([a-z-]+)': \"([^\"]+)\"", block.group(1)))
-    connect = re.search(r"'connect-src':.*: \"('self')\",", block.group(1))
+    # The same-origin branch: 'self', plus whatever the page adds (reCAPTCHA's connect source).
+    connect = re.search(r"'connect-src':.*: \"('self'[^\"]*)\",", block.group(1))
     if connect is None:
         raise AssertionError(
             "check-bundle.mjs no longer requires connect-src 'self' for a same-origin build"

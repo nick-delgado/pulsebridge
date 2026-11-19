@@ -504,11 +504,12 @@ def check_front_door(s: Scan) -> None:
     s.check(
         bucket.get("name") == env.get("DEMO_COUNTER_BUCKET")
         and bucket.get("public_access_prevention") == "enforced",
-        f"DEMO_COUNTER_BUCKET must name the private counter bucket: {env.get('DEMO_COUNTER_BUCKET')}",
+        f"DEMO_COUNTER_BUCKET must name the private counter bucket: {bucket.get('name')}",
     )
     writer = s.get("module.phr.google_storage_bucket_iam_member.demo_counter_writer") or {}
     s.check(
-        writer.get("member") == f"serviceAccount:{email('fhir-proxy')}" and writer.get("role") == "roles/storage.objectUser",
+        writer.get("member") == f"serviceAccount:{email('fhir-proxy')}"
+        and writer.get("role") == "roles/storage.objectUser",
         f"only fhir-proxy may write the counters: {writer.get('member')} {writer.get('role')}",
     )
     s.check(
@@ -587,10 +588,10 @@ def check_environment(s: Scan) -> None:
     # the reCAPTCHA key follows the same switch.
     buckets = {r["values"].get("force_destroy") for r in s.of_type("google_storage_bucket")}
     s.check(buckets == {not protect}, f"counter bucket force_destroy {buckets}")
-    keys = {r["values"].get("deletion_policy") for r in s.of_type("google_recaptcha_enterprise_key")}
-    s.check(
-        keys == {"PREVENT" if protect else "DELETE"}, f"reCAPTCHA key deletion_policy {keys}"
-    )
+    keys = {
+        r["values"].get("deletion_policy") for r in s.of_type("google_recaptcha_enterprise_key")
+    }
+    s.check(keys == {"PREVENT" if protect else "DELETE"}, f"reCAPTCHA key deletion_policy {keys}")
     labels = {
         r["values"].get("labels", {}).get("environment")
         for r in s.of_type("google_cloud_run_v2_service")

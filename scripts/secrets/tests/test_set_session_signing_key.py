@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "set-session-signing-key.sh"
-SECRET = "pbt-session-signing-key"
+SECRET = "pbt-session-signing-key"  # noqa: S105 - a secret NAME, not a value
 EXISTING = f"projects/100000000001/secrets/{SECRET}/versions/1\n"
 
 
