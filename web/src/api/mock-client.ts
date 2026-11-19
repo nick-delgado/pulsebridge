@@ -1153,7 +1153,7 @@ export class MockClient implements PulseBridgeApi {
         503,
         'transient',
         'login-not-configured',
-        'Reviewer login is not configured on the server.',
+        'Demo sessions are not configured on the server.',
       );
     }
     if (!active) {

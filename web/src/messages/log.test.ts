@@ -279,7 +279,7 @@ describe('empty, loading and error states', () => {
     );
     await flush();
     expect(m.q('#log-alert').textContent).toContain('The service is not configured');
-    expect(m.q('#log-alert').textContent).toContain('You are still logged in');
+    expect(m.q('#log-alert').textContent).toContain('Your demo session is kept');
   });
 
   it('a 401 is left to the shell', async () => {
