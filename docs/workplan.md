@@ -991,9 +991,9 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` | todo |
-| T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/` | todo |
-| T45 | Dashboard: "View the live demo" | D16 | `web/` | todo |
+| T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` | in-progress |
+| T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/` | in-progress |
+| T45 | Dashboard: "View the live demo" | D16 | `web/` | in-progress |
 | T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | todo |
 | T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, and the minimum needed elsewhere in `web/` | todo |
 | T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/`, service and module READMEs not owned above | todo |
