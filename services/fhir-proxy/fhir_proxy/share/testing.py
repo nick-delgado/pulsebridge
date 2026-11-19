@@ -57,6 +57,8 @@ from fhir_proxy.testing import (
     FHIR_STORE,
     PATIENT_ID,
     Clock,
+    FakeBucket,
+    FakeFraudDefense,
     FakeHealthcare,
     FakeIdTokens,
     FakeSender,
@@ -712,24 +714,29 @@ def build_share_env(
     fake_transport = transport or FakeTransport(openemr)
     sender = FakeSender()
     sender.answer("/status", 200, {"googleHealth": "connected"})
+    fraud, bucket = FakeFraudDefense(), FakeBucket()
     app = create_app(
         config,
         store,
         id_tokens=FakeIdTokens(),
         send=sender,
+        recaptcha_transport=fraud,
+        storage_transport=bucket,
         clock=clock,
         monotonic=clock.monotonic,
         extension_options={"openemr_transport": fake_transport},
     )
     harness = Harness(
         app,
-        app.test_client(),
+        app.test_client(use_cookies=False),
         store,
         sender,
         FakeIdTokens(),
         clock,
-        Path(config.password_file),
+        Path(config.session_key_file),
         config,
+        fraud,
+        bucket,
     )
     env = ShareEnv(harness, openemr, fake_transport, store, clock, doc_path, settings, key, cert[0])
     env.write_doc()
