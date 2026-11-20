@@ -1134,6 +1134,9 @@ measured), and by the attempt time for send attempts.
 - AC: the messages log, the status strip's counts and the OpenEMR read-back panel cover the same
   window.
 - AC: the dashboard's 30 d button is gone; 24 h and 7 d remain.
+- AC (added 20 Nov from T46's review): the page's polling (`web/src/state/poll.ts` `pollUntil`, used
+  by the cuff outcome and traces) resumes after a `429` once the `Retry-After` wait has passed,
+  instead of stopping for good and leaving the row pending; tested.
 - AC: nothing is deleted from either FHIR store or OpenEMR; the README says the data stays and
   only the proxy hides it.
 - AC: tests at the boundary (just inside, just outside, an overlapping window), break-checked.
