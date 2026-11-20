@@ -756,6 +756,23 @@ def session_from(response) -> str:  # noqa: ANN001
     return rest.split(";", 1)[0]
 
 
+GENEROUS_LIMITS: dict[str, int] = {
+    "requests_per_address_per_minute": 6000,
+    "reads_per_session_per_minute": 1200,
+    "cuff_sends_per_session_per_10_minutes": 30,
+    "shares_per_session_per_10_minutes": 20,
+    "shares_per_instance_per_hour": 600,
+}
+# The production defaults (ServiceConfig's, which are VARIABLES' defaults).
+DEMO_LIMITS: dict[str, int] = {
+    "requests_per_address_per_minute": 300,
+    "reads_per_session_per_minute": 120,
+    "cuff_sends_per_session_per_10_minutes": 3,
+    "shares_per_session_per_10_minutes": 2,
+    "shares_per_instance_per_hour": 30,
+}
+
+
 def make_config(tmp_path: Path, **overrides: object) -> ServiceConfig:
     key_file = tmp_path / "session-signing-key"
     if not key_file.exists():
@@ -777,6 +794,9 @@ def make_config(tmp_path: Path, **overrides: object) -> ServiceConfig:
         sample_patient=SAMPLE_PATIENT,
         status_cache_seconds=60,
         fhir_timeout=5,
+        # T46's rate limits at the top of their ranges, so a test that is not about them can make
+        # as many requests as it needs; tests/test_rate_limits.py uses the defaults (DEMO_LIMITS).
+        **GENEROUS_LIMITS,
     )
     values.update(overrides)
     values.setdefault("public_base_url", PUBLIC_BASE + str(values.get("path_prefix", "")))

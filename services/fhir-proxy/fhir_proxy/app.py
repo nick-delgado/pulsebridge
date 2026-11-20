@@ -8,15 +8,25 @@ Order of checks on every request (``before_request``):
 0. The request's time budget starts (``fhir_proxy.deadline``): ``CUFF_FORWARD_TIMEOUT_SECONDS``
    for the cuff send, ``REQUEST_BUDGET_SECONDS`` for everything else. No upstream call starts
    after it is spent.
-1. A token in the query string (``access_token=``, RFC 6750 section 2.3, or ``__session=``) is
+1. The per-address rate limit (T46): ``REQUESTS_PER_ADDRESS_PER_MINUTE`` requests per client
+   address, every route together, the public ``/auth/`` routes and requests refused below
+   included; otherwise ``429 rate-limited``. First: it is as cheap as a check gets (one
+   dictionary entry, no I/O), and a flood is then counted before anything is done for it,
+   even before a refusal below is logged.
+2. A token in the query string (``access_token=``, RFC 6750 section 2.3, or ``__session=``) is
    refused, whatever else the request carries: query strings end up in request logs.
-2. Every request that can change something (any method but ``GET`` and ``HEAD``; in practice
+3. Every request that can change something (any method but ``GET`` and ``HEAD``; in practice
    every ``POST``) must carry an ``Origin`` header naming one of ``ALLOWED_ORIGINS``;
    otherwise ``403 origin-refused``. With the cookie's ``SameSite=Strict`` this is the defence
    against cross-site request forgery (README, "Demo sessions").
-3. Every route except the three under ``/auth/`` needs a valid session token in the
+4. Every route except the three under ``/auth/`` needs a valid session token in the
    ``__session`` cookie; otherwise ``401 session-required``. That includes unknown paths, so an
    unauthenticated caller cannot list the routes. ``Authorization: Bearer`` is not accepted.
+5. The per-session rate limits (T46), keyed on the verified token's ``jti``: reads (every
+   ``GET``/``HEAD``), cuff sends (``POST /cuff/readings``) and shares (``POST /share``, then the
+   per-instance limit on shares by everyone); otherwise ``429 rate-limited``. After the session
+   check, because only a verified token's ``jti`` is a key a caller cannot make up. Then the
+   route itself; ``POST /auth/session`` adds its own per-address limit on session attempts.
 
 There is no CORS: the page and the proxy share one origin (Firebase Hosting's ``/api``
 rewrite), so no ``Access-Control-*`` header is ever sent and a cross-origin script cannot read
@@ -60,6 +70,7 @@ from fhir_proxy.messages import (
     MessagesLog,
     decode_cursor,
 )
+from fhir_proxy.rate_limit import SlidingWindows, TokenBuckets
 from fhir_proxy.routes import CORE_ROUTES, Route
 from fhir_proxy.search import parse_instant
 from fhir_proxy.session_limit import SessionLimiter
@@ -95,6 +106,26 @@ SESSION_CHALLENGE = f'Cookie realm="pulsebridge", cookie-name="{COOKIE_NAME}"'
 GOOGLE_CALL_TIMEOUT_SECONDS = 10.0
 SESSION_LOG_WINDOW_SECONDS = 60
 DEMO_BUSY_TEXT = "The demo is busy, try again tomorrow."
+# The share route's endpoint (fhir_proxy.share.ROUTE; a test checks the two agree). Named here,
+# not imported, because the share package is an optional extension.
+SHARE_ENDPOINT = "share"
+# T46: the windows of the rate limits; the counts are variables (config.py).
+MINUTE_SECONDS = 60
+TEN_MINUTES_SECONDS = 600
+HOUR_SECONDS = 3600
+RATE_LOG_WINDOW_SECONDS = 60
+# Every 429 the gate answers; the page shows the wait from Retry-After for any of them (T45).
+RATE_LIMIT_TEXTS = {
+    "address": "Too many requests from this address; wait and try again.",
+    "session-reads": "Too many requests in this demo session; wait and try again.",
+    "session-cuff-sends": (
+        "This demo session has sent as many cuff readings as it may for now; wait and try again."
+    ),
+    "session-shares": (
+        "This demo session has shared as many readings as it may for now; wait and try again."
+    ),
+    "all-shares": ("The demo has shared as many readings as it may this hour; wait and try again."),
+}
 
 SECURITY_HEADERS = {
     # Health data and tokens are never cached, by the browser or by Firebase Hosting's CDN.
@@ -236,6 +267,34 @@ def create_app(
         timeout=GOOGLE_CALL_TIMEOUT_SECONDS,
         clock=clock,
     )
+    # T46's rate limits (README, "Rate limits"): in memory, per instance.
+    per_address = TokenBuckets(
+        capacity=config.requests_per_address_per_minute,
+        window_seconds=MINUTE_SECONDS,
+        monotonic=monotonic,
+    )
+    session_reads = TokenBuckets(
+        capacity=config.reads_per_session_per_minute,
+        window_seconds=MINUTE_SECONDS,
+        monotonic=monotonic,
+    )
+    session_cuff_sends = SlidingWindows(
+        limit=config.cuff_sends_per_session_per_10_minutes,
+        window_seconds=TEN_MINUTES_SECONDS,
+        monotonic=monotonic,
+    )
+    session_shares = SlidingWindows(
+        limit=config.shares_per_session_per_10_minutes,
+        window_seconds=TEN_MINUTES_SECONDS,
+        monotonic=monotonic,
+    )
+    all_shares = SlidingWindows(
+        limit=config.shares_per_instance_per_hour,
+        window_seconds=HOUR_SECONDS,
+        max_keys=1,
+        monotonic=monotonic,
+    )
+    rate_log = FloodLogSampler(window_seconds=RATE_LOG_WINDOW_SECONDS, monotonic=monotonic)
     refused_log = FloodLogSampler(window_seconds=SESSION_LOG_WINDOW_SECONDS, monotonic=monotonic)
     origin_log = FloodLogSampler(window_seconds=SESSION_LOG_WINDOW_SECONDS, monotonic=monotonic)
     upstream = Upstream(
@@ -325,6 +384,38 @@ def create_app(
         if log_it:
             log(logging.WARNING, event, client_address=address, **fields)
 
+    def _rate_limited(limit: str, wait: int, address: str) -> Problem:
+        # Sampled: under a flood, one line per address per minute plus a count of the rest.
+        _sampled(rate_log, "rate-limited", address, limit=limit, retry_after=wait)
+        return Problem(
+            429,
+            "throttled",  # R4 issue-type: "the system is not prepared to handle this request"
+            "rate-limited",
+            RATE_LIMIT_TEXTS[limit],
+            headers={"Retry-After": str(wait)},
+        )
+
+    def _session_limits(jti: str, address: str) -> None:
+        """The per-session limits of this request, by what it does (T46)."""
+        if request.method in ("GET", "HEAD"):
+            wait = session_reads.take(jti)
+            if wait is not None:
+                raise _rate_limited("session-reads", wait, address)
+        elif request.endpoint == "cuff_readings":
+            wait = session_cuff_sends.take(jti)
+            if wait is not None:
+                raise _rate_limited("session-cuff-sends", wait, address)
+        elif request.endpoint == SHARE_ENDPOINT:
+            wait = session_shares.take(jti)
+            if wait is not None:
+                raise _rate_limited("session-shares", wait, address)
+            wait = all_shares.take("all")
+            if wait is not None:
+                # Refused by the limit on everyone: this session's share did not happen, so it
+                # does not count against the session either.
+                session_shares.give_back(jti)
+                raise _rate_limited("all-shares", wait, address)
+
     @app.before_request
     def gate() -> Response | None:
         g.started = time.monotonic()
@@ -334,6 +425,10 @@ def create_app(
             else config.request_budget
         )
         deadline.start(budget)
+        address = _address()
+        wait = per_address.take(address)
+        if wait is not None:
+            raise _rate_limited("address", wait, address)
         if any(name in request.args for name in QUERY_TOKEN_NAMES):
             raise Problem(
                 400,
@@ -347,9 +442,7 @@ def create_app(
             # browser sends Origin on a POST (Fetch standard, "append a request Origin header").
             origin = request.headers.get("Origin")
             if origin not in config.allowed_origins:
-                _sampled(
-                    origin_log, "origin-refused", _address(), origin_present=origin is not None
-                )
+                _sampled(origin_log, "origin-refused", address, origin_present=origin is not None)
                 raise Problem(
                     403,
                     "forbidden",
@@ -367,6 +460,7 @@ def create_app(
         except InvalidToken as exc:
             log(logging.INFO, "token-refused", reason=str(exc))
             raise _session_required() from None
+        _session_limits(g.session["jti"], address)
         return None
 
     @app.after_request

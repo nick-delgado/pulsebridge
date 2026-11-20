@@ -81,6 +81,27 @@ VARIABLES: dict[str, Variable] = {
         "Assessments allowed per UTC day across all instances (the counter bucket), 1 to 100000",
         "300",
     ),
+    # The rate limits of the public demo (T46; README "Rate limits"). Per instance, in memory:
+    # the real limit is each one times the instance count (fhir-proxy's max_instance_count, 2).
+    "REQUESTS_PER_ADDRESS_PER_MINUTE": Variable(
+        "Requests per client address a minute, every route together (the public /auth/ routes "
+        "included), 60 to 6000, at least READS_PER_SESSION_PER_MINUTE (a token bucket)",
+        "300",
+    ),
+    "READS_PER_SESSION_PER_MINUTE": Variable(
+        "GET (and HEAD) requests per demo session a minute, 60 to 1200 (a token bucket keyed on "
+        "the session token's jti)",
+        "120",
+    ),
+    "CUFF_SENDS_PER_SESSION_PER_10_MINUTES": Variable(
+        "POST /cuff/readings per demo session in any 10 minutes, 1 to 30", "3"
+    ),
+    "SHARES_PER_SESSION_PER_10_MINUTES": Variable(
+        "POST /share per demo session in any 10 minutes, 1 to 20", "2"
+    ),
+    "SHARES_PER_INSTANCE_PER_HOUR": Variable(
+        "POST /share by all visitors together in any hour, per instance, 1 to 600", "30"
+    ),
     "DEMO_COUNTER_BUCKET": Variable(
         "Cloud Storage bucket holding one counter object per UTC day (the daily bot-check cap)"
     ),
@@ -256,6 +277,11 @@ class ServiceConfig:
     recaptcha_min_score: float = 0.5
     sessions_per_address_per_hour: int = 5
     bot_checks_per_day: int = 300
+    requests_per_address_per_minute: int = 300
+    reads_per_session_per_minute: int = 120
+    cuff_sends_per_session_per_10_minutes: int = 3
+    shares_per_session_per_10_minutes: int = 2
+    shares_per_instance_per_hour: int = 30
     fhir_timeout: float = 10.0
     cuff_forward_timeout: float = 55.0
     request_budget: float = 50.0
@@ -331,6 +357,13 @@ class ServiceConfig:
                     f"{name} must be at least {REQUEST_TIMEOUT_MARGIN_SECONDS} s below "
                     "REQUEST_TIMEOUT_SECONDS"
                 )
+        per_address = int(_number("REQUESTS_PER_ADDRESS_PER_MINUTE", values, 60, 6000, whole=True))
+        reads = int(_number("READS_PER_SESSION_PER_MINUTE", values, 60, 1200, whole=True))
+        if per_address < reads:
+            # Otherwise one visitor's own reads would run into its address's limit first.
+            raise ConfigError(
+                "REQUESTS_PER_ADDRESS_PER_MINUTE must be at least READS_PER_SESSION_PER_MINUTE"
+            )
         public_base_url = _public_base_url(values["PUBLIC_BASE_URL"], values["PATH_PREFIX"])
         health_sync_url = values["HEALTH_SYNC_URL"] or None
         return cls(
@@ -362,6 +395,17 @@ class ServiceConfig:
                 _number("SESSIONS_PER_ADDRESS_PER_HOUR", values, 1, 100, whole=True)
             ),
             bot_checks_per_day=int(_number("BOT_CHECKS_PER_DAY", values, 1, 100000, whole=True)),
+            requests_per_address_per_minute=per_address,
+            reads_per_session_per_minute=reads,
+            cuff_sends_per_session_per_10_minutes=int(
+                _number("CUFF_SENDS_PER_SESSION_PER_10_MINUTES", values, 1, 30, whole=True)
+            ),
+            shares_per_session_per_10_minutes=int(
+                _number("SHARES_PER_SESSION_PER_10_MINUTES", values, 1, 20, whole=True)
+            ),
+            shares_per_instance_per_hour=int(
+                _number("SHARES_PER_INSTANCE_PER_HOUR", values, 1, 600, whole=True)
+            ),
             fhir_timeout=_number("FHIR_TIMEOUT_SECONDS", values, 1, 30),
             cuff_forward_timeout=forward,
             request_budget=budget,

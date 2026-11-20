@@ -23,6 +23,10 @@ beyond the proxy's own CPU once that address has used its attempts.
   (``Retry-After`` :data:`OVERFLOW_RETRY_SECONDS`) until room is made: that is the cost of a
   flood of more than 10,000 addresses in an hour on one instance, and it costs no assessment.
 
+The counting itself is ``fhir_proxy.rate_limit.SlidingWindows``, which T46's other limits use
+too (T46 moved it there; the rules above are unchanged, and the search for aged-out entries now
+runs at most once a second).
+
 Counters live in memory, per process: with one gunicorn worker per instance, the real limit is
 at most the configured one times the instance count. That is acceptable here because the
 **daily cap** (``fhir_proxy.demo_counter``), which does span instances, bounds the cost.
@@ -30,15 +34,15 @@ at most the configured one times the instance count. That is acceptable here bec
 
 from __future__ import annotations
 
-import math
-import threading
 import time
-from collections import OrderedDict, deque
 from collections.abc import Callable
+
+from fhir_proxy.rate_limit import OVERFLOW_RETRY_SECONDS, SlidingWindows
 
 WINDOW_SECONDS = 3600
 MAX_TRACKED_ADDRESSES = 10_000
-OVERFLOW_RETRY_SECONDS = 60
+
+__all__ = ["MAX_TRACKED_ADDRESSES", "OVERFLOW_RETRY_SECONDS", "WINDOW_SECONDS", "SessionLimiter"]
 
 
 class SessionLimiter:
@@ -50,39 +54,14 @@ class SessionLimiter:
         max_addresses: int = MAX_TRACKED_ADDRESSES,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._per_address = per_address
-        self._window = window_seconds
-        self._max = max_addresses
-        self._monotonic = monotonic
-        self._lock = threading.Lock()
-        self._by_address: OrderedDict[str, deque[float]] = OrderedDict()
-
-    def _expire(self, times: deque[float], now: float) -> None:
-        while times and times[0] <= now - self._window:
-            times.popleft()
+        self._windows = SlidingWindows(
+            limit=per_address,
+            window_seconds=window_seconds,
+            max_keys=max_addresses,
+            monotonic=monotonic,
+        )
 
     def attempt(self, address: str) -> int | None:
         """Record one attempt from ``address``: ``None`` if allowed, else whole seconds to wait
         (and nothing is recorded)."""
-        with self._lock:
-            now = self._monotonic()
-            times = self._by_address.get(address)
-            if times is not None:
-                self._expire(times, now)
-                if len(times) >= self._per_address:
-                    oldest = times[len(times) - self._per_address]
-                    return max(1, math.ceil(oldest + self._window - now))
-            elif len(self._by_address) >= self._max:
-                # Make room only from entries whose attempts have all aged out.
-                for key, entries in list(self._by_address.items()):
-                    self._expire(entries, now)
-                    if not entries:
-                        del self._by_address[key]
-                if len(self._by_address) >= self._max:
-                    return OVERFLOW_RETRY_SECONDS
-            if times is None:
-                times = deque()
-                self._by_address[address] = times
-            times.append(now)
-            self._by_address.move_to_end(address)
-            return None
+        return self._windows.take(address)
