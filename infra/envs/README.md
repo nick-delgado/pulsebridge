@@ -151,6 +151,21 @@ fallback only), `trusted_proxy_hops` (default 2, measured behind Firebase Hostin
 `openemr_scopes` (step 6), `public_origin` (a custom domain; T30, deferred), `name_prefix` /
 `identity_name_prefix`, the two ingress fallbacks, and the public demo's settings below.
 
+Rules the root enforces before anything is created: a `SYN-` patient ID is **required** with
+synthetic data and **refused** without it; a real name is refused with synthetic data (the cuff
+simulator always sends the seeder's synthetic name, Synthetic / Demo, so the seeder accepts a
+Patient the cuff path created first) and required without it; an alert destination is
+required; the zone must be in the region; images must be pinned by digest. (Until T44 prod
+also refused a reviewer password from tfvars; D16 removed the password and that switch,
+`allow_reviewer_password_from_tfvars`: both environments now set the session signing key with
+the same script.)
+
+**One patient for everything.** `patient_id` and `patient_assigning_authority` are one variable
+each. `_stack` passes the same values to module ingestion (v2-to-fhir, health-sync or the
+seeder) and module phr (cuff-sim, fhir-proxy), and the `setup_env` output hands `PATIENT_ID` to
+the connect script. `checks.tf` compares what each module received; `_stack/tests/plan_scan.py`
+compares the planned `PATIENT_ID` and `PATIENT_ASSIGNING_AUTHORITY` of every service.
+
 ### The public demo's settings
 
 All optional: leave them unset (`null`) and module phr's defaults apply, which are
@@ -179,22 +194,6 @@ sends and 4 shares in 10 minutes per session, 60 shares an hour for everyone. On
 `history_days` and `session_ttl_seconds` are stated on the page's privacy note
 (`web/privacy.html`: "the last 7 days", "24 hours"); if you change them, change the note too
 (`infra/modules/phr/tests/check_proxy_settings.py` fails until you do).
-
-
-Rules the root enforces before anything is created: a `SYN-` patient ID is **required** with
-synthetic data and **refused** without it; a real name is refused with synthetic data (the cuff
-simulator always sends the seeder's synthetic name, Synthetic / Demo, so the seeder accepts a
-Patient the cuff path created first) and required without it; an alert destination is
-required; the zone must be in the region; images must be pinned by digest. (Until T44 prod
-also refused a reviewer password from tfvars; D16 removed the password and that switch,
-`allow_reviewer_password_from_tfvars`: both environments now set the session signing key with
-the same script.)
-
-**One patient for everything.** `patient_id` and `patient_assigning_authority` are one variable
-each. `_stack` passes the same values to module ingestion (v2-to-fhir, health-sync or the
-seeder) and module phr (cuff-sim, fhir-proxy), and the `setup_env` output hands `PATIENT_ID` to
-the connect script. `checks.tf` compares what each module received; `_stack/tests/plan_scan.py`
-compares the planned `PATIENT_ID` and `PATIENT_ASSIGNING_AUTHORITY` of every service.
 
 ## What a plan shows
 
