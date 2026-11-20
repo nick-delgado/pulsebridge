@@ -991,9 +991,9 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 
 | ID | Task | Depends on | Owns | Status |
 | --- | --- | --- | --- | --- |
-| T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` (but including `fhir_proxy/share/testing.py`, the share tests' harness), `tests/e2e/`, and the proxy's entries in `tests/tooling/test_image_smoke.py` (added 19 Nov so the suite stays green) | in-progress |
-| T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/`, and `tests/tooling/test_phr_service_config.py` (added 19 Nov) | in-progress |
-| T45 | Dashboard: "View the live demo" | D16 | `web/` | in-review (reviewed 19 Nov: approve with minor fixes; fixes under way) |
+| T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` (but including `fhir_proxy/share/testing.py`, the share tests' harness), `tests/e2e/`, and the proxy's entries in `tests/tooling/test_image_smoke.py` (added 19 Nov so the suite stays green) | done |
+| T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/`, and `tests/tooling/test_phr_service_config.py` (added 19 Nov) | done |
+| T45 | Dashboard: "View the live demo" | D16 | `web/` | done |
 | T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | todo |
 | T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, and the minimum needed elsewhere in `web/` | todo |
 | T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/` (beyond what T43 changed), service and module READMEs not owned above | todo |
@@ -1147,6 +1147,27 @@ measured), and by the attempt time for send attempts.
 - AC: the master checklist gets rows for what only a real deployment can show (the assessment
   call, the score a real browser gets, the CSP with reCAPTCHA, the cookie through Hosting's
   rewrite, the counter under two instances, the quota override if any).
+
+**T43 to T45 outcome (20 November).** All three reviewed and merged together (the page's CSP
+check needs both the page and the header). T45: approve with minor fixes (wording, a rate-limit
+message test, a browser test for a script that fails to load), made. T44: changes required (the
+CSP check parsed the page's source shape; it now runs the page's own code), plus a narrower
+custom reCAPTCHA key role for the deployer instead of `recaptchaenterprise.editor`, both Hosting
+origins in `ALLOWED_ORIGINS` (the key's domains come from the same list), the demo settings
+passable from tfvars, and a `token_issuer` output; made. T43: changes required (`make smoke`
+derived the token issuer from the secret prefix, which differs from `name_prefix` by default;
+it now requires `PULSEBRIDGE_TOKEN_ISSUER` from the `token_issuer` output); made. Decided in
+the builds: the unconfigured code is `503 session-not-configured`; logout needs no session; the
+Origin check covers every method except GET and HEAD; `demo-busy` carries `Retry-After` to UTC
+midnight; the counter bucket is `<project_id>-<name_prefix>-demo-counters`; the proxy keeps
+`roles/recaptchaenterprise.agent` (its extras are list-only); Fraud Defense has no per-day
+quota to lower (checked), so the bucket counter is the only daily cap. Google's reCAPTCHA pages
+were read directly. Checked together offline: lint, `make test` (3,690 passed), `make tf-test`
+(all modules), the dashboard's unit tests (781) and build, pre-commit, secret scan. Known
+failures until T48: two `test_docs` cases for `docs/setup.md`, which still links the
+reviewer-password section and script. Also for T48: the Makefile's smoke comment (reviewer
+password; add `PULSEBRIDGE_TOKEN_ISSUER`), and a short privacy note on the page (the site owner
+is now the data controller for reCAPTCHA data), if the user wants one.
 
 ### Rollout (orchestrator, after T48)
 
