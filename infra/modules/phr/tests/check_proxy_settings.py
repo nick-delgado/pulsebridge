@@ -132,19 +132,24 @@ def main() -> int:
     proxy = proxy_settings(CONFIG.read_text(encoding="utf-8"))
     module = module_settings(VARIABLES_TF.read_text(encoding="utf-8"))
     found = problems(proxy, module, PRIVACY.read_text(encoding="utf-8"))
-    # The check's own control: a drifted copy of each kind must be reported.
-    drifted = {k: dict(v) for k, v in module.items()}
-    drifted["HISTORY_DAYS"]["high"] = 31
-    drifted["SHARES_PER_INSTANCE_PER_HOUR"]["default"] = 15
-    drifted["BOT_CHECKS_PER_DAY"]["high"] = 200000
-    control = problems(proxy, drifted, "sessions last 1 hours; the last 2 days")
-    if len(control) != 5:
-        print(f"check_proxy_settings: the control found {control}; the check is broken")
-        return 1
+    # Real drift first, so it is always reported as what it is.
     if found:
         print("check_proxy_settings: module phr and fhir-proxy disagree:")
         for p in found:
             print(f"  - {p}")
+        return 1
+    # The check's own control, independent of the real module: a module that copies the proxy
+    # exactly passes, and a copy drifted in each way is reported exactly once per drift.
+    baseline = {k: {**v, "low_strict": False} for k, v in proxy.items()}
+    good_note = "sessions last 24 hours; only the last 7 days"
+    drifted = {k: dict(v) for k, v in baseline.items()}
+    drifted["HISTORY_DAYS"]["high"] = 31
+    drifted["SHARES_PER_INSTANCE_PER_HOUR"]["default"] = 15
+    drifted["BOT_CHECKS_PER_DAY"]["high"] = 200000
+    clean = problems(proxy, baseline, good_note)
+    control = problems(proxy, drifted, "sessions last 1 hours; the last 2 days")
+    if clean or len(control) != 5:
+        print(f"check_proxy_settings: the control found {clean} and {control}; the check is broken")
         return 1
     print(f"check_proxy_settings: {len(module)} settings agree with fhir-proxy's config.py")
     return 0
