@@ -60,9 +60,7 @@ def proxy_settings(text: str) -> dict[str, dict]:
         if not m:
             raise SystemExit(f"config.py: no VARIABLES entry for {name}")
         default = re.findall(r'"([^"]*)"', m.group(1))[-1]
-        r = re.search(
-            rf'_number\("{name}", values, ([0-9.]+), ([0-9.]+)(, whole=True)?\)', text
-        )
+        r = re.search(rf'_number\("{name}", values, ([0-9.]+), ([0-9.]+)(, whole=True)?\)', text)
         if not r:
             raise SystemExit(f"config.py: no _number(...) range check for {name}")
         found[name] = {
