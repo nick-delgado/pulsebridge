@@ -116,7 +116,10 @@ def capability_statement(
                     f"valid for {hours} hours that carries no user identity, no scopes and no "
                     "launch context; Authorization headers are not accepted. Every POST must "
                     "come from the dashboard's own origin (Origin header). Every search is "
-                    "limited to the one configured patient.",
+                    "limited to the one configured patient. Requests are rate limited per "
+                    "client address and per session (T46): a refusal is HTTP 429 with "
+                    "Retry-After in seconds and an OperationOutcome (issue code throttled, "
+                    "reason rate-limited).",
                 },
                 "resource": list(resources.values()),
             }

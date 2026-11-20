@@ -102,6 +102,14 @@ def test_the_share_endpoint_the_gate_names_is_the_share_routes() -> None:
     assert (ROUTE.method, ROUTE.path) == ("POST", "/share")
 
 
+def test_the_capability_statement_says_requests_are_rate_limited(tmp_path) -> None:
+    h = demo(tmp_path)
+    security = read(h).get_json()["rest"][0]["security"]["description"]
+    assert "rate limited" in security
+    assert "429" in security
+    assert "Retry-After" in security
+
+
 # ---- reads per session -------------------------------------------------------------------------
 
 
