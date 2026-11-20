@@ -474,6 +474,30 @@ describe('refreshing (data changes, polling) without losing focus', () => {
     expect(m.calls).toHaveLength(2);
   });
 
+  it('a 429 while polling waits for Retry-After, then polling resumes (T47)', async () => {
+    vi.useFakeTimers();
+    const m = mount();
+    const pending = page([
+      attempt({ application: { outcome: 'pending', reason: null }, observation: null }),
+    ]);
+    await m.answer(pending);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(m.calls).toHaveLength(2);
+    m.calls[1]?.answer.reject(new ApiError(429, 'Too many requests. Wait 50 seconds.', null, 50));
+    await flush();
+    expect(m.q('#log-alert').textContent).toContain('Too many requests. Wait 50 seconds.');
+    // Nothing is asked while the wait runs, and the log has not given up.
+    await vi.advanceTimersByTimeAsync(49_000);
+    expect(m.calls).toHaveLength(2);
+    expect(m.slots.log.textContent).not.toContain('still pending after 2 minutes');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(m.calls).toHaveLength(3);
+    await m.answer(page([attempt()]));
+    expect(m.q('#log-alert').textContent).toBe('');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.calls).toHaveLength(3); // settled
+  });
+
   it('polling is bounded and then offers "Check again"', async () => {
     vi.useFakeTimers();
     const m = mount();

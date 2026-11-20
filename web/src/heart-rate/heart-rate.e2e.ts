@@ -89,7 +89,7 @@ test.describe('recent watch data: the newest windows are provisional', () => {
     const share = page.getByRole('button', { name: 'Share with clinic' });
 
     // Reach the chart with Tab from the range buttons, and see the focus ring.
-    await page.getByRole('button', { name: 'Show the last 30 days' }).focus();
+    await page.getByRole('button', { name: 'Show the last 7 days' }).focus();
     await page.keyboard.press('Tab');
     await expect(slider(page)).toBeFocused();
     const outline = await slider(page).evaluate((el) => getComputedStyle(el).outlineStyle);
@@ -118,7 +118,7 @@ test.describe('recent watch data: the newest windows are provisional', () => {
   });
 });
 
-test('switching ranges loads 7 and 30 days', async ({ page }) => {
+test('switching ranges loads 7 days, and there is no 30-day range (T47)', async ({ page }) => {
   const errors = await watchErrors(page);
   await logIn(page);
   await expect(summary(page)).toContainText('last 24 hours');
@@ -133,16 +133,16 @@ test('switching ranges loads 7 and 30 days', async ({ page }) => {
   const week = await windowCount(page);
   expect(week).toBeGreaterThan(6 * day);
 
-  await page.getByRole('button', { name: 'Show the last 30 days' }).click();
-  await expect(summary(page)).toContainText('last 30 days');
-  const month = await windowCount(page);
-  expect(month).toBeGreaterThan(8000);
+  // Only 24 h and 7 d: the proxy shows nothing older than HISTORY_DAYS (7 by default).
+  const ranges = watchSide(page).getByRole('group', { name: 'Time range' }).getByRole('button');
+  await expect(ranges).toHaveText(['24 h', '7 d']);
+  await expect(page.getByRole('button', { name: 'Show the last 30 days' })).toHaveCount(0);
 
-  // Still responsive at ~8,600 windows: moving the keyboard cursor answers quickly.
+  // Still responsive at ~2,000 windows: moving the keyboard cursor answers quickly.
   await slider(page).focus();
   const t0 = Date.now();
   for (let i = 0; i < 20; i++) await page.keyboard.press('ArrowLeft');
-  await expect(slider(page)).toHaveAttribute('aria-valuenow', String(month - 20));
+  await expect(slider(page)).toHaveAttribute('aria-valuenow', String(week - 20));
   expect(Date.now() - t0).toBeLessThan(5000);
   expect(errors).toEqual([]);
 });

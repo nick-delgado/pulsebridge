@@ -30,7 +30,7 @@ import {
 } from '../api/contract';
 import { CuffSendError, isFinalTraceAnswer, UnauthorizedError } from '../api/errors';
 import type { CuffSlot, FeatureContext } from '../shell/features';
-import { pollUntil, type PollOptions } from '../state/poll';
+import { pollUntil, rateLimitWaitMs, type PollOptions } from '../state/poll';
 import type { Selection } from '../state/selection';
 import { append, el, placeholder, replaceChildren, uniqueId } from '../ui/dom';
 import {
@@ -945,6 +945,8 @@ export function createCuff(context: FeatureContext<CuffSlot>, deps: CuffDeps): v
           return now === undefined || !isPending(now);
         } catch (error) {
           if (isAbort(error, c.signal) || error instanceof UnauthorizedError) throw error;
+          // A 429: pollUntil waits for its Retry-After, then polls again (T47).
+          if (rateLimitWaitMs(error) !== null) throw error;
           if (isFinalTraceAnswer(error)) {
             const now = find(r.key);
             if (now) replace({ ...now, lookup: 'missing' });

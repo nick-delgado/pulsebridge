@@ -66,7 +66,8 @@ test('every row kind, both acknowledgment levels in words, and the summary in th
   ]) {
     await expect(log, words).toContainText(words);
   }
-  // Load everything; the unreadable rows (one with no id) come last.
+  // Load everything. An unreadable row with no time is not listed since T47 (its age cannot be
+  // placed in the 7-day window); the one with a time is listed in its place by time.
   const more = page.locator('#log-more');
   for (let i = 0; i < 10 && (await more.isVisible()); i++) {
     const count = await logRows(page).count();
@@ -74,8 +75,8 @@ test('every row kind, both acknowledgment levels in words, and the summary in th
     await expect.poll(() => logRows(page).count()).toBeGreaterThan(count);
   }
   await expect(more).toBeHidden();
-  await expect(logRows(page).last()).toContainText('Unreadable send record');
-  await expect(logRows(page).last()).toContainText('Time unknown');
+  await expect(logRows(page).filter({ hasText: 'Unreadable send record' })).toHaveCount(1);
+  await expect(log).not.toContainText('Time unknown');
   expect(errors).toEqual([]);
 });
 
