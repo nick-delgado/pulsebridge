@@ -68,7 +68,12 @@ describe('the privacy note stays inside the page rules', () => {
 
   it('names nobody: no e-mail address, domain or contact line', () => {
     expect(text).not.toMatch(/@/);
-    expect(text).not.toMatch(/\b[a-z0-9-]+\.(com|org|net|app|dev|io)\b/i);
+    // The only host named is Google's own, which reCAPTCHA talks to.
+    const hosts = [...text.matchAll(/\b(?:[a-z0-9-]+\.)+(?:com|org|net|app|dev|io)\b/gi)].map(
+      (m) => m[0],
+    );
+    expect(hosts.length).toBeGreaterThan(0);
+    for (const host of hosts) expect(host).toMatch(/^(www\.)?google\.com$/);
   });
 });
 
@@ -89,6 +94,10 @@ describe('every claim matches the code', () => {
     expect(text).toContain('__session');
     expect(text).toContain('scripts on the page cannot read it');
     expect(text).toContain('_GRECAPTCHA');
+    // Not "no other cookies": requests to www.google.com can carry Google's own (FAQ).
+    expect(text).toContain('This site sets no other cookie');
+    expect(text).toContain('cookies Google had already set on google.com');
+    expect(text).not.toMatch(/no other cookies|who viewed what/);
   });
 
   it('the server sends Google only the token, the site key and the action', () => {

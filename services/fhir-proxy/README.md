@@ -645,8 +645,8 @@ flood (the first per address per minute, then one `session-events-suppressed` co
 `session-signing-key-unavailable` (`problem`), `token-refused` (`reason`). Never a token, the
 key or the refused `Origin` value.
 
-What it is not: sign-in. Every visitor is the same anonymous "demo"; nothing records who viewed
-what. A real multi-patient deployment would use SMART on FHIR or an identity provider and an
+What it is not: sign-in. Every visitor is the same anonymous "demo"; nothing ties a request to a person (Cloud Run's request
+log keeps each request's network address and URL for 30 days). A real multi-patient deployment would use SMART on FHIR or an identity provider and an
 audit log. The CapabilityStatement says so and claims no `restful-security-service` code.
 
 ## Response headers

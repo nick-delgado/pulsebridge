@@ -280,11 +280,13 @@ is the PulseBridge side of the same exchange:
   classification; that is all.
 - **Single patient.** One deployment holds one person's record, connected with the deployer's
   own Google Health account. There is no sign-in at all: every visitor of the public demo gets
-  the same anonymous access after the bot check, and nothing records who viewed what.
+  the same anonymous access after the bot check, and nothing asks who they are (Cloud Run's
+  request log does keep each request's network address and URL for 30 days).
 - **Screenshots use synthetic data.** The cuff is simulated; every image here shows the synthetic
   patient. The live demo on prod shows the deployer's real heart rate for the last 7 days.
-- **Small by design.** The OpenEMR "clinic" runs on a free-tier e2-micro: fine for one reviewer
-  at a time, slow under sustained load. Only the FHIR searches the dashboard needs are supported.
+- **Small by design.** The OpenEMR "clinic" runs on a free-tier e2-micro: it handles shares one
+  at a time and slows down under sustained load, so the public demo's limits keep the load small
+  (2 shares per session in 10 minutes, at most 30 an hour per proxy instance for everyone). Only the FHIR searches the dashboard needs are supported.
   OpenEMR receives vitals only (no orders, medications or scheduling).
 - **Not a managed mapping pipeline.** The mappings are our own code on purpose; there is no
   Whistle, Dataflow or managed HL7v2-to-FHIR conversion.
