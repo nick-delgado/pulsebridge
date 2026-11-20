@@ -18,8 +18,10 @@ explained the first time it appears.
 > showed no new charges for the project (checklist T4). **The public demo**
 > (decision D16, 19 November: no password, a bot check, a 24-hour session cookie, rate limits and
 > a 7-day window; [Step 4](#step-4-open-the-public-demo)) was built and tested offline after
-> those runs and is not yet verified on a real project: its first real run is the rollout to prod, and what
-> only that can show is listed in the checklist (rows P17 to P26). The runbook's
+> those runs and rolled out to prod on 20 November: the bot check, the session cookie through
+> Hosting and `make smoke` worked there. What it needs more traffic for (two instances, other
+> devices' scores) is not yet verified on a real project; the checklist (rows P17 to P26) says
+> which. The runbook's
 > [master checklist](../infra/envs/README.md#master-checklist) lists every assumption in the order
 > you will meet them and records what the dev run confirmed. If a step below does not behave as
 > described, that checklist is where the answer is recorded.
