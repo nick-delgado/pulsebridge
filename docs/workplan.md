@@ -996,7 +996,7 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 | T45 | Dashboard: "View the live demo" | D16 | `web/` | done |
 | T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | done |
 | T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, the minimum needed elsewhere in `web/`, and the one smoke break in `tests/e2e/test_smoke_breaks.py` that the window changes (added 20 Nov) | done |
-| T48 | Docs, settings and privacy note for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/`, the `Makefile` (comments only), `infra/modules/phr/`, `infra/envs/_stack/`, `infra/envs/dev/`, `infra/envs/prod/`, `infra/modules/ingestion/tests/`, `web/` (the privacy note), `tests/tooling/` where the docs tests need it, and service and module READMEs (scope widened 20 Nov) | in-progress |
+| T48 | Docs, settings and privacy note for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/`, the `Makefile` (comments only), `infra/modules/phr/`, `infra/envs/_stack/`, `infra/envs/dev/`, `infra/envs/prod/`, `infra/modules/ingestion/tests/`, `web/` (the privacy note), `tests/tooling/` where the docs tests need it, and service and module READMEs (scope widened 20 Nov) | done |
 
 ### The contract T43 to T45 share
 
@@ -1214,6 +1214,17 @@ attempt's HL7v2 text could carry an older OBX-14 time (cuff-sim stamps the curre
 verified until rollout: Cloud Healthcare's `date=ge` on `effectivePeriod`, `date` with
 `_total=accurate&_count=0`, and a `_page_token` with a changed `date`. For module phr (T48 or
 the rollout): pass `HISTORY_DAYS` and T46's five limits as optional variables.
+
+**T48 outcome (20 November).** Reviewed (approve with minor fixes) and merged. The README,
+setup guide and runbook describe the self-serve demo; module phr passes `HISTORY_DAYS` and T46's
+five limits through `_stack` and both roots (a checker fails if a default or range drifts from
+the proxy's); the page has a privacy note (`web/privacy.html`, linked from the landing view and
+the header; every claim tied to the code or Google's docs by tests); `make smoke` runs its
+negatives in a second session (T46's per-session cuff limit would otherwise refuse N4); checklist
+rows P17 to P26 cover what only a deployment can show. The brief's components, secrets and layout
+were updated by the orchestrator. Checked together on the working branch, credentials removed:
+lint, `make test` (3,802 passed, 0 failed), every Terraform check, the dashboard (808 unit, 73
+browser tests, build), pre-commit and the secret scan.
 
 ### Rollout (orchestrator, after T48)
 
