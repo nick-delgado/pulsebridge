@@ -307,6 +307,7 @@ def test_the_signed_token_is_redacted_even_when_echoed() -> None:
             "PULSEBRIDGE_BASE_URL": "https://dash.example.test/api",
             "CLOUDSDK_CORE_PROJECT": "example-project-1",
             "SECRET_NAME_PREFIX": "pb",
+            "PULSEBRIDGE_TOKEN_ISSUER": "pulsebridge-fhir-proxy:example-project-1:pulsebridge",
         },
         transport=Fake(),
         key_reader=lambda _p, _s: key,
