@@ -818,8 +818,15 @@ class MessagesLog:
                     n for r in audited for n in (r.message_name, r.derived_message_name) if n
                 }
                 orphans = [(at, m) for at, m in unclaimed if m.name not in everywhere]
+                # Only attempts inside the shown window may be pointed at: a hint naming an
+                # older one would hand out the id of an attempt that is not shown (T47).
                 candidates = {
-                    m.name: self._duplicate_candidates(m, at, audited) for at, m in orphans
+                    m.name: [
+                        r
+                        for r in self._duplicate_candidates(m, at, audited)
+                        if attempt_in_window(r.sent_at, since)
+                    ]
+                    for at, m in orphans
                 }
                 # A candidate qualifies only if the store does not have its own derived name.
                 to_check = sorted(

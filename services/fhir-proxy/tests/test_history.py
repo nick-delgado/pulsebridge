@@ -169,6 +169,18 @@ def test_a_store_that_ignores_the_bound_still_shows_nothing_older(harness, readi
     assert _ids(later) == ["bp-at"]
 
 
+def test_a_continuation_kept_by_the_grace_still_shows_nothing_older(harness, patient) -> None:  # noqa: ARG001
+    # A next link followed seconds later keeps its own ge bound (a little before the current
+    # boundary), so the store is asked the same query; what lies between the two is not shown.
+    harness.fake.put(FHIR_STORE, blood_pressure("bp-between", BOUNDARY - timedelta(seconds=10)))
+    harness.fake.put(FHIR_STORE, blood_pressure("bp-after", BOUNDARY + timedelta(seconds=10)))
+    query = f"{BP}&date=ge{_z(BOUNDARY - timedelta(seconds=30))}&_page_token=0"
+    response = harness.get(f"/fhir/Observation?{query}")
+    assert _ids(response) == ["bp-after"]
+    sent = [v for k, v in harness.fake.calls("GET", "/Observation$")[-1][2] if k == "date"]
+    assert sent == [f"ge{_z(BOUNDARY - timedelta(seconds=30))}"]  # kept for the page token
+
+
 def test_a_later_lower_bound_is_kept(harness, readings) -> None:  # noqa: ARG001
     response = harness.get(f"/fhir/Observation?{HR}&date=ge2025-12-26T12:30:00Z")
     assert _ids(response) == ["hr-inside"]
@@ -368,6 +380,38 @@ def test_the_messages_log_covers_the_window(harness, patient) -> None:  # noqa: 
     assert old not in ids and older not in ids and name_old not in ids
     audit = [p for _, _, p in harness.fake.calls("GET", "/AuditEvent$") if ("_count", "50") in p]
     assert audit and all(("date", f"ge{BOUNDARY_TEXT}") in p for p in audit)
+
+
+@pytest.mark.parametrize(("sent_offset", "hinted"), [(-30, False), (10, True)])
+def test_a_duplicate_hint_never_names_an_older_attempt(
+    harness, patient, sent_offset: int, hinted: bool
+) -> None:  # noqa: ARG001
+    from fhir_proxy.testing import sample_bytes
+    from pulsebridge_fhir import Acknowledged, SendAttempt, build_send_attempt_audit_event
+
+    data = sample_bytes("valid_bp_reading")  # control ID SYN-VALID-0001
+    sent = BOUNDARY + timedelta(seconds=sent_offset)
+    built = build_send_attempt_audit_event(
+        SendAttempt(
+            sent_at=sent,
+            transport="mllp",
+            control_id="SYN-VALID-0001",
+            result=Acknowledged(code="AA", raw_ack=b"MSH|^~\\&|||||||ACK|X|P|2.5.1\rMSA|AA|X"),
+            patient_id="PB-SYN-0001",
+            agent="cuff-sim",
+            destination=STORE_NAME,
+            derived_message_name=f"{STORE_NAME}/messages/d3JvbmctZGVyaXZlZA==",  # not stored
+        ),
+        recorded=sent + timedelta(seconds=1),
+    )
+    harness.fake.put(AUDIT_STORE, built.resource)
+    name = f"{STORE_NAME}/messages/cmVhbC1tZXNzYWdl"
+    created = _z(BOUNDARY + timedelta(seconds=60)).replace("Z", "000Z")
+    harness.fake.add_message(name, data, create_time=created, patient_ids=["PB-SYN-0001"])
+    rows = {r["id"]: r for r in harness.get("/messages").get_json()["entries"]}
+    assert name in rows
+    expected = built.resource["id"] if hinted else None
+    assert rows[name]["possibleDuplicateOf"] == expected
 
 
 def test_a_transaction_that_wrote_only_older_windows_is_not_a_row(harness, seed_heart_rate) -> None:

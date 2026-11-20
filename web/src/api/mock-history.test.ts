@@ -90,6 +90,20 @@ describe('MockClient shows only the last 7 days', () => {
     expect((shared as ApiError).status).toBe(404);
   });
 
+  it('a blood-pressure reading that has left the window answers 404 too', async () => {
+    const [bp] = await client.searchObservations({
+      code: LOINC.bloodPressurePanel,
+      range: { start: new Date(NOW - DAY), end: new Date(NOW + DAY) },
+    });
+    const id = bp?.id ?? '';
+    expect(id).not.toBe('');
+    await expect(client.getObservation(id)).resolves.toMatchObject({ id });
+    now = NOW + 8 * DAY;
+    await client.startSession('mock-recaptcha-test');
+    const error: unknown = await client.getObservation(id).catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(404);
+  });
+
   it('the messages log lists nothing older than the window', async () => {
     const page = await client.listMessages({ count: 50 });
     expect(page.entries.length).toBeGreaterThan(0);
