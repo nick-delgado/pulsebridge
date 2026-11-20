@@ -49,9 +49,7 @@ test('from the landing view: the privacy note, with no script, and back', async 
   expect(seen.errors).toEqual([]);
 });
 
-test('from the dashboard header: the privacy note, then back to the dashboard', async ({
-  page,
-}) => {
+test('from the dashboard header: the privacy note, and back', async ({ page }) => {
   const seen = await watch(page);
   await page.goto('/');
   await page.getByRole('button', { name: 'View the live demo' }).click();
