@@ -15,7 +15,6 @@ import {
   mockDataSetFromSearch,
   SYNC_INTERVAL_MS,
 } from './mock-data';
-import { Session } from './session';
 
 // US daylight saving ends on Sunday 1 November 2026 at 02:00 EDT (06:00 UTC): clocks go back
 // to 01:00 EST. 01:30 local therefore happens twice, at 05:30 and 06:30 UTC.
@@ -55,15 +54,13 @@ describe('mock data sets', () => {
     const now = Date.parse('2026-11-01T17:00:00Z'); // 12:00 EST
 
     beforeEach(async () => {
-      sessionStorage.clear();
       client = new MockClient({
-        session: new Session(sessionStorage, () => now),
         onUnauthorized: () => undefined,
         now: () => now,
         latencyMs: 0,
         dataSet: MOCK_DATA_SETS['dst-new-york'],
       });
-      await client.login('x');
+      await client.startSession('mock-recaptcha-test');
     });
 
     it('writes -04:00 before the change and -05:00 after it, for the same instants', async () => {
@@ -111,15 +108,13 @@ describe('mock sync schedule', () => {
   });
 
   it('moves the data, its status and the last sync time together, once per run', async () => {
-    sessionStorage.clear();
     let now = Date.parse('2026-03-10T15:03:00Z');
     const client = new MockClient({
-      session: new Session(sessionStorage, () => now),
       onUnauthorized: () => undefined,
       now: () => now,
       latencyMs: 0,
     });
-    await client.login('x');
+    await client.startSession('mock-recaptcha-test');
     const range = () => ({ start: new Date(now - 3 * 3600_000), end: new Date(now) });
     const load = () => client.searchObservations({ code: LOINC.heartRate, range: range() });
 
@@ -174,16 +169,13 @@ describe('mock sync schedule', () => {
     expect(lastHeartRateWrite(at('12:50'))).toBe(at('12:32'));
     // The first windows after the gap (12:45-13:00) arrive with the 13:02 run.
     expect(lastHeartRateWrite(at('13:05'))).toBe(at('13:02'));
-
-    sessionStorage.clear();
     const now = at('12:50');
     const client = new MockClient({
-      session: new Session(sessionStorage, () => now),
       onUnauthorized: () => undefined,
       now: () => now,
       latencyMs: 0,
     });
-    await client.login('x');
+    await client.startSession('mock-recaptcha-test');
     expect((await client.getStatus()).watchSync.lastSyncAt).toBe('2026-11-16T12:32:00.000Z');
     const page = await client.listMessages({ kind: 'fhir-transaction', count: 50 });
     const runs = page.entries.filter(

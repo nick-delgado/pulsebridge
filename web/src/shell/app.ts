@@ -1,18 +1,29 @@
 /**
- * The app's two states, login and dashboard, and the moves between them:
+ * The app's two states, landing and dashboard, and the moves between them (D16):
  *
- *   start ── token in sessionStorage? ── yes ──▶ dashboard
- *     │                                  no ───▶ login ── password OK ──▶ dashboard
- *   dashboard ── "Log out" ──▶ clear token ──▶ login
- *   dashboard ── any 401 (client calls onUnauthorized) ──▶ token already cleared ──▶ login
+ *   start ── checkSession: does the proxy accept this browser's __session cookie?
+ *     │        active ──▶ dashboard
+ *     │        none, or the check failed ──▶ landing ── bot check passes ──▶ dashboard
+ *   dashboard ── "Log out" ──▶ POST /auth/logout (clears the cookie) ──▶ landing
+ *   dashboard ── any 401 (client calls onUnauthorized) ──▶ landing, "session has ended"
+ *   dashboard ── any 429 (client calls onRateLimited) ──▶ stays; a notice says how long to wait
+ *
+ * The page never holds a token: the cookie is HttpOnly, so script cannot read it, and the only
+ * way to know whether it is still good is to ask the proxy.
  *
  * Leaving the dashboard aborts its AbortSignal, so every feature's listeners and subscriptions
- * go with it, and the next login builds a fresh dashboard.
+ * go with it, and the next session builds a fresh dashboard.
  */
 import type { PulseBridgeApi } from '../api/contract';
 import type { ClientDeps } from '../api/index';
-import { Session } from '../api/session';
-import { isServiceNotConfigured, UnauthorizedError } from '../api/errors';
+import {
+  ApiError,
+  isServiceNotConfigured,
+  NOT_CONFIGURED_MESSAGE,
+  rateLimitMessage,
+  UnauthorizedError,
+} from '../api/errors';
+import type { BotCheck } from '../bot-check/index';
 import { mountCuff } from '../cuff/index';
 import { mountHeartRate } from '../heart-rate/index';
 import { mountMessages } from '../messages/index';
@@ -22,10 +33,13 @@ import { createSelectionStore } from '../state/selection';
 import { el, placeholder, replaceChildren } from '../ui/dom';
 import type { FeatureContext, Features, MountFeature } from './features';
 import { dashboardLayout } from './layout';
-import { loginView } from './login';
+import { landingView, START_LABEL } from './landing';
 import { createSyncWatch } from './sync-watch';
 
-export const SESSION_ENDED = 'Your session has ended. Log in again.';
+export const SESSION_ENDED = `Your demo session has ended. Select "${START_LABEL}" to start a new one.`;
+
+/** How long the rate-limit notice stays when the proxy sent no `Retry-After`. */
+export const RATE_LIMIT_NOTICE_DEFAULT_MS = 60 * 1000;
 
 /**
  * How often the status strip reloads while the tab is visible. health-sync runs every 15
@@ -47,52 +61,58 @@ export const DEFAULT_FEATURES: Features = {
 export interface AppOptions {
   root: HTMLElement;
   makeClient: (deps: ClientDeps) => PulseBridgeApi | Promise<PulseBridgeApi>;
-  session?: Session;
+  /** reCAPTCHA in an HTTP build, the mock's stand-in in a mock build (bot-check/index.ts). */
+  botCheck: BotCheck;
   features?: Features;
   now?: () => number;
 }
 
 export interface App {
-  view(): 'login' | 'dashboard';
+  view(): 'landing' | 'dashboard';
   client: PulseBridgeApi;
 }
 
 export async function startApp(options: AppOptions): Promise<App> {
   const { root } = options;
-  const session = options.session ?? new Session();
   const features = options.features ?? DEFAULT_FEATURES;
   const now = options.now ?? (() => Date.now());
-  let view: 'login' | 'dashboard' = 'login';
+  let view: 'landing' | 'dashboard' = 'landing';
   let teardown: AbortController | null = null;
+  /** Shows the rate-limit notice on the dashboard; null while there is no dashboard. */
+  let rateLimited: ((retryAfterSeconds: number | null) => void) | null = null;
 
   const client = await options.makeClient({
-    session,
     onUnauthorized: () => {
-      showLogin(SESSION_ENDED);
+      showLanding(SESSION_ENDED);
+    },
+    onRateLimited: (seconds) => {
+      rateLimited?.(seconds);
     },
   });
 
   function leaveDashboard(): void {
     teardown?.abort();
     teardown = null;
+    rateLimited = null;
   }
 
-  function showLogin(notice?: string): void {
-    if (view === 'login' && root.childElementCount > 0) {
-      // Several calls can fail with 401 at once; show the login form once.
+  function showLanding(notice?: string): void {
+    if (view === 'landing' && root.childElementCount > 0) {
+      // Several calls can fail with 401 at once; show the landing view once.
       return;
     }
     leaveDashboard();
-    view = 'login';
+    view = 'landing';
     replaceChildren(
       root,
-      loginView({
+      landingView({
         client,
+        botCheck: options.botCheck,
         ...(notice ? { notice } : {}),
         onSuccess: showDashboard,
       }),
     );
-    document.getElementById('login-password')?.focus();
+    document.getElementById('landing-start')?.focus();
   }
 
   function showDashboard(): void {
@@ -103,6 +123,24 @@ export async function startApp(options: AppOptions): Promise<App> {
     const { signal } = controller;
     const layout = dashboardLayout({ mode: client.mode, signal });
     const selection = createSelectionStore();
+
+    // T46: any route can answer 429 `rate-limited`. The visitor stays on the dashboard; the
+    // notice says how long to wait and goes once the wait is over. Each feature also shows its
+    // own error for the call that was refused.
+    let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+    rateLimited = (seconds) => {
+      layout.notice.textContent = rateLimitMessage(seconds);
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(
+        () => {
+          layout.notice.textContent = '';
+        },
+        seconds === null ? RATE_LIMIT_NOTICE_DEFAULT_MS : seconds * 1000,
+      );
+    };
+    signal.addEventListener('abort', () => {
+      clearTimeout(noticeTimer);
+    });
     const dataChanges = createDataChangeBus();
 
     // The status strip. Each load replaces the last one's answer; a load that answers after a
@@ -139,7 +177,8 @@ export async function startApp(options: AppOptions): Promise<App> {
         (error: unknown) => {
           if (signal.aborted || load !== statusLoads || error instanceof UnauthorizedError) return;
           shown = false;
-          // A missing password secret makes every route 503 (amendment 11); the session stays.
+          // A proxy that cannot check sessions answers 503 everywhere (amendment 11); the
+          // session stays.
           layout.status.render(
             isServiceNotConfigured(error)
               ? { kind: 'not-configured' }
@@ -179,10 +218,11 @@ export async function startApp(options: AppOptions): Promise<App> {
       'click',
       () => {
         // Abort first: every request the dashboard still has in flight is cancelled before the
-        // token goes, so none of them can answer after the next login.
+        // session ends, so none of them can answer into the next one. The logout request itself
+        // is not tied to the dashboard, so it is not cancelled with it.
         leaveDashboard();
-        client.logout();
-        showLogin();
+        void client.logout();
+        showLanding();
       },
       { signal },
     );
@@ -232,8 +272,24 @@ export async function startApp(options: AppOptions): Promise<App> {
     refreshStatus();
   }
 
-  if (client.isLoggedIn()) showDashboard();
-  else showLogin();
+  // A reload keeps the cookie, so a visitor who already passed the bot check goes straight back
+  // to the dashboard. If the proxy cannot be asked, the landing view is the safe place: starting
+  // a new session there works either way.
+  let notice: string | undefined;
+  let state: 'active' | 'none' = 'none';
+  try {
+    state = await client.checkSession();
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 429) {
+      notice = rateLimitMessage(error.retryAfterSeconds);
+    } else if (isServiceNotConfigured(error)) {
+      // A cookie the proxy cannot check (T43's 503 `session-not-configured`): say so now rather
+      // than on the click, where starting a session would be refused the same way.
+      notice = NOT_CONFIGURED_MESSAGE;
+    }
+  }
+  if (state === 'active') showDashboard();
+  else showLanding(notice);
 
   return { view: () => view, client };
 }

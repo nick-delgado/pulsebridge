@@ -33,7 +33,7 @@ export function statusStrip(): { root: HTMLElement; render(state: StripState): v
 export type StripState =
   | { kind: 'loading' }
   | { kind: 'error'; message: string }
-  /** Every route answers 503 `login-not-configured` (amendment 11): the session is kept. */
+  /** Every route answers 503 `session-not-configured` (amendment 11): the session is kept. */
   | { kind: 'not-configured' }
   | { kind: 'ready'; status: StatusSummary; now: number };
 
@@ -46,7 +46,7 @@ function items(state: StripState): HTMLLIElement[] {
         'warn',
         'Service',
         'Not configured',
-        'The server is missing its reviewer password secret, so it answers no request. You are still logged in; the page tries again every few minutes.',
+        'The server is missing its session-signing key, so it answers no request. Your demo session is kept; the page tries again every few minutes.',
       ),
     ];
   }

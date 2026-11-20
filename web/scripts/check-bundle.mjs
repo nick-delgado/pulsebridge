@@ -2,17 +2,17 @@
 //   node scripts/check-bundle.mjs <dist-dir> <http|mock>
 //
 // 1. index.html carries the Content-Security-Policy <meta>, directive by directive:
-//    default-src, base-uri, form-action and object-src 'none'; script-src 'self'; connect-src
-//    exactly 'none' (mock) or 'self' plus the configured proxy origin (HTTP), nothing wider.
+//    default-src, base-uri, form-action and object-src 'none'. A mock build: script-src 'self',
+//    connect-src 'none', no frame-src (no Google at all). An HTTP build: exactly 'self' plus
+//    reCAPTCHA's paths (Google's CSP guidance, vite.config.ts RECAPTCHA_CSP), nothing wider.
 // 2. index.html has no inline <script> (the CSP would block it anyway).
 // 3. An HTTP build contains none of the mock client or its synthetic data. Vite drops the mock
 //    branch because the mode is a build-time constant; this proves it did.
 // 4. No build points at a developer machine (localhost, 127.0.0.1).
 // 5. The chart library (uPlot) is not in the main entry chunk nor imported statically by it,
-//    so the login form never waits for it (bundle-rules.mjs, from Vite's build manifest).
+//    so the landing view never waits for it (bundle-rules.mjs, from Vite's build manifest).
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadEnv } from 'vite';
 import { chartChunkProblems, mockMarkerProblems } from './bundle-rules.mjs';
 
 const [dir, mode] = process.argv.slice(2);
@@ -39,23 +39,28 @@ else {
       .filter((parts) => parts[0])
       .map(([name, ...values]) => [name, values.join(' ')]),
   );
-  // The proxy origin the build was configured with, read the way Vite reads it.
-  const proxyUrl = (
-    loadEnv(mode === 'mock' ? 'mock' : 'production', '.', 'VITE_').VITE_FHIR_PROXY_URL ?? ''
-  ).trim();
-  const proxyOrigin = /^https?:\/\//i.test(proxyUrl) ? new URL(proxyUrl).origin : null;
+  // Written out here, not imported from vite.config.ts, so a widened policy there fails here.
+  const google = {
+    script: 'https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/',
+    frame: 'https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/',
+    connect: 'https://www.google.com/recaptcha/',
+  };
   const expected = {
     'default-src': "'none'",
-    'script-src': "'self'",
+    'script-src': mode === 'mock' ? "'self'" : `'self' ${google.script}`,
     'base-uri': "'none'",
     'form-action': "'none'",
     'object-src': "'none'",
-    'connect-src': mode === 'mock' ? "'none'" : proxyOrigin ? `'self' ${proxyOrigin}` : "'self'",
+    'connect-src': mode === 'mock' ? "'none'" : `'self' ${google.connect}`,
+    'frame-src': mode === 'mock' ? undefined : google.frame,
   };
   for (const [name, value] of Object.entries(expected)) {
     const actual = directives.get(name);
-    if (actual !== value)
-      problems.push(`CSP ${name} is "${actual ?? '(missing)'}", expected "${value}"`);
+    if (actual !== value) {
+      problems.push(
+        `CSP ${name} is "${actual ?? '(missing)'}", expected "${value ?? '(missing)'}"`,
+      );
+    }
   }
 }
 if (/<script(?![^>]*\bsrc=)[^>]*>/i.test(html)) problems.push('index.html has an inline <script>');

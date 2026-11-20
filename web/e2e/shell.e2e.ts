@@ -12,24 +12,23 @@ function watchErrors(page: Page): string[] {
 
 async function logIn(page: Page): Promise<void> {
   await page.goto('/');
-  await page.getByLabel('Password').fill('any password works in mock mode');
-  await page.getByRole('button', { name: 'Log in' }).click();
+  await page.getByRole('button', { name: 'View the live demo' }).click();
   await expect(page.getByRole('main', { name: 'PulseBridge dashboard' })).toBeVisible();
 }
 
-test('login, regions, share button, log strip, no console errors', async ({ page }) => {
+test('demo session, regions, share button, log strip, no console errors', async ({ page }) => {
   const errors = watchErrors(page);
   const requests: string[] = [];
   page.on('request', (request) => requests.push(request.url()));
 
   await page.goto('/');
-  await expect(page.getByText('Any non-empty password logs in')).toBeVisible();
+  await expect(page.getByText('Mock mode: synthetic data and no server.')).toBeVisible();
   await logIn(page);
 
-  // Token in sessionStorage, no cookie.
-  const stored = await page.evaluate(() => sessionStorage.getItem('pulsebridge.session'));
-  expect(stored).toContain('mock-session-');
-  expect(await page.context().cookies()).toEqual([]);
+  // The page keeps no token anywhere script can read (in a real deployment the session is an
+  // HttpOnly cookie; the mock keeps its stand-in in memory).
+  expect(await page.evaluate(() => [sessionStorage.length, localStorage.length])).toEqual([0, 0]);
+  expect(await page.evaluate(() => document.cookie)).toBe('');
 
   // Landmarks and regions.
   await expect(page.getByRole('banner')).toBeVisible();
@@ -66,10 +65,9 @@ test('login, regions, share button, log strip, no console errors', async ({ page
   await toggle.press('Enter');
   await expect(log).toBeHidden();
 
-  // Logout returns to the login form and forgets the token.
+  // Logout returns to the landing view.
   await page.getByRole('button', { name: 'Log out' }).click();
-  await expect(page.getByLabel('Password')).toBeVisible();
-  expect(await page.evaluate(() => sessionStorage.getItem('pulsebridge.session'))).toBeNull();
+  await expect(page.getByRole('button', { name: 'View the live demo' })).toBeVisible();
 
   // Mock mode makes no request beyond the page's own files on the preview server.
   expect(requests.filter((url) => !url.startsWith('http://127.0.0.1:4173/'))).toEqual([]);
@@ -122,12 +120,12 @@ test('the figure is line art: no shape in the silhouette is filled', async ({ pa
 });
 
 for (const scheme of ['light', 'dark'] as const) {
-  test(`login field boundary has at least 3:1 contrast with its card (${scheme}, WCAG 1.4.11)`, async ({
+  test(`the start button has at least 3:1 contrast with its card (${scheme}, WCAG 1.4.11)`, async ({
     page,
   }) => {
     await page.emulateMedia({ colorScheme: scheme });
     await page.goto('/');
-    await expect(page.getByLabel('Password')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'View the live demo' })).toBeVisible();
     const ratio = await page.evaluate(() => {
       const rgb = (c: string) => (c.match(/\d+(\.\d+)?/g) ?? []).slice(0, 3).map(Number);
       const lum = (c: string) => {
@@ -137,10 +135,10 @@ for (const scheme of ['light', 'dark'] as const) {
         });
         return 0.2126 * r + 0.7152 * g + 0.0722 * b;
       };
-      const input = document.querySelector('#login-password');
-      const card = document.querySelector('.login__card');
-      if (!input || !card) return 0;
-      const a = lum(getComputedStyle(input).borderTopColor);
+      const button = document.querySelector('#landing-start');
+      const card = document.querySelector('.landing__card');
+      if (!button || !card) return 0;
+      const a = lum(getComputedStyle(button).backgroundColor);
       const b = lum(getComputedStyle(card).backgroundColor);
       return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
     });

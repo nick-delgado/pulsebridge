@@ -218,7 +218,7 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
         setText(status, '');
         setAlert([
           isServiceNotConfigured(error)
-            ? 'Not shared: the service is not configured (the server is missing its reviewer password secret). You are still logged in.'
+            ? 'Not shared: the service is not configured (the server is missing its session-signing key). Your demo session is kept.'
             : error instanceof ApiError && error.status === 404
               ? 'Not shared: the reading was not found in the record.'
               : `Not shared: the reading could not be checked (${error instanceof Error ? error.message : 'unknown error'}).`,
@@ -335,7 +335,7 @@ export function createShare(context: FeatureContext<ShareSlot>, deps: ShareDeps)
         setText(status, '');
         const lines = isServiceNotConfigured(failure)
           ? [
-              'Not shared: the service is not configured (the server is missing its reviewer password secret). You are still logged in.',
+              'Not shared: the service is not configured (the server is missing its session-signing key). Your demo session is kept.',
               'Nothing was sent to the clinic.',
             ]
           : failureSentences(failure);

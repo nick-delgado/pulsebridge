@@ -12,6 +12,7 @@
  */
 import type {
   AckCode,
+  AuthConfig,
   ApplicationOutcome,
   CommitAck,
   CuffSendResult,
@@ -473,4 +474,30 @@ export function parseShareResult(wire: unknown): ShareResult {
       observation: sentAndStored<Observation>(readBack.observation, 'Observation'),
     },
   };
+}
+
+/**
+ * reCAPTCHA key ids are 40 characters of letters, digits, `-` and `_` today; the bounds are
+ * looser so a longer id still works, while anything that could change the script URL's meaning
+ * (`&`, `/`, `?`, spaces) is refused before it gets there.
+ */
+const SITE_KEY = /^[A-Za-z0-9_-]{20,100}$/;
+/** reCAPTCHA action names may contain only letters, digits, `/` and `_` (Google's docs). */
+const ACTION = /^[A-Za-z0-9/_]{1,100}$/;
+
+/**
+ * `GET /auth/config`'s body, `{"recaptcha_site_key", "recaptcha_action"}`, checked. Throws on any
+ * other shape: a page that cannot load the bot check must say so, not guess a key.
+ */
+export function parseAuthConfig(body: unknown): AuthConfig {
+  const b = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+  const key = b.recaptcha_site_key;
+  const action = b.recaptcha_action;
+  if (typeof key !== 'string' || !SITE_KEY.test(key)) {
+    throw new Error('auth/config: recaptcha_site_key is missing or not a key id');
+  }
+  if (typeof action !== 'string' || !ACTION.test(action)) {
+    throw new Error('auth/config: recaptcha_action is missing or not an action name');
+  }
+  return { recaptchaSiteKey: key, recaptchaAction: action };
 }

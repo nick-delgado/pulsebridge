@@ -50,8 +50,7 @@ async function open(page: Page): Promise<string[]> {
   });
   await page.clock.setFixedTime(NOW);
   await page.goto('/?mock-data=dst-new-york');
-  await page.getByLabel('Password').fill('any password works in mock mode');
-  await page.getByRole('button', { name: 'Log in' }).click();
+  await page.getByRole('button', { name: 'View the live demo' }).click();
   await expect(page.locator('#hr-summary')).toContainText('last 24 hours');
   return errors;
 }

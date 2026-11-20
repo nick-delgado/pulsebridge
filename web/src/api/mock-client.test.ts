@@ -2,12 +2,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // The real shapes the mock must imitate: T06's example resources (synthetic, in the repo).
 import heartRateExample from '../../../libs/pulsebridge_fhir/examples/observation-heart-rate.json';
 import bloodPressureExample from '../../../libs/pulsebridge_fhir/examples/observation-blood-pressure.json';
-import { ApiError, CuffSendError, LoginError, UnauthorizedError } from './errors';
+import { ApiError, CuffSendError } from './errors';
 import { LOINC, type Observation } from './fhir';
 import { MockClient } from './mock-client';
 import { mockControlId, mockOruR01 } from './mock-data';
 import samplesManifest from '../../../libs/pulsebridge_hl7v2/samples/samples.json';
-import { Session } from './session';
 
 const EXAMPLES: Record<string, Observation> = {
   'observation-heart-rate.json': heartRateExample as Observation,
@@ -38,38 +37,16 @@ function shape(value: unknown, prefix = ''): string[] {
 }
 
 describe('MockClient', () => {
-  let session: Session;
   let onUnauthorized: ReturnType<typeof vi.fn<() => void>>;
   let now: number;
   let client: MockClient;
 
   beforeEach(async () => {
-    sessionStorage.clear();
     now = NOW;
-    // The session checks token expiry against the same fixed clock the mock uses.
-    session = new Session(sessionStorage, () => now);
     onUnauthorized = vi.fn<() => void>();
-    client = new MockClient({ session, onUnauthorized, now: () => now, latencyMs: 0 });
-    await client.login('any password');
-  });
-
-  describe('login', () => {
-    it('accepts any non-empty password and stores a token in sessionStorage', () => {
-      expect(client.isLoggedIn()).toBe(true);
-      expect(session.token()).toMatch(/^mock-session-/);
-    });
-
-    it('rejects an empty password', async () => {
-      client.logout();
-      await expect(client.login('')).rejects.toBeInstanceOf(LoginError);
-      expect(client.isLoggedIn()).toBe(false);
-    });
-
-    it('answers like a 401 when logged out: clears the session and calls onUnauthorized', async () => {
-      client.logout();
-      await expect(client.getStatus()).rejects.toBeInstanceOf(UnauthorizedError);
-      expect(onUnauthorized).toHaveBeenCalledOnce();
-    });
+    client = new MockClient({ onUnauthorized, now: () => now, latencyMs: 0 });
+    // The session flow itself is tested in mock-session.test.ts.
+    await client.startSession('mock-recaptcha-test');
   });
 
   describe('heart-rate Observations', () => {

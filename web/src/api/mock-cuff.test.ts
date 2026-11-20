@@ -10,7 +10,6 @@ import { isDerivedMessageName, type CuffReadingRequest } from './contract';
 import { CuffSendError } from './errors';
 import { MockClient, type MockClientOptions } from './mock-client';
 import { MOCK_HL7V2_STORE } from './mock-data';
-import { Session } from './session';
 
 const NOW = Date.parse('2026-03-10T15:02:00Z');
 const SAMPLES = (
@@ -19,16 +18,14 @@ const SAMPLES = (
 
 let now: number;
 async function client(options: Partial<MockClientOptions> = {}): Promise<MockClient> {
-  const session = new Session(sessionStorage, () => now);
   const c = new MockClient({
-    session,
     onUnauthorized: () => undefined,
     now: () => now,
     latencyMs: 0,
     rateLimit: null,
     ...options,
   });
-  await c.login('x');
+  await c.startSession('mock-recaptcha-test');
   return c;
 }
 
@@ -56,7 +53,6 @@ async function sha256UrlSafe(text: string): Promise<string> {
 }
 
 beforeEach(() => {
-  sessionStorage.clear();
   now = NOW;
 });
 
@@ -370,12 +366,11 @@ describe('mock cuff route: rate limit', () => {
 
   it("is on by default, with cuff-sim's defaults", async () => {
     const c = new MockClient({
-      session: new Session(sessionStorage, () => now),
       onUnauthorized: () => undefined,
       now: () => now,
       latencyMs: 0,
     });
-    await c.login('x');
+    await c.startSession('mock-recaptcha-test');
     for (let i = 0; i < 3; i++) await c.submitCuffReading(reading());
     expect((await refusal(c, reading())).status).toBe(429);
   });

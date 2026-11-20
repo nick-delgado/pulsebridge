@@ -30,3 +30,10 @@ describe('share reasons added by T15', () => {
     expect(e.nothingSent).toBe(false);
   });
 });
+
+describe('share reasons added by T45', () => {
+  it('rate-limited (429 from T46, no steps) keeps the wait and means nothing was sent', () => {
+    const e = ShareError.from(new ApiError(429, 'wait', outcome('rate-limited'), 30));
+    expect([e.reason, e.retryAfterSeconds, e.nothingSent]).toEqual(['rate-limited', 30, true]);
+  });
+});

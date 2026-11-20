@@ -78,7 +78,7 @@ function childController(parent: AbortSignal): AbortController {
 
 function errorText(error: unknown): string {
   if (isServiceNotConfigured(error)) {
-    return 'The service is not configured: the server is missing its reviewer password secret, so it answers no request. You are still logged in.';
+    return 'The service is not configured: the server is missing its session-signing key, so it answers no request. Your demo session is kept.';
   }
   return `Could not load the messages log: ${error instanceof Error ? error.message : 'unknown error'}`;
 }

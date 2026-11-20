@@ -132,9 +132,13 @@ export function mockAuditFailureFromSearch(search: string): 'build' | 'write' | 
  * - `?mock-status=openemr-not-checked|counts-unknown|health-sync-timeout|not-configured`: the
  *   status the proxy sends before T15 installs its OpenEMR probe (amendment 10), when the store
  *   could not be counted (null counts, amendment 15), when health-sync did not answer (amendment
- *   9), or when its password secret is missing, so every route but login answers 503 (amendment
- *   11).
+ *   9), or when it cannot check sessions (its signing key is missing), so every protected route
+ *   answers 503 (amendment 11).
  * - `?mock-share=<MockShareFailure>`: a share that stops or is refused at a given point.
+ * - `?mock-demo=<MockDemoOutcome>`: how "View the live demo" ends (T45, D16); a pass by default.
+ * - `?mock-session-seconds=<n>`: the session cookie lasts n seconds (1 to 86400; default 86400,
+ *   the proxy's `SESSION_TTL_SECONDS`), so a browser test can see a 401 mid-session.
+ * - `?mock-throttle=status`: every status load answers 429 `rate-limited` with `Retry-After: 30`.
  */
 export type MockLookupFailure = 'not-found' | 'failed';
 export type MockStatusMode =
@@ -158,13 +162,45 @@ export type MockShareFailure =
    */
   | 'hosting-timeout';
 
+/**
+ * How `POST /auth/session` (or the config before it) answers in mock mode: the proxy's refusals
+ * (workplan "The contract T43 to T45 share"), plus `config-unreachable`, where `GET /auth/config`
+ * gets no answer at all, and `bot-check-not-loaded`, where the bot check itself fails in the
+ * browser. (`?mock-status=not-configured` is the other side of `session-not-configured`: a
+ * session that started before the key went missing, so the dashboard's 503s can be seen.)
+ */
+export type MockDemoOutcome =
+  | 'bot-check-failed'
+  | 'origin-refused'
+  | 'rate-limited'
+  | 'demo-busy'
+  | 'bot-check-unavailable'
+  | 'config-unreachable'
+  /** T43's 503 `session-not-configured`: the proxy has no session-signing key. */
+  | 'session-not-configured'
+  /** Google's script cannot load (a content blocker): the mock bot check throws. */
+  | 'bot-check-not-loaded';
+
 export interface MockSwitches {
+  demoOutcome: MockDemoOutcome | null;
+  sessionSeconds: number | null;
+  throttle: 'status' | null;
   lookupFailure: MockLookupFailure | null;
   partialLog: boolean;
   statusMode: MockStatusMode | null;
   shareFailure: MockShareFailure | null;
 }
 
+const DEMO_OUTCOMES: readonly MockDemoOutcome[] = [
+  'bot-check-failed',
+  'origin-refused',
+  'rate-limited',
+  'demo-busy',
+  'bot-check-unavailable',
+  'config-unreachable',
+  'session-not-configured',
+  'bot-check-not-loaded',
+];
 const LOOKUP_FAILURES: readonly MockLookupFailure[] = ['not-found', 'failed'];
 const STATUS_MODES: readonly MockStatusMode[] = [
   'openemr-not-checked',
@@ -187,7 +223,15 @@ export function mockSwitchesFromSearch(search: string): MockSwitches {
   const q = new URLSearchParams(search);
   const pick = <T extends string>(allowed: readonly T[], name: string): T | null =>
     allowed.find((v) => v === q.get(name)) ?? null;
+  const seconds = q.get('mock-session-seconds') ?? '';
+  const sessionSeconds = /^\d{1,5}$/.test(seconds) ? Number(seconds) : null;
   return {
+    demoOutcome: pick(DEMO_OUTCOMES, 'mock-demo'),
+    sessionSeconds:
+      sessionSeconds !== null && sessionSeconds >= 1 && sessionSeconds <= 86_400
+        ? sessionSeconds
+        : null,
+    throttle: q.get('mock-throttle') === 'status' ? 'status' : null,
     lookupFailure: pick(LOOKUP_FAILURES, 'mock-lookup'),
     partialLog: q.get('mock-log') === 'partial',
     statusMode: pick(STATUS_MODES, 'mock-status'),
