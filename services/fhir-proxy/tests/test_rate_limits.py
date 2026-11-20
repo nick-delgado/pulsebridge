@@ -422,7 +422,10 @@ def test_each_limit_is_a_variable_with_a_bounded_range(base_env, name, bounds) -
 def test_the_address_range_starts_at_60(base_env) -> None:
     env = {**base_env, "READS_PER_SESSION_PER_MINUTE": "60"}
     assert ServiceConfig.from_env({**env, "REQUESTS_PER_ADDRESS_PER_MINUTE": "60"})
-    with pytest.raises(ConfigError, match="REQUESTS_PER_ADDRESS_PER_MINUTE"):
+    # Refused by its own range, not only because it is below the reads limit.
+    with pytest.raises(
+        ConfigError, match="REQUESTS_PER_ADDRESS_PER_MINUTE must be a whole number from 60 to 6000"
+    ):
         ServiceConfig.from_env({**env, "REQUESTS_PER_ADDRESS_PER_MINUTE": "59"})
 
 
