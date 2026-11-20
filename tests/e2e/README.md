@@ -87,10 +87,17 @@ the stack's signing key:
    proxy accepts a standard token.
 3. Sent as the `__session` cookie on every request after the session checks, and every `POST`
    carries the front door's own `Origin`, as the page's requests do.
+4. **A second session for the negatives** (T48). The proxy limits each session to 3 cuff sends
+   and 2 shares in any 10 minutes (T46, keyed on the token's `jti`), and counts every attempt,
+   even one cuff-sim refuses. The run sends 4 (A1, then N1, N2 and N4) and shares twice (A10,
+   A12), so before the negatives it signs a second token the same way, with a new `jti`: each
+   session stays inside its budget and the run does not wait ten minutes. The in-process stack
+   runs the proxy with those production limits, so a run that went over them fails `make test`
+   (`test_no_session_goes_over_the_proxys_per_session_limits`).
 
 Whoever can read the signing key can already forge any session, so this adds no new trust; it
 needs `roles/secretmanager.secretAccessor` on that secret. The key (in its text and base64
-forms) and the token are registered with a redactor before first use, and every printed line,
+forms) and both tokens are registered with a redactor before first use, and every printed line,
 failure message and the JSON report are redacted (`Bearer ...` and anything shaped like a JWT
 too). Neither is ever written to disk.
 
@@ -262,15 +269,21 @@ a message saying what was wrong. Part B is tested against synthetic `sync-run` l
 
 ## Not verified
 
-- **Part A has run live once and passed; Part B has never run live.** 17 November 2026,
-  against the dev stack (synthetic data), run as a project Owner: exit 0,
+- **The session flow (D16) has never run live.** The runs below used D9's reviewer password.
+  Since T43 the smoke test signs its own sessions with the signing key (S1), checks that a junk
+  token is refused after a real assessment (S1b) and, since T48, runs its negatives in a second
+  session to stay inside T46's per-session limits. All of it is checked at the public demo's
+  rollout (infra/envs/README.md, checklist P20), with `PULSEBRIDGE_TOKEN_ISSUER` from the
+  `token_issuer` output.
+- **Earlier live runs, with the password:** 17 November 2026, against the dev stack (synthetic
+  data), run as a project Owner: exit 0,
   `SMOKE RESULT: PASSED WITH 4 SKIPPED (pass=33 fail=0 skip=4 warn=0)`; S3's `/status` answered
-  in 0.85 s; B1 to B4 were skipped (synthetic data: health-sync is not deployed). No real-data
-  stack exists yet, so Part B is tested only against synthetic log entries.
+  in 0.85 s; B1 to B4 were skipped (synthetic data: health-sync is not deployed). 18 November
+  2026, against prod (real data, with `--allow-real-data-writes`): passed in full, Part B
+  included (README.md, "Status").
 - The `gcloud logging read` filter and the shape of its JSON (`jsonPayload` per entry) are from
   Cloud Logging's documented output and health-sync's logging code, not from a real entry.
 - The 5 s `/status` limit (0.85 s on the live run): a cold Cloud Run start, or a cold edge VM
   behind the OpenEMR probe, can exceed it. Raise `--status-max-seconds` for a first call after a long idle period.
-- health-sync's stranded-preliminary count uses `_summary=count`, which Cloud Healthcare refuses
-  (found by the first dev deploy for the proxy's counts). Expect B4 to `WARN` until health-sync
-  changes that search.
+- health-sync's stranded-preliminary count used `_summary=count`, which Cloud Healthcare
+  refuses; since T39 it counts with `_total=accurate&_count=0` (checklist I6).
