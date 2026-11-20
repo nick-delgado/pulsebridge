@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <!--
+      The demo's privacy note (T48). A second page of the same build (vite.config.ts): no script
+      at all, only the page's own stylesheet, so reading it loads nothing from Google and needs
+      nothing the Content-Security-Policy does not already allow. Every claim is checked against
+      the code and Google's documentation (web/README.md, "The privacy note"); the 24 hours and
+      the 7 days are module phr's defaults (infra/modules/phr/tests/check_proxy_settings.py).
+    -->
+    <title>Privacy · PulseBridge</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="stylesheet" href="/src/styles/privacy.css" />
+  </head>
+  <body>
+    <main class="privacy" id="main" aria-labelledby="privacy-title">
+      <article class="privacy__card">
+        <h1 id="privacy-title" class="privacy__title">Privacy</h1>
+        <p>
+          PulseBridge is a demo of a personal health record. There are no accounts: nothing asks who
+          you are, and nothing records who viewed what. This note says what the demo does with data
+          about your visit, and whose health data it shows.
+        </p>
+
+        <h2>Whose health data you see</h2>
+        <p>
+          The heart-rate readings are the real data of the person who runs this deployment, from
+          their own watch, shown in public by their choice (a test deployment shows invented
+          readings instead). Only the last 7 days are shown; older readings are kept, not shown. The
+          blood-pressure readings come from a simulated cuff.
+        </p>
+        <p>
+          A cuff reading you send, and a reading you share with the test clinic, is kept in the
+          record and shown to other visitors for the next 7 days. Send made-up numbers only.
+        </p>
+
+        <h2>The bot check (Google reCAPTCHA)</h2>
+        <p>
+          The start page loads Google's reCAPTCHA script (part of Google Cloud Fraud Defense) as
+          soon as it opens, before you select "View the live demo". The script runs in your browser
+          and talks to Google directly: it judges whether a person or a program is using the page
+          and gives the page a one-time token. When you select the button, this site's server sends
+          that token to Google, with the site's key and the action name, and gets back a score from
+          0.0 (likely a program) to 1.0 (likely a person). The server does not send Google your IP
+          address or your browser's details. This page loads nothing from Google.
+        </p>
+        <p>
+          For this data the site's owner is the data controller and Google is the data processor:
+          since 2 April 2026 Google processes reCAPTCHA data only on the owner's behalf, for
+          security and abuse prevention, under the Google Cloud Terms of Service and the Cloud Data
+          Processing Addendum.
+        </p>
+
+        <h2>Cookies</h2>
+        <ul>
+          <li>
+            <code>__session</code>, set by this site when the bot check lets you in: a signed
+            session identifier and its expiry time, nothing about you. Your browser sends it only to
+            this site's server, and scripts on the page cannot read it. It lasts 24 hours, or until
+            you select "Log out".
+          </li>
+          <li>
+            <code>_GRECAPTCHA</code>, set by Google's reCAPTCHA script. Google describes it as "a
+            necessary cookie" for "providing its risk analysis".
+          </li>
+        </ul>
+        <p>There are no other cookies, no analytics and no advertising.</p>
+
+        <h2>Logs</h2>
+        <p>
+          Google Cloud Run, which runs this site's server, logs every request the page makes to it:
+          the time, the address requested, the answer's status, size and duration, your browser's
+          user agent, and the network address the request came from. The server's own log records
+          each bot check's outcome and score, without your address; when it refuses requests for
+          coming too fast or from another website, it notes the client IP address of the first such
+          refusal of each kind from an address in a minute. Neither log records the cookie or any
+          token.
+        </p>
+        <p>
+          Logs are kept for 30 days, Google Cloud Logging's default, which this project does not
+          change, and are then deleted. The page itself is served by Firebase Hosting, which sends
+          no request logs to this project unless its owner turns that on.
+        </p>
+
+        <h2>Not a medical service</h2>
+        <p>
+          This is a portfolio demo. Nothing it shows is medical advice, and the test clinic is not a
+          real one.
+        </p>
+
+        <p class="privacy__back"><a href="/">Back to PulseBridge</a></p>
+      </article>
+    </main>
+  </body>
+</html>

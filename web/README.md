@@ -122,6 +122,32 @@ There is no password. The landing view (`src/shell/landing.ts`) says what the de
 A reload asks `checkSession` first: if the cookie is still good the dashboard opens directly.
 In a mock build `src/bot-check/mock.ts` stands in for Google, so nothing is loaded.
 
+## The privacy note (T48)
+
+`privacy.html` is a second page of the same build (`vite.config.ts`, `rolldownOptions.input`),
+linked from the landing view (under the reCAPTCHA notice) and from the dashboard's header. It
+says, for a visitor, what the demo does with their visit: whose health data is shown (the
+deployer's own, last 7 days only), what the bot check sends to Google (Fraud Defense; since
+2 April 2026 the site owner is the data controller and Google the processor, Fraud Defense FAQ),
+the two cookies (`__session`, a signed session ID and expiry with no personal data, 24 hours;
+Google's own `_GRECAPTCHA`), and what is logged (Cloud Run's request log; the proxy's sampled
+refusals with the client address; 30 days, Cloud Logging's default retention, which nothing in
+`infra/` changes).
+
+- **No script.** The page is HTML and one same-origin stylesheet (`src/styles/privacy.css`), so
+  reading it loads nothing from Google and fits the existing CSP; `scripts/check-bundle.mjs`
+  fails the build if it gains a `<script>` or loses the CSP `<meta>`.
+- **True of the code.** `src/shell/privacy.test.ts` ties each claim to its source: the cookie
+  name and flags in `fhir_proxy/app.py`, the assessment body in `fhir_proxy/bot_check.py` (only
+  the token, the site key and the action), the three sampled log events that carry the client
+  address, the button labels. `infra/modules/phr/tests/check_proxy_settings.py` checks that
+  "24 hours" and "the last 7 days" are module phr's defaults; a deployer who changes
+  `session_ttl_seconds` or `history_days` must change the note too.
+- **Nothing author-specific**, so no contact line: a contact address would have to come from
+  configuration (a build variable or `/auth/config`), which the page does not have yet.
+- Browser tests: `e2e/privacy.e2e.ts` (from the landing view and from the dashboard, no script,
+  nothing off the site, no CSP violation).
+
 ## Page layout and who fills what
 
 ```
