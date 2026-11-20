@@ -56,10 +56,6 @@ module "identity" {
 
   secret_deletion_protection = var.protect_from_destroy
   secret_labels              = local.labels
-
-  # Dev only (validated in variables.tf): write-only, never in plan or state.
-  reviewer_password            = var.reviewer_password
-  reviewer_password_wo_version = var.reviewer_password_wo_version
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -316,6 +312,13 @@ module "phr" {
   # T41: CI's page deployer may read fhir-proxy (roles/run.viewer): Firebase Hosting checks
   # run.services.get on the /api rewrite's target when `firebase deploy` finalizes a version.
   page_deployer_service_account_email = var.page_deployer_service_account_email
+
+  # D16 (T44): null passes through and module phr uses its own default (its variables are not
+  # nullable, so Terraform substitutes the default for a null).
+  recaptcha_min_score           = var.recaptcha_min_score
+  bot_checks_per_day            = var.bot_checks_per_day
+  session_ttl_seconds           = var.session_ttl_seconds
+  sessions_per_address_per_hour = var.sessions_per_address_per_hour
 
   # bootstrap added Firebase with the owner's credentials (add_firebase); the deployer needs no
   # Firebase role beyond roles/firebasehosting.admin.

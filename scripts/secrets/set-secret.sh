@@ -127,8 +127,8 @@ google-health-client-id | google-health-client-secret | google-health-refresh-to
 openemr-client-private-key)
   sv_die "$SV_EXIT_USAGE" "'$short_name' is written by the edge VM itself: its openemr-oauth-client hook generates the key pair, registers the client with OpenEMR and stores the key as a version at first boot (infra/modules/openemr/README.md). A version written by hand would not match the client OpenEMR registered."
   ;;
-reviewer-password)
-  sv_die "$SV_EXIT_USAGE" "use scripts/secrets/set-reviewer-password.sh for '$short_name': it applies fhir-proxy's password rules and can generate and show one."
+session-signing-key)
+  sv_die "$SV_EXIT_USAGE" "use scripts/secrets/set-session-signing-key.sh for '$short_name': it generates the 32 random bytes and sends them to Secret Manager without showing them."
   ;;
 "$sv_prefix"-*)
   sv_die "$SV_EXIT_USAGE" "pass the short name without the prefix, for example $(sv_shown "${short_name#"$sv_prefix"-}") (the script adds '$sv_prefix-')."

@@ -227,6 +227,8 @@ variable "deployer_roles" {
     # Firebase to the project needs more (firebase.projects.update): bootstrap does that once
     # with the owner's credentials (add_firebase), so the deployer never needs roles/firebase.admin.
     "roles/firebasehosting.admin",
+    # Not listed: module phr's reCAPTCHA key and its counter bucket. No predefined role is narrow
+    # enough for either, so bootstrap grants the deployer two custom roles (deployer.tf, T44).
   ]
 
   validation {
@@ -358,6 +360,30 @@ variable "planner_account_id" {
   validation {
     condition     = can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]$", var.planner_account_id))
     error_message = "planner_account_id must be 6-30 characters of lowercase letters, digits and hyphens, start with a letter and not end with a hyphen."
+  }
+}
+
+variable "deployer_recaptcha_role_id" {
+  description = "ID of the deployer's custom project role for reCAPTCHA keys (deployer.tf, T44): recaptchaenterprise.keys.create, .get, .list, .update and .delete only (no legacy secret key retrieval, no assessments). A deleted custom role keeps its ID reserved for about 37 days."
+  type        = string
+  default     = "pulsebridgeDeployerRecaptchaKeys"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9_.]{3,64}$", var.deployer_recaptcha_role_id))
+    error_message = "deployer_recaptcha_role_id must be 3-64 letters, digits, '_' or '.'."
+  }
+}
+
+variable "deployer_bucket_role_id" {
+  description = "ID of the deployer's custom project role for the stack's buckets (deployer.tf, T44): bucket create, update, delete and IAM, plus listing and deleting objects to empty a bucket on destroy; no object reads or writes. A deleted custom role keeps its ID reserved for about 37 days."
+  type        = string
+  default     = "pulsebridgeDeployerBuckets"
+  nullable    = false
+
+  validation {
+    condition     = can(regex("^[a-zA-Z0-9_.]{3,64}$", var.deployer_bucket_role_id))
+    error_message = "deployer_bucket_role_id must be 3-64 letters, digits, '_' or '.'."
   }
 }
 

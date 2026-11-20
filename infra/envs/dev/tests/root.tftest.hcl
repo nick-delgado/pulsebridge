@@ -53,15 +53,6 @@ run "defaults_are_a_synthetic_dev_stack_with_ingest_off" {
   }
 }
 
-run "dev_takes_the_reviewer_password_from_tfvars" {
-  command = plan
-
-  variables {
-    reviewer_password            = "a-synthetic-test-password-0123"
-    reviewer_password_wo_version = 1
-  }
-}
-
 # ---- use_synthetic_data and the patient ----------------------------------------------------
 
 run "synthetic_data_requires_a_syn_patient" {
@@ -243,5 +234,45 @@ run "page_deployer_service_account_plans" {
 
   variables {
     page_deployer_service_account_email = "page-deployer@example-project.iam.gserviceaccount.com"
+  }
+}
+
+# T44: the demo settings pass through the root; unset keeps module phr's defaults.
+run "demo_settings_pass_through_the_root" {
+  command = plan
+
+  variables {
+    recaptcha_min_score           = 0.7
+    bot_checks_per_day            = 120
+    session_ttl_seconds           = 3600
+    sessions_per_address_per_hour = 9
+  }
+
+  assert {
+    condition     = output.demo_settings == { recaptcha_min_score = 0.7, session_ttl_seconds = 3600, sessions_per_address_per_hour = 9, bot_checks_per_day = 120 }
+    error_message = "Each demo setting set in tfvars must reach module phr."
+  }
+}
+
+run "demo_settings_default_at_the_root" {
+  command = plan
+
+  assert {
+    condition     = output.demo_settings == { recaptcha_min_score = 0.5, session_ttl_seconds = 86400, sessions_per_address_per_hour = 5, bot_checks_per_day = 300 }
+    error_message = "Unset demo settings must give module phr's defaults."
+  }
+}
+
+# T44: make smoke reads the proxy's issuer from this output (PULSEBRIDGE_TOKEN_ISSUER).
+run "token_issuer_output_follows_name_prefix" {
+  command = plan
+
+  variables {
+    name_prefix = "pbsmoke"
+  }
+
+  assert {
+    condition     = endswith(output.token_issuer, ":pbsmoke") && startswith(output.token_issuer, "pulsebridge-fhir-proxy:")
+    error_message = "token_issuer must end with name_prefix (not identity_name_prefix)."
   }
 }

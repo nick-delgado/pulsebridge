@@ -14,7 +14,7 @@ output "service_account_names" {
 }
 
 output "secret_ids" {
-  description = "Secret ID (the short name, e.g. \"pb-reviewer-password\") per secret key. Cloud Run secret references and the scripts that add versions use this."
+  description = "Secret ID (the short name, e.g. \"pb-session-signing-key\") per secret key. Cloud Run secret references and the scripts that add versions use this."
   value       = { for k, s in google_secret_manager_secret.this : k => s.secret_id }
 }
 
@@ -26,11 +26,6 @@ output "secret_resource_ids" {
 output "secret_readers" {
   description = "Which workloads may read each secret (the accessor bindings this module creates). Informational, for READMEs and checks in other modules."
   value       = { for k, cfg in local.secrets : k => cfg.readers }
-}
-
-output "reviewer_password_version_created" {
-  description = "True when this module wrote a reviewer-password version from tfvars (dev). False means the secret is empty until scripts/secrets/set-reviewer-password.sh runs, and the proxy's login answers 503."
-  value       = length(google_secret_manager_secret_version.reviewer_password) > 0
 }
 
 # T38: module healthcare builds the Healthcare service agent's address from the project number and

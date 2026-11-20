@@ -1,5 +1,7 @@
 # shellcheck shell=bash
-# Shared code for set-secret.sh and set-reviewer-password.sh (task T27). Sourced, never run.
+# Shared code for set-secret.sh (task T27) and set-session-signing-key.sh (T44). Sourced, never run.
+# set-session-signing-key.sh uses only the argument, target and gcloud helpers: its key never
+# enters sv_value (it is piped from /dev/urandom straight into gcloud).
 #
 # What every function here protects: the secret value. It lives only in the shell variables
 # sv_value and sv_confirm, which are never exported. It reaches gcloud on standard input through
@@ -25,8 +27,7 @@ SV_MIN_LENGTH=16
 # shellcheck disable=SC2034 # used by the scripts that source this file
 SV_MAX_LENGTH=128
 # Generated values: letters and digits only (62 symbols, about 5.95 bits each), so they survive
-# any quoting. 32 characters are about 190 bits; the reviewer password uses 24 (about 143 bits,
-# docs/spikes/s6.md asks for 24 or more) because a person may have to type it.
+# any quoting. 32 characters are about 190 bits.
 SV_GENERATE_ALPHABET='A-Za-z0-9'
 
 # allexport (`set -a`, or SHELLOPTS=allexport in the environment) would export every variable the
@@ -39,8 +40,7 @@ sv_value=''
 sv_confirm=''
 
 sv_err() {
-  # Messages go to standard error; standard output is reserved for the generated reviewer
-  # password. No message ever contains the value.
+  # Messages go to standard error. No message ever contains the value.
   builtin printf '%s: %s\n' "$SV_PROG" "$*" >&2
 }
 
@@ -235,10 +235,6 @@ sv_read_value() { # sv_read_value <what, for the prompt>
 
 # Refuse a value that breaks the rules. Messages say which rule, never the value.
 #
-# Profile "reviewer": any printable ASCII, but not only spaces. fhir-proxy compares the file's
-# content (minus a trailing newline) with what the browser sends; nothing on that path interprets
-# punctuation.
-#
 # Profile "edge-vm" (db-root-password, openemr-db-password, openemr-admin-password): letters,
 # digits and !#$%&()*+,-./:;<>?@[]^_{|}~ only, not starting with "-". Why, per reader:
 # - OpenEMR's image builds one string "server=... rootpass=<root> ... pass=<db> ... iuserpass=<admin>",
@@ -254,7 +250,7 @@ sv_read_value() { # sv_read_value <what, for the prompt>
 # Every other reader (the edge VM's startup script and hooks, MariaDB's own SQL escaping, the
 # installer's mysqli_real_escape_string, bash `read -a`, which does not expand globs) keeps the
 # remaining punctuation as it is. --generate (letters and digits) avoids the question.
-sv_check_value() { # sv_check_value <min length> <max length> <profile: reviewer|edge-vm>
+sv_check_value() { # sv_check_value <min length> <max length> <profile: edge-vm>
   local min="$1" max="$2" profile="$3"
   if [ -z "$sv_value" ]; then
     sv_die "$SV_EXIT_USAGE" "the value is empty; nothing was written."
@@ -266,12 +262,6 @@ sv_check_value() { # sv_check_value <min length> <max length> <profile: reviewer
   *[![:print:]]*) sv_die "$SV_EXIT_USAGE" "the value contains a character outside printable ASCII (letters, digits, punctuation, space); nothing was written." ;;
   esac
   case "$profile" in
-  reviewer)
-    case "$sv_value" in
-    *[!\ ]*) ;;
-    *) sv_die "$SV_EXIT_USAGE" "the value is only spaces; nothing was written." ;;
-    esac
-    ;;
   edge-vm)
     local rule="OpenEMR's first-time setup or its sqlconf.php would change or break it (scripts/secrets/README.md, \"Value rules\"). Allowed: letters, digits and !#\$%&()*+,-./:;<>?@[]^_{|}~. Or use --generate. Nothing was written."
     case "$sv_value" in
@@ -301,16 +291,13 @@ sv_add_version() { # sv_add_version <secret id>
   local secret="$1" statuses
   # The builtin printf writes the exact bytes, with no newline added, to gcloud's standard input;
   # `--data-file=-` makes gcloud read the payload from there. gcloud's own output goes to
-  # standard error, so standard output carries nothing but a generated password.
+  # standard error; standard output carries nothing.
   set +e
   builtin printf '%s' "$sv_value" | sv_gcloud secrets versions add "$secret" \
     --project="$sv_project" --data-file=- --quiet >&2
   statuses="${PIPESTATUS[*]}"
   set -e
-  # Keep the value only if it must still be shown (a generated reviewer password).
-  if [ "${SV_KEEP_VALUE:-}" != "1" ]; then
-    sv_clear
-  fi
+  sv_clear
   case "$statuses" in
   *" 0") ;;
   *)

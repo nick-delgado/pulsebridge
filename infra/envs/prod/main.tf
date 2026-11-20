@@ -6,9 +6,8 @@ module "stack" {
   source = "../_stack"
 
   # Per-environment settings (env.tf).
-  environment                         = local.environment
-  protect_from_destroy                = local.protect_from_destroy
-  allow_reviewer_password_from_tfvars = local.allow_reviewer_password_from_tfvars
+  environment          = local.environment
+  protect_from_destroy = local.protect_from_destroy
 
   project_id           = var.project_id
   region               = var.region
@@ -35,9 +34,6 @@ module "stack" {
   alert_email                 = var.alert_email
   alert_notification_channels = var.alert_notification_channels
 
-  reviewer_password            = var.reviewer_password
-  reviewer_password_wo_version = var.reviewer_password_wo_version
-
   mllp_port          = var.mllp_port
   openemr_https_port = var.openemr_https_port
   enable_iap_ssh     = var.enable_iap_ssh
@@ -50,6 +46,11 @@ module "stack" {
   extra_allowed_origins = var.extra_allowed_origins
 
   page_deployer_service_account_email = var.page_deployer_service_account_email
+
+  recaptcha_min_score           = var.recaptcha_min_score
+  bot_checks_per_day            = var.bot_checks_per_day
+  session_ttl_seconds           = var.session_ttl_seconds
+  sessions_per_address_per_hour = var.sessions_per_address_per_hour
 
   v2_to_fhir_ingress  = var.v2_to_fhir_ingress
   health_sync_ingress = var.health_sync_ingress

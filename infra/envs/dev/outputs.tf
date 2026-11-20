@@ -122,3 +122,13 @@ output "next_steps" {
   description = "The ordered post-apply procedure for this deployment: terraform output -raw next_steps."
   value       = module.stack.next_steps
 }
+
+output "demo_settings" {
+  description = "The public demo's settings fhir-proxy gets (D16); tune them with the variables of the same names."
+  value       = module.stack.demo_settings
+}
+
+output "token_issuer" {
+  description = "fhir-proxy's TOKEN_ISSUER, for `make smoke`: PULSEBRIDGE_TOKEN_ISSUER=\"$(terraform output -raw token_issuer)\". Not a secret."
+  value       = module.stack.token_issuer
+}

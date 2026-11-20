@@ -13,16 +13,33 @@ they disagree:
 The header must have every directive of the <meta> policy with the same value, plus
 `frame-ancestors 'none'` (a <meta> policy cannot set it; web/README.md, "Security basics"), and
 nothing else. No source may be `'unsafe-inline'`, `'unsafe-eval'`, `'unsafe-hashes'`,
-`'strict-dynamic'`, a wildcard, or a scheme (`data:`, `http:`, `https:`, `blob:`).
+`'strict-dynamic'`, a wildcard, a bare scheme (`data:`, `http:`, `https:`, `blob:`) or an
+`http://` URL.
+
+The only external sources are reCAPTCHA's (D16, T44), exactly as Google's CSP guidance lists them
+for a page that does not use nonces (Fraud Defense FAQ, docs.cloud.google.com/recaptcha/docs/faq,
+read 19 November 2026: "Alternatively, add the following values to the directives"):
+script-src www.google.com/recaptcha/ and www.gstatic.com/recaptcha/;
+frame-src www.google.com/recaptcha/ and
+recaptcha.google.com/recaptcha/; connect-src www.google.com/recaptcha/. Each of those
+directives must hold exactly these https:// sources (path-restricted, so the rest of google.com
+stays blocked), and no other directive may hold any.
 The other security headers must have their documented values (REQUIRED_HEADERS).
 
-Usage: python3 infra/modules/phr/tests/check_hosting_csp.py   (standard library only)
+The page's two policies are not parsed by shape: the declarations that make them
+(`contentSecurityPolicy()` and the constants it uses; check-bundle.mjs's `expected` object) are
+cut out of the files and RUN with node, so the check compares values, however T45 writes the
+code. Only TypeScript annotations are erased first (see _ERASE).
+
+Usage: python3 infra/modules/phr/tests/check_hosting_csp.py   (standard library and node)
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -46,8 +63,17 @@ REQUIRED_HEADERS = {
     "Strict-Transport-Security": "max-age=31536000",
 }
 FORBIDDEN_SOURCES = re.compile(
-    r"'unsafe-inline'|'unsafe-eval'|'unsafe-hashes'|'strict-dynamic'|\*|\b(data|https?|blob):",
+    r"'unsafe-inline'|'unsafe-eval'|'unsafe-hashes'|'strict-dynamic'|\*|http://"
+    r"|(^|\s)(data|https?|blob|wss?|filesystem|mediastream):(\s|$)",
 )
+# reCAPTCHA's sources per directive (the module docstring cites Google's guidance). The page loads
+# https://www.google.com/recaptcha/enterprise.js, which loads its code from www.gstatic.com and
+# runs the check in an iframe from www.google.com (or recaptcha.google.com).
+RECAPTCHA_SOURCES = {
+    "script-src": {"https://www.google.com/recaptcha/", "https://www.gstatic.com/recaptcha/"},
+    "frame-src": {"https://www.google.com/recaptcha/", "https://recaptcha.google.com/recaptcha/"},
+    "connect-src": {"https://www.google.com/recaptcha/"},
+}
 
 
 def parse_policy(policy: str) -> dict[str, str]:
@@ -63,41 +89,90 @@ def parse_policy(policy: str) -> dict[str, str]:
     return directives
 
 
+def _block(text: str, start: str, where: Path) -> str:
+    """The source text from the regex `start` to the brace that closes the first `{` after it
+    (plus a trailing `;`). Braces inside the page's strings are balanced (template literals'
+    `${...}`), so counting them is enough for these two files."""
+    found = re.search(start, text, re.M)
+    if found is None:
+        raise AssertionError(f"{where.name}: {start!r} not found; the check reads that code")
+    i = text.index("{", found.end() - 1 if text[found.end() - 1] == "{" else found.end())
+    depth = 0
+    for k in range(i, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[k], 0)
+        if depth == 0:
+            end = k + 1
+            return text[found.start() : end + (1 if text[end : end + 1] == ";" else 0)]
+    raise AssertionError(f"{where.name}: unbalanced braces after {start!r}")
+
+
+# TypeScript that node cannot run as JavaScript, as it appears in these two declarations:
+# `as const`, `export`, parameter types (`mode: string`, `extra: readonly string[]`, `a: string |
+# undefined`) and return types (`): string {`). Erasing them leaves plain JavaScript; the page's
+# own logic is then RUN, not re-implemented here, so any way T45 composes the policy is fine.
+_TYPE = r"(?:readonly\s+)?[A-Za-z_]\w*(?:\[\])?(?:\s*\|\s*[A-Za-z_]\w*(?:\[\])?)*"
+_ERASE = (
+    (re.compile(r"\s+as\s+const\b"), ""),
+    (re.compile(r"^export\s+", re.M), ""),
+    (re.compile(r"\)\s*:\s*" + _TYPE + r"\s*(\{|=>)"), r") \1"),
+    (re.compile(r"(\(|,\s*)(\w+)\??\s*:\s*" + _TYPE + r"(?=\s*[,)=])"), r"\1\2"),
+)
+
+
+def _run_node(js: str, what: str) -> str:
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is not on PATH; this check runs the page's own policy code")
+    proc = subprocess.run(
+        [node, "--input-type=module", "-e", js], capture_output=True, text=True, timeout=30
+    )
+    if proc.returncode != 0:
+        raise AssertionError(f"could not evaluate {what} with node: {proc.stderr.strip()[:400]}")
+    return proc.stdout.strip()
+
+
 def meta_policy_for_same_origin_build() -> dict[str, str]:
-    """The directives of web/vite.config.ts's contentSecurityPolicy() for an HTTP build whose
-    proxy URL is the same-origin default, read from its array literal."""
+    """The <meta> policy web/vite.config.ts's contentSecurityPolicy() returns for the build the
+    Hosting rewrite serves (an HTTP build, same origin, no proxy URL): the function and the
+    constants it uses are taken from the file and run with node."""
     text = VITE_CONFIG.read_text(encoding="utf-8")
-    body = re.search(r"export function contentSecurityPolicy\([^)]*\)[^{]*\{(.*?)\n\}", text, re.S)
-    if body is None:
-        raise AssertionError(f"contentSecurityPolicy() not found in {VITE_CONFIG}")
-    default_connect = re.search(r"let connect = \"([^\"]+)\";", body.group(1))
-    array = re.search(r"return \[(.*?)\]\.join\('; '\)", body.group(1), re.S)
-    if default_connect is None or array is None:
-        raise AssertionError("contentSecurityPolicy() no longer has the shape this check reads")
-    items = re.findall(r"\"([^\"]+)\"|`([^`]+)`", array.group(1))
-    parts = [
-        (plain or template).replace("${connect}", default_connect.group(1))
-        for plain, template in items
-    ]
-    if any("${" in p for p in parts):
-        raise AssertionError(f"unexpected template in the meta policy: {parts}")
-    return parse_policy("; ".join(parts))
+    parts = []
+    # Module-level constants the function may use (T45: RECAPTCHA_CSP), then the function.
+    for const in re.finditer(r"^(?:export\s+)?const\s+([A-Z][A-Z0-9_]*)\s*=\s*\{", text, re.M):
+        parts.append(_block(text, re.escape(const.group(0)), VITE_CONFIG))
+    parts.append(_block(text, r"^(?:export\s+)?function\s+contentSecurityPolicy\s*\(", VITE_CONFIG))
+    js = "\n".join(parts)
+    for pattern, replacement in _ERASE:
+        js = pattern.sub(replacement, js)
+    # 'production' is Vite's mode for `npm run build` (anything but 'mock' is an HTTP build);
+    # the second argument, which older versions took (the proxy URL), is unset there.
+    js += "\nconsole.log(contentSecurityPolicy('production', undefined));\n"
+    return parse_policy(_run_node(js, "vite.config.ts contentSecurityPolicy()"))
 
 
 def check_bundle_requirements() -> dict[str, str]:
-    """The `expected` map in check-bundle.mjs, with its same-origin HTTP connect-src."""
+    """The directives web/scripts/check-bundle.mjs requires of an HTTP build, from its own
+    `expected` object (and the constants declared just before it), run with node."""
     text = CHECK_BUNDLE.read_text(encoding="utf-8")
-    block = re.search(r"const expected = \{(.*?)\n  \};", text, re.S)
-    if block is None:
+    expected = re.search(r"^\s*const expected = \{", text, re.M)
+    if expected is None:
         raise AssertionError(f"the expected directives were not found in {CHECK_BUNDLE}")
-    expected = dict(re.findall(r"'([a-z-]+)': \"([^\"]+)\"", block.group(1)))
-    connect = re.search(r"'connect-src':.*: \"('self')\",", block.group(1))
-    if connect is None:
-        raise AssertionError(
-            "check-bundle.mjs no longer requires connect-src 'self' for a same-origin build"
-        )
-    expected["connect-src"] = connect.group(1)
-    return expected
+    # The object constants declared before `expected` that it refers to (T45: `google`).
+    body = _block(text, re.escape(expected.group(0)), CHECK_BUNDLE)
+    head = text[: expected.start()]
+    parts = [
+        _block(text, re.escape(m.group(0)), CHECK_BUNDLE)
+        for m in re.finditer(r"^\s*const (\w+) = \{", head, re.M)
+        if re.search(rf"\b{m.group(1)}\.", body)
+    ]
+    parts.append(body)
+    js = (
+        "const mode = 'http'; const proxyOrigin = null;\n"
+        + "\n".join(p.strip() for p in parts)
+        + "\nconsole.log(JSON.stringify(expected));\n"
+    )
+    values = json.loads(_run_node(js, "check-bundle.mjs expected"))
+    return {k: v for k, v in values.items() if isinstance(v, str)}
 
 
 def main() -> int:
@@ -112,6 +187,16 @@ def main() -> int:
     for name, value in header.items():
         if FORBIDDEN_SOURCES.search(value):
             problems.append(f"{name} allows a forbidden source: {value!r}")
+        external = {src for src in value.split() if src.startswith("https://")}
+        wanted_external = RECAPTCHA_SOURCES.get(name, set())
+        if external != wanted_external:
+            problems.append(
+                f"{name} external sources {sorted(external)} are not exactly reCAPTCHA's "
+                f"{sorted(wanted_external)}"
+            )
+    for name in RECAPTCHA_SOURCES:
+        if name not in header:
+            problems.append(f"{name} is missing: reCAPTCHA needs {sorted(RECAPTCHA_SOURCES[name])}")
 
     meta = meta_policy_for_same_origin_build()
     wanted = {**meta, **HEADER_ONLY}

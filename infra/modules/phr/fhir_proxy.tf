@@ -1,5 +1,6 @@
-# fhir-proxy (T14): the dashboard's only backend and the only public service (D10). Reviewer
-# login (D9), a narrow read API over the FHIR stores and the HL7v2 store, the messages log, and
+# fhir-proxy (T14): the dashboard's only backend and the only public service (D10). Anonymous
+# demo sessions (D16: a reCAPTCHA bot check, then a signed __session cookie; demo.tf), a narrow
+# read API over the FHIR stores and the HL7v2 store, the messages log, and
 # cuff forwarding to cuff-sim with its own identity. Settings follow
 # services/fhir-proxy/README.md, "For T22: deploying it".
 
@@ -7,7 +8,7 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
   project     = var.project_id
   location    = var.region
   name        = local.fhir_proxy_name
-  description = "PulseBridge fhir-proxy: the dashboard's API behind the Firebase Hosting rewrite /api/**. Public; the reviewer session token is the gate."
+  description = "PulseBridge fhir-proxy: the dashboard's API behind the Firebase Hosting rewrite /api/**. Public; the demo session cookie is the gate."
   labels      = var.labels
 
   # All: Firebase Hosting reaches the service at its default run.app URL from outside the VPC.
@@ -18,8 +19,8 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
 
   # Public. Google: "The recommended way to make a public service is to disable the Cloud Run
   # Invoker IAM check" (docs.cloud.google.com/run/docs/authenticating/public). With the check
-  # off, Cloud Run does not look at the Authorization header at all, so the reviewer's own
-  # bearer token reaches the container untouched. No allUsers binding is created.
+  # off, Cloud Run does not check the caller at all; the proxy's own __session cookie is the
+  # gate. No allUsers binding is created.
   invoker_iam_disabled = true
 
   # The provider defaults this to true, which makes `terraform destroy` fail. No data here.
@@ -28,9 +29,10 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
   template {
     service_account = var.service_account_emails["fhir-proxy"]
 
-    # min 0: scale to zero. max 2 (docs/spikes/s6.md): the login limit is per process and the
-    # image runs one worker, so the real limits are up to 5 x 2 failures a minute per address
-    # and 60 x 2 in total; two instances also cap the bill if someone floods the public URL.
+    # min 0: scale to zero. max 2: the per-address session limit is per process and the image
+    # runs one worker, so the real limit is SESSIONS_PER_ADDRESS_PER_HOUR x 2; two instances
+    # also cap the bill if someone floods the public URL. The DAILY bot-check cap does not
+    # multiply: it is counted in the bucket, shared by both (demo.tf).
     scaling {
       min_instance_count = 0
       max_instance_count = 2
@@ -64,10 +66,15 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
     # Each secret as a volume, read from Secret Manager on every file read at version "latest":
     # "When reading a volume, Cloud Run always fetches the secret value from the Secret Manager
     # to use the value with the latest version" (docs.cloud.google.com/run/docs/configuring/
-    # services/secrets). A new reviewer password therefore takes effect without a redeploy
-    # (the proxy re-reads the file after PASSWORD_CACHE_SECONDS, 30 s). An environment
-    # variable would be resolved once at instance start, and would put the value in the
-    # service's configuration.
+    # services/secrets). A new signing key therefore takes effect without a redeploy, once the
+    # proxy reads the file again. An environment variable would be resolved once at instance
+    # start, and would put the value in the service's configuration.
+    #
+    # Cloud Run checks at DEPLOY time that every mounted secret has a version to resolve: a
+    # revision that mounts a secret with no enabled version fails to deploy. So the signing
+    # key's version must be added (scripts/secrets/set-session-signing-key.sh) after the
+    # identity apply and before this service is created or changed (infra/envs/README.md,
+    # "Rolling out the public demo").
     dynamic "volumes" {
       for_each = local.proxy_secret_files
       content {
@@ -93,7 +100,7 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
       resources {
         limits = {
           cpu    = "1"
-          memory = "512Mi" # the login key derivation (scrypt) takes about 16 MiB per call
+          memory = "512Mi" # measured headroom for 8 threads (no scrypt since D16)
         }
         cpu_idle          = true
         startup_cpu_boost = false
@@ -148,13 +155,25 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
             # One front door: the page reaches the proxy only through the rewrite.
             PATH_PREFIX     = local.path_prefix
             PUBLIC_BASE_URL = "${local.public_origin}${local.path_prefix}"
-            ALLOWED_ORIGINS = join(",", concat([local.public_origin], var.extra_allowed_origins))
+            # Every page origin (main.tf, local.allowed_origins) plus extra_allowed_origins:
+            # the list the proxy's Origin check accepts on POST /auth/session and every POST.
+            ALLOWED_ORIGINS = join(",", local.allowed_origins)
             # 2 by default: measured behind Firebase Hosting (README, "The client address and
             # the direct run.app URL").
             TRUSTED_PROXY_HOPS = tostring(var.trusted_proxy_hops)
-            # A deployment-specific issuer also salts the token key derivation, so a token or
-            # precomputation from another PulseBridge deployment is useless here.
-            TOKEN_ISSUER = "pulsebridge-fhir-proxy:${var.project_id}:${var.name_prefix}"
+            # The session token's `iss`: deployment-specific, so a token from another PulseBridge
+            # deployment never verifies here even if a key were reused.
+            TOKEN_ISSUER = local.token_issuer
+            # D16, the T43 to T45 contract (demo.tf). The site key is public; the page reads it
+            # from GET /auth/config, never from its build. The assessment is created in
+            # GCP_PROJECT_ID, the project that owns the key.
+            RECAPTCHA_SITE_KEY            = google_recaptcha_enterprise_key.demo.name
+            RECAPTCHA_ACTION              = local.recaptcha_action
+            RECAPTCHA_MIN_SCORE           = tostring(var.recaptcha_min_score)
+            SESSION_TTL_SECONDS           = tostring(var.session_ttl_seconds)
+            SESSIONS_PER_ADDRESS_PER_HOUR = tostring(var.sessions_per_address_per_hour)
+            BOT_CHECKS_PER_DAY            = tostring(var.bot_checks_per_day)
+            DEMO_COUNTER_BUCKET           = google_storage_bucket.demo_counters.name
             # Under Firebase Hosting's 60 s; the request timeout is the same as Cloud Run's.
             REQUEST_BUDGET_SECONDS       = tostring(local.timeouts.proxy_request_budget)
             CUFF_FORWARD_TIMEOUT_SECONDS = tostring(local.timeouts.proxy_cuff_forward)
@@ -180,6 +199,7 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
   }
 
   # The first forwarded cuff request must not meet a 403: the invoker grant on cuff-sim exists
-  # before this revision serves.
-  depends_on = [google_cloud_run_v2_service_iam_member.invoker]
+  # before this revision serves. Likewise the first demo session must not meet a 403 on the
+  # counter bucket (503 bot-check-unavailable).
+  depends_on = [google_cloud_run_v2_service_iam_member.invoker, google_storage_bucket_iam_member.demo_counter_writer]
 }

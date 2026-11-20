@@ -47,9 +47,10 @@ resource "google_storage_bucket" "tfstate" {
   depends_on = [google_project_service.bootstrap]
 }
 
-# The deployer's only Cloud Storage access: objects in this one bucket (the default
-# deployer_roles hold no storage role, because the stack creates no bucket). Bucket-scoped, so it
-# reaches no other bucket in the project, and it keeps state access working whatever the list.
+# The deployer's only object READ and WRITE access: objects in this one bucket. Bucket-scoped, so
+# it reaches no other bucket's objects, and it keeps state access working whatever the list. (The
+# custom role in deployer.tf manages the stack's demo counter bucket, T44, but cannot read or
+# write objects in any bucket.)
 resource "google_storage_bucket_iam_member" "deployer_state" {
   bucket = google_storage_bucket.tfstate.name
   role   = "roles/storage.objectAdmin"
