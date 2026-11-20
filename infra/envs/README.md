@@ -61,6 +61,18 @@ authoritative.
 - **`terraform state rm`**: makes Terraform forget a resource without touching it in Google
   Cloud. Used once, in "Rolling out the public demo", for a protected secret that must leave the
   configuration.
+- **The public demo (D16)**: anyone can open the dashboard, with no password. A visitor selects
+  "View the live demo"; an invisible **bot check** runs: Google's **reCAPTCHA** script (part of
+  **Google Cloud Fraud Defense**, formerly reCAPTCHA Enterprise) gives the page a one-time token,
+  and fhir-proxy asks Google to **assess** it, getting a score from 0.0 (likely a bot) to 1.0
+  (likely a person). On a pass the proxy sets a signed **session cookie**, `__session`, for 24
+  hours: the only cookie Firebase Hosting passes on to Cloud Run. Each assessment is counted in
+  a small **counter bucket** so the daily cap holds across instances and restarts. Module phr's
+  README, "The public demo (D16)", has the detail.
+- **Rate limit**: how many requests of a kind one session, one client address or everyone
+  together may make in a time window; above it the proxy answers `429` with `Retry-After`. The
+  proxy keeps them in memory, **per instance**, so with its two instances each real limit is up
+  to twice the number ("The public demo's settings" below).
 
 ## Why one composition (`_stack`) and two thin roots
 
@@ -137,7 +149,37 @@ rewrite to; a `check` warns outside the free tier, module phr refuses a region H
 reach), `enable_iap_ssh` (for the first-boot checklist), `enable_cloud_nat` (billed hourly;
 fallback only), `trusted_proxy_hops` (default 2, measured behind Firebase Hosting; step 12),
 `openemr_scopes` (step 6), `public_origin` (a custom domain; T30, deferred), `name_prefix` /
-`identity_name_prefix`, the two ingress fallbacks.
+`identity_name_prefix`, the two ingress fallbacks, and the public demo's settings below.
+
+### The public demo's settings
+
+All optional: leave them unset (`null`) and module phr's defaults apply, which are
+fhir-proxy's own (`services/fhir-proxy/fhir_proxy/config.py`). `terraform output demo_settings`
+shows what the proxy gets.
+
+| Variable | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `recaptcha_min_score` | 0.5 | above 0, at most 1 | the lowest bot-check score that gets a session; tune it from the scores real visitors get (checklist P19) |
+| `bot_checks_per_day` | 300 | 1 to 3000 | assessments per UTC day, across all instances (the counter bucket); past it the page says "The demo is busy, try again tomorrow." |
+| `session_ttl_seconds` | 86400 | 300 to 86400 | how long a session lasts (24 hours) |
+| `sessions_per_address_per_hour` | 5 | 1 to 100 | bot-check attempts per client address an hour, checked before any assessment is made |
+| `requests_per_address_per_minute` | 300 | 60 to 6000 | requests without a valid session per client address a minute |
+| `reads_per_session_per_minute` | 120 | 60 to 1200 | reads per session a minute (the dashboard's busiest measured minute is 37) |
+| `cuff_sends_per_session_per_10_minutes` | 3 | 1 to 30 | cuff readings per session in any 10 minutes |
+| `shares_per_session_per_10_minutes` | 2 | 1 to 20 | shares to OpenEMR per session in any 10 minutes |
+| `shares_per_instance_per_hour` | 30 | 1 to 600 | shares by everyone together in any hour |
+| `history_days` | 7 | 1 to 30 | how many days back the demo shows; older data is hidden, never deleted |
+
+**Every rate limit is per fhir-proxy instance.** The proxy keeps its counts in memory (no shared
+store, so nothing is billed while the demo is idle), and Cloud Run runs up to two instances, so
+each real limit is up to twice its number: 10 bot-check attempts an hour per address, 6 cuff
+sends and 4 shares in 10 minutes per session, 60 shares an hour for everyone. Only
+`bot_checks_per_day` is exact: it is counted in the bucket both instances share.
+
+`history_days` and `session_ttl_seconds` are stated on the page's privacy note
+(`web/privacy.html`: "the last 7 days", "24 hours"); if you change them, change the note too
+(`infra/modules/phr/tests/check_proxy_settings.py` fails until you do).
+
 
 Rules the root enforces before anything is created: a `SYN-` patient ID is **required** with
 synthetic data and **refused** without it; a real name is refused with synthetic data (the cuff
@@ -531,7 +573,8 @@ site only with this deploy. Once CI has taken over an environment ("CI/CD"), eve
 followed by a page deploy job that does this itself, with the `firebase-tools` locked in
 `ci/deploy-tools/package-lock.json` (`ci/tf_ci.py deploy-page`).
 
-Worked when: `dashboard_url` shows the login page. (16 November: the locked firebase-tools
+Worked when: `dashboard_url` shows the landing view with "View the live demo" (before T45, the
+login page). (16 November: the locked firebase-tools
 15.34.2 from `ci/deploy-tools` deployed the page, but with an Owner's service account key, not
 the deployer. 18 November, P12: `roles/firebasehosting.admin` alone is **not** enough; the CI
 page deployer also needs `serviceusage.services.get` on the project and `run.services.get` on
@@ -540,7 +583,8 @@ its other roles.)
 
 ### 12. The front door's first-deploy checks (deployer)
 
-Items P1 to P10 of the master checklist, **hop measurement first**. `trusted_proxy_hops`
+Items P1 to P10 of the master checklist, **hop measurement first**, then the public demo's
+P17 to P26 (a new deployment, or the first after "Rolling out the public demo"). `trusted_proxy_hops`
 defaults to 2, the value measured behind Firebase Hosting on dev (P1); the measurement confirms
 it on your deployment (through Hosting: 2 entries and your own address as `client_address`,
 never the made-up `192.0.2.1`). Set another value and re-apply only if it shows a different
@@ -559,8 +603,9 @@ second run (`stored_read: ok`, `windows_unchanged > 0`), `/status` timing, the a
 a simulated cuff reading over MLLP to the FHIR store (Observation and Provenance checked
 against the message sent), shared to OpenEMR and read back, shared again (`already-shared`),
 plus malformed readings that must create nothing and the `/status` strip. Run it with your own
-`gcloud` login (until T48 it reads `<prefix>-reviewer-password`; after T48 it signs a session
-with `<prefix>-session-signing-key`, read from Secret Manager in memory):
+`gcloud` login: it signs its own demo sessions with `<prefix>-session-signing-key`, read from
+Secret Manager into memory (a command line cannot pass the browser's bot check, and the proxy
+has no bypass), so your account needs `roles/secretmanager.secretAccessor` on that secret:
 
 ```bash
 PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/<env> output -raw dashboard_url)/api" \
@@ -570,8 +615,12 @@ make smoke
 ```
 
 `PULSEBRIDGE_TOKEN_ISSUER` is fhir-proxy's exact `TOKEN_ISSUER` (`pulsebridge-fhir-proxy:<project_id>:<name_prefix>`;
-output `token_issuer`, not a secret): the smoke test signs its session with it (T43, after T48).
-It is built from `name_prefix`, not from `secret_name_prefix` (that is `identity_name_prefix`).
+output `token_issuer`, not a secret): the smoke test signs its sessions with it (T43). It is
+built from `name_prefix`, not from `secret_name_prefix` (that is `identity_name_prefix`).
+It uses two sessions, one for the reading and the share, one for the negatives, because the
+proxy allows each session 3 cuff sends and 2 shares in any 10 minutes (T46; T48 found that one
+session would be refused at N4). Its junk-token check (S1b) costs one real assessment of the
+day's `bot_checks_per_day`.
 
 On a real-data stack it refuses to write a test reading into the patient's record unless
 `SMOKE_ARGS=--allow-real-data-writes` is given, and it runs I4's and I6's health-sync checks
@@ -726,10 +775,44 @@ mounts the old secret, whose read grant step 4 removes) and accepted for prod (D
    page deploy (step 11) publishes the T45 page with the new Content-Security-Policy.
 7. **Check** (README step 12 and module phr's "Verify on the first real deploy", items 6 to 8):
    "View the live demo" works on `<site>.web.app`; today's counter object appears in
-   `gcloud storage ls gs://<project-id>-<name_prefix>-demo-counters`; no CSP error in the console.
+   `gcloud storage ls gs://<project-id>-<name_prefix>-demo-counters`; no CSP error in the console;
+   then `make smoke` (step 14) and the checklist's rows P17 to P26.
 8. **Delete the old secret by hand**, once step 7 passes:
    `gcloud secrets delete <prefix>-reviewer-password --project <project-id>`. Until then it is
    only unused (nothing can read it: step 4 removed the one grant).
+
+### The public demo: what is public, and its known limits
+
+Since D16 anyone with the address can open the demo, with no password and nothing to sign up
+for. Decide with that in mind:
+
+- **Your real data is public within the window.** On a real-data stack (prod) every visitor sees
+  your heart rate for the last `history_days` (7) days, and the blood-pressure readings and
+  shares of that window. Older data stays in the stores and in OpenEMR; the proxy only hides it
+  (a read of something older answers like a missing resource). This was the owner's decision
+  (D16). A synthetic stack (dev) shows invented data only.
+- **Visitors can write.** A session may send cuff readings and share readings to OpenEMR, within
+  the limits above; what they send stays in the record (nothing the API offers removes it) and
+  is shown to the next visitors while it is in the window.
+- **What visitors are told.** The landing view says the page uses reCAPTCHA and links to the
+  privacy note (`web/privacy.html`, also linked from the dashboard's header): the cookies, what
+  the bot check sends to Google (since 2 April 2026 you, the site owner, are the data controller
+  for it and Google the processor), what the proxy and Cloud Run log (the client address only in
+  sampled refusals; Cloud Run's request log of every API call), and that logs are kept 30 days
+  (Cloud Logging's default for the `_Default` bucket, which nothing here changes). It names
+  nobody: no contact line, since that would need a configured address the repository does not
+  have.
+- **The direct `run.app` URL.** fhir-proxy must accept requests from Firebase Hosting, so its
+  `*.run.app` URL is public too. A caller of that URL can write its own `X-Forwarded-For` and so
+  choose which address it is counted as: it can use up another address's 5 bot-check attempts an
+  hour and its budget for requests without a session (a visitor who already has a session is
+  not affected, because sessions are counted by their own ID). What still bounds it is the daily
+  bot-check cap. The fix belongs at the edge (trust the forwarded address only from Hosting, or
+  make the URL reachable from Hosting only) and is a recorded follow-up of T46 (module phr's
+  README, "The client address and the direct run.app URL").
+- **When the cap is reached** the page says "The demo is busy, try again tomorrow." until UTC
+  midnight. Assessments that fail count too, so a scripted flood can use the day up; it costs
+  nothing beyond the cap.
 
 ### Rotating the session signing key
 
@@ -787,12 +870,17 @@ here either).
 | Pub/Sub, Secret Manager, log-based metrics, IAM, VPC, firewall | about $0 | about $0 |
 | Alert policies | $0 until 1 September 2027; then $0.35 per metric reference a month: about $1.05 (real data, 3 policies) or $0.70 (synthetic, 2) | the same |
 | Firebase Hosting | $0 under 10 GB stored and 10 GB a month transferred | the same |
+| reCAPTCHA assessments (Fraud Defense) | $0 | 10,000 a month free per organisation, then an $8 flat fee for 10,001 to 100,000 in a month ([Billing information](https://docs.cloud.google.com/recaptcha/docs/billing-information), read 20 November 2026). The default cap of 300 a day is at most 9,300 a month: $0, unless the same organisation's other keys, or a second deployment's 300 a day, push the month past 10,000 |
+| The demo counter bucket | $0: at most 7 tiny objects (one per day, deleted after 7 days) | one read and one write per bot check: fractions of a cent |
 | Data disk snapshots (prod only, 7 daily, incremental) | snapshot storage of a fraction of a GB: cents a month, not confirmed | the same |
 | Cloud NAT (off) | **billed hourly** if turned on: about $4.70 a month plus $0.045 per GiB | |
 
 So **near $0 a month idle** for one deployment on a fresh billing account, plus cents of
 storage; about $6 more for a second deployment's VM; about $1 more for alerts from September
-2027. The only always-on resource is the VM.
+2027; $8 in a month when the organisation's reCAPTCHA assessments pass 10,000 (two deployments
+at the full default cap every day would). The only always-on resource is the VM. A project with
+a billing account is on Fraud Defense's Premium tier, where assessments past the free 10,000
+keep working and are billed; without billing they would be refused (Essentials).
 
 ## CI/CD (T26)
 
@@ -1192,11 +1280,13 @@ reboot, patching, seeder-alert and Scheduler items; what it left is listed here)
   and the first plan and apply with T41's grants in code (P12).
 - **The real-data path**: connect script and health-sync (I1, I4, I14 to I20, I23, A8), and prod
   (A20).
+- **The public demo (D16)**, built offline by T43 to T48 and never deployed: P17 to P26, at its
+  rollout to prod ("Rolling out the public demo").
 - The deployer creating the Pub/Sub service agent itself (A22), prices (A16), and every item
   marked `partly`. Source abbreviations: **B** bootstrap, **PB** project-base, **ID** identity, **HC**
 healthcare, **IN** ingestion, **EV** edge-vm, **OE** openemr, **PHR** phr, **HS** health-sync,
 **SEED** services/seed, **SVC** services/README.md, **CG** connect-google-health, **CS**
-cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the smoke test
+cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **web** web/README.md, **T25** this task, **T29** the smoke test
 (`make smoke`, tests/e2e/README.md).
 
 ### Before and during the applies (steps 1 to 5, 7 and 8)
@@ -1330,7 +1420,7 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | P3 | The rewrite path: `/api/fhir/metadata` with the token gives the CapabilityStatement; `/api/unknown` gives the proxy's OperationOutcome; search links start with `/api/` | PHR | 2026-11-17 dev: ok. `/api/fhir/metadata` 200 with a `CapabilityStatement` (4.0.1); `/api/unknown` 404 with an `OperationOutcome`; the search's `self` and `next` links start with `/api/` |
 | P4 | cuff-sim's and health-sync's `run.app` URLs refuse outside callers even with a valid token; a cuff send through the page works; the status strip shows health-sync's state | PHR, IN | 2026-11-16 dev: partly. A cuff send over HTTPS through fhir-proxy worked; outside calls to the `run.app` URLs not tried; no health-sync (synthetic) |
 | P5 | MLLP through the VPC: a cuff send over MLLP returns `AA` | PHR, EV | 2026-11-16 dev: ok. A cuff send over MLLP returned `AA` |
-| P6 | The secret mount: login 503 before a version; works within about 30 s after `scripts/secrets/set-reviewer-password.sh`; an old token is refused after a second new version | PHR | 2026-11-18 dev: ok for rotation. The owner set a new password with `scripts/secrets/set-reviewer-password.sh` (version 3, 11:16:18 UTC); 37 s later the new password logged in (200) and the previous one was refused (401), with no restart; the owner's open dashboard session was signed out. Not checked: login 503 before any version exists. Note: the script leaves earlier versions enabled (they no longer log in, but stay readable to anyone with access to the secret). **T44 (D16) replaced the reviewer password**: the same mount now carries the session signing key; module phr's "Verify on the first real deploy", item 6, is the new check |
+| P6 | The secret mount (D9's reviewer password, which T44 replaced by the session signing key; module phr's "Verify on the first real deploy", item 6, is the new check): login 503 before a version; works within about 30 s after `scripts/secrets/set-reviewer-password.sh`; an old token is refused after a second new version | PHR | 2026-11-18 dev: ok for rotation. The owner set a new password with `scripts/secrets/set-reviewer-password.sh` (version 3, 11:16:18 UTC); 37 s later the new password logged in (200) and the previous one was refused (401), with no restart; the owner's open dashboard session was signed out. Not checked: login 503 before any version exists. Note: the script leaves earlier versions enabled (they no longer log in, but stay readable to anyone with access to the secret). **T44 (D16) replaced the reviewer password**: the same mount now carries the session signing key; module phr's "Verify on the first real deploy", item 6, is the new check |
 | P7 | CSP in the browser: zero violations through login, every tab, the chart, a cuff send; `/` carries the policy and `frame-ancestors 'none'`; `/.vite/manifest.json` is 404 | PHR | 2026-11-16 dev: partly. Login, status strip and chart in Chromium with no console errors; the other tabs, a cuff send from the page, the headers and the manifest 404 not checked |
 | P8 | The 60 s limit: a forced slow cuff send gets the proxy's own 504 within about 55 s, and its AuditEvent appears | PHR | |
 | P9 | Direct VPC egress cold starts: time the first `/api/status` and the first MLLP send after 20 idle minutes | PHR | 2026-11-18 dev: ok. After 20 minutes with no request reaching fhir-proxy (checked in its request log), from 11:38 UTC: first request (login) 3.78 s, first `/api/status` 0.94 s, first cuff send over MLLP 12.16 s with ACK `AA` (cold proxy, cuff-sim and adapter path), then a warm `/api/status` 0.22 s |
@@ -1341,6 +1431,19 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | P14 | Network: Cloud Run Direct VPC egress traffic is admitted by the subnet-range firewall rule (tags and service identity cannot be the source); a /24 is plenty | PB | 2026-11-16 dev: ok. cuff-sim's MLLP sends and fhir-proxy's shares reached the VM from the serverless subnet |
 | P15 | fhir-proxy's Cloud Healthcare searches: `gt`/`lt` on `effectivePeriod`, `_sort=date`, `_page_token` reuse, `_summary=count`, `_sort=-_lastUpdated` with `_elements=id,meta`, identifier OR lists, AuditEvent `type`/`subtype`/`date`/`_sort=-date`, Provenance `recorded` and `_include=Provenance:target`; the indexing delay for non-identifier searches | FP | 2026-11-16 dev: partly. `_summary=count` is **refused** (fhir-proxy now counts with `_total=accurate&_count=0`, fixed before T36); a heart-rate search sorted by date works; the others not checked |
 | P16 | fhir-proxy: HL7v2 `messages.list` with a `create_time` filter and `view=RAW_ONLY`; the identity-token audience; a mounted secret file reflects a new `latest` without a restart; `fhirResourceReader` allows every search above | FP | 2026-11-18 dev: mostly ok. The messages log (`messages.list` with a `create_time` filter, `view=RAW_ONLY` reads) works through `make smoke` and the dashboard; fhir-proxy's identity token to cuff-sim is accepted (every cuff send); the mounted reviewer-password file reflected a new `latest` without a restart (P6); `fhirResourceReader` allowed every search the smoke test and dashboard make. The audience value itself was not inspected |
+| P17 | The `__session` cookie through Hosting's rewrite, both ways: after "View the live demo" the browser holds `__session` with `Path=/api`, `HttpOnly`, `Secure`, `SameSite=Strict` and `Max-Age=86400` (Hosting passed the proxy's `Set-Cookie` back); `/api/status` then answers 200, not 401 (Hosting passed `Cookie` on); "Log out" removes it; a visit to `/privacy.html` and back keeps it; no `/api` answer is cached (`Cache-Control: no-store`) | PHR, FP | |
+| P18 | The assessment call: a click gives 200 and a `session-created` line with a score and `checks_today`; `curl` with a made-up token gives 403 and `bot-check-failed` with `reason=invalid-token`, `invalid_reason=MALFORMED` (the endpoint, the request body, `roles/recaptchaenterprise.agent` and the answer's field names); `tokenProperties.hostname` is the bare host; the key accepts both `<site>.web.app` and `<site>.firebaseapp.com`; the assessment is in `GCP_PROJECT_ID` | FP, PHR | |
+| P19 | The score real browsers get: the `score` of a few `session-created` lines (a desktop browser, a phone, a private window, a browser with a content blocker); none of them refused at `recaptcha_min_score` 0.5, else lower it and record why | FP, PHR | |
+| P20 | `make smoke` (step 14) with `PULSEBRIDGE_TOKEN_ISSUER` from the `token_issuer` output: `SMOKE RESULT: PASSED`, the locally signed sessions accepted (S1), the junk token refused after a real assessment (S1b), the negatives in their second session not rate-limited | T29, FP | |
+| P21 | The CSP with reCAPTCHA in the browser: zero violations while `enterprise.js` and its iframe load, the click, the dashboard and a cuff send; whether reCAPTCHA adds an inline style the policy (`style-src 'self'`) refuses, and if so whether anything visible breaks (the badge is hidden anyway); `/privacy.html` loads with no violation and no request off the site | PHR, web | |
+| P22 | The `Origin` header through Hosting: a `POST` through Hosting arrives with the page's origin and passes; `curl -X POST` with `Origin: https://example.org` gets `403 origin-refused` and an `origin-refused` log line | FP | |
+| P23 | The counter bucket under two instances: the first check of the day creates `bot-checks/<YYYY-MM-DD>` and later checks count up (`metadata.count`, which needs `storage.objects.delete` as well as `create`); under a burst of sessions that wakes the second instance, the count equals the number of `session-created` plus `bot-check-failed` lines (no increment lost to a race); `gcloud storage buckets describe` shows public access prevention `enforced` and the 7-day delete rule | FP, PHR | |
+| P24 | The rate limits on a normal visit: page load, the 7-day chart, three cuff sends, two shares and an idle hour log no `rate-limited` line; with two instances running, each counts on its own (the limits double, as documented) | FP | |
+| P25 | T47's window against Cloud Healthcare: `date=ge<boundary>` on `effectivePeriod` matches a heart-rate window that overlaps the boundary; `date` beside `_total=accurate&_count=0` (the status counts) and beside `_sort=-_lastUpdated`; a `_page_token` sent with a `date` a few seconds later than it was issued with; `recorded=ge` with `_include=Provenance:target`; nothing older than 7 days in the chart, the log or the counts | FP | |
+| P26 | What the privacy note says about logs: Cloud Run's request log for an `/api` call through Hosting (which `remoteIp` it records, the visitor's or Hosting's, and that it holds no cookie); the proxy's lines carry a `client_address` only in `rate-limited`, `session-rate-limited` and `origin-refused`; `gcloud logging buckets describe _Default --location=global` shows 30 days' retention; Hosting is not linked to Cloud Logging | PHR, FP, web | |
+
+No row for a quota override: Fraud Defense has no per-day assessments quota that Terraform could
+lower (T44 read Google's "Quotas and limits" page), so the bucket counter is the only daily cap.
 
 ### Teardown (dev)
 
