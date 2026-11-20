@@ -23,6 +23,46 @@ It is **read-only** (D12): it writes nothing to any of our stores. Its one write
 which creates a Patient, an Encounter and an Observation in OpenEMR (never updates or deletes).
 Every input is treated as hostile.
 
+It shows only the **last `HISTORY_DAYS` days** (7 by default; T47, D16). **The data stays:**
+nothing is deleted from either FHIR store, the HL7v2 store or OpenEMR; only the proxy hides
+what is older. See "The shown window (T47)".
+
+## The shown window (T47)
+
+The boundary is **now minus `HISTORY_DAYS`** (1 to 30, default 7), computed on every request
+with the app's clock and cut to whole milliseconds (`fhir_proxy/history.py`). What counts as
+"older" depends on what the thing is:
+
+- **A reading** (an Observation) by its **effective time**, `effective[x]`: when it was measured,
+  not when it was stored. An `effectiveDateTime` is inside at or after the boundary. A heart-rate
+  window is an `effectivePeriod` (a FHIR *Period*: a `start` and an `end`); it is inside when its
+  end is at or after the boundary, so a window that **overlaps** the boundary is shown. That is
+  exactly R4's rule for `date=ge<boundary>` on a Period (the search below). A reading whose
+  time has no zone or is a partial date cannot be placed, so it is not shown (no date search
+  finds it either).
+- **A send attempt** (its AuditEvent) by its **attempt time** (T31's `period.start`).
+
+Where each route applies it:
+
+| Route | What it does with the window |
+| --- | --- |
+| `GET /fhir/Observation` | adds `date=ge<boundary>` to the store's search; a caller's lower bound (`gt`/`ge`) that is earlier is **raised** to it, not refused; a later one is kept; the upper bound is untouched. Every returned Observation is checked against the boundary again, whatever the store did. The `self` and `next` links carry the bound that was sent |
+| `GET /fhir/Observation/{id}`, `GET /trace/heart-rate/{id}`, `POST /share` | an older reading answers `404 not-found` exactly as a missing one: the same body, the same headers, no extra log line. The share checks this before any `422`, so a refusal never describes an old reading; its OpenEMR read-back is of that one reading, so it covers the same window |
+| `GET /trace/cuff-attempts/{id}` | an older attempt is `404` like a missing one (an unreadable one by its `recorded` time, instead of `422`); an attempt inside whose Observation is older (a sample's OBX-14 years back) is shown without that Observation |
+| `GET /messages` | attempts by attempt time (the audit search gets `date=ge<boundary>` on `recorded`, which is never before the send), store-only messages by `createTime`, transactions by Provenance `recorded`; a row never links an older Observation (its `observation` is `null`), and a transaction lists only Observations inside (one that wrote only older windows, such as a backfill, is not a row) |
+| `GET /status` | `observationCounts` and `lastSyncAt` add `date=ge<boundary>` to their searches (still `_total=accurate&_count=0`, never `_summary`, which Cloud Healthcare refuses) |
+| `GET /fhir/metadata` | the `date` parameter's and the Observation resource's `documentation` state the rule |
+
+**Paging.** A store's page token belongs to the query it was issued for, and the boundary moves
+by the seconds between page 1 and page 2. So a continuation (`_page_token`) whose `ge` bound lies
+at most 10 minutes (`PAGE_LINK_GRACE`) before the current boundary is sent to the store as it
+is; what comes back is still checked against the current boundary. Whether Cloud Healthcare
+minds a different `date` beside its page token is not documented (see "Not verified").
+
+**Why the status counts may differ by a few from the chart.** The counts are cached for
+`STATUS_CACHE_SECONDS` (the boundary from when they were made), and Cloud Healthcare indexes
+searches asynchronously; both were already true before T47.
+
 ## Layout
 
 ```text
@@ -539,15 +579,14 @@ call, on fake timers; one call is one request except where noted):
 
 Notes on these numbers:
 
-- **The 30 d range** is still on the page until T47 removes it: 30 days of 5-minute windows is
-  8,640, about 9 search pages, so one click on it is about 9 reads.
+- **The 30 d range** was removed from the page by T47 (only 7 days are shown); it was about
+  9 search pages a click.
 - **Tabs share one budget.** Every tab of one browser sends the same cookie, so the same `jti`.
   Two tabs at the busiest measured minute (2 x 37 = 74) are well inside 120; two tabs both at
   the worst polling case (2 x 100) could be refused for a while.
-- **A 429 during polling ends that polling.** The page's `pollUntil` (`web/src/state/poll.ts`)
-  stops for good when a check throws, so a refused poll leaves its row shown as pending until
-  the visitor reloads or acts. T47 will make the page's polling resume after `Retry-After`;
-  this task does not change `web/`.
+- **A 429 during polling** (T47): the page's `pollUntil` (`web/src/state/poll.ts`) waits for
+  `Retry-After` and then polls again, instead of stopping; the wait does not use up its 2
+  minutes, and nothing is sent while it waits.
 
 The busiest minute measured is 37 reads. The worst the code allows without a person clicking
 fast is about 100 (a filtered log polling 4 pages every 3 s is 80 a minute, plus 20 trace polls
@@ -1010,6 +1049,7 @@ whether OpenEMR's zone was other than UTC was not checked). Not done: 7, 8, 9.
 | `CUFF_SENDS_PER_SESSION_PER_10_MINUTES` | no | `3` | `POST /cuff/readings` per session, 1-30; per instance |
 | `SHARES_PER_SESSION_PER_10_MINUTES` | no | `2` | `POST /share` per session, 1-20; per instance |
 | `SHARES_PER_INSTANCE_PER_HOUR` | no | `30` | `POST /share` by all visitors, per instance, 1-600 |
+| `HISTORY_DAYS` | no | `7` | how many days back the proxy shows, 1-30 (T47, "The shown window"); nothing is deleted |
 | `CUFF_SIM_URL` | yes | | cuff-sim's Cloud Run URL (`https://...run.app`); also the identity token's audience |
 | `PUBLIC_BASE_URL` | yes | | the URL the page reaches the proxy at, for `Bundle.entry.fullUrl`: behind the Firebase Hosting rewrite `https://<hosting domain>/api` (its path must equal `PATH_PREFIX`). Never taken from `Host` or forwarded headers |
 | `HEALTH_SYNC_URL` | no | empty | health-sync's Cloud Run URL; empty: `state: unknown`, `health-sync-not-deployed` |
@@ -1189,8 +1229,10 @@ deliberate exception that quotes them, and checks every record with and without 
 ## Tests
 
 `make test` runs `tests/`. The real `HealthcareClient` runs over an in-memory fake of the three
-stores (`fhir_proxy.testing.FakeHealthcare`), which applies **no** date filter so the proxy's own
-R4 rule is what is tested. Heart-rate data is written through T06's real `heart_rate_transaction`;
+stores (`fhir_proxy.testing.FakeHealthcare`), which applies **no** date filter to Observation
+searches by default, so the proxy's own R4 rule is what is tested (`observation_dates=True`
+turns on a separately written R4 rule, for T47's count test). `tests/test_history.py` tests the
+window at its boundary (just inside, just outside, an overlapping window, the clock moving). Heart-rate data is written through T06's real `heart_rate_transaction`;
 blood-pressure data through v2-to-fhir's real `map_message` over T07's samples; the five
 AuditEvent fixtures are T31's examples as committed. cuff-sim and health-sync are a fake sender;
 the real `requests` sender is tested against an HTTP server on 127.0.0.1 (bytes, timeout, no
@@ -1260,6 +1302,12 @@ notes, and must be confirmed on the first deployment (T25):
 - Firebase Hosting's rewrite forwards the `Authorization` header (D9's login, no longer used
   since T43; confirmed on the first dev deploy: login, `/status` and the searches worked through `/api`); the full path and its 60 s
   timeout in practice are still open.
+- T47's window against Cloud Healthcare: `date=ge<boundary>` on `effectivePeriod` matching an
+  overlapping window (R4's rule; the chart is safe either way, since the proxy re-checks, but
+  the status count relies on the store's own matching); `date` beside `_total=accurate&_count=0`
+  and beside `_sort=-_lastUpdated`; a `_page_token` sent with a `date` a few seconds later than
+  the one it was issued with (the 10-minute grace avoids this for links followed promptly);
+  `recorded=ge` with `_include=Provenance:target`.
 - Cloud Healthcare FHIR search: `gt`/`lt` on `effectivePeriod` (the proxy re-applies R4's rule,
   but cannot add windows the store left out); `_sort=date` on Observation; reusing a
   `_page_token` from a `next` link with the proxy's own parameter order; `_total=accurate&_count=0` (not `_summary=count`, which Cloud Healthcare refuses: found on the
