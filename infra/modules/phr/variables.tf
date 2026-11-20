@@ -275,17 +275,17 @@ variable "service_account_emails" {
 }
 
 variable "secret_ids" {
-  description = "Module identity's map of secret key to Secret Manager secret ID (module.identity.secret_ids), passed as it is. fhir-proxy mounts \"reviewer-password\" as a file; other keys are ignored (the OpenEMR client secret comes through var.openemr)."
+  description = "Module identity's map of secret key to Secret Manager secret ID (module.identity.secret_ids), passed as it is. fhir-proxy mounts \"session-signing-key\" (D16: the HS256 key of the demo session cookie) as a file; other keys are ignored (the OpenEMR client secret comes through var.openemr)."
   type        = map(string)
 
   validation {
-    condition     = contains(keys(var.secret_ids), "reviewer-password")
-    error_message = "secret_ids must contain the key reviewer-password (module identity creates it)."
+    condition     = contains(keys(var.secret_ids), "session-signing-key")
+    error_message = "secret_ids must contain the key session-signing-key (module identity creates it)."
   }
   validation {
     # Secret Manager secret IDs: letters, digits, '_' and '-', at most 255.
-    condition     = can(regex("^[A-Za-z0-9_-]{1,255}$", lookup(var.secret_ids, "reviewer-password", "")))
-    error_message = "secret_ids[\"reviewer-password\"] must be a short secret ID (letters, digits, '_', '-'), not a projects/... path."
+    condition     = can(regex("^[A-Za-z0-9_-]{1,255}$", lookup(var.secret_ids, "session-signing-key", "")))
+    error_message = "secret_ids[\"session-signing-key\"] must be a short secret ID (letters, digits, '_', '-'), not a projects/... path."
   }
 }
 
@@ -426,7 +426,7 @@ variable "public_origin" {
 }
 
 variable "extra_allowed_origins" {
-  description = "Further origins allowed to call fhir-proxy cross-origin (CORS), for example \"http://localhost:5173\" for a development page. Empty (default): only public_origin, and the page itself needs no CORS at all because it calls /api on its own origin. Each entry exactly as a browser sends Origin."
+  description = "Further entries for fhir-proxy's Origin check (ALLOWED_ORIGINS), after the page's own origins (public_origin, https://<site>.web.app, https://<site>.firebaseapp.com). Since D16 there is no cross-origin use: the session cookie is SameSite=Strict and the proxy sends no CORS credentials, so a page must reach the proxy on its own origin. An entry here only lets a same-origin setup elsewhere pass the Origin check on POST, for example \"http://localhost:5173\" for Vite's dev-server proxy (web/README.md, PULSEBRIDGE_DEV_PROXY_TARGET). Empty (default) in prod. Each entry exactly as a browser sends Origin."
   type        = list(string)
   default     = []
   nullable    = false
@@ -443,15 +443,15 @@ variable "extra_allowed_origins" {
 variable "trusted_proxy_hops" {
   description = <<-EOT
     TRUSTED_PROXY_HOPS for fhir-proxy: how many X-Forwarded-For entries, counted from the
-    right, were appended by proxies Google runs in front of it. The login rate limit keys on
-    the entry just left of them. 0 to 5.
+    right, were appended by proxies Google runs in front of it. The per-address demo session
+    limit (SESSIONS_PER_ADDRESS_PER_HOUR, D16) keys on the entry just left of them. 0 to 5.
     Default 2, MEASURED (dev, 17 November 2026; infra/envs/README.md, checklist P1): the page
     reaches the proxy only through Firebase Hosting's rewrite, and there the proxy receives two
     entries, "<visitor>, <Hosting's address>". Hosting replaces any X-Forwarded-For the visitor
     sent, so the second entry from the right is the visitor. With 1 the key would be a
-    Hosting address shared by visitors, so anyone could lock every visitor out through the
-    public page (5 failures fill one such key; how many Hosting addresses there are was not
-    measured).
+    Hosting address shared by visitors, so anyone could keep every visitor from starting a
+    demo session through the public page (5 attempts an hour fill one such key; how many
+    Hosting addresses there are was not measured).
     Use another value only for another front door: 1 if the page called the run.app URL
     directly with nothing in front (the service's own default), 0 never on Cloud Run (local
     use: the header is ignored). The known cost of 2: the run.app URL stays publicly reachable
@@ -506,5 +506,139 @@ variable "cuff_sim_max_instances" {
   validation {
     condition     = var.cuff_sim_max_instances >= 1 && var.cuff_sim_max_instances <= 3 && floor(var.cuff_sim_max_instances) == var.cuff_sim_max_instances
     error_message = "cuff_sim_max_instances must be a whole number from 1 to 3."
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# The public demo (D16, T44): bot check and session settings. The names and defaults are the T43
+# to T45 contract (docs/workplan.md, "The contract T43 to T45 share"); fhir-proxy checks them
+# again at start.
+# ---------------------------------------------------------------------------------------------
+
+variable "recaptcha_min_score" {
+  description = "RECAPTCHA_MIN_SCORE: the lowest reCAPTCHA score (0.0 likely a bot, 1.0 likely a person) that gets a demo session. 0.5 (default) is Google's suggested starting threshold for score keys. Above 0 and at most 1."
+  type        = number
+  default     = 0.5
+  nullable    = false
+
+  validation {
+    condition     = var.recaptcha_min_score > 0 && var.recaptcha_min_score <= 1
+    error_message = "recaptcha_min_score must be greater than 0 and at most 1."
+  }
+}
+
+variable "session_ttl_seconds" {
+  description = "SESSION_TTL_SECONDS: how long a demo session (the __session cookie and the token's exp) lasts. 86400 (default, 24 hours, D16). From 300 to 86400."
+  type        = number
+  default     = 86400
+  nullable    = false
+
+  validation {
+    condition     = var.session_ttl_seconds >= 300 && var.session_ttl_seconds <= 86400 && floor(var.session_ttl_seconds) == var.session_ttl_seconds
+    error_message = "session_ttl_seconds must be a whole number from 300 to 86400."
+  }
+}
+
+variable "sessions_per_address_per_hour" {
+  description = "SESSIONS_PER_ADDRESS_PER_HOUR: how many POST /auth/session attempts one client address may make in an hour, checked BEFORE any assessment is created, so a flood from one address costs nothing. Per proxy instance (in memory), so the real limit is this times the instance cap (2). 5 (default). From 1 to 100."
+  type        = number
+  default     = 5
+  nullable    = false
+
+  validation {
+    condition     = var.sessions_per_address_per_hour >= 1 && var.sessions_per_address_per_hour <= 100 && floor(var.sessions_per_address_per_hour) == var.sessions_per_address_per_hour
+    error_message = "sessions_per_address_per_hour must be a whole number from 1 to 100."
+  }
+}
+
+variable "bot_checks_per_day" {
+  description = "BOT_CHECKS_PER_DAY: the most reCAPTCHA assessments fhir-proxy creates in one UTC day, counted across instances in the demo counter bucket; past it the page says \"The demo is busy, try again tomorrow.\" 300 (default): about 9,000 a month, under the 10,000 assessments a month that are free per organisation. From 1 to 3000. Google offers no per-day quota on assessments to back this with a hard cap (README, \"The public demo\")."
+  type        = number
+  default     = 300
+  nullable    = false
+
+  validation {
+    condition     = var.bot_checks_per_day >= 1 && var.bot_checks_per_day <= 3000 && floor(var.bot_checks_per_day) == var.bot_checks_per_day
+    error_message = "bot_checks_per_day must be a whole number from 1 to 3000."
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# The public demo's rate limits (T46) and shown window (T47), passed through since T48. The
+# names, defaults and ranges are fhir-proxy's own (services/fhir-proxy/fhir_proxy/config.py,
+# VARIABLES and ServiceConfig.from_env); tests/check_proxy_settings.py fails if they drift.
+# Every limit is kept in memory by each proxy instance, so with max_instance_count = 2 the real
+# limit is up to twice the number (README, "Instances, concurrency and the rate limits").
+# ---------------------------------------------------------------------------------------------
+
+variable "requests_per_address_per_minute" {
+  description = "REQUESTS_PER_ADDRESS_PER_MINUTE: requests WITHOUT a valid session (the /auth/ routes, a missing, invalid or expired cookie) that one client address may make in a minute, all routes together (a token bucket). Per proxy instance, so up to twice this with 2 instances. 300 (default). From 60 to 6000."
+  type        = number
+  default     = 300
+  nullable    = false
+
+  validation {
+    condition     = var.requests_per_address_per_minute >= 60 && var.requests_per_address_per_minute <= 6000 && floor(var.requests_per_address_per_minute) == var.requests_per_address_per_minute
+    error_message = "requests_per_address_per_minute must be a whole number from 60 to 6000."
+  }
+}
+
+variable "reads_per_session_per_minute" {
+  description = "READS_PER_SESSION_PER_MINUTE: the requests one demo session may make in a minute other than cuff sends and shares: every GET and HEAD, and its few other requests such as logout (a token bucket keyed on the session token's jti). The dashboard's busiest measured minute is 37 (fhir-proxy README, \"Rate limits\"). Per proxy instance, so up to twice this with 2 instances. 120 (default). From 60 to 1200."
+  type        = number
+  default     = 120
+  nullable    = false
+
+  validation {
+    condition     = var.reads_per_session_per_minute >= 60 && var.reads_per_session_per_minute <= 1200 && floor(var.reads_per_session_per_minute) == var.reads_per_session_per_minute
+    error_message = "reads_per_session_per_minute must be a whole number from 60 to 1200."
+  }
+}
+
+variable "cuff_sends_per_session_per_10_minutes" {
+  description = "CUFF_SENDS_PER_SESSION_PER_10_MINUTES: cuff readings (POST /cuff/readings) one demo session may send in any 10 minutes (D16: 3). Per proxy instance, so up to twice this with 2 instances. 3 (default). From 1 to 30."
+  type        = number
+  default     = 3
+  nullable    = false
+
+  validation {
+    condition     = var.cuff_sends_per_session_per_10_minutes >= 1 && var.cuff_sends_per_session_per_10_minutes <= 30 && floor(var.cuff_sends_per_session_per_10_minutes) == var.cuff_sends_per_session_per_10_minutes
+    error_message = "cuff_sends_per_session_per_10_minutes must be a whole number from 1 to 30."
+  }
+}
+
+variable "shares_per_session_per_10_minutes" {
+  description = "SHARES_PER_SESSION_PER_10_MINUTES: shares to OpenEMR (POST /share) one demo session may make in any 10 minutes (D16: 2). Per proxy instance, so up to twice this with 2 instances. 2 (default). From 1 to 20."
+  type        = number
+  default     = 2
+  nullable    = false
+
+  validation {
+    condition     = var.shares_per_session_per_10_minutes >= 1 && var.shares_per_session_per_10_minutes <= 20 && floor(var.shares_per_session_per_10_minutes) == var.shares_per_session_per_10_minutes
+    error_message = "shares_per_session_per_10_minutes must be a whole number from 1 to 20."
+  }
+}
+
+variable "shares_per_instance_per_hour" {
+  description = "SHARES_PER_INSTANCE_PER_HOUR: shares to OpenEMR by all visitors together in any hour, counted by each proxy instance on its own: with 2 instances up to 60 an hour (accepted with D16's rollout plan). 30 (default). From 1 to 600."
+  type        = number
+  default     = 30
+  nullable    = false
+
+  validation {
+    condition     = var.shares_per_instance_per_hour >= 1 && var.shares_per_instance_per_hour <= 600 && floor(var.shares_per_instance_per_hour) == var.shares_per_instance_per_hour
+    error_message = "shares_per_instance_per_hour must be a whole number from 1 to 600."
+  }
+}
+
+variable "history_days" {
+  description = "HISTORY_DAYS: how many days back fhir-proxy shows (T47): readings by when they were measured, send attempts by when they were sent; anything older answers like a missing resource. Nothing is deleted: the data stays in the stores and in OpenEMR, only the proxy hides it. The page's privacy note says \"the last 7 days\": change it with this. 7 (default). From 1 to 30."
+  type        = number
+  default     = 7
+  nullable    = false
+
+  validation {
+    condition     = var.history_days >= 1 && var.history_days <= 30 && floor(var.history_days) == var.history_days
+    error_message = "history_days must be a whole number from 1 to 30."
   }
 }

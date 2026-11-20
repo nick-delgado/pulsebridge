@@ -4,10 +4,10 @@
  * This mounts the real features against the mock, so a feature that breaks the rule after a
  * merge fails here.
  */
-import { beforeEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { MockClient } from '../api/mock-client';
-import { Session } from '../api/session';
 import { startApp } from './app';
+import { mockBotCheck } from './test-support';
 
 /** The id prefix each feature owns, by the slot it is mounted in. */
 const SLOT_PREFIX: Record<string, string> = {
@@ -31,18 +31,13 @@ const settle = async () => {
 };
 
 describe('element ids on the dashboard', () => {
-  beforeEach(() => {
-    sessionStorage.clear();
-  });
-
   it('are unique, and each is prefixed by the shell or the feature whose slot holds it', async () => {
     document.body.replaceChildren();
     const root = document.createElement('div');
     document.body.append(root);
-    const session = new Session(sessionStorage);
-    const client = new MockClient({ session, onUnauthorized: () => undefined, latencyMs: 0 });
-    await client.login('x');
-    await startApp({ root, makeClient: () => client });
+    const client = new MockClient({ onUnauthorized: () => undefined, latencyMs: 0 });
+    await client.startSession('mock-recaptcha-test');
+    await startApp({ root, makeClient: () => client, botCheck: mockBotCheck() });
     await settle();
 
     const elements = [...root.querySelectorAll<HTMLElement>('[id]')];

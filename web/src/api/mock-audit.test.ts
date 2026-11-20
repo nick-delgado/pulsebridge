@@ -3,7 +3,6 @@ import type { SendAttemptEntry } from './contract';
 import type { AuditEvent } from './fhir';
 import { MockClient } from './mock-client';
 import { derivedMessageName, MOCK_HL7V2_STORE } from './mock-data';
-import { Session } from './session';
 // T31's generated examples, copied from libs/pulsebridge_fhir/examples/ (see t31-examples/README.md).
 import acceptedMllp from './t31-examples/auditevent-send-accepted-mllp.json';
 import accepted from './t31-examples/auditevent-send-accepted.json';
@@ -45,15 +44,12 @@ describe("mock send-attempt AuditEvents against T31's examples", () => {
   let traceFor: (id: string) => ReturnType<MockClient['getCuffAttemptTrace']>;
 
   beforeAll(async () => {
-    sessionStorage.clear();
-    const session = new Session(sessionStorage, () => NOW);
     const client = new MockClient({
-      session,
       onUnauthorized: () => undefined,
       now: () => NOW,
       latencyMs: 0,
     });
-    await client.login('x');
+    await client.startSession('mock-recaptcha-test');
     traceFor = (id) => client.getCuffAttemptTrace(id);
     const { entries } = await client.listMessages({ kind: 'cuff-send', count: 50 });
     const pick = (name: string, test: (e: SendAttemptEntry) => boolean) => {

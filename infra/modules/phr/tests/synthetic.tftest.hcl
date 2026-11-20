@@ -32,7 +32,7 @@ variables {
     "cuff-sim"   = "pb-cuff-sim@example-project.iam.gserviceaccount.com"
   }
   secret_ids = {
-    "reviewer-password" = "pulsebridge-reviewer-password"
+    "session-signing-key" = "pulsebridge-session-signing-key"
   }
 
   network_name           = "pulsebridge-vpc"

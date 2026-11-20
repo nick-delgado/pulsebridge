@@ -1,4 +1,4 @@
-"""No log line, at any level, on any route, holds a password, a token, the patient id or a value.
+"""No log line, at any level, on any route, holds a key, a token, the patient id or a value.
 
 Distinctive synthetic values are pushed through every route, including the error paths and an
 unexpected exception, and every log record is checked both as the JSON line production writes
@@ -10,9 +10,16 @@ from __future__ import annotations
 import json
 
 from fhir_proxy import traces
-from fhir_proxy.testing import AUDIT_STORE, PASSWORD, PATIENT_ID, STORE_NAME, example, sample_bytes
+from fhir_proxy.testing import (
+    AUDIT_STORE,
+    PATIENT_ID,
+    SIGNING_KEY,
+    STORE_NAME,
+    example,
+    sample_bytes,
+)
 
-WRONG_GUESS = "zz-distinctive-wrong-guess-7c1e"
+JUNK_TOKEN = "zz-distinctive-junk-token-7c1e"  # noqa: S105 - synthetic
 BODY_MARKER = "zz-distinctive-body-marker-5b2a"
 
 
@@ -30,13 +37,21 @@ def test_nothing_sensitive_reaches_the_logs(harness, logs, seed_heart_rate, map_
     broken["outcome"] = "0"
     harness.fake.put(AUDIT_STORE, broken)
 
-    # Login: wrong, right, rate-limited, then a token used everywhere.
-    for _ in range(6):
-        harness.client.post("/auth/login", json={"password": WRONG_GUESS})
-    token = harness.login(PASSWORD, **{"X-Forwarded-For": "203.0.113.50"})
-    auth = {"Authorization": f"Bearer {token}"}
-    harness.client.get("/status", headers={"Authorization": f"Bearer {token}x"})
+    # Sessions: junk, failed, a foreign origin, rate-limited, then one used everywhere.
+    bot_tokens = [harness.fraud.issue(score=0.1) for _ in range(2)]
+    harness.start_session(JUNK_TOKEN)
+    harness.start_session(bot_tokens[0])
+    harness.client.post("/auth/session", json={"recaptcha_token": bot_tokens[1]})
+    for _ in range(4):
+        harness.start_session()
+    good = harness.fraud.issue()
+    from fhir_proxy.testing import session_from
+
+    token = session_from(harness.start_session(good, **{"X-Forwarded-For": "203.0.113.50"}))
+    auth = harness.auth(token)
+    harness.client.get("/status", headers={"Cookie": f"__session={token}x"})
     harness.client.get(f"/status?access_token={token}")
+    harness.client.get(f"/status?__session={token}")
 
     harness.sender.answer("/status", 200, {"googleHealth": "connected"})
     harness.sender.answer("/cuff/readings", 422, {"resourceType": "OperationOutcome", "issue": []})
@@ -59,7 +74,7 @@ def test_nothing_sensitive_reaches_the_logs(harness, logs, seed_heart_rate, map_
 
     # An unexpected exception whose message quotes secrets must be logged by type only.
     def explode(*_args: object, **_kwargs: object) -> dict:
-        raise RuntimeError(f"{PASSWORD} {token} {PATIENT_ID} {BODY_MARKER}")
+        raise RuntimeError(f"{SIGNING_KEY!r} {token} {PATIENT_ID} {BODY_MARKER}")
 
     original = traces.heart_rate_trace
     traces.heart_rate_trace = explode
@@ -68,19 +83,21 @@ def test_nothing_sensitive_reaches_the_logs(harness, logs, seed_heart_rate, map_
     finally:
         traces.heart_rate_trace = original
     assert response.status_code == 500
-    assert PASSWORD not in response.get_data(as_text=True)
+    assert token not in response.get_data(as_text=True)
 
     text = logs.text()
     assert text, "the probe produced no log lines at all"
-    for secret in (PASSWORD, WRONG_GUESS, token, token.split(".")[2], PATIENT_ID, BODY_MARKER):
+    secrets = (SIGNING_KEY.decode(), JUNK_TOKEN, *bot_tokens, good, token, token.split(".")[2])
+    for secret in (*secrets, PATIENT_ID, BODY_MARKER):
         assert secret not in text, f"leaked: {secret[:12]}..."
     for value in ("63.5", "SYNTHIA", "TESTPATIENT", "fake-identity-token"):
         assert value not in text
     events = {e["event"] for e in logs.events()}
     assert {
-        "login-failed",
-        "login-rate-limited",
-        "login-succeeded",
+        "bot-check-failed",
+        "origin-refused",
+        "session-rate-limited",
+        "session-created",
         "token-refused",
         "bug",
     } <= events

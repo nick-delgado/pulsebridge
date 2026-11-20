@@ -51,28 +51,6 @@ run "defaults_are_a_real_data_prod_stack_with_ingest_off" {
   }
 }
 
-run "prod_refuses_the_reviewer_password_from_tfvars" {
-  command = plan
-
-  variables {
-    reviewer_password            = "a-synthetic-test-password-0123"
-    reviewer_password_wo_version = 1
-  }
-
-  # The password itself is refused first; the version's rules, which reference it, then do not run.
-  expect_failures = [var.reviewer_password]
-}
-
-run "prod_refuses_a_reviewer_password_version_from_tfvars" {
-  command = plan
-
-  variables {
-    reviewer_password_wo_version = 1
-  }
-
-  expect_failures = [var.reviewer_password_wo_version]
-}
-
 run "prod_refuses_a_syn_patient_with_real_data" {
   command = plan
 
@@ -116,16 +94,6 @@ run "patient_check_fires_when_ingestion_and_phr_disagree" {
   expect_failures = [check.one_patient_for_the_cuff_path]
 }
 
-run "prod_refuses_a_reviewer_password_even_without_a_version" {
-  command = plan
-
-  variables {
-    reviewer_password = "a-synthetic-test-password-0123"
-  }
-
-  expect_failures = [var.reviewer_password]
-}
-
 # T26: the build trigger runs as the build account, so it is refused without it.
 run "build_trigger_needs_the_build_account" {
   command = plan
@@ -144,5 +112,51 @@ run "build_approval_is_on_by_default" {
   assert {
     condition     = var.build_trigger_approval_required == true
     error_message = "build_trigger_approval_required must default to true in the root."
+  }
+}
+
+# T44: the demo settings pass through the root; unset keeps module phr's defaults.
+run "demo_settings_pass_through_the_root" {
+  command = plan
+
+  variables {
+    recaptcha_min_score                   = 0.7
+    bot_checks_per_day                    = 120
+    session_ttl_seconds                   = 3600
+    sessions_per_address_per_hour         = 9
+    requests_per_address_per_minute       = 450
+    reads_per_session_per_minute          = 240
+    cuff_sends_per_session_per_10_minutes = 4
+    shares_per_session_per_10_minutes     = 1
+    shares_per_instance_per_hour          = 15
+    history_days                          = 14
+  }
+
+  assert {
+    condition     = output.demo_settings == { recaptcha_min_score = 0.7, session_ttl_seconds = 3600, sessions_per_address_per_hour = 9, bot_checks_per_day = 120, requests_per_address_per_minute = 450, reads_per_session_per_minute = 240, cuff_sends_per_session_per_10_minutes = 4, shares_per_session_per_10_minutes = 1, shares_per_instance_per_hour = 15, history_days = 14 }
+    error_message = "Each demo setting set in tfvars must reach module phr."
+  }
+}
+
+run "demo_settings_default_at_the_root" {
+  command = plan
+
+  assert {
+    condition     = output.demo_settings == { recaptcha_min_score = 0.5, session_ttl_seconds = 86400, sessions_per_address_per_hour = 5, bot_checks_per_day = 300, requests_per_address_per_minute = 300, reads_per_session_per_minute = 120, cuff_sends_per_session_per_10_minutes = 3, shares_per_session_per_10_minutes = 2, shares_per_instance_per_hour = 30, history_days = 7 }
+    error_message = "Unset demo settings must give module phr's defaults."
+  }
+}
+
+# T44: make smoke reads the proxy's issuer from this output (PULSEBRIDGE_TOKEN_ISSUER).
+run "token_issuer_output_follows_name_prefix" {
+  command = plan
+
+  variables {
+    name_prefix = "pbsmoke"
+  }
+
+  assert {
+    condition     = endswith(output.token_issuer, ":pbsmoke") && startswith(output.token_issuer, "pulsebridge-fhir-proxy:")
+    error_message = "token_issuer must end with name_prefix (not identity_name_prefix)."
   }
 }

@@ -46,9 +46,11 @@ What is left out, and counted in the summary:
 - Duplicates: two Observations for the same window start (writes are idempotent, so this means an
   upstream fault). The most recently updated (`meta.lastUpdated`) is kept.
 
-### 30 days stay responsive
+### A week stays responsive
 
-Thirty days is about 8,600 windows. uPlot's line path builder already reduces the points to one
+The ranges are 24 h and 7 d. There was a 30 d range until T47 removed it: the proxy shows only
+the last `HISTORY_DAYS` days (7 by default, D16), so a longer range could only show the same
+week. Seven days is about 2,000 windows (thirty, measured before, about 8,600). uPlot's line path builder already reduces the points to one
 minimum/maximum pair per pixel column while it builds the path, so drawing costs the plot width,
 not the number of points. We therefore do **not** aggregate the data for display: every window is
 still its own row, and a click (the window whose middle is nearest the pointer,

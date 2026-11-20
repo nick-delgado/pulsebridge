@@ -2,14 +2,14 @@
  * The status strip announces a new watch sync (`notifyDataChanged('sync')`) so features re-fetch,
  * and reloads itself periodically so a sync during a session is noticed at all.
  */
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import { afterEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import type { StatusSummary } from '../api/contract';
 import { MockClient } from '../api/mock-client';
 import { SYNC_INTERVAL_MS } from '../api/mock-data';
-import { Session } from '../api/session';
 import type { DataChangeKind } from '../state/data-changed';
 import { startApp, STATUS_REFRESH_MS, VISIBILITY_RELOAD_MIN_GAP_MS } from './app';
 import type { FeatureContext, Features } from './features';
+import { mockBotCheck, viewDemo } from './test-support';
 
 const settle = async () => {
   for (let i = 0; i < 3; i++) await new Promise((r) => setTimeout(r, 0));
@@ -54,13 +54,11 @@ async function start(answers?: (StatusSummary | Promise<StatusSummary>)[]): Prom
   document.body.append(root);
   let now = Date.parse('2026-03-10T12:00:00Z');
   const client = new MockClient({
-    // The session checks token expiry on the same fixed clock.
-    session: new Session(sessionStorage, () => now),
     onUnauthorized: quiet,
     latencyMs: 0,
     now: () => now,
   });
-  await client.login('x');
+  await client.startSession('mock-recaptcha-test');
   const getStatus = vi.spyOn(client, 'getStatus');
   if (answers) {
     for (const answer of answers) getStatus.mockImplementationOnce(() => Promise.resolve(answer));
@@ -80,7 +78,13 @@ async function start(answers?: (StatusSummary | Promise<StatusSummary>)[]): Prom
     share: quiet,
     messages: quiet,
   };
-  await startApp({ root, makeClient: () => client, features, now: () => now });
+  await startApp({
+    root,
+    makeClient: () => client,
+    botCheck: mockBotCheck(),
+    features,
+    now: () => now,
+  });
   await settle();
   return {
     heard,
@@ -99,18 +103,11 @@ async function start(answers?: (StatusSummary | Promise<StatusSummary>)[]): Prom
       [...root.querySelectorAll('button')].find((b) => b.textContent === 'Log out')?.click();
     },
     logIn: async () => {
-      const input = root.querySelector<HTMLInputElement>('#login-password');
-      if (!input) throw new Error('no login form');
-      input.value = 'x';
-      root.querySelector('form')?.dispatchEvent(new Event('submit', { cancelable: true }));
-      await settle();
+      await viewDemo(root);
     },
   };
 }
 
-beforeEach(() => {
-  sessionStorage.clear();
-});
 afterEach(() => {
   vi.useRealTimers();
 });

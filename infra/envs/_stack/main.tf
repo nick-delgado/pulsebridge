@@ -56,10 +56,6 @@ module "identity" {
 
   secret_deletion_protection = var.protect_from_destroy
   secret_labels              = local.labels
-
-  # Dev only (validated in variables.tf): write-only, never in plan or state.
-  reviewer_password            = var.reviewer_password
-  reviewer_password_wo_version = var.reviewer_password_wo_version
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -316,6 +312,20 @@ module "phr" {
   # T41: CI's page deployer may read fhir-proxy (roles/run.viewer): Firebase Hosting checks
   # run.services.get on the /api rewrite's target when `firebase deploy` finalizes a version.
   page_deployer_service_account_email = var.page_deployer_service_account_email
+
+  # D16 (T44): null passes through and module phr uses its own default (its variables are not
+  # nullable, so Terraform substitutes the default for a null).
+  recaptcha_min_score           = var.recaptcha_min_score
+  bot_checks_per_day            = var.bot_checks_per_day
+  session_ttl_seconds           = var.session_ttl_seconds
+  sessions_per_address_per_hour = var.sessions_per_address_per_hour
+  # T48: T46's limits and T47's window, the same way (null: module phr's default).
+  requests_per_address_per_minute       = var.requests_per_address_per_minute
+  reads_per_session_per_minute          = var.reads_per_session_per_minute
+  cuff_sends_per_session_per_10_minutes = var.cuff_sends_per_session_per_10_minutes
+  shares_per_session_per_10_minutes     = var.shares_per_session_per_10_minutes
+  shares_per_instance_per_hour          = var.shares_per_instance_per_hour
+  history_days                          = var.history_days
 
   # bootstrap added Firebase with the owner's credentials (add_firebase); the deployer needs no
   # Firebase role beyond roles/firebasehosting.admin.

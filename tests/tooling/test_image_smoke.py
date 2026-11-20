@@ -218,6 +218,7 @@ class Case:
     bad_env: dict[str, str] = field(default_factory=dict)
     bad_message: str = ""
     threads: str = "4"  # gunicorn --threads in the README's command
+    headers: dict[str, str] = field(default_factory=dict)  # sent with the request (fhir-proxy)
 
 
 CASES = {
@@ -271,10 +272,13 @@ CASES = {
         bad_env={"AUDIT_FHIR_STORE_ID": "smoke-hl7v2"},
         bad_message="AUDIT_FHIR_STORE_ID must differ from HL7V2_STORE_ID",
     ),
-    # Every route but POST /auth/login needs a session token, so GET <prefix>/status without one
-    # is 401 with WWW-Authenticate: Bearer, decided before any Google call. PATH_PREFIX=/api as
-    # behind the Firebase Hosting rewrite (module phr). The password file is a fake mounted like
-    # the reviewer-password secret volume; the URLs are reserved .test names nothing resolves.
+    # Every route but the three under /auth/ needs the __session cookie (D16, T43). GET
+    # <prefix>/status with a cookie that is not a valid token is 401 session-required, decided
+    # before any Google call; the signing key is read to check it, so a 401 (not 503
+    # session-not-configured) proves the mounted key file is readable. PATH_PREFIX=/api as
+    # behind the Firebase Hosting rewrite (module phr). The key file is a fake mounted like the
+    # session-signing-key secret volume; the site key and bucket are placeholders never called;
+    # the URLs are reserved .test names nothing resolves.
     "fhir-proxy": Case(
         service="fhir-proxy",
         env={
@@ -282,7 +286,9 @@ CASES = {
             "FHIR_STORE_ID": "smoke-fhir",
             "AUDIT_FHIR_STORE_ID": "smoke-audit",
             "HL7V2_STORE_ID": "smoke-hl7v2",
-            "REVIEWER_PASSWORD_FILE": "/smoke/reviewer-password",
+            "SESSION_SIGNING_KEY_FILE": "/smoke/session-signing-key",
+            "RECAPTCHA_SITE_KEY": "smoke-placeholder-site-key-000000000000",
+            "DEMO_COUNTER_BUCKET": "smoke-demo-counters",
             "ALLOWED_ORIGINS": "https://smoke.example.test",
             "CUFF_SIM_URL": "https://cuff-sim.smoke.example.test",
             "PUBLIC_BASE_URL": "https://smoke.example.test/api",
@@ -292,14 +298,17 @@ CASES = {
         path="/api/status",
         body=None,
         status=401,
+        headers={"Cookie": "__session=not.a.session"},
         bad_env={"CUFF_SIM_URL": ""},
         bad_message="missing environment variables: CUFF_SIM_URL",
         threads="8",
     ),
 }
 
-# A fake reviewer password for fhir-proxy's smoke case: obviously not a real one, never logged.
-FAKE_REVIEWER_PASSWORD = "smoke-test-placeholder-password"  # noqa: S105 - a fake
+# A fake session-signing key for fhir-proxy's smoke case: 40 bytes (the proxy requires at least
+# 32), all one letter, so it is obviously not a real key (and has no entropy for a secret
+# scanner to mistake). It must never appear in the logs.
+FAKE_SIGNING_KEY = "k" * 40
 
 
 def docker(*args: str, check: bool = True, timeout: float = 120) -> subprocess.CompletedProcess:
@@ -327,10 +336,10 @@ def adc_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert shutil.which(DOCKER), f"{DOCKER} not found"
     d = tmp_path_factory.mktemp("adc")
     (d / "adc.json").write_text(json.dumps(FAKE_ADC))
-    (d / "reviewer-password").write_text(FAKE_REVIEWER_PASSWORD)
+    (d / "session-signing-key").write_text(FAKE_SIGNING_KEY)
     d.chmod(0o755)
     (d / "adc.json").chmod(0o644)  # readable by the image's non-root user
-    (d / "reviewer-password").chmod(0o644)
+    (d / "session-signing-key").chmod(0o644)
     return d
 
 
@@ -394,7 +403,10 @@ def request(base: str, case: Case) -> tuple[int, bytes, dict[str, str]]:
         url,
         data=case.body,
         method=case.method,
-        headers={"Content-Type": "application/json"} if case.body is not None else {},
+        headers={
+            **({"Content-Type": "application/json"} if case.body is not None else {}),
+            **case.headers,
+        },
     )
     try:
         with opener.open(req, timeout=5) as resp:
@@ -429,16 +441,16 @@ def test_starts_listens_on_port_and_answers(case: Case, running: tuple[str, str]
         samples = json.loads(body)
         assert samples and all({"name", "label", "class", "transports"} <= set(s) for s in samples)
     if case.service == "fhir-proxy":
-        # The token gate answered, under the prefix, with a FHIR OperationOutcome and its fixed
-        # reason. 401 (not 503 "login-not-configured") also proves the password file was read.
+        # The session gate answered, under the prefix, with a FHIR OperationOutcome and its fixed
+        # reason. 401 (not 503 "session-not-configured") also proves the key file was read.
         outcome = json.loads(body)
         assert outcome["resourceType"] == "OperationOutcome", outcome
         codes = [c["code"] for c in outcome["issue"][0]["details"]["coding"]]
-        assert codes == ["unauthorized"], outcome
-        assert headers.get("WWW-Authenticate", "").startswith("Bearer"), headers
+        assert codes == ["session-required"], outcome
+        assert headers.get("WWW-Authenticate", "").startswith("Cookie"), headers
     logs = docker("logs", container)
     output = logs.stdout + logs.stderr
-    assert FAKE_REVIEWER_PASSWORD not in output, "the password file's content was logged"
+    assert FAKE_SIGNING_KEY not in output, "the signing key file's content was logged"
     assert f"Listening at: http://0.0.0.0:{SMOKE_PORT}" in output, output
     assert "Control server error" not in output, output
 

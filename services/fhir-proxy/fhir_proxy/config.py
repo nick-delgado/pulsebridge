@@ -2,7 +2,7 @@
 
 Everything is checked at start-up, so a bad value fails the deploy instead of every request.
 Nothing here names a deployment: a clone sets its own project, stores, URLs, origin and patient.
-The defaults that exist are operating limits (timeouts, the login limits, the token lifetime).
+The defaults that exist are operating limits (timeouts, the session limits, the token lifetime).
 
 Error messages name the variable, never its value: some values (the patient identifier, the
 patient's name) are personal data in a real deployment, and the URLs identify the deployment.
@@ -33,11 +33,13 @@ VARIABLES: dict[str, Variable] = {
     "AUDIT_FHIR_STORE_ID": Variable("Audit FHIR store with the send-attempt AuditEvents (D15)"),
     "HL7V2_STORE_ID": Variable("HL7v2 store the cuff messages are stored in"),
     "PATIENT_ID": Variable("The configured patient's identifier (urn:pulsebridge:patient)"),
-    "REVIEWER_PASSWORD_FILE": Variable(
-        "Path of the mounted reviewer-password secret (version latest), read at request time"
+    "SESSION_SIGNING_KEY_FILE": Variable(
+        "Path of the mounted session-signing-key secret (version latest): at least 32 random "
+        "bytes, re-read after a short cache, so a new version ends every session"
     ),
     "ALLOWED_ORIGINS": Variable(
-        "Comma-separated dashboard origins allowed by CORS, e.g. https://app.example.test"
+        "Comma-separated origins of the page, e.g. https://app.example.test: every POST must "
+        "carry one of them in Origin, and the bot check's hostname must be one of their hosts"
     ),
     "CUFF_SIM_URL": Variable("Base URL of the cuff-sim Cloud Run service (https://...)"),
     "HEALTH_SYNC_URL": Variable(
@@ -51,26 +53,66 @@ VARIABLES: dict[str, Variable] = {
     "PATH_PREFIX": Variable(
         "Path every route is served under, e.g. /api behind the Firebase Hosting rewrite", ""
     ),
-    "SESSION_TTL_SECONDS": Variable("Lifetime of a session token, 60 to 86400", "28800"),
-    "TOKEN_ISSUER": Variable(
-        "JWT iss and aud of the session token; also salts the signing-key derivation",
-        "pulsebridge-fhir-proxy",
+    "SESSION_TTL_SECONDS": Variable(
+        "Lifetime of a session (the token's exp and the cookie's Max-Age), 60 to 86400", "86400"
     ),
-    "PASSWORD_CACHE_SECONDS": Variable(
-        "How long the password file's content is reused, 0 to 300 (rotation delay)", "30"
-    ),
+    "TOKEN_ISSUER": Variable("JWT iss and aud of the session token", "pulsebridge-fhir-proxy"),
     "TRUSTED_PROXY_HOPS": Variable(
         "How many X-Forwarded-For entries, from the right, trusted proxies appended, 0 to 5"
         " (1: run.app alone; 2 behind Firebase Hosting, which module phr sets)",
         "1",
     ),
-    "LOGIN_FAILURES_PER_ADDRESS": Variable(
-        "Failed logins allowed per client address per window; the next attempt gets 429", "5"
+    # The bot check (D16): Google Cloud Fraud Defense, formerly reCAPTCHA Enterprise.
+    "RECAPTCHA_SITE_KEY": Variable(
+        "The score-based web key's ID (public; GET /auth/config hands it to the page)"
     ),
-    "LOGIN_FAILURES_TOTAL": Variable(
-        "Failed logins allowed from all addresses per window on one instance", "60"
+    "RECAPTCHA_ACTION": Variable(
+        "The action the page names when it runs the check; an assessment for any other fails",
+        "view_demo",
     ),
-    "LOGIN_WINDOW_SECONDS": Variable("Length of the login rate-limit window, 10 to 3600", "60"),
+    "RECAPTCHA_MIN_SCORE": Variable(
+        "Lowest score that passes, 0.0 to 1.0 (1.0: very likely a person)", "0.5"
+    ),
+    "SESSIONS_PER_ADDRESS_PER_HOUR": Variable(
+        "POST /auth/session attempts allowed per client address in a sliding hour, 1 to 100",
+        "5",
+    ),
+    "BOT_CHECKS_PER_DAY": Variable(
+        "Assessments allowed per UTC day across all instances (the counter bucket), 1 to 100000",
+        "300",
+    ),
+    # The rate limits of the public demo (T46; README "Rate limits"). Per instance, in memory:
+    # the real limit is each one times the instance count (fhir-proxy's max_instance_count, 2).
+    "REQUESTS_PER_ADDRESS_PER_MINUTE": Variable(
+        "Requests without a valid session per client address a minute, every route together "
+        "(the public /auth/ routes, missing, invalid or expired cookies), 60 to 6000 (a token "
+        "bucket); a request with a valid session counts against its session's limits instead",
+        "300",
+    ),
+    "READS_PER_SESSION_PER_MINUTE": Variable(
+        "GET and HEAD requests (and the session's few other non-send, non-share requests) per "
+        "demo session a minute, 60 to 1200 (a token bucket keyed on the session token's jti)",
+        "120",
+    ),
+    "CUFF_SENDS_PER_SESSION_PER_10_MINUTES": Variable(
+        "POST /cuff/readings per demo session in any 10 minutes, 1 to 30", "3"
+    ),
+    "SHARES_PER_SESSION_PER_10_MINUTES": Variable(
+        "POST /share per demo session in any 10 minutes, 1 to 20", "2"
+    ),
+    "SHARES_PER_INSTANCE_PER_HOUR": Variable(
+        "POST /share by all visitors together in any hour, per instance, 1 to 600", "30"
+    ),
+    # T47 (D16): only the last HISTORY_DAYS days are shown; nothing is deleted, the proxy hides.
+    "HISTORY_DAYS": Variable(
+        "How many days back the proxy shows, 1 to 30: readings by their effective time (a "
+        "heart-rate window that overlaps the boundary is shown), send attempts by their attempt "
+        "time; anything older answers like a missing resource. Nothing is deleted",
+        "7",
+    ),
+    "DEMO_COUNTER_BUCKET": Variable(
+        "Cloud Storage bucket holding one counter object per UTC day (the daily bot-check cap)"
+    ),
     "FHIR_TIMEOUT_SECONDS": Variable(
         "Timeout of one Cloud Healthcare API request (FHIR or HL7v2), 1 to 30", "10"
     ),
@@ -173,6 +215,13 @@ _HOST_NAME = re.compile(
     re.ASCII,
 )
 _LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+# A reCAPTCHA key ID is 40 characters of letters, digits, - and _ today; allow some room.
+_SITE_KEY = re.compile(r"[A-Za-z0-9_-]{20,100}", re.ASCII)
+# "Actions may only contain alphanumeric characters, slashes, and underscores" (reCAPTCHA,
+# "Install score-based keys on websites", actions).
+_ACTION = re.compile(r"[A-Za-z0-9/_]{1,100}", re.ASCII)
+# Cloud Storage bucket naming rules, the dot-free form (no domain-named buckets here).
+_BUCKET = re.compile(r"[a-z0-9][a-z0-9_-]{1,61}[a-z0-9]", re.ASCII)
 
 
 class ConfigError(ValueError):
@@ -221,19 +270,27 @@ class ServiceConfig:
     audit_fhir_store_id: str
     hl7v2_store_id: str
     patient_id: str
-    password_file: str
+    session_key_file: str
     allowed_origins: tuple[str, ...]
     cuff_sim_url: str
+    recaptcha_site_key: str
+    demo_counter_bucket: str
     health_sync_url: str | None = None
     sample_patient: SamplePatient | None = None
     path_prefix: str = ""
-    session_ttl_seconds: int = 28800
+    session_ttl_seconds: int = 86400
     token_issuer: str = "pulsebridge-fhir-proxy"  # noqa: S105 - a name, not a secret
-    password_cache_seconds: float = 30.0
     trusted_proxy_hops: int = 1
-    login_failures_per_address: int = 5
-    login_failures_total: int = 60
-    login_window_seconds: int = 60
+    recaptcha_action: str = "view_demo"
+    recaptcha_min_score: float = 0.5
+    sessions_per_address_per_hour: int = 5
+    bot_checks_per_day: int = 300
+    requests_per_address_per_minute: int = 300
+    reads_per_session_per_minute: int = 120
+    cuff_sends_per_session_per_10_minutes: int = 3
+    shares_per_session_per_10_minutes: int = 2
+    shares_per_instance_per_hour: int = 30
+    history_days: int = 7
     fhir_timeout: float = 10.0
     cuff_forward_timeout: float = 55.0
     request_budget: float = 50.0
@@ -269,8 +326,21 @@ class ServiceConfig:
             # D15: the audit data has its own store. One id for both is a wiring mistake.
             raise ConfigError("AUDIT_FHIR_STORE_ID must differ from FHIR_STORE_ID")
         _match("PATIENT_ID", values["PATIENT_ID"], _PATIENT_ID, "1 to 64 printable characters")
-        if not values["REVIEWER_PASSWORD_FILE"].startswith("/"):
-            raise ConfigError("REVIEWER_PASSWORD_FILE must be an absolute path")
+        if not values["SESSION_SIGNING_KEY_FILE"].startswith("/"):
+            raise ConfigError("SESSION_SIGNING_KEY_FILE must be an absolute path")
+        _match("RECAPTCHA_SITE_KEY", values["RECAPTCHA_SITE_KEY"], _SITE_KEY, "a reCAPTCHA key ID")
+        _match(
+            "RECAPTCHA_ACTION",
+            values["RECAPTCHA_ACTION"],
+            _ACTION,
+            "1 to 100 of A-Z a-z 0-9 / _ (reCAPTCHA's rule for action names)",
+        )
+        _match(
+            "DEMO_COUNTER_BUCKET",
+            values["DEMO_COUNTER_BUCKET"],
+            _BUCKET,
+            "a Cloud Storage bucket name (3 to 63 of a-z 0-9 - _ .)",
+        )
         _match("PATH_PREFIX", values["PATH_PREFIX"], _PREFIX, "empty or like /api")
         _match("TOKEN_ISSUER", values["TOKEN_ISSUER"], _ISSUER, "1 to 100 of A-Z a-z 0-9 . _ : -")
 
@@ -296,6 +366,10 @@ class ServiceConfig:
                     f"{name} must be at least {REQUEST_TIMEOUT_MARGIN_SECONDS} s below "
                     "REQUEST_TIMEOUT_SECONDS"
                 )
+        # No rule between the two: a request counts against one of them only (a valid session's
+        # against its session, every other against its address), so neither bounds the other.
+        per_address = int(_number("REQUESTS_PER_ADDRESS_PER_MINUTE", values, 60, 6000, whole=True))
+        reads = int(_number("READS_PER_SESSION_PER_MINUTE", values, 60, 1200, whole=True))
         public_base_url = _public_base_url(values["PUBLIC_BASE_URL"], values["PATH_PREFIX"])
         health_sync_url = values["HEALTH_SYNC_URL"] or None
         return cls(
@@ -306,9 +380,11 @@ class ServiceConfig:
             audit_fhir_store_id=values["AUDIT_FHIR_STORE_ID"],
             hl7v2_store_id=values["HL7V2_STORE_ID"],
             patient_id=values["PATIENT_ID"],
-            password_file=values["REVIEWER_PASSWORD_FILE"],
+            session_key_file=values["SESSION_SIGNING_KEY_FILE"],
             allowed_origins=_origins(values["ALLOWED_ORIGINS"]),
             cuff_sim_url=_service_url("CUFF_SIM_URL", values["CUFF_SIM_URL"]),
+            recaptcha_site_key=values["RECAPTCHA_SITE_KEY"],
+            demo_counter_bucket=values["DEMO_COUNTER_BUCKET"],
             health_sync_url=(
                 None
                 if health_sync_url is None
@@ -318,13 +394,25 @@ class ServiceConfig:
             path_prefix=values["PATH_PREFIX"],
             session_ttl_seconds=int(_number("SESSION_TTL_SECONDS", values, 60, 86400, whole=True)),
             token_issuer=values["TOKEN_ISSUER"],
-            password_cache_seconds=_number("PASSWORD_CACHE_SECONDS", values, 0, 300),
             trusted_proxy_hops=int(_number("TRUSTED_PROXY_HOPS", values, 0, 5, whole=True)),
-            login_failures_per_address=int(
-                _number("LOGIN_FAILURES_PER_ADDRESS", values, 1, 100, whole=True)
+            recaptcha_action=values["RECAPTCHA_ACTION"],
+            recaptcha_min_score=_number("RECAPTCHA_MIN_SCORE", values, 0, 1),
+            sessions_per_address_per_hour=int(
+                _number("SESSIONS_PER_ADDRESS_PER_HOUR", values, 1, 100, whole=True)
             ),
-            login_failures_total=int(_number("LOGIN_FAILURES_TOTAL", values, 1, 10000, whole=True)),
-            login_window_seconds=int(_number("LOGIN_WINDOW_SECONDS", values, 10, 3600, whole=True)),
+            bot_checks_per_day=int(_number("BOT_CHECKS_PER_DAY", values, 1, 100000, whole=True)),
+            requests_per_address_per_minute=per_address,
+            reads_per_session_per_minute=reads,
+            cuff_sends_per_session_per_10_minutes=int(
+                _number("CUFF_SENDS_PER_SESSION_PER_10_MINUTES", values, 1, 30, whole=True)
+            ),
+            shares_per_session_per_10_minutes=int(
+                _number("SHARES_PER_SESSION_PER_10_MINUTES", values, 1, 20, whole=True)
+            ),
+            shares_per_instance_per_hour=int(
+                _number("SHARES_PER_INSTANCE_PER_HOUR", values, 1, 600, whole=True)
+            ),
+            history_days=int(_number("HISTORY_DAYS", values, 1, 30, whole=True)),
             fhir_timeout=_number("FHIR_TIMEOUT_SECONDS", values, 1, 30),
             cuff_forward_timeout=forward,
             request_budget=budget,

@@ -10,9 +10,11 @@
 #   4. any authoritative IAM resource (*_iam_binding, *_iam_policy) or project-level IAM;
 #   5. any service account key (google_service_account_key);
 #   6. any IAM member resource other than google_cloud_run_v2_service_iam_member.invoker and
-#      .page_deployer_viewer, a `member` not built from var.service_account_emails (or, in
-#      page_deployer_viewer only, var.page_deployer_service_account_email), or a page deployer
-#      grant that is not roles/run.viewer on google_cloud_run_v2_service.fhir_proxy (T41);
+#      .page_deployer_viewer and google_storage_bucket_iam_member.demo_counter_writer, a
+#      `member` not built from var.service_account_emails (or, in page_deployer_viewer only,
+#      var.page_deployer_service_account_email), a page deployer grant that is not
+#      roles/run.viewer on google_cloud_run_v2_service.fhir_proxy (T41), or a counter bucket
+#      grant that is not roles/storage.objectUser for fhir-proxy on that bucket (T44);
 #   7. a secret reaches an environment variable (value_source / secret_key_ref), or a secret
 #      volume is pinned to anything but "latest";
 #   8. a project or domain is hardcoded: a literal `project = "..."`, a projects/<id>/ path, a
@@ -22,7 +24,11 @@
 #   9. a `module` block is declared (resources could hide in a child module);
 #  10. a Firebase Hosting version or release is declared (Terraform cannot upload the page; a
 #      release would replace the live site with an empty one; hosting.tf explains);
-#  11. fhir-proxy lost its depends_on on the cuff-sim invoker grant.
+#  11. fhir-proxy lost its depends_on on the cuff-sim invoker grant or on the counter bucket's
+#      grant (T44);
+#  12. the demo (T44): a bucket without uniform access or enforced public access prevention, a
+#      reCAPTCHA key that allows all domains or has testing options (a fixed testing score
+#      would let every bot through), or a key that is not SCORE.
 #
 # Usage: infra/modules/phr/tests/static_checks.sh [module dir]   (needs bash, grep, sed, awk)
 
@@ -110,8 +116,17 @@ check "no service account key resources" \
 
 # 6. The IAM member resources are exactly the reviewed two.
 members="$(printf '%s\n' "$code" | grep -E 'resource[[:space:]]+"[a-z0-9_]+_iam_member"' || true)"
-check "IAM members are only google_cloud_run_v2_service_iam_member.invoker and .page_deployer_viewer" \
-  "$(printf '%s\n' "$members" | grep -vE '"google_cloud_run_v2_service_iam_member"[[:space:]]+"(invoker|page_deployer_viewer)"[[:space:]]*\{' | grep -v '^$' || true)"
+check "IAM members are only the run invoker and page_deployer_viewer grants and the counter bucket's writer" \
+  "$(printf '%s\n' "$members" | grep -vE '"google_cloud_run_v2_service_iam_member"[[:space:]]+"(invoker|page_deployer_viewer)"[[:space:]]*\{' | grep -vE '"google_storage_bucket_iam_member"[[:space:]]+"demo_counter_writer"[[:space:]]*\{' | grep -v '^$' || true)"
+counter_block="$(block demo.tf google_storage_bucket_iam_member demo_counter_writer)"
+if printf '%s\n' "$counter_block" | grep -qE '^[[:space:]]*bucket[[:space:]]*=[[:space:]]*google_storage_bucket\.demo_counters\.name[[:space:]]*$' \
+  && printf '%s\n' "$counter_block" | grep -qE '^[[:space:]]*role[[:space:]]*=[[:space:]]*"roles/storage\.objectUser"[[:space:]]*$' \
+  && printf '%s\n' "$counter_block" | grep -qE '^[[:space:]]*member[[:space:]]*=[[:space:]]*"serviceAccount:\$\{var\.service_account_emails\["fhir-proxy"\]\}"[[:space:]]*$'; then
+  echo "ok:   the counter bucket's one grant is roles/storage.objectUser for fhir-proxy"
+else
+  echo "FAIL: google_storage_bucket_iam_member.demo_counter_writer must grant roles/storage.objectUser on google_storage_bucket.demo_counters to var.service_account_emails[\"fhir-proxy\"]"
+  fail=1
+fi
 for r in invoker page_deployer_viewer; do
   if ! printf '%s\n' "$members" | grep -qE "\"google_cloud_run_v2_service_iam_member\"[[:space:]]+\"$r\""; then
     echo "FAIL: expected IAM resource missing: google_cloud_run_v2_service_iam_member.$r"
@@ -161,10 +176,36 @@ check "no google_firebase_hosting_version / _release" \
   "$(printf '%s\n' "$code" | grep -E 'resource[[:space:]]+"google_firebase_hosting_(version|release|channel)"' || true)"
 
 # 11. Ordering: the proxy's revision waits for its invoker grant on cuff-sim.
-if printf '%s\n' "$proxy_block" | grep -qE 'depends_on[[:space:]]*=[[:space:]]*\[[^]]*google_cloud_run_v2_service_iam_member\.invoker'; then
-  echo "ok:   fhir-proxy depends on the cuff-sim invoker binding"
+# T44: and on the counter bucket grant, so the first demo session does not meet a 403 there.
+for edge in google_cloud_run_v2_service_iam_member.invoker google_storage_bucket_iam_member.demo_counter_writer; do
+  if printf '%s\n' "$proxy_block" | grep -qE "depends_on[[:space:]]*=[[:space:]]*\[[^]]*${edge//./\\.}([^a-z_]|$)"; then
+    echo "ok:   fhir-proxy depends on $edge"
+  else
+    echo "FAIL: google_cloud_run_v2_service.fhir_proxy's depends_on must include $edge"
+    fail=1
+  fi
+done
+
+# 12. The demo's bucket and key (T44).
+bucket_block="$(block demo.tf google_storage_bucket demo_counters)"
+key_block="$(block demo.tf google_recaptcha_enterprise_key demo)"
+if printf '%s\n' "$bucket_block" | grep -qE '^[[:space:]]*uniform_bucket_level_access[[:space:]]*=[[:space:]]*true[[:space:]]*$' \
+  && printf '%s\n' "$bucket_block" | grep -qE '^[[:space:]]*public_access_prevention[[:space:]]*=[[:space:]]*"enforced"[[:space:]]*$'; then
+  echo "ok:   the counter bucket has uniform access and enforced public access prevention"
 else
-  echo "FAIL: google_cloud_run_v2_service.fhir_proxy must have depends_on = [google_cloud_run_v2_service_iam_member.invoker]"
+  echo "FAIL: google_storage_bucket.demo_counters needs uniform_bucket_level_access = true and public_access_prevention = \"enforced\""
+  fail=1
+fi
+check "no other bucket" \
+  "$(printf '%s\n' "$code" | grep -E 'resource[[:space:]]+"google_storage_bucket"[[:space:]]+"' | grep -v '"demo_counters"' || true)"
+check "no reCAPTCHA key that allows every domain" \
+  "$(printf '%s\n' "$code" | grep -E 'allow_all_domains[[:space:]]*=' | grep -vE 'allow_all_domains[[:space:]]*=[[:space:]]*false[[:space:]]*$' || true)"
+check "no reCAPTCHA testing options (a fixed score lets every bot through)" \
+  "$(printf '%s\n' "$code" | grep -E 'testing_options|testing_score' || true)"
+if printf '%s\n' "$key_block" | grep -qE '^[[:space:]]*integration_type[[:space:]]*=[[:space:]]*"SCORE"[[:space:]]*$'; then
+  echo "ok:   the demo key is a SCORE key"
+else
+  echo "FAIL: google_recaptcha_enterprise_key.demo must have integration_type = \"SCORE\""
   fail=1
 fi
 

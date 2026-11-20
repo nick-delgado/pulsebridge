@@ -3,7 +3,9 @@
 #   browser ──HTTPS──> Firebase Hosting site (static page from web/dist, security headers)
 #                        │ rewrite /api/**  (same origin: no CORS needed)
 #                        ▼
-#                      fhir-proxy  (Cloud Run, public: the session token is the gate, D9/D10)
+#                      fhir-proxy  (Cloud Run, public: the __session cookie is the gate, D10/D16)
+#                        ├── reCAPTCHA (Fraud Defense): one assessment per demo session (demo.tf)
+#                        ├── Cloud Storage: the daily bot-check counter bucket (demo.tf)
 #                        │ Direct VPC egress, ALL_TRAFFIC, serverless subnet (D14)
 #                        ├── Cloud Healthcare API: FHIR store, audit FHIR store, HL7v2 store (read)
 #                        ├── cuff-sim   (internal only; invoker = fhir-proxy's account only)
@@ -71,18 +73,37 @@ locals {
 
   # The rewrite puts the proxy under /api on the page's own origin. Hosting forwards the full
   # path (/api/status), so the proxy serves every route under PATH_PREFIX.
-  path_prefix   = "/api"
+  path_prefix = "/api"
+
+  # The session token's `iss` and `aud` (fhir-proxy's TOKEN_ISSUER), built once: the proxy gets
+  # it as TOKEN_ISSUER and the output token_issuer publishes the same string, so `make smoke`
+  # signs its session with exactly what the proxy checks. Deployment-specific, so a token from
+  # another PulseBridge deployment never verifies here. Not a secret.
+  token_issuer  = "pulsebridge-fhir-proxy:${var.project_id}:${var.name_prefix}"
   site_id       = coalesce(var.hosting_site_id, var.project_id)
   public_origin = coalesce(var.public_origin, "https://${local.site_id}.web.app")
+
+  # Every origin the page is served from (D16, T44). Firebase Hosting serves a site on both
+  # <site>.web.app and <site>.firebaseapp.com, and a custom domain adds public_origin. The
+  # reCAPTCHA key accepts tokens from all of them (demo.tf), so fhir-proxy's Origin check must
+  # accept all of them too, or a visitor on one gets a token and then 403 origin-refused.
+  page_origins = distinct([
+    local.public_origin,
+    "https://${local.site_id}.web.app",
+    "https://${local.site_id}.firebaseapp.com",
+  ])
+  # ALLOWED_ORIGINS: the page's origins first (public_origin leads), then extra_allowed_origins.
+  allowed_origins = distinct(concat(local.page_origins, var.extra_allowed_origins))
 
   # The secrets fhir-proxy mounts, one directory each (Cloud Run refuses two secret volumes in
   # one directory). Key = volume name; the file inside is always "value"; env is the variable
   # that tells the service where the file is.
   proxy_secret_files = merge(
     {
-      "reviewer-password" = {
-        secret = var.secret_ids["reviewer-password"]
-        env    = "REVIEWER_PASSWORD_FILE"
+      # D16: the HS256 key of the demo session token (32 random bytes).
+      "session-signing-key" = {
+        secret = var.secret_ids["session-signing-key"]
+        env    = "SESSION_SIGNING_KEY_FILE"
       }
     },
     var.openemr == null ? {} : {

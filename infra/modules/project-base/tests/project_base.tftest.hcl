@@ -53,7 +53,7 @@ run "default_api_list_covers_stack_and_excludes_identity_platform" {
 
   assert {
     condition     = !contains(keys(google_project_service.this), "identitytoolkit.googleapis.com")
-    error_message = "Identity Platform must not be enabled by default (D9)."
+    error_message = "Identity Platform must not be enabled by default (D9, D16)."
   }
 
   assert {
@@ -70,6 +70,8 @@ run "default_api_list_covers_stack_and_excludes_identity_platform" {
       "monitoring.googleapis.com",
       "firebase.googleapis.com",
       "firebasehosting.googleapis.com",
+      "recaptchaenterprise.googleapis.com", # D16: the score key and the assessments (T44)
+      "storage.googleapis.com",             # D16: the demo counter bucket (T44)
     ], keys(google_project_service.this))) == 0
     error_message = "The default API list is missing a service the stack needs."
   }

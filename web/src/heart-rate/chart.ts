@@ -7,13 +7,14 @@
  *
  * What is drawn, bottom to top:
  *   - a band between each window's minimum and maximum (the shaded range, with thin edges),
- *     series 1 and 2, drawn first so the averages stay on top at 30 days;
+ *     series 1 and 2, drawn first so the averages stay on top at 7 days;
  *   - the line of five-minute averages of windows that are not provisional, solid, series 3;
  *   - the line of provisional windows, dashed, with a marker on each, series 4;
  *   - our own markers: the keyboard / hover cursor (a vertical line) and the selected point.
  * Null values break every line and the band, so a gap with no data stays a gap.
  *
- * Why it stays fast at 30 days (about 8,600 windows): uPlot's line path builder already reduces
+ * Why it stays fast at 7 days (about 2,000 windows; it was measured at 30, about 8,600, before
+ * T47 removed that range): uPlot's line path builder already reduces
  * the points to one min/max pair per pixel column when it builds the path, so drawing costs
  * the plot width, not the point count. We do not aggregate the data ourselves: every window stays
  * one row, so a click or the keyboard picks one real Observation.

@@ -71,12 +71,12 @@ sys.exit(99)
 
 
 # What the scripts run besides gcloud: bash (also through `env` in the shebang), dirname, tr,
-# head, cat (the help and pick-up text).
-TOOLS = ("bash", "env", "dirname", "tr", "head", "cat")
+# head, cat (the help and pick-up text), wc (set-session-signing-key.sh counts the random bytes).
+TOOLS = ("bash", "env", "dirname", "tr", "head", "cat", "wc")
 
 
 def fake_value(length: int = 40) -> str:
-    """A fake reviewer password: printable ASCII with a leading and a trailing space, exactly
+    """A fake value: printable ASCII with a leading and a trailing space, exactly
     `length` long."""
     core = "fake-" + secrets.token_hex(length)
     return " " + core[: length - 2] + " "

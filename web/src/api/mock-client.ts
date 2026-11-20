@@ -3,9 +3,13 @@
  * build's Content-Security-Policy is `connect-src 'none'`, so a stray request would fail loudly).
  *
  * It behaves like the real client where the page can tell the difference:
- * - any non-empty password logs in, and the token goes into the same sessionStorage session;
- * - every other call checks that token first, and with none it clears the session and calls
- *   `onUnauthorized`, exactly as the HTTP client does on a 401;
+ * - "View the live demo" walks the proxy's session flow (D16): `getAuthConfig` gives a mock key,
+ *   `startSession` accepts only the mock bot check's tokens (src/bot-check/mock.ts) and answers
+ *   a pass or, with `?mock-demo=`, each refusal the proxy can send; the "cookie" is in memory
+ *   and expires like the real one (`?mock-session-seconds=` shortens it);
+ * - every other call checks that session first, and without one calls `onUnauthorized`, exactly
+ *   as the HTTP client does on a 401; a 429 (cuff-sim's bucket, `?mock-throttle=status`) calls
+ *   `onRateLimited`, as the HTTP client does;
  * - a cuff send is checked as cuff-sim checks it (services/cuff-sim/README.md): the same limits,
  *   the same refusals as `CuffSendError` 422 with an OperationOutcome naming the field, and the
  *   same per-instance rate limit (429 with `retryAfterSeconds`);
@@ -18,7 +22,7 @@
  *   of 25 (at most 50) cut BEFORE the kind/outcome filter (so a filtered page can be short or
  *   empty while `nextCursor` is set), an opaque cursor refused with 400 `invalid-cursor`;
  * - its refusals are the proxy's: 400 for a refused search, 422 for an unreadable attempt's
- *   trace, 503 `login-not-configured` on every route when its secret is missing (a switch);
+ *   trace, 503 `session-not-configured` on every route when its secret is missing (a switch);
  * - the share walks the sequence T15 will (contract.ts `ShareStepName`), with trace steps
  *   redacted exactly as T14's `extensions.trace_step` does it (`traceStep` below).
  */
@@ -30,7 +34,9 @@ import type {
   CuffSendResult,
   FhirTransactionEntry,
   HeartRateTrace,
-  LoginResult,
+  AuthConfig,
+  DemoSession,
+  SessionState,
   MalformedSample,
   MessageLookup,
   MessagesLogEntry,
@@ -61,7 +67,10 @@ import {
 import {
   ApiError,
   CuffSendError,
-  LoginError,
+  DEMO_BUSY_MESSAGE,
+  rateLimitMessage,
+  SESSION_REFUSALS,
+  SessionError,
   PROXY_REASON_SYSTEM,
   ShareError,
   UnauthorizedError,
@@ -82,6 +91,8 @@ import {
   HOSTILE_REFUSED_SYSTOLIC,
   heartRateObservation,
   heartRateObservations,
+  historyBoundary,
+  inHistory,
   heartRateWritesAt,
   lastHeartRateWrite,
   lastSyncRun,
@@ -107,11 +118,18 @@ import {
   syntheticRollUp,
   windowStartFromId,
 } from './mock-data';
-import type { Session } from './session';
+import { MOCK_RECAPTCHA_TOKEN_PREFIX } from '../bot-check/mock';
+import type { MockDemoOutcome } from './mock-data';
 
 export interface MockClientOptions {
-  session: Session;
   onUnauthorized: () => void;
+  onRateLimited?: (retryAfterSeconds: number | null) => void;
+  /** `?mock-demo=`: how starting a session ends; a pass when null or absent. */
+  demoOutcome?: MockDemoOutcome | null;
+  /** `?mock-session-seconds=`: the session's lifetime; the proxy's 86400 when null or absent. */
+  sessionSeconds?: number | null;
+  /** `?mock-throttle=status`: every status load answers 429 with `Retry-After: 30`. */
+  throttle?: 'status' | null;
   /** Clock, injectable for tests. */
   now?: () => number;
   /** Simulated network delay per call; 0 in tests. */
@@ -145,9 +163,12 @@ export interface MockClientOptions {
 /** cuff-sim's defaults (RATE_LIMIT_BURST=3, RATE_LIMIT_PER_MINUTE=6). */
 export const MOCK_RATE_LIMIT = { burst: 3, perMinute: 6 } as const;
 
-/** Mock tokens look nothing like a JWT on purpose, so nobody mistakes one for a real token. */
-const MOCK_TOKEN_PREFIX = 'mock-session-';
-const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+/** The proxy's default `SESSION_TTL_SECONDS` (D16). */
+const SESSION_TTL_SECONDS = 86_400;
+/** Not a real key: shaped like one so it passes the same check a real config does. */
+export const MOCK_SITE_KEY = 'mock-site-key-000000000000000000000000000';
+/** `Retry-After` the mock sends for `?mock-demo=rate-limited` and `?mock-throttle=status`. */
+export const MOCK_RETRY_AFTER_SECONDS = { session: 42, status: 30 } as const;
 
 interface MockAttempt {
   entry: SendAttemptEntry;
@@ -229,6 +250,8 @@ export class MockClient implements PulseBridgeApi {
   #tokens: number;
   #tokensAt: number;
   #sequence = 0;
+  /** The mock `__session` cookie: when it expires (ms), or null when there is none. */
+  #sessionExpiresAt: number | null = null;
 
   constructor(private readonly options: MockClientOptions) {
     this.#now = options.now ?? (() => Date.now());
@@ -247,32 +270,84 @@ export class MockClient implements PulseBridgeApi {
     return lastSyncRun(this.#now());
   }
 
-  // -- login ------------------------------------------------------------------------------------
+  // -- session (D16) ----------------------------------------------------------------------------
 
-  async login(password: string, options: CallOptions = {}): Promise<LoginResult> {
+  async getAuthConfig(options: CallOptions = {}): Promise<AuthConfig> {
     await this.#delay();
     options.signal?.throwIfAborted();
-    if (password === '') throw new LoginError('wrong-password', 'Enter a password.');
-    const result = {
-      token: `${MOCK_TOKEN_PREFIX}${(this.#now() % 1e9).toString(36)}`,
-      expiresAt: new Date(this.#now() + SESSION_TTL_MS).toISOString(),
-    };
-    this.options.session.save(result);
-    return result;
+    if (this.options.demoOutcome === 'config-unreachable') {
+      throw new SessionError('unavailable', 'The server could not be reached. Try again.');
+    }
+    return { recaptchaSiteKey: MOCK_SITE_KEY, recaptchaAction: 'view_demo' };
   }
 
-  logout(): void {
-    this.options.session.clear();
+  async startSession(recaptchaToken: string, options: CallOptions = {}): Promise<DemoSession> {
+    await this.#delay();
+    options.signal?.throwIfAborted();
+    // The proxy's cheap shape check, then its "assessment": only the mock bot check's tokens.
+    const outcome = recaptchaToken.startsWith(MOCK_RECAPTCHA_TOKEN_PREFIX)
+      ? (this.options.demoOutcome ?? null)
+      : 'bot-check-failed';
+    switch (outcome) {
+      case null:
+      case 'config-unreachable':
+        break;
+      case 'rate-limited':
+        throw new SessionError(
+          'rate-limited',
+          rateLimitMessage(MOCK_RETRY_AFTER_SECONDS.session),
+          MOCK_RETRY_AFTER_SECONDS.session,
+        );
+      case 'demo-busy':
+        throw new SessionError('demo-busy', DEMO_BUSY_MESSAGE);
+      case 'session-not-configured':
+        throw new SessionError('not-configured', SESSION_REFUSALS['not-configured']);
+      case 'bot-check-not-loaded':
+        // The mock bot check refuses before any token exists (src/bot-check/mock.ts); a token
+        // that still arrives here is from a test calling startSession directly: a pass.
+        break;
+      default:
+        // The same sentences the HTTP client gives (http-client.ts, `sessionError`).
+        throw new SessionError(outcome, SESSION_REFUSALS[outcome]);
+    }
+    const ttl = (this.options.sessionSeconds ?? SESSION_TTL_SECONDS) * 1000;
+    this.#sessionExpiresAt = this.#now() + ttl;
+    return { expiresAt: new Date(this.#sessionExpiresAt).toISOString() };
   }
 
-  isLoggedIn(): boolean {
-    return this.options.session.token() !== null;
+  async checkSession(options: CallOptions = {}): Promise<SessionState> {
+    await this.#delay();
+    options.signal?.throwIfAborted();
+    if (!this.#hasSession()) return 'none';
+    // With a cookie, a proxy without its signing key answers 503 (T43), as #authorised does.
+    if (this.options.statusMode === 'not-configured') throw sessionNotConfigured();
+    return 'active';
+  }
+
+  logout(): Promise<void> {
+    this.#sessionExpiresAt = null;
+    return Promise.resolve();
+  }
+
+  /** The cookie is there and has not expired (Max-Age); an expired one is gone, as in a browser. */
+  #hasSession(): boolean {
+    if (this.#sessionExpiresAt !== null && this.#now() >= this.#sessionExpiresAt) {
+      this.#sessionExpiresAt = null;
+    }
+    return this.#sessionExpiresAt !== null;
   }
 
   // -- reads ------------------------------------------------------------------------------------
 
   async getStatus(options: CallOptions = {}): Promise<StatusSummary> {
     await this.#authorised(options.signal);
+    if (this.options.throttle === 'status') {
+      // T46's refusal: 429 `rate-limited` with Retry-After, the session untouched.
+      const wait = MOCK_RETRY_AFTER_SECONDS.status;
+      this.options.onRateLimited?.(wait);
+      const problem = proxyProblem(429, 'throttled', 'rate-limited', rateLimitMessage(wait));
+      throw new ApiError(429, problem.message, problem.outcome, wait);
+    }
     const now = this.#now();
     const sync = this.#lastSync();
     const written = lastHeartRateWrite(now);
@@ -312,8 +387,11 @@ export class MockClient implements PulseBridgeApi {
         lastSyncAt: written === null ? null : new Date(written).toISOString(),
       },
       observationCounts: {
-        watch: heartRateObservations(now - 30 * 864e5, now, sync).length,
-        cuff: this.#bloodPressure().length,
+        // Counted within the shown window, as the proxy counts (T47).
+        watch: heartRateObservations(historyBoundary(now) - 1, now, sync).filter((o) =>
+          inHistory(o, historyBoundary(now)),
+        ).length,
+        cuff: this.#bloodPressure().filter((o) => inHistory(o, historyBoundary(now))).length,
       },
       fhirStore: { reachable: true, checkedAt, detail: null },
       // The mock implements the share, so it reports OpenEMR as T15's probe would. Before T15
@@ -330,15 +408,23 @@ export class MockClient implements PulseBridgeApi {
     options: CallOptions = {},
   ): Promise<Observation[]> {
     await this.#authorised(options.signal);
+    // The proxy raises a lower bound before its boundary to the boundary (T47), so nothing
+    // older than the shown window comes back, whatever range the page asks for.
+    const boundary = historyBoundary(this.#now());
     const start = query.range.start.getTime();
     const end = query.range.end.getTime();
     if (query.code === LOINC.heartRate) {
-      return heartRateObservations(start, end, this.#lastSync(), this.#zone);
+      // heartRateObservations keeps windows that END AFTER its start (date=gt); one millisecond
+      // before the boundary keeps a window that ends exactly at it (the proxy's date=ge).
+      const from = start >= boundary ? start : boundary - 1;
+      return heartRateObservations(from, end, this.#lastSync(), this.#zone).filter((o) =>
+        inHistory(o, boundary),
+      );
     }
     if (query.code === LOINC.bloodPressurePanel) {
       return this.#bloodPressure().filter((o) => {
         const t = Date.parse(o.effectiveDateTime ?? '');
-        return t > start && t < end; // date=gt<start>&date=lt<end>
+        return t > start && t < end && inHistory(o, boundary); // date=gt<start>&date=lt<end>
       });
     }
     // A refused search parameter is a 400 (R4; amendment 7), as search.py `_refuse` words it.
@@ -373,6 +459,10 @@ export class MockClient implements PulseBridgeApi {
       throw notFound(`Observation/${observationId}`);
     }
     const observation = heartRateObservation(window, sync, this.#zone);
+    // Older than the shown window: the proxy answers exactly as for a missing one (T47).
+    if (!inHistory(observation, historyBoundary(this.#now()))) {
+      throw notFound(`Observation/${observationId}`);
+    }
     return {
       observation,
       provenance: provenanceFor(`Observation/${observationId}`, window.endTime, 'watch'),
@@ -496,7 +586,14 @@ export class MockClient implements PulseBridgeApi {
     if (!SAFE_ID.test(attemptId)) {
       throw proxyProblem(400, 'invalid', 'invalid-id', 'That is not a valid id.');
     }
-    if (this.#unreadable.some((u) => u.id === attemptId)) {
+    const boundary = historyBoundary(this.#now());
+    const unreadable = this.#unreadable.find((u) => u.id === attemptId);
+    // An attempt older than the shown window (by its attempt time; an unreadable one by its
+    // recorded time) answers exactly as a missing one (T47).
+    if (unreadable && !(Date.parse(unreadable.recordedAt ?? '') >= boundary)) {
+      throw notFound(`AuditEvent/${attemptId}`);
+    }
+    if (unreadable) {
       // Amendment 12: final, like a 404; the row stays in the log as unreadable.
       throw proxyProblem(
         422,
@@ -506,7 +603,9 @@ export class MockClient implements PulseBridgeApi {
       );
     }
     const attempt = this.#attempts.find((a) => a.audited && a.entry.id === attemptId);
-    if (!attempt) throw notFound(`AuditEvent/${attemptId}`);
+    if (!attempt || !(Date.parse(attempt.entry.sentAt) >= boundary)) {
+      throw notFound(`AuditEvent/${attemptId}`);
+    }
     const row = this.#present(attempt);
     const observation = row.observation === null ? null : this.#observationFor(attempt);
     return {
@@ -576,6 +675,12 @@ export class MockClient implements PulseBridgeApi {
     if (wantTransactions) {
       for (const t of this.#allTransactions()) rows.push({ at: t.recordedAt, entry: t });
     }
+    // Only the shown window (T47): an attempt by its send time, a store-only row by its
+    // createTime, a transaction by its recorded time, an unreadable row by its recorded time.
+    const boundary = historyBoundary(this.#now());
+    const shown = rows.filter((r) => r.at !== null && Date.parse(r.at) >= boundary);
+    rows.length = 0;
+    rows.push(...shown);
     // Newest first by send time, ties by id descending; undated rows last (amendment 17).
     rows.sort((x, y) => {
       if (x.at === null || y.at === null) return x.at === y.at ? 0 : x.at === null ? 1 : -1;
@@ -1081,19 +1186,13 @@ export class MockClient implements PulseBridgeApi {
     // Like fetch: a call whose signal was aborted (the dashboard was torn down) rejects with
     // an AbortError, which callers ignore.
     signal?.throwIfAborted();
-    const token = this.options.session.token();
-    if (token !== null && this.options.statusMode === 'not-configured') {
-      // The proxy cannot check any token without its password secret, so every route but
-      // login answers 503 (amendment 11). The session is not ended: there was no 401.
-      throw proxyProblem(
-        503,
-        'transient',
-        'login-not-configured',
-        'Reviewer login is not configured on the server.',
-      );
+    const active = this.#hasSession();
+    if (active && this.options.statusMode === 'not-configured') {
+      // The proxy cannot check any session without its signing key, so every protected route
+      // answers 503 (amendment 11). The session is not ended: there was no 401.
+      throw sessionNotConfigured();
     }
-    if (token === null || !token.startsWith(MOCK_TOKEN_PREFIX)) {
-      this.options.session.clear();
+    if (!active) {
       this.options.onUnauthorized();
       throw new UnauthorizedError();
     }
@@ -1187,18 +1286,22 @@ export class MockClient implements PulseBridgeApi {
     }
     // Retry-After: whole seconds until a token is back, rounded up (RFC 9110 section 10.2.3).
     const wait = Math.max(1, Math.ceil((1 - this.#tokens) / perMs / 1000));
+    this.options.onRateLimited?.(wait);
     throw cuffRefusal(429, [['body', 'too many sends; try again later']], 'throttled', wait);
   }
 
   /** The configured patient's Observation with this id (heart rate or blood pressure), or null. */
   async #findObservation(id: string): Promise<Observation | null> {
+    // Older than the shown window: not found, as on the proxy (read and share alike, T47).
+    const boundary = historyBoundary(this.#now());
     const bp = this.#bloodPressure().find((o) => o.id === id);
-    if (bp) return bp;
+    if (bp) return inHistory(bp, boundary) ? bp : null;
     const start = windowStartFromId(id);
     const window = start === null ? null : syntheticRollUp(start);
     const sync = this.#lastSync();
     if (start === null || window === null || start + 5 * 60 * 1000 > sync) return null;
-    return Promise.resolve(heartRateObservation(window, sync, this.#zone));
+    const observation = heartRateObservation(window, sync, this.#zone);
+    return Promise.resolve(inHistory(observation, boundary) ? observation : null);
   }
 
   #observationFor(attempt: MockAttempt): Observation | null {
@@ -1503,7 +1606,9 @@ export class MockClient implements PulseBridgeApi {
       problem:
         "written in format version 2, newer than this library's 1: the MSA-1 detail is missing",
     });
-    // One without an id or a readable time (amendment 6): id "", sorted last.
+    // One without an id or a readable time (amendment 6). Since T47 the proxy lists it no more:
+    // its age cannot be known, and the audit search's date=ge<boundary> cannot match it. It
+    // stays seeded so the mock shows that it is hidden (mock-messages.test.ts).
     this.#unreadable.push({
       kind: 'unreadable-send-attempt',
       id: '',
@@ -1637,6 +1742,16 @@ function proxyProblem(
 /** A refusal of the share route, before anything is sent (no steps). */
 function shareProblem(status: number, code: string, reason: string, text: string): ShareError {
   return ShareError.from(proxyProblem(status, code, reason, text));
+}
+
+/** T43's 503 when the session-signing key is missing (issue code `transient`). */
+function sessionNotConfigured(): ApiError {
+  return proxyProblem(
+    503,
+    'transient',
+    'session-not-configured',
+    'Demo sessions are not configured on the server.',
+  );
 }
 
 function notFound(what: string): ApiError {

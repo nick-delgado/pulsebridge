@@ -42,13 +42,11 @@ EXPECTED_ENV = {
     "dev": {
         "environment": "dev",
         "protect_from_destroy": "false",
-        "allow_reviewer_password_from_tfvars": "true",
         "use_synthetic_data_default": "true",
     },
     "prod": {
         "environment": "prod",
         "protect_from_destroy": "true",
-        "allow_reviewer_password_from_tfvars": "false",
         "use_synthetic_data_default": "false",
     },
 }
@@ -219,7 +217,6 @@ def check_roots_differ_only_where_documented() -> None:
     readme = (ENVS / "README.md").read_text()
     for setting in (
         "protect_from_destroy",
-        "allow_reviewer_password_from_tfvars",
         "use_synthetic_data",
     ):
         if setting not in readme:
@@ -313,7 +310,7 @@ def check_no_hardcoded_identity() -> None:
                 fail(f"{rel}: project ID {m.group(1)!r} assigned in code is not a placeholder")
         if path.suffix in (".tf", ".hcl"):
             # Secret values never pass through Terraform here: no data source that reads a secret
-            # version, and no secret_data argument (dev's password is write-only, in identity).
+            # version, and no secret_data argument (no secret value passes through Terraform, D16).
             code = re.sub(r"#.*", "", text)
             if re.search(r'data\s+"google_secret_manager_secret_version', code) or re.search(
                 r"\bsecret_data\b", code

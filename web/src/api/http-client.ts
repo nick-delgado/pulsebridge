@@ -3,15 +3,19 @@
  * (services/fhir-proxy/README.md, "Routes as built") plus the share route specified for T15;
  * they are listed in web/README.md ("HTTP contract").
  *
- * Every protected request carries `Authorization: Bearer <token>`. A 401 on any of them clears the
- * session and calls `onUnauthorized`, which the app uses to show the login form again.
+ * The session (D16) is the `__session` cookie the proxy sets on `POST /auth/session`. It is
+ * HttpOnly, so this page never reads, stores or sends a token itself: every request is
+ * same-origin with `credentials: 'same-origin'`, and the browser attaches the cookie. A 401 on a
+ * protected route calls `onUnauthorized` (the app returns to the landing view); a 429 on any
+ * route calls `onRateLimited` with the wait (the app says how long, and stays where it is).
  */
 import type {
   CuffAttemptTrace,
   CuffReadingRequest,
   CuffSendResult,
+  AuthConfig,
+  DemoSession,
   HeartRateTrace,
-  LoginResult,
   MalformedSample,
   MessagesLogPage,
   MessagesLogQuery,
@@ -20,13 +24,17 @@ import type {
   PulseBridgeApi,
   ShareRequest,
   ShareResult,
+  SessionState,
   StatusSummary,
 } from './contract';
 import {
   ApiError,
   CuffSendError,
-  LoginError,
+  proxyReason,
+  rateLimitMessage,
   retryAfterSeconds,
+  SESSION_REFUSALS,
+  SessionError,
   ShareError,
   UnauthorizedError,
 } from './errors';
@@ -42,6 +50,7 @@ import {
   type Resource,
 } from './fhir';
 import {
+  parseAuthConfig,
   parseCuffSendResult,
   parseHeartRateSource,
   parseMessagesPage,
@@ -51,14 +60,17 @@ import {
   parseStatus,
   UNREADABLE_SHARE,
 } from './parse';
-import type { Session } from './session';
-
 export interface HttpClientOptions {
-  /** fhir-proxy base URL, for example "/api" or "https://proxy.example.test/api". */
+  /**
+   * fhir-proxy's base path on the page's own origin, for example "/api" (the Firebase Hosting
+   * rewrite). Same-origin only: the cookie is `SameSite=Strict` and the proxy allows no
+   * cross-origin credentials.
+   */
   baseUrl: string;
-  session: Session;
-  /** Called after a 401 on a protected route, once the session has been cleared. */
+  /** Called after a 401 on a protected route that belonged to the current session. */
   onUnauthorized: () => void;
+  /** Called after a 429 on a protected route, with the seconds from `Retry-After` (or null). */
+  onRateLimited?: (retryAfterSeconds: number | null) => void;
   fetch?: typeof fetch;
   /** Used to resolve a relative base URL; the page's own location in the browser. */
   origin?: string;
@@ -76,7 +88,10 @@ interface RequestOptions {
   method?: 'GET' | 'POST';
   body?: unknown;
   accept?: string;
-  /** False only for the login route, which is the one route without a token. */
+  /**
+   * False for the public session routes (`auth/config`, `auth/session`, `auth/logout`): their
+   * answers, a 401 or 429 included, are the caller's to read, not the app's.
+   */
   auth?: boolean;
   signal?: AbortSignal | undefined;
   /** Return a non-2xx response (after the 401 handling) instead of throwing; the share uses it. */
@@ -95,53 +110,86 @@ export class HttpClient implements PulseBridgeApi {
     this.#fetch = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
-  // -- login ------------------------------------------------------------------------------------
+  /**
+   * Counts session changes (start, logout). A request remembers the value it was sent under, so a
+   * slow request from an earlier session that answers 401 after a new session started cannot end
+   * the new one. (The page cannot compare tokens: it never sees one.)
+   */
+  #generation = 0;
+  /** The logout still being sent, if any; a new session waits for it (see `startSession`). */
+  #loggingOut: Promise<void> | null = null;
 
-  async login(password: string, options: CallOptions = {}): Promise<LoginResult> {
-    let response: Response;
+  // -- session (D16) ----------------------------------------------------------------------------
+
+  async getAuthConfig(options: CallOptions = {}): Promise<AuthConfig> {
+    const response = await this.#sessionRoute('auth/config', { signal: options.signal });
+    if (!response.ok) throw await sessionError(response);
     try {
-      response = await this.#send('auth/login', {
-        method: 'POST',
-        body: { password },
-        auth: false,
-        signal: options.signal,
-      });
+      return parseAuthConfig(await response.json());
     } catch (error) {
+      if (options.signal?.aborted) throw error;
+      throw new SessionError('unavailable', 'The server sent an unexpected bot-check setting.');
+    }
+  }
+
+  async startSession(recaptchaToken: string, options: CallOptions = {}): Promise<DemoSession> {
+    // A logout's answer clears the cookie (Max-Age=0). Were it to arrive after this request's
+    // answer, it would clear the NEW cookie, so a session never starts while a logout is out.
+    if (this.#loggingOut) await this.#loggingOut;
+    const response = await this.#sessionRoute('auth/session', {
+      method: 'POST',
+      body: { recaptcha_token: recaptchaToken },
+      signal: options.signal,
+    });
+    if (!response.ok) throw await sessionError(response);
+    let body: { expires_at?: unknown } | null = null;
+    try {
+      body = (await response.json()) as { expires_at?: unknown } | null;
+    } catch {
+      // Not JSON: refused below.
+    }
+    if (typeof body?.expires_at !== 'string' || Number.isNaN(Date.parse(body.expires_at))) {
+      throw new SessionError('unavailable', 'The server sent an unexpected session answer.');
+    }
+    this.#generation++;
+    return { expiresAt: body.expires_at };
+  }
+
+  async checkSession(options: CallOptions = {}): Promise<SessionState> {
+    // Any protected GET would do; /status is the one the dashboard loads first anyway.
+    const response = await this.#sessionRoute('status', { signal: options.signal });
+    if (response.status === 401) return 'none';
+    if (response.ok) return 'active';
+    throw await toApiError(response);
+  }
+
+  logout(): Promise<void> {
+    // From now on a 401 from a request sent before this belongs to an ended session.
+    this.#generation++;
+    const done = this.#sessionRoute('auth/logout', { method: 'POST' }).then(
+      () => undefined,
+      // Best effort: if the answer is lost the cookie may stay until it expires; a reload would
+      // then find the session still active. Nothing here can do better.
+      () => undefined,
+    );
+    this.#loggingOut = done;
+    void done.then(() => {
+      if (this.#loggingOut === done) this.#loggingOut = null;
+    });
+    return done;
+  }
+
+  /** A public session route: the response is returned whatever its status. */
+  #sessionRoute(
+    path: string,
+    options: Pick<RequestOptions, 'method' | 'body' | 'signal'>,
+  ): Promise<Response> {
+    return this.#send(path, { ...options, auth: false }).catch((error: unknown) => {
       if (error instanceof ApiError && error.status === 0) {
-        throw new LoginError('unavailable', 'The server could not be reached. Try again.');
+        throw new SessionError('unavailable', 'The server could not be reached. Try again.');
       }
       throw error;
-    }
-    if (response.status === 401) throw new LoginError('wrong-password', 'Wrong password.');
-    if (response.status === 429) {
-      throw new LoginError(
-        'rate-limited',
-        'Too many attempts. Wait a minute and try again.',
-        retryAfterSeconds(response.headers.get('Retry-After')),
-      );
-    }
-    if (response.status === 503) {
-      throw new LoginError('not-configured', 'Reviewer login is not configured on the server.');
-    }
-    if (!response.ok) {
-      throw new LoginError('unavailable', `Login failed (HTTP ${response.status}).`);
-    }
-    // Body as docs/spikes/s6.md specifies it: {"token": "...", "expires_at": "..."}.
-    const body = (await response.json()) as { token?: unknown; expires_at?: unknown };
-    if (typeof body.token !== 'string' || typeof body.expires_at !== 'string') {
-      throw new LoginError('unavailable', 'The server sent an unexpected login response.');
-    }
-    const result: LoginResult = { token: body.token, expiresAt: body.expires_at };
-    this.options.session.save(result);
-    return result;
-  }
-
-  logout(): void {
-    this.options.session.clear();
-  }
-
-  isLoggedIn(): boolean {
-    return this.options.session.token() !== null;
+    });
   }
 
   // -- reads ------------------------------------------------------------------------------------
@@ -323,9 +371,13 @@ export class HttpClient implements PulseBridgeApi {
         : null;
     const outcomeBody = envelope ? envelope.operationOutcome : body;
     const outcome = isOperationOutcome(outcomeBody) ? outcomeBody : null;
-    const text = outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`;
+    const retryAfter = retryAfterSeconds(response.headers.get('Retry-After'));
+    const text =
+      response.status === 429
+        ? rateLimitMessage(retryAfter)
+        : (outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`);
     throw ShareError.from(
-      new ApiError(response.status, text, outcome),
+      new ApiError(response.status, text, outcome, retryAfter),
       parseShareSteps(envelope?.steps),
     );
   }
@@ -338,7 +390,7 @@ export class HttpClient implements PulseBridgeApi {
 
   /**
    * A `next` link from the server is followed only when it points inside the proxy's own base
-   * URL, so the bearer token is never sent to another host.
+   * URL: the page has one backend (D10), and only that path carries the session cookie.
    */
   #sameBase(link: string): URL {
     const url = new URL(link, this.#base);
@@ -364,23 +416,15 @@ export class HttpClient implements PulseBridgeApi {
     } = options;
     const headers = new Headers({ Accept: accept });
     if (body !== undefined) headers.set('Content-Type', JSON_TYPE);
-    let token: string | null = null;
-    if (auth) {
-      token = this.options.session.token();
-      if (token === null) {
-        // No point asking the server: without a token the answer is 401.
-        this.#unauthorized();
-        throw new UnauthorizedError();
-      }
-      headers.set('Authorization', `Bearer ${token}`);
-    }
+    const generation = this.#generation;
 
     const init: RequestInit = {
       method,
       headers,
-      // No cookies in either direction (the proxy sets none, D9); PHI is not kept in the HTTP
-      // cache; a redirect is an error rather than a hop that could carry the request elsewhere.
-      credentials: 'omit',
+      // The session is the HttpOnly `__session` cookie: the browser sends it on same-origin
+      // requests only, and the page never touches it. PHI is not kept in the HTTP cache; a
+      // redirect is an error rather than a hop that could carry the request elsewhere.
+      credentials: 'same-origin',
       cache: 'no-store',
       redirect: 'error',
     };
@@ -397,20 +441,25 @@ export class HttpClient implements PulseBridgeApi {
       throw new ApiError(0, 'The server could not be reached.');
     }
 
-    if (auth && response.status === 401) {
-      // Only end the session this request belonged to. A slow request sent with an old token
-      // can answer 401 after the user has logged in again; that must not clear the new token.
-      // (No stored token at all, for example it just expired, still means "show the login".)
-      const current = this.options.session.token();
-      if (current === null || current === token) this.#unauthorized();
+    if (!auth) return response;
+    if (response.status === 401) {
+      // 401 `session-required`. Only end the session this request was sent under: a slow request
+      // from before a logout or a new session must not send the visitor back to the landing view.
+      if (generation === this.#generation) this.#unauthorized();
       throw new UnauthorizedError();
     }
-    if (!auth || response.ok || allowError) return response;
+    if (response.status === 429) {
+      // T46: any route can answer 429 `rate-limited`. Say how long to wait; the session stays.
+      this.options.onRateLimited?.(retryAfterSeconds(response.headers.get('Retry-After')));
+    }
+    if (response.ok || allowError) return response;
     throw await toApiError(response);
   }
 
   #unauthorized(): void {
-    this.options.session.clear();
+    // The session is over on the server's side; count it as a change so the next 401s from the
+    // same burst of requests do not call back again.
+    this.#generation++;
     this.options.onUnauthorized();
   }
 }
@@ -428,11 +477,41 @@ async function toApiError(response: Response): Promise<ApiError> {
   } catch {
     // Not JSON.
   }
-  const text = outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`;
-  return new ApiError(
-    response.status,
-    text,
-    outcome,
-    retryAfterSeconds(response.headers.get('Retry-After')),
-  );
+  const retryAfter = retryAfterSeconds(response.headers.get('Retry-After'));
+  // A 429 reads the same on every route (T46), whatever the body says.
+  const text =
+    response.status === 429
+      ? rateLimitMessage(retryAfter)
+      : (outcome?.issue[0]?.diagnostics ?? `The server answered HTTP ${response.status}.`);
+  return new ApiError(response.status, text, outcome, retryAfter);
+}
+
+/**
+ * The `SessionError` for a refused `auth/config` or `auth/session`, from the proxy's reason code
+ * (errors.ts, `SessionFailure`). Only an exact code is trusted: a 503 page from the hosting layer
+ * is "unavailable", not "the demo is busy".
+ */
+async function sessionError(response: Response): Promise<SessionError> {
+  const { status } = response;
+  const retryAfter = retryAfterSeconds(response.headers.get('Retry-After'));
+  if (status === 429)
+    return new SessionError('rate-limited', rateLimitMessage(retryAfter), retryAfter);
+  let reason: string | null = null;
+  try {
+    const body: unknown = await response.json();
+    if (isOperationOutcome(body)) reason = proxyReason(body);
+  } catch {
+    // Not JSON.
+  }
+  // The reason codes this route documents, each only with its own status.
+  const known: Partial<Record<number, readonly (keyof typeof SESSION_REFUSALS)[]>> = {
+    403: ['bot-check-failed', 'origin-refused'],
+    503: ['demo-busy', 'bot-check-unavailable'],
+  };
+  if (status === 503 && reason === 'session-not-configured') {
+    return new SessionError('not-configured', SESSION_REFUSALS['not-configured']);
+  }
+  const match = known[status]?.find((r) => r === reason);
+  if (match) return new SessionError(match, SESSION_REFUSALS[match]);
+  return new SessionError('unavailable', `The demo could not start (HTTP ${status}). Try again.`);
 }

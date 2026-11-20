@@ -8,18 +8,35 @@ Order of checks on every request (``before_request``):
 0. The request's time budget starts (``fhir_proxy.deadline``): ``CUFF_FORWARD_TIMEOUT_SECONDS``
    for the cuff send, ``REQUEST_BUDGET_SECONDS`` for everything else. No upstream call starts
    after it is spent.
-1. ``OPTIONS`` is a CORS preflight, answered here without a token: ``204`` for a known route
-   from an allowed origin with its method and headers, and the same ``403`` for anything else,
-   an unknown path included (so a preflight cannot list the routes either).
-2. A token in the query string (``access_token=``, RFC 6750 section 2.3) is refused, whatever
-   else the request carries: query strings end up in request logs.
-3. Every route except ``POST /auth/login`` needs a valid session token in
-   ``Authorization: Bearer <token>``; otherwise ``401`` with ``WWW-Authenticate: Bearer``. That
-   includes unknown paths, so an unauthenticated caller cannot list the routes.
+1. The ``__session`` cookie, if there is one, is verified (an HMAC-SHA256 check of a short token
+   with the cached key: no I/O). Only its outcome is kept here; nothing is refused yet. It
+   comes first because it decides which rate limit the request counts against.
+2. **One rate limit** (T46), before anything is refused or done: a request with a valid session
+   counts against its session's limits only, keyed on the verified ``jti`` (reads, cuff sends,
+   shares, then the per-instance limit on shares by everyone); every other request (no cookie,
+   an invalid or expired one, the public ``/auth/`` routes without a session) counts against
+   ``REQUESTS_PER_ADDRESS_PER_MINUTE`` of its client address. Otherwise ``429 rate-limited``.
+   A valid session is never refused by its address's limit: with ``TRUSTED_PROXY_HOPS=2`` a
+   caller of the direct ``*.run.app`` URL can name any address (README, "The client address"),
+   and could otherwise lock a visitor out by flooding in that visitor's name.
+3. A token in the query string (``access_token=``, RFC 6750 section 2.3, or ``__session=``) is
+   refused, whatever else the request carries: query strings end up in request logs.
+4. Every request that can change something (any method but ``GET`` and ``HEAD``; in practice
+   every ``POST``) must carry an ``Origin`` header naming one of ``ALLOWED_ORIGINS``;
+   otherwise ``403 origin-refused``. With the cookie's ``SameSite=Strict`` this is the defence
+   against cross-site request forgery (README, "Demo sessions"). A request refused at 3 or 4
+   was counted at 2 as a plain request (a read, for a session), never as a cuff send or share.
+5. Every route except the three under ``/auth/`` needs a valid session token in the
+   ``__session`` cookie; otherwise ``401 session-required``. That includes unknown paths, so an
+   unauthenticated caller cannot list the routes. ``Authorization: Bearer`` is not accepted.
+6. The route. ``POST /auth/session`` adds its own per-address limit on session attempts (T43).
 
-Every response (``after_request``) gets the security headers and, for an allowed origin, the
-CORS headers. Every error is an OperationOutcome with fixed wording; an unexpected exception is
-logged by class name only and answered 500.
+There is no CORS: the page and the proxy share one origin (Firebase Hosting's ``/api``
+rewrite), so no ``Access-Control-*`` header is ever sent and a cross-origin script cannot read
+an answer. Every response (``after_request``) gets the security headers, and loses any
+``Set-Cookie`` except the one ``POST /auth/session`` or ``/auth/logout`` sets. Every error is an
+OperationOutcome with fixed wording; an unexpected exception is logged by class name only and
+answered 500.
 """
 
 from __future__ import annotations
@@ -32,18 +49,21 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from email.utils import format_datetime
+from urllib.parse import urlsplit
 
 from flask import Flask, Response, g, request
 from pulsebridge_gcp import HealthcareApiError, HealthcareClient, NotFoundError, default_transport
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
-from fhir_proxy import capability, deadline, search, traces
+from fhir_proxy import capability, deadline, history, search, traces
 from fhir_proxy.bodies import MAX_BODY_BYTES, read_body, too_large
+from fhir_proxy.bot_check import BotCheckUnavailable, FraudDefense, token_has_shape
 from fhir_proxy.client_address import client_address
 from fhir_proxy.config import ServiceConfig
+from fhir_proxy.demo_counter import CounterUnavailable, DailyCounter, DemoBusy
 from fhir_proxy.errors import FHIR_JSON, Problem, upstream_problem
 from fhir_proxy.extensions import EXTENSION_MODULE, ProxyContext, load_extension, sample_urls
-from fhir_proxy.login_limit import FloodLogSampler, LoginLimiter
+from fhir_proxy.flood_log import FloodLogSampler
 from fhir_proxy.logs import configure_logging, log
 from fhir_proxy.messages import (
     DEFAULT_COUNT,
@@ -53,10 +73,12 @@ from fhir_proxy.messages import (
     MessagesLog,
     decode_cursor,
 )
-from fhir_proxy.password import PasswordFile, PasswordUnavailable
+from fhir_proxy.rate_limit import MAX_TRACKED_KEYS, SlidingWindows, TableFull, TokenBuckets
 from fhir_proxy.routes import CORE_ROUTES, Route
 from fhir_proxy.search import parse_instant
-from fhir_proxy.session_token import InvalidToken, TokenSigner, passwords_match
+from fhir_proxy.session_limit import SessionLimiter
+from fhir_proxy.session_token import InvalidToken, TokenSigner
+from fhir_proxy.signing_key import KeyUnavailable, SigningKeyFile
 from fhir_proxy.status import StatusService
 from fhir_proxy.store import SAFE_ID, Stores, entries, next_link
 from fhir_proxy.upstream import (
@@ -71,14 +93,45 @@ from fhir_proxy.upstream import (
 
 SOFTWARE_VERSION = "0.1.0"
 JSON_TYPE = "application/json"
-MAX_LOGIN_BYTES = 1024
-MAX_PASSWORD_CHARS = 1024
-# RFC 9110 section 11.1: the auth scheme name is case-insensitive.
-_BEARER = re.compile(r"(?i:bearer) ([A-Za-z0-9._-]{1,2048})", re.ASCII)
-ALLOWED_REQUEST_HEADERS = ("authorization", "content-type")
-EXPOSED_HEADERS = "Retry-After, WWW-Authenticate"
-PREFLIGHT_MAX_AGE = "600"
-QUERY_TOKEN_NAMES = ("access_token", "token", "id_token")
+# {"recaptcha_token": "<token>"}: a token is at most 8 KiB (bot_check.TOKEN_SHAPE).
+MAX_SESSION_BODY_BYTES = 10 * 1024
+QUERY_TOKEN_NAMES = ("access_token", "token", "id_token", "__session")
+# The one cookie: Firebase Hosting strips the cookies of a request it passes to Cloud Run, except
+# one named __session, which it also adds to the CDN cache key ("Manage cache behavior",
+# firebase.google.com/docs/hosting/manage-cache, "Using cookies").
+COOKIE_NAME = "__session"
+# RFC 9110 section 15.5.2: a 401 MUST carry WWW-Authenticate. No registered scheme describes a
+# cookie session, so this names the cookie in the form of the (expired) HTTP Cookie
+# authentication draft (draft-broyer-http-cookie-auth); a client needs nothing from it.
+SESSION_CHALLENGE = f'Cookie realm="pulsebridge", cookie-name="{COOKIE_NAME}"'
+# Upper bound of one Fraud Defense or Cloud Storage call (each is also capped by the request's
+# budget). Fixed, not a variable: neither is user-visible tuning.
+GOOGLE_CALL_TIMEOUT_SECONDS = 10.0
+SESSION_LOG_WINDOW_SECONDS = 60
+DEMO_BUSY_TEXT = "The demo is busy, try again tomorrow."
+# The share route's endpoint (fhir_proxy.share.ROUTE; a test checks the two agree). Named here,
+# not imported, because the share package is an optional extension.
+SHARE_ENDPOINT = "share"
+# T46: the windows of the rate limits; the counts are variables (config.py).
+MINUTE_SECONDS = 60
+TEN_MINUTES_SECONDS = 600
+HOUR_SECONDS = 3600
+RATE_LOG_WINDOW_SECONDS = 60
+# Every 429 the gate answers; the page shows the wait from Retry-After for any of them (T45).
+# "table-full": a limiter's table is full of live keys, so a NEW key cannot be tracked; the
+# caller used no budget of its own (rate_limit.TableFull).
+RATE_LIMIT_TEXTS = {
+    "table-full": "The demo is busy; wait a minute and try again.",
+    "address": "Too many requests from this address; wait and try again.",
+    "session-reads": "Too many requests in this demo session; wait and try again.",
+    "session-cuff-sends": (
+        "This demo session has sent as many cuff readings as it may for now; wait and try again."
+    ),
+    "session-shares": (
+        "This demo session has shared as many readings as it may for now; wait and try again."
+    ),
+    "all-shares": ("The demo has shared as many readings as it may this hour; wait and try again."),
+}
 
 SECURITY_HEADERS = {
     # Health data and tokens are never cached, by the browser or by Firebase Hosting's CDN.
@@ -126,12 +179,32 @@ def _is_json_request() -> bool:
     return (request.mimetype or "") == JSON_TYPE
 
 
+def session_cookie(token: str, *, path: str, max_age: int) -> str:
+    """The ``Set-Cookie`` value of the demo session (the contract in docs/workplan.md, D16).
+
+    - ``Path``: ``PATH_PREFIX`` (``/api``), so the browser sends the cookie to the proxy only,
+      never with the page's own files.
+    - ``Max-Age``: the token's lifetime; 0 deletes the cookie (RFC 6265 section 5.2.2).
+    - ``HttpOnly``: page script cannot read it, so an injected script cannot steal it.
+    - ``Secure``: sent over HTTPS only.
+    - ``SameSite=Strict``: the browser sends it only on requests the page's own site makes, never
+      on a request another site starts (a link, a form, an image). That is half of the defence
+      against cross-site request forgery; the ``Origin`` check is the other half.
+    - No ``Domain``: a host-only cookie, never shared with other subdomains.
+    """
+    return (
+        f"{COOKIE_NAME}={token}; Path={path}; Max-Age={max_age}; HttpOnly; Secure; SameSite=Strict"
+    )
+
+
 def create_app(
     config: ServiceConfig | None = None,
     transport: object | None = None,
     *,
     id_tokens: IdTokenSource | None = None,
     send: HttpSender | None = None,
+    recaptcha_transport: object | None = None,
+    storage_transport: object | None = None,
     clock: Callable[[], datetime] | None = None,
     monotonic: Callable[[], float] | None = None,
     extension_module: str = EXTENSION_MODULE,
@@ -140,18 +213,29 @@ def create_app(
     """Build the app. With no arguments, configuration comes from the environment, the
     Healthcare client uses Application Default Credentials and identity tokens come from the
     metadata server (the service's own service account on Cloud Run). ``transport`` is the
-    Cloud Healthcare transport (tests pass a fake); it is always wrapped so every call honours
-    the request's time budget. ``extension_options`` reaches the extension's ``register``
-    as ``proxy.options`` (tests pass the share's fake OpenEMR transport there)."""
+    Cloud Healthcare transport (tests pass a fake); ``recaptcha_transport`` and
+    ``storage_transport`` carry the Fraud Defense and Cloud Storage calls (tests pass
+    ``fhir_proxy.testing``'s fakes). Each is always wrapped so every call honours the request's
+    time budget. ``extension_options`` reaches the extension's ``register`` as
+    ``proxy.options`` (tests pass the share's fake OpenEMR transport there)."""
     configure_logging()
     config = config or ServiceConfig.from_env()
     clock = clock or (lambda: datetime.now(UTC))
     monotonic = monotonic or time.monotonic
+    shared: list[object] = []
+
+    def google() -> object:
+        # One authorised session (Application Default Credentials, cloud-platform scope) for
+        # every Google API the proxy calls; created only if some transport was not passed in.
+        if not shared:
+            shared.append(default_transport())
+        return shared[0]
+
     client = HealthcareClient(
         project=config.project_id,
         location=config.location,
         dataset=config.dataset_id,
-        transport=deadline.DeadlineTransport(transport or default_transport()),
+        transport=deadline.DeadlineTransport(transport or google()),
         timeout=config.fhir_timeout,
     )
     executor = ThreadPoolExecutor(max_workers=16)
@@ -164,20 +248,67 @@ def create_app(
         patient_id=config.patient_id,
         monotonic=monotonic,
     )
-    passwords = PasswordFile(
-        config.password_file, cache_seconds=config.password_cache_seconds, monotonic=monotonic
-    )
+    signing_key = SigningKeyFile(config.session_key_file, monotonic=monotonic)
     signer = TokenSigner(
         issuer=config.token_issuer, ttl_seconds=config.session_ttl_seconds, clock=clock
     )
-    limiter = LoginLimiter(
-        per_address=config.login_failures_per_address,
-        total=config.login_failures_total,
-        window_seconds=config.login_window_seconds,
+    session_limiter = SessionLimiter(
+        per_address=config.sessions_per_address_per_hour, monotonic=monotonic
+    )
+    # The bot check's hostname must be the host of one of the page's origins.
+    page_hosts = [urlsplit(origin).hostname or "" for origin in config.allowed_origins]
+    fraud_defense = FraudDefense(
+        deadline.DeadlineTransport(recaptcha_transport or google()),
+        project=config.project_id,
+        site_key=config.recaptcha_site_key,
+        action=config.recaptcha_action,
+        min_score=config.recaptcha_min_score,
+        hostnames=page_hosts,
+        timeout=GOOGLE_CALL_TIMEOUT_SECONDS,
+    )
+    counter = DailyCounter(
+        deadline.DeadlineTransport(storage_transport or google()),
+        bucket=config.demo_counter_bucket,
+        cap=config.bot_checks_per_day,
+        timeout=GOOGLE_CALL_TIMEOUT_SECONDS,
+        clock=clock,
+    )
+    # T46's rate limits (README, "Rate limits"): in memory, per instance, each table capped at
+    # MAX_TRACKED_KEYS keys (read here, at start-up, so a test can lower it).
+    max_keys = MAX_TRACKED_KEYS
+    per_address = TokenBuckets(
+        capacity=config.requests_per_address_per_minute,
+        window_seconds=MINUTE_SECONDS,
+        max_keys=max_keys,
         monotonic=monotonic,
     )
-    failed_log = FloodLogSampler(window_seconds=config.login_window_seconds, monotonic=monotonic)
-    refused_log = FloodLogSampler(window_seconds=config.login_window_seconds, monotonic=monotonic)
+    session_reads = TokenBuckets(
+        capacity=config.reads_per_session_per_minute,
+        window_seconds=MINUTE_SECONDS,
+        max_keys=max_keys,
+        monotonic=monotonic,
+    )
+    session_cuff_sends = SlidingWindows(
+        limit=config.cuff_sends_per_session_per_10_minutes,
+        window_seconds=TEN_MINUTES_SECONDS,
+        max_keys=max_keys,
+        monotonic=monotonic,
+    )
+    session_shares = SlidingWindows(
+        limit=config.shares_per_session_per_10_minutes,
+        window_seconds=TEN_MINUTES_SECONDS,
+        max_keys=max_keys,
+        monotonic=monotonic,
+    )
+    all_shares = SlidingWindows(
+        limit=config.shares_per_instance_per_hour,
+        window_seconds=HOUR_SECONDS,
+        max_keys=1,
+        monotonic=monotonic,
+    )
+    rate_log = FloodLogSampler(window_seconds=RATE_LOG_WINDOW_SECONDS, monotonic=monotonic)
+    refused_log = FloodLogSampler(window_seconds=SESSION_LOG_WINDOW_SECONDS, monotonic=monotonic)
+    origin_log = FloodLogSampler(window_seconds=SESSION_LOG_WINDOW_SECONDS, monotonic=monotonic)
     upstream = Upstream(
         tokens=id_tokens or GoogleIdTokens(),
         send=send or requests_sender(),
@@ -188,6 +319,10 @@ def create_app(
         health_sync_timeout=config.health_sync_timeout,
     )
     messages_log = MessagesLog(stores, patient_id=config.patient_id, executor=executor, now=clock)
+
+    def shown_since() -> datetime:
+        # T47: the boundary of the shown window, computed afresh on every request.
+        return history.window_start(clock(), config.history_days)
 
     context = ProxyContext(
         config=config,
@@ -203,6 +338,7 @@ def create_app(
         upstream.health_sync_caller(),
         cache_seconds=config.status_cache_seconds,
         openemr_probe=context.openemr_probe,
+        history_days=config.history_days,
         clock=clock,
         monotonic=monotonic,
     )
@@ -217,59 +353,112 @@ def create_app(
     app.extensions["pulsebridge_stores"] = stores
     app.extensions["pulsebridge_messages_log"] = messages_log
     app.extensions["pulsebridge_status"] = status_service
-    # Fixed by the core table: an extension can never make a route public (or replace login).
+    # Fixed by the core table: an extension can never make a route public.
     public_endpoints = {r.endpoint for r in CORE_ROUTES if r.public}
-    methods_by_rule = {f"{prefix}{r.path}": r.method for r in routes}
+    cookie_path = prefix or "/"
 
     # ---- the gate ----------------------------------------------------------------------------
 
-    def _unauthorized(error: str | None) -> Problem:
-        challenge = 'Bearer realm="pulsebridge"'
-        if error is not None:
-            challenge += f', error="{error}"'
+    def _session_required() -> Problem:
+        # R4 issue-type "login": "the user needs to log in". One reason for every case
+        # (missing, expired, signed with another key, malformed): the page only starts again.
         return Problem(
             401,
             "login",
-            "unauthorized",
-            "Log in again: the session token is missing, expired or not valid.",
-            headers={"WWW-Authenticate": challenge},
+            "session-required",
+            "Start a demo session: the session is missing, expired or not valid.",
+            headers={"WWW-Authenticate": SESSION_CHALLENGE},
         )
 
-    def _current_password() -> str:
+    def _current_key() -> bytes:
         try:
-            return passwords.current()
-        except PasswordUnavailable as exc:
-            log(logging.ERROR, "reviewer-password-unavailable", problem=str(exc))
+            return signing_key.current()
+        except KeyUnavailable as exc:
+            log(logging.ERROR, "session-signing-key-unavailable", problem=str(exc))
             raise Problem(
                 503,
                 "transient",
-                "login-not-configured",
-                "Reviewer login is not configured on the server.",
+                "session-not-configured",
+                "Demo sessions are not configured on the server.",
             ) from None
 
-    def _preflight() -> Response:
-        rule = request.url_rule
-        origin = request.headers.get("Origin")
-        wanted_method = request.headers.get("Access-Control-Request-Method", "")
-        wanted_headers = {
-            h.strip().lower()
-            for h in request.headers.get("Access-Control-Request-Headers", "").split(",")
-            if h.strip()
-        }
-        allowed_method = None if rule is None else methods_by_rule.get(rule.rule)
-        if (
-            allowed_method is None
-            or origin not in config.allowed_origins
-            or wanted_method != allowed_method
-            or not wanted_headers <= set(ALLOWED_REQUEST_HEADERS)
-        ):
-            g.cors_refused = True
-            raise Problem(403, "forbidden", "cors-refused", "This cross-origin request is refused.")
-        response = Response(status=204)
-        response.headers["Access-Control-Allow-Methods"] = allowed_method
-        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-        response.headers["Access-Control-Max-Age"] = PREFLIGHT_MAX_AGE
-        return response
+    def _address() -> str:
+        return client_address(
+            request.headers.get("X-Forwarded-For"), request.remote_addr, config.trusted_proxy_hops
+        )
+
+    def _sampled(sampler: FloodLogSampler, event: str, address: str, **fields: object) -> None:
+        # Under a flood: one line per address per window, plus a count of the rest.
+        log_it, suppressed = sampler.record(address)
+        if suppressed:
+            log(
+                logging.WARNING,
+                "session-events-suppressed",
+                kind=event,
+                count=suppressed,
+                window_seconds=sampler.window_seconds,
+            )
+        if log_it:
+            log(logging.WARNING, event, client_address=address, **fields)
+
+    def _rate_limited(limit: str, wait: int, address: str) -> Problem:
+        if isinstance(wait, TableFull):
+            # Not this caller's budget: the table of `limit` is full of live keys.
+            table, limit = limit, "table-full"
+        else:
+            table = None
+        # Sampled: under a flood, one line per address per minute plus a count of the rest.
+        fields: dict[str, object] = {"limit": limit, "retry_after": int(wait)}
+        if table is not None:
+            fields["table"] = table
+        _sampled(rate_log, "rate-limited", address, **fields)
+        return Problem(
+            429,
+            "throttled",  # R4 issue-type: "the system is not prepared to handle this request"
+            "rate-limited",
+            RATE_LIMIT_TEXTS[limit],
+            headers={"Retry-After": str(int(wait))},
+        )
+
+    def _session_from_cookie() -> tuple[dict | None, str | None]:
+        """``(claims, None)`` for a valid ``__session`` cookie, else ``(None, why)``: ``None``
+        when there is no cookie, else a reason code. Refuses nothing: the gate decides later."""
+        token = request.cookies.get(COOKIE_NAME)
+        if not token:
+            return None, None
+        try:
+            key = signing_key.current()
+        except KeyUnavailable:
+            return None, "key-unavailable"  # a protected route answers 503 below
+        try:
+            return signer.verify(token, key), None
+        except InvalidToken as exc:
+            return None, str(exc)
+
+    def _session_limits(jti: str, address: str, *, plain: bool) -> None:
+        """The per-session limits of this request, by what it does (T46). ``plain``: the gate
+        will refuse it (token in the URL, missing Origin), so it counts as a plain request."""
+        if plain or request.endpoint not in ("cuff_readings", SHARE_ENDPOINT):
+            # Every GET and HEAD, and the session's few other requests (logout, a new session
+            # attempt, a request the gate refuses): one budget, so nothing a session sends is
+            # free. The page's only POSTs besides sends and shares are logout and sign-in.
+            wait = session_reads.take(jti)
+            if wait is not None:
+                raise _rate_limited("session-reads", wait, address)
+        elif request.endpoint == "cuff_readings":
+            wait = session_cuff_sends.take(jti)
+            if wait is not None:
+                raise _rate_limited("session-cuff-sends", wait, address)
+        elif request.endpoint == SHARE_ENDPOINT:
+            wait = session_shares.take(jti)
+            if wait is not None:
+                raise _rate_limited("session-shares", wait, address)
+            wait = all_shares.take("all")
+            if wait is not None:
+                # Refused by the limit on everyone: this session's share did not happen, so it
+                # does not count against the session either.
+                session_shares.give_back(jti)
+                raise _rate_limited("all-shares", wait, address)
 
     @app.before_request
     def gate() -> Response | None:
@@ -280,44 +469,63 @@ def create_app(
             else config.request_budget
         )
         deadline.start(budget)
-        if request.method == "OPTIONS":
-            return _preflight()
-        if any(name in request.args for name in QUERY_TOKEN_NAMES):
+        address = _address()
+        session, refused_because = _session_from_cookie()
+        token_in_query = any(name in request.args for name in QUERY_TOKEN_NAMES)
+        origin = request.headers.get("Origin")
+        origin_refused = request.method not in ("GET", "HEAD") and (
+            origin not in config.allowed_origins
+        )
+        # 2. One rate limit, before anything is refused or done.
+        if session is not None:
+            _session_limits(session["jti"], address, plain=token_in_query or origin_refused)
+        else:
+            wait = per_address.take(address)
+            if wait is not None:
+                raise _rate_limited("address", wait, address)
+        # 3. A token in the URL.
+        if token_in_query:
             raise Problem(
                 400,
                 "security",
                 "token-in-query",
-                "Send the session token in the Authorization header, never in the URL.",
-                headers={"WWW-Authenticate": 'Bearer realm="pulsebridge", error="invalid_request"'},
+                "Never send a session token in the URL.",
+            )
+        # 4. The Origin check (CSRF). An exact match with a configured origin, the form a
+        # browser sends (RFC 6454 section 7); a missing header is refused too: every browser
+        # sends Origin on a POST (Fetch standard, "append a request Origin header").
+        if origin_refused:
+            _sampled(origin_log, "origin-refused", address, origin_present=origin is not None)
+            raise Problem(
+                403,
+                "forbidden",
+                "origin-refused",
+                "This request must come from the dashboard's own page.",
             )
         if request.endpoint in public_endpoints:
             return None
-        header = request.headers.get("Authorization")
-        if header is None:
-            raise _unauthorized(None)
-        match = _BEARER.fullmatch(header)
-        if match is None:
-            raise _unauthorized("invalid_request")
-        password = _current_password()
-        try:
-            signer.verify(match.group(1), password)
-        except InvalidToken as exc:
-            log(logging.INFO, "token-refused", reason=str(exc))
-            raise _unauthorized("invalid_token") from None
+        # 5. The session.
+        if session is None:
+            if refused_because is None:
+                raise _session_required()
+            if refused_because == "key-unavailable":
+                _current_key()  # logs and answers 503 session-not-configured
+            log(logging.INFO, "token-refused", reason=refused_because)
+            raise _session_required()
+        g.session = session
         return None
 
     @app.after_request
     def headers(response: Response) -> Response:
         for name, value in SECURITY_HEADERS.items():
             response.headers[name] = value
-        response.headers.pop("Set-Cookie", None)  # D9: no cookie, ever
-        response.headers.add("Vary", "Origin")
-        origin = request.headers.get("Origin")
-        if origin is not None and origin in config.allowed_origins and not g.get("cors_refused"):
-            # Exactly the configured origin, never "*"; no Allow-Credentials: a bearer token is
-            # sent by script, not by the browser, so credentials mode is not needed.
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Access-Control-Expose-Headers"] = EXPOSED_HEADERS
+        # The only cookie is the session's, set by the two handlers below; any other (from an
+        # extension or a forwarded answer) is dropped.
+        response.headers.remove("Set-Cookie")
+        cookie = g.get("set_cookie")
+        if cookie is not None:
+            response.headers.add("Set-Cookie", cookie)
+        response.headers.add("Vary", "Origin, Cookie")
         return response
 
     @app.errorhandler(Problem)
@@ -350,123 +558,112 @@ def create_app(
 
     # ---- handlers ----------------------------------------------------------------------------
 
-    def login() -> Response:
-        address = client_address(
-            request.headers.get("X-Forwarded-For"), request.remote_addr, config.trusted_proxy_hops
+    def auth_config() -> Response:
+        # Public by design: the site key is what the page hands to Google's script. Fetched by
+        # the page, not built into it, so a clone sets its own key in Terraform only.
+        return _json(
+            {
+                "recaptcha_site_key": config.recaptcha_site_key,
+                "recaptcha_action": config.recaptcha_action,
+            }
         )
 
-        def sampled(sampler: FloodLogSampler, event: str, **fields: object) -> None:
-            # Under a flood: one line per address per window, plus a count of the rest.
-            log_it, suppressed = sampler.record(address)
-            if suppressed:
-                log(
-                    logging.WARNING,
-                    "login-events-suppressed",
-                    kind=event,
-                    count=suppressed,
-                    window_seconds=config.login_window_seconds,
-                )
-            if log_it:
-                log(logging.WARNING, event, client_address=address, **fields)
+    def _bot_check_unavailable() -> Problem:
+        return Problem(
+            503,
+            "transient",
+            "bot-check-unavailable",
+            "The bot check is unavailable; try again shortly.",
+        )
 
-        def throttled(wait: int) -> Problem:
-            sampled(refused_log, "login-rate-limited", retry_after=wait)
-            return Problem(
+    def auth_session() -> Response:
+        """The order is the cost order: everything that is free comes before the counter, and
+        the counter (which caps what is spent) before the assessment (what costs money)."""
+        address = _address()
+        # 1. The per-address limit, before the body is even read.
+        wait = session_limiter.attempt(address)
+        if isinstance(wait, TableFull):
+            raise _rate_limited("session-attempts", wait, address)
+        if wait is not None:
+            _sampled(refused_log, "session-rate-limited", address, retry_after=wait)
+            raise Problem(
                 429,
                 "throttled",
                 "rate-limited",
-                "Too many failed logins; wait and try again.",
+                "Too many attempts; wait and try again.",
                 headers={"Retry-After": str(wait)},
             )
-
-        # The per-address limit comes first: a blocked address learns nothing more. The slot is
-        # reserved now, so concurrent attempts from one address count (login_limit.py).
-        slot, wait = limiter.begin(address)
-        if slot is None:
-            raise throttled(wait)
-        wrong = False
+        # 2. The body: exactly {"recaptcha_token": "<text>"}, strict JSON.
+        invalid = Problem(
+            400,
+            "invalid",
+            "invalid-body",
+            'The body must be {"recaptcha_token": "..."}.',
+            expression=["recaptcha_token"],
+        )
+        if not _is_json_request():
+            raise invalid
         try:
-            if not _is_json_request():
-                raise Problem(
-                    415, "not-supported", "unsupported-media-type", "Send application/json."
-                )
-            data = read_body(MAX_LOGIN_BYTES)
-            try:
-                body = _strict_json(data)
-            except (UnicodeDecodeError, ValueError):
-                body = None
-            if (
-                not isinstance(body, dict)
-                or set(body) != {"password"}
-                or not isinstance(body["password"], str)
-                or not 1 <= len(body["password"]) <= MAX_PASSWORD_CHARS
-            ):
-                raise Problem(
-                    400,
-                    "invalid",
-                    "invalid-body",
-                    'The body must be {"password": "..."}.',
-                    expression=["password"],
-                )
-            actual = _current_password()
-            wrong = not passwords_match(body["password"], actual)
-        finally:
-            if not wrong:
-                limiter.succeeded(slot)  # a correct password or no guess at all: slot given back
-        if wrong:
-            # The instance-wide total limits failures only: it never stops a correct password.
-            total_wait = limiter.failed(slot)
-            entries_count = len(
-                [p for p in (request.headers.get("X-Forwarded-For") or "").split(",") if p.strip()]
-            )
-            if total_wait is None:
-                # Below the total, failures are already bounded (60 a minute): log each one,
-                # after any summary of a flood whose window has ended.
-                for sampler, kind in (
-                    (failed_log, "login-failed"),
-                    (refused_log, "login-rate-limited"),
-                ):
-                    suppressed = sampler.due()
-                    if suppressed:
-                        log(
-                            logging.WARNING,
-                            "login-events-suppressed",
-                            kind=kind,
-                            count=suppressed,
-                            window_seconds=config.login_window_seconds,
-                        )
-                log(
-                    logging.WARNING,
-                    "login-failed",
-                    client_address=address,
-                    forwarded_for_entries=entries_count,
-                )
-            else:
-                sampled(
-                    failed_log,
-                    "login-failed",
-                    forwarded_for_entries=entries_count,
-                    over_total=True,
-                )
-                raise Problem(
-                    429,
-                    "throttled",
-                    "rate-limited",
-                    "Too many failed logins; wait and try again.",
-                    headers={"Retry-After": str(total_wait)},
-                )
+            body = _strict_json(read_body(MAX_SESSION_BODY_BYTES))
+        except (UnicodeDecodeError, ValueError):
+            raise invalid from None
+        if not isinstance(body, dict) or set(body) != {"recaptcha_token"}:
+            raise invalid
+        token = body["recaptcha_token"]
+        if not isinstance(token, str):
+            raise invalid
+        failed = Problem(403, "forbidden", "bot-check-failed", "The bot check did not pass.")
+        # 3. The cheap shape check: junk costs no assessment and no count.
+        if not token_has_shape(token):
+            log(logging.WARNING, "bot-check-failed", reason="malformed-token")
+            raise failed
+        # 4. The signing key: without it no session could be issued, so spend nothing.
+        key = _current_key()
+        # 5. The daily cap, counted before the assessment is made.
+        try:
+            taken = counter.take()
+        except DemoBusy as busy:
+            log(logging.WARNING, "demo-busy", cap=config.bot_checks_per_day)
             raise Problem(
-                401,
-                "login",
-                "wrong-password",
-                "Wrong password.",
-                headers={"WWW-Authenticate": 'Bearer realm="pulsebridge"'},
+                503,
+                "throttled",
+                "demo-busy",
+                DEMO_BUSY_TEXT,
+                headers={"Retry-After": str(busy.retry_after)},
+            ) from None
+        except CounterUnavailable as exc:
+            log(logging.ERROR, "demo-counter-unavailable", problem=str(exc))
+            raise _bot_check_unavailable() from None
+        # 6. The assessment.
+        try:
+            verdict = fraud_defense.assess(token)
+        except BotCheckUnavailable as exc:
+            log(logging.ERROR, "bot-check-unavailable", problem=str(exc))
+            raise _bot_check_unavailable() from None
+        if not verdict.passed:
+            # Logged for tuning RECAPTCHA_MIN_SCORE; the caller learns only bot-check-failed.
+            log(
+                logging.WARNING,
+                "bot-check-failed",
+                reason=verdict.reason,
+                invalid_reason=verdict.invalid_reason,
+                score=verdict.score,
+                checks_today=taken.count,
             )
-        issued = signer.issue(actual)
-        log(logging.INFO, "login-succeeded")
+            raise failed
+        issued = signer.issue(key)
+        g.set_cookie = session_cookie(
+            issued.token, path=cookie_path, max_age=config.session_ttl_seconds
+        )
+        log(logging.INFO, "session-created", score=verdict.score, checks_today=taken.count)
         expires = issued.expires_at.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        # Field names as docs/spikes/s6.md wrote them (the dashboard reads expires_at).
-        return _json({"token": issued.token, "expires_at": expires})
+        return _json({"expires_at": expires})
+
+    def auth_logout() -> Response:
+        # No session needed: an expired cookie can be cleared too. The browser deletes a cookie
+        # whose Max-Age is 0 when the name, path and domain match the one it holds.
+        g.set_cookie = session_cookie("", path=cookie_path, max_age=0)
+        return Response(status=204)
 
     def status() -> Response:
         return _json(status_service.summary())
@@ -476,13 +673,19 @@ def create_app(
             routes,
             prefix=prefix,
             ttl_hours=config.session_ttl_seconds / 3600,
+            history_days=config.history_days,
             software_version=SOFTWARE_VERSION,
             date=started_on,
         )
         return _json(statement, content_type=FHIR_JSON)
 
     def search_observations() -> Response:
-        query = search.parse_observation_query(list(request.args.items(multi=True)))
+        since = shown_since()
+        # The caller's query is validated first (a bad one is a 400 whatever the window), then
+        # its lower date bound is raised to the window's boundary (history.bounded_query).
+        query = history.bounded_query(
+            search.parse_observation_query(list(request.args.items(multi=True))), since
+        )
         try:
             refs = stores.patient_references()
             bundle = stores.search_observations(query.store_params(",".join(refs))) if refs else {}
@@ -491,7 +694,9 @@ def create_app(
         found = [
             r
             for r in entries(bundle, "Observation")
-            if stores.is_ours(r, refs) and search.matches_dates(r, query)
+            if stores.is_ours(r, refs)
+            and search.matches_dates(r, query)
+            and history.effective_in_window(r, since)
         ]
         path = f"{prefix}/fhir/Observation"
         links = [
@@ -541,8 +746,13 @@ def create_app(
             resource = None
         except HealthcareApiError as exc:
             raise upstream_problem(exc, "the FHIR store") from None
-        if resource is None or not stores.is_ours(resource, refs):
-            # Another patient's Observation answers exactly like a missing one.
+        if (
+            resource is None
+            or not stores.is_ours(resource, refs)
+            or not history.effective_in_window(resource, shown_since())
+        ):
+            # Another patient's Observation, or one older than the shown window (T47), answers
+            # exactly like a missing one: the same body, headers and (no) log line.
             raise Problem(404, "not-found", "not-found", "The Observation was not found.")
         response = _json(resource, content_type=FHIR_JSON)
         # R4 http.html "read": the server SHOULD return an ETag with the versionId (a weak
@@ -570,7 +780,7 @@ def create_app(
     def heart_rate_trace(observation_id: str) -> Response:
         observation_id = _checked_id(observation_id)
         try:
-            return _json(traces.heart_rate_trace(stores, observation_id))
+            return _json(traces.heart_rate_trace(stores, observation_id, since=shown_since()))
         except HealthcareApiError as exc:
             raise upstream_problem(exc, "the FHIR store") from None
 
@@ -584,6 +794,7 @@ def create_app(
                     attempt_id,
                     patient_id=config.patient_id,
                     sample_patient=config.sample_patient,
+                    since=shown_since(),
                 )
             )
         except HealthcareApiError as exc:
@@ -623,7 +834,9 @@ def create_app(
             count = min(int(text), MAX_COUNT)
         cursor = decode_cursor(given["cursor"], clock()) if "cursor" in given else None
         try:
-            page = messages_log.page(kind=kind, outcome=outcome, count=count, cursor=cursor)
+            page = messages_log.page(
+                kind=kind, outcome=outcome, count=count, cursor=cursor, since=shown_since()
+            )
         except HealthcareApiError as exc:
             raise upstream_problem(exc, "the stores") from None
         return _json(page)
@@ -678,7 +891,9 @@ def create_app(
         return _forwarded(lambda: upstream.cuff_reading(body, content_type), "readings")
 
     handlers: dict[str, Callable] = {
-        "login": login,
+        "auth_config": auth_config,
+        "auth_session": auth_session,
+        "auth_logout": auth_logout,
         "status": status,
         "metadata": metadata,
         "search_observations": search_observations,
@@ -697,6 +912,8 @@ def create_app(
             endpoint=route.endpoint,
             view_func=handlers[route.endpoint],
             methods=[route.method],
+            # No automatic OPTIONS answer: there is no CORS, and OPTIONS goes through the gate.
+            provide_automatic_options=False,
         )
     # Every core URL must still reach its core endpoint: no extension rule may shadow one.
     adapter = app.url_map.bind("")

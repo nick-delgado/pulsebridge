@@ -24,7 +24,7 @@ import type { MessagesLogEntry, MessagesLogQuery, SendAttemptEntry } from '../ap
 import { isServiceNotConfigured, UnauthorizedError } from '../api/errors';
 import { ACK_MODE_NOTE } from '../cuff/readings';
 import type { FeatureContext, MessagesSlot } from '../shell/features';
-import { pollUntil, type PollOptions } from '../state/poll';
+import { pollUntil, rateLimitWaitMs, type PollOptions } from '../state/poll';
 import { el, placeholder, replaceChildren, uniqueId } from '../ui/dom';
 import { gather, mergeRefresh, MAX_AUTO_PAGES, PAGE_ROWS, uniqueRows, type Shown } from './paging';
 import {
@@ -78,7 +78,7 @@ function childController(parent: AbortSignal): AbortController {
 
 function errorText(error: unknown): string {
   if (isServiceNotConfigured(error)) {
-    return 'The service is not configured: the server is missing its reviewer password secret, so it answers no request. You are still logged in.';
+    return 'The service is not configured: the server is missing its session-signing key, so it answers no request. Your demo session is kept.';
   }
   return `Could not load the messages log: ${error instanceof Error ? error.message : 'unknown error'}`;
 }
@@ -671,29 +671,38 @@ export function createMessagesLog(
     });
   }
 
-  /** The newest rows again, merged into what is shown (data changes and polling). */
-  function refresh(): Promise<void> {
+  /**
+   * The newest rows again, merged into what is shown (data changes and polling). Resolves to
+   * what made it fail (shown in the notice already), or null: the polling needs to tell a 429,
+   * after which it waits for Retry-After (T47).
+   */
+  function refresh(): Promise<unknown> {
     if (!loaded) {
       // A change during the first load is not lost: it runs once that load has ended.
       if (busy) refreshQueued = true;
       else reload();
-      return Promise.resolve();
+      return Promise.resolve(null);
     }
     if (busy) {
       refreshQueued = true;
-      return Promise.resolve();
+      return Promise.resolve(null);
     }
     return new Promise((resolve) => {
+      let failure: unknown = null;
       run(async (c, gen) => {
         try {
           const g = await gather(fetchPage(c), undefined, pageRows, maxAutoPages);
           if (c.signal.aborted || gen !== generation) return;
+          failure = g.error;
           shown = mergeRefresh(shown, g);
           afterGather(g);
           render();
           maybePoll();
+        } catch (error) {
+          failure = error;
+          throw error; // run() shows it
         } finally {
-          resolve();
+          resolve(failure);
         }
       });
     });
@@ -733,7 +742,9 @@ export function createMessagesLog(
     poller = c;
     pollUntil(
       async () => {
-        await refresh();
+        const failure = await refresh();
+        // A 429: pollUntil waits for its Retry-After, then polls again (T47).
+        if (rateLimitWaitMs(failure) !== null) throw failure;
         return pendingKeys().size === 0;
       },
       {

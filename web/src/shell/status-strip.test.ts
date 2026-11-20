@@ -151,7 +151,7 @@ describe('status strip: the proxy as built (T19, amendments 9, 10, 11, 13, 15)',
     const st = statusStrip();
     st.render({ kind: 'not-configured' });
     expect(st.root.textContent).toContain('Service: Not configured');
-    expect(st.root.textContent).toContain('You are still logged in');
+    expect(st.root.textContent).toContain('Your demo session is kept');
   });
 });
 

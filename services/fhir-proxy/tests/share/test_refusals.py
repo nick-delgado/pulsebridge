@@ -13,7 +13,7 @@ from fhir_proxy.share.testing import (
     stored_observation,
     stored_patient,
 )
-from fhir_proxy.testing import FHIR_STORE
+from fhir_proxy.testing import FHIR_STORE, ORIGIN
 
 
 def reason(response) -> str:  # noqa: ANN001
@@ -131,11 +131,14 @@ def test_a_heart_rate_without_ucum_per_minute_is_not_shareable(env) -> None:
 
 
 @pytest.mark.parametrize("value", ["2026-01-01", "2026-01-01T09:30:00", "yesterday", None])
-def test_a_reading_without_a_zoned_time_is_not_shareable(env, value) -> None:  # noqa: ANN001
+def test_a_reading_without_a_zoned_time_is_not_found(env, value) -> None:  # noqa: ANN001
+    # T47: a reading whose effective time cannot be placed is not inside the shown window (no
+    # date search finds it either), so it answers like a missing one, before any 422 could
+    # tell anything about it. Nothing is sent.
     observation = stored_observation("observation-blood-pressure.json", BP_ID)
     observation["effectiveDateTime"] = value
     env.store.put(FHIR_STORE, observation)
-    refused(env, env.share(), 422, "observation-not-shareable")
+    refused(env, env.share(), 404, "not-found")
 
 
 @pytest.mark.parametrize(
@@ -170,8 +173,16 @@ def test_not_configured_is_503_and_the_probe_says_so(tmp_path, client_key, serve
 
 
 def test_the_route_needs_the_session_token(env) -> None:
-    response = env.harness.client.post("/share", json={"observationId": BP_ID})
+    # From the page's own origin but without the __session cookie.
+    response = env.harness.client.post(
+        "/share", json={"observationId": BP_ID}, headers={"Origin": ORIGIN}
+    )
     assert response.status_code == 401 and env.openemr.requests == []
+    # Without an allowed Origin it is refused before the cookie is even looked at.
+    response = env.harness.client.post(
+        "/share", json={"observationId": BP_ID}, headers=env.harness.auth() | {"Origin": "null"}
+    )
+    assert response.status_code == 403 and env.openemr.requests == []
 
 
 def test_the_share_route_is_listed_as_a_view_not_a_fhir_interaction(env) -> None:

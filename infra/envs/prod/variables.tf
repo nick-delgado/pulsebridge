@@ -76,7 +76,7 @@ variable "name_prefix" {
 }
 
 variable "identity_name_prefix" {
-  description = "Prefix of the service account and Secret Manager secret IDs (module identity), at most 12 characters because a service account ID is at most 30 (\"pb\" gives pb-health-sync, pb-reviewer-password). It is separate from name_prefix only because of that length limit. The connect script's PULSEBRIDGE_NAME_PREFIX must equal it (output secret_name_prefix)."
+  description = "Prefix of the service account and Secret Manager secret IDs (module identity), at most 12 characters because a service account ID is at most 30 (\"pb\" gives pb-health-sync, pb-session-signing-key). It is separate from name_prefix only because of that length limit. The connect script's PULSEBRIDGE_NAME_PREFIX must equal it (output secret_name_prefix)."
   type        = string
   default     = "pb"
   nullable    = false
@@ -285,50 +285,6 @@ variable "alert_notification_channels" {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Reviewer password from tfvars: DEV ONLY (prod refuses it; use scripts/secrets instead)
-# ---------------------------------------------------------------------------------------------
-
-variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, written as a version of the reviewer-password secret through a write-only argument, so it is never in the plan or the state. Used only when reviewer_password_wo_version > 0. At least 16 characters. Set it EITHER this way OR with scripts/secrets/set-reviewer-password.sh, never both. Prefer giving it to one apply as TF_VAR_reviewer_password (read with `IFS= read -rs`, unset afterwards whether or not the apply succeeded; dev terraform.tfvars.example) over writing it into terraform.tfvars."
-  type        = string
-  default     = null
-  sensitive   = true
-  ephemeral   = true
-
-  validation {
-    condition     = var.reviewer_password == null ? true : length(var.reviewer_password) >= 16
-    error_message = "reviewer_password must be at least 16 characters."
-  }
-  validation {
-    # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod. In
-    # prod a password here would be silently unused; refuse it so nobody thinks it was set.
-    condition     = var.reviewer_password == null || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): unset reviewer_password (and TF_VAR_reviewer_password) and use scripts/secrets/set-reviewer-password.sh."
-  }
-}
-
-variable "reviewer_password_wo_version" {
-  description = "Dev only: 0 (default) writes no reviewer-password version from tfvars. 1 or more writes reviewer_password; raise the number to send a new password (Terraform cannot see a write-only value change). In prod a value above 0 is refused."
-  type        = number
-  default     = 0
-  nullable    = false
-
-  validation {
-    condition     = var.reviewer_password_wo_version >= 0 && floor(var.reviewer_password_wo_version) == var.reviewer_password_wo_version
-    error_message = "reviewer_password_wo_version must be a whole number, 0 or more."
-  }
-  validation {
-    # local.allow_reviewer_password_from_tfvars comes from env.tf: true in dev, false in prod.
-    condition     = var.reviewer_password_wo_version == 0 || local.allow_reviewer_password_from_tfvars
-    error_message = "This environment does not take the reviewer password from tfvars (prod): leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
-  }
-  validation {
-    condition     = var.reviewer_password_wo_version == 0 || var.reviewer_password != null
-    error_message = "reviewer_password must be set when reviewer_password_wo_version is greater than 0."
-  }
-}
-
-# ---------------------------------------------------------------------------------------------
 # Network and the edge VM
 # ---------------------------------------------------------------------------------------------
 
@@ -477,4 +433,73 @@ variable "build_trigger_approval_required" {
   type        = bool
   default     = true
   nullable    = false
+}
+
+# ---------------------------------------------------------------------------------------------
+# The public demo (D16, T44): optional; null keeps module phr's default
+# ---------------------------------------------------------------------------------------------
+
+variable "recaptcha_min_score" {
+  description = "fhir-proxy's RECAPTCHA_MIN_SCORE: the lowest reCAPTCHA score (0.0 likely a bot, 1.0 likely a person) that gets a demo session, above 0 and at most 1. null (default): module phr's 0.5. Tune it after the first real deploy, from the scores real visitors get."
+  type        = number
+  default     = null
+}
+
+variable "bot_checks_per_day" {
+  description = "fhir-proxy's BOT_CHECKS_PER_DAY: the most reCAPTCHA assessments in one UTC day across all instances (the counter bucket), 1 to 3000; past it the page says the demo is busy. null (default): module phr's 300 (about 9,000 a month, under the 10,000 free per organisation)."
+  type        = number
+  default     = null
+}
+
+variable "session_ttl_seconds" {
+  description = "fhir-proxy's SESSION_TTL_SECONDS: how long a demo session lasts, 300 to 86400. null (default): module phr's 86400 (24 hours, D16)."
+  type        = number
+  default     = null
+}
+
+variable "sessions_per_address_per_hour" {
+  description = "fhir-proxy's SESSIONS_PER_ADDRESS_PER_HOUR: session attempts per client address an hour, per instance, checked before any assessment, 1 to 100. null (default): module phr's 5."
+  type        = number
+  default     = null
+}
+
+# ---------------------------------------------------------------------------------------------
+# The public demo's rate limits (T46) and shown window (T47), since T48: optional; null keeps
+# module phr's default (fhir-proxy's own, services/fhir-proxy/fhir_proxy/config.py)
+# ---------------------------------------------------------------------------------------------
+
+variable "requests_per_address_per_minute" {
+  description = "fhir-proxy's REQUESTS_PER_ADDRESS_PER_MINUTE: requests without a valid session per client address a minute, all routes together, 60 to 6000. Per instance (up to twice this with fhir-proxy's 2 instances). null (default): module phr's 300."
+  type        = number
+  default     = null
+}
+
+variable "reads_per_session_per_minute" {
+  description = "fhir-proxy's READS_PER_SESSION_PER_MINUTE: requests per demo session a minute other than cuff sends and shares (every GET and HEAD, and the few others such as logout), 60 to 1200. Per instance (up to twice this with 2 instances). null (default): module phr's 120."
+  type        = number
+  default     = null
+}
+
+variable "cuff_sends_per_session_per_10_minutes" {
+  description = "fhir-proxy's CUFF_SENDS_PER_SESSION_PER_10_MINUTES: cuff readings per demo session in any 10 minutes, 1 to 30. Per instance (up to twice this with 2 instances). null (default): module phr's 3."
+  type        = number
+  default     = null
+}
+
+variable "shares_per_session_per_10_minutes" {
+  description = "fhir-proxy's SHARES_PER_SESSION_PER_10_MINUTES: shares to OpenEMR per demo session in any 10 minutes, 1 to 20. Per instance (up to twice this with 2 instances). null (default): module phr's 2."
+  type        = number
+  default     = null
+}
+
+variable "shares_per_instance_per_hour" {
+  description = "fhir-proxy's SHARES_PER_INSTANCE_PER_HOUR: shares to OpenEMR by all visitors together in any hour, counted per instance, 1 to 600. null (default): module phr's 30, so up to 60 an hour with 2 instances."
+  type        = number
+  default     = null
+}
+
+variable "history_days" {
+  description = "fhir-proxy's HISTORY_DAYS: how many days back the demo shows (older data is hidden, never deleted), 1 to 30. null (default): module phr's 7, which the page's privacy note states."
+  type        = number
+  default     = null
 }

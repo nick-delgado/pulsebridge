@@ -9,7 +9,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from fhir_proxy.testing import CUFF_URL
+from fhir_proxy.testing import CUFF_URL, ORIGIN
 from fhir_proxy.upstream import UpstreamError, UpstreamTimeout, requests_sender
 
 RESULT = {
@@ -58,7 +58,9 @@ def test_body_is_forwarded_byte_for_byte_with_the_proxys_identity(harness) -> No
     # request already used.
     assert 50 < call["timeout"] <= 55
     # The reviewer's session token never leaves the proxy.
-    assert harness.auth()["Authorization"] not in json.dumps(call["headers"])
+    # The caller's session never reaches cuff-sim: only the proxy's own identity token.
+    assert harness.auth()["Cookie"].split("=", 1)[1] not in json.dumps(call["headers"])
+    assert "cookie" not in {name.lower() for name in call["headers"]}
 
 
 @pytest.mark.parametrize("status", [400, 413, 422, 429, 500])
@@ -148,7 +150,9 @@ def test_a_non_json_content_type_is_not_forwarded_as_json(harness) -> None:
 
 def test_cuff_forwarding_needs_a_logged_in_caller(harness) -> None:
     harness.sender.answer("/cuff/readings", 200, RESULT)
-    response = harness.client.post("/cuff/readings", data=b"{}", content_type="application/json")
+    response = harness.client.post(
+        "/cuff/readings", data=b"{}", content_type="application/json", headers={"Origin": ORIGIN}
+    )
     assert response.status_code == 401
     assert harness.sender.calls == []
 
@@ -265,7 +269,7 @@ def test_the_identity_token_fetch_counts_inside_the_budget(tmp_path) -> None:
         "/cuff/readings",
         data=b"{}",
         content_type="application/json",
-        headers={"Authorization": f"Bearer {token}"},
+        headers=h.auth(token),
     )
     assert response.status_code == 200
     assert h.tokens.timeouts[-1] <= 2  # the fetch was given only the time left
@@ -285,7 +289,7 @@ def test_a_token_fetch_that_uses_up_the_budget_sends_nothing(tmp_path) -> None:
         "/cuff/readings",
         data=b"{}",
         content_type="application/json",
-        headers={"Authorization": f"Bearer {token}"},
+        headers=h.auth(token),
     )
     assert response.status_code == 504
     assert h.sender.calls == []

@@ -8,9 +8,6 @@ locals {
 
   # dev is destroyed nightly (T26) and holds synthetic data: everything may be destroyed.
   protect_from_destroy = false
-
-  # dev may set the reviewer password from tfvars (module identity's write-only version).
-  allow_reviewer_password_from_tfvars = true
 }
 
 variable "use_synthetic_data" {

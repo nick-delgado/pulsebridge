@@ -150,10 +150,10 @@ override_resource {
 }
 
 override_resource {
-  target = module.identity.google_secret_manager_secret.this["reviewer-password"]
+  target = module.identity.google_secret_manager_secret.this["session-signing-key"]
   values = {
-    id   = "projects/example-project/secrets/pb-reviewer-password"
-    name = "projects/100000000001/secrets/pb-reviewer-password"
+    id   = "projects/example-project/secrets/pb-session-signing-key"
+    name = "projects/100000000001/secrets/pb-session-signing-key"
   }
 }
 
@@ -279,9 +279,8 @@ override_resource {
 # Synthetic values only: no real project, patient, person or address.
 
 variables {
-  environment                         = "dev"
-  protect_from_destroy                = false
-  allow_reviewer_password_from_tfvars = true
+  environment          = "dev"
+  protect_from_destroy = false
 
   project_id           = "example-project"
   region               = "us-central1"
@@ -499,9 +498,8 @@ run "prod_settings" {
   command = apply
 
   variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
+    environment          = "prod"
+    protect_from_destroy = true
   }
 
   assert {
@@ -524,10 +522,9 @@ run "enabling_an_api_keeps_the_agent_grants" {
   command = plan
 
   variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
-    enable_iap_ssh                      = true # one more API (iap) and one more firewall rule
+    environment          = "prod"
+    protect_from_destroy = true
+    enable_iap_ssh       = true # one more API (iap) and one more firewall rule
   }
 
   assert {
@@ -550,10 +547,9 @@ run "another_project_base_change_keeps_the_agent_grants" {
   command = plan
 
   variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
-    enable_cloud_nat                    = true
+    environment          = "prod"
+    protect_from_destroy = true
+    enable_cloud_nat     = true
   }
 
   assert {
@@ -573,34 +569,70 @@ run "another_project_base_change_keeps_the_agent_grants" {
   expect_failures = [check.cloud_nat_is_billed_hourly]
 }
 
-# ---- the reviewer password from tfvars: dev only -------------------------------------------
+# ---- T44: make smoke's issuer is module phr's, built from name_prefix -----------------------------
 
-run "dev_may_set_reviewer_password_from_tfvars" {
+run "token_issuer_comes_from_module_phr" {
   command = plan
 
-  variables {
-    reviewer_password            = "a-synthetic-test-password-0123"
-    reviewer_password_wo_version = 1
-  }
-
   assert {
-    condition     = module.identity.reviewer_password_version_created
-    error_message = "In dev a reviewer-password version may come from tfvars (write-only)."
+    condition     = output.token_issuer == module.phr.token_issuer && output.token_issuer == "pulsebridge-fhir-proxy:${var.project_id}:${var.name_prefix}"
+    error_message = "The stack's token_issuer must be module phr's (name_prefix, not identity_name_prefix)."
   }
 }
 
-run "prod_refuses_reviewer_password_from_tfvars" {
+# ---- T44: the demo settings pass through, null keeps module phr's defaults ---------------------
+
+run "demo_settings_default_to_module_phr" {
+  command = plan
+
+  assert {
+    condition = module.phr.demo_settings == {
+      recaptcha_min_score                   = 0.5
+      session_ttl_seconds                   = 86400
+      sessions_per_address_per_hour         = 5
+      bot_checks_per_day                    = 300
+      requests_per_address_per_minute       = 300
+      reads_per_session_per_minute          = 120
+      cuff_sends_per_session_per_10_minutes = 3
+      shares_per_session_per_10_minutes     = 2
+      shares_per_instance_per_hour          = 30
+      history_days                          = 7
+    }
+    error_message = "Unset (null) demo settings must give module phr's defaults."
+  }
+}
+
+run "demo_settings_reach_module_phr" {
   command = plan
 
   variables {
-    environment                         = "prod"
-    protect_from_destroy                = true
-    allow_reviewer_password_from_tfvars = false
-    reviewer_password                   = "a-synthetic-test-password-0123"
-    reviewer_password_wo_version        = 1
+    recaptcha_min_score                   = 0.7
+    bot_checks_per_day                    = 120
+    session_ttl_seconds                   = 3600
+    sessions_per_address_per_hour         = 9
+    requests_per_address_per_minute       = 450
+    reads_per_session_per_minute          = 240
+    cuff_sends_per_session_per_10_minutes = 4
+    shares_per_session_per_10_minutes     = 1
+    shares_per_instance_per_hour          = 15
+    history_days                          = 14
   }
 
-  expect_failures = [var.reviewer_password_wo_version]
+  assert {
+    condition = module.phr.demo_settings == {
+      recaptcha_min_score                   = 0.7
+      session_ttl_seconds                   = 3600
+      sessions_per_address_per_hour         = 9
+      bot_checks_per_day                    = 120
+      requests_per_address_per_minute       = 450
+      reads_per_session_per_minute          = 240
+      cuff_sends_per_session_per_10_minutes = 4
+      shares_per_session_per_10_minutes     = 1
+      shares_per_instance_per_hour          = 15
+      history_days                          = 14
+    }
+    error_message = "Each demo setting set at the stack must reach module phr."
+  }
 }
 
 # ---- images: a full plan needs them; the targeted first applies do not ----------------------

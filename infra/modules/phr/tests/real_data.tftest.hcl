@@ -10,6 +10,11 @@ mock_provider "google" {
     target = google_cloud_run_v2_service.fhir_proxy
     values = { uri = "https://pulsebridge-fhir-proxy-abc123-uc.a.run.app" }
   }
+  # A synthetic site key ID (the real one is Google's random 40-character ID).
+  override_resource {
+    target = google_recaptcha_enterprise_key.demo
+    values = { name = "synthetic-test-site-key-0000000000000000" }
+  }
 }
 
 mock_provider "google-beta" {
@@ -42,7 +47,7 @@ variables {
     "health-sync" = "pb-health-sync@example-project.iam.gserviceaccount.com"
   }
   secret_ids = {
-    "reviewer-password"          = "pulsebridge-reviewer-password"
+    "session-signing-key"        = "pulsebridge-session-signing-key"
     "openemr-client-private-key" = "pb-openemr-client-private-key"
   }
 
@@ -269,26 +274,26 @@ run "images_accounts_and_probes" {
 
 # ---- secrets --------------------------------------------------------------------------------
 
-run "reviewer_password_is_a_file_at_latest" {
+run "session_signing_key_is_a_file_at_latest" {
   command = apply
 
   assert {
     condition = (
       length(google_cloud_run_v2_service.fhir_proxy.template[0].volumes) == 1 &&
-      google_cloud_run_v2_service.fhir_proxy.template[0].volumes[0].name == "reviewer-password" &&
-      google_cloud_run_v2_service.fhir_proxy.template[0].volumes[0].secret[0].secret == "pulsebridge-reviewer-password" &&
+      google_cloud_run_v2_service.fhir_proxy.template[0].volumes[0].name == "session-signing-key" &&
+      google_cloud_run_v2_service.fhir_proxy.template[0].volumes[0].secret[0].secret == "pulsebridge-session-signing-key" &&
       google_cloud_run_v2_service.fhir_proxy.template[0].volumes[0].secret[0].items[0].version == "latest" &&
       google_cloud_run_v2_service.fhir_proxy.template[0].volumes[0].secret[0].items[0].path == "value"
     )
-    error_message = "The reviewer-password secret must be a volume at version latest (a new version then takes effect without a redeploy)."
+    error_message = "The session-signing-key secret must be a volume at version latest (a new key then takes effect without a redeploy)."
   }
   assert {
     condition = (
       length(google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].volume_mounts) == 1 &&
-      google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].volume_mounts[0].name == "reviewer-password" &&
-      google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].volume_mounts[0].mount_path == "/secrets/reviewer-password"
+      google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].volume_mounts[0].name == "session-signing-key" &&
+      google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].volume_mounts[0].mount_path == "/secrets/session-signing-key"
     )
-    error_message = "The secret volume must be mounted at /secrets/reviewer-password."
+    error_message = "The secret volume must be mounted at /secrets/session-signing-key."
   }
   assert {
     condition = alltrue([
@@ -313,29 +318,43 @@ run "fhir_proxy_environment" {
 
   assert {
     condition = { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value } == {
-      GCP_PROJECT_ID               = "example-project"
-      HEALTHCARE_LOCATION          = "us-central1"
-      HEALTHCARE_DATASET_ID        = "pulsebridge"
-      FHIR_STORE_ID                = "pulsebridge-fhir"
-      AUDIT_FHIR_STORE_ID          = "pulsebridge-audit"
-      HL7V2_STORE_ID               = "pulsebridge-hl7v2"
-      PATIENT_ID                   = "PAT-0001"
-      PATIENT_ASSIGNING_AUTHORITY  = "EXAMPLE"
-      PATIENT_FAMILY_NAME          = "Example"
-      PATIENT_GIVEN_NAME           = "Pat"
-      REVIEWER_PASSWORD_FILE       = "/secrets/reviewer-password/value"
-      CUFF_SIM_URL                 = "https://pulsebridge-cuff-sim-abc123-uc.a.run.app"
-      HEALTH_SYNC_URL              = "https://pulsebridge-health-sync-abc123-uc.a.run.app"
-      PATH_PREFIX                  = "/api"
-      PUBLIC_BASE_URL              = "https://example-project.web.app/api"
-      ALLOWED_ORIGINS              = "https://example-project.web.app"
-      TRUSTED_PROXY_HOPS           = "2"
-      TOKEN_ISSUER                 = "pulsebridge-fhir-proxy:example-project:pulsebridge"
-      REQUEST_BUDGET_SECONDS       = "50"
-      CUFF_FORWARD_TIMEOUT_SECONDS = "55"
-      REQUEST_TIMEOUT_SECONDS      = "70"
+      GCP_PROJECT_ID                = "example-project"
+      HEALTHCARE_LOCATION           = "us-central1"
+      HEALTHCARE_DATASET_ID         = "pulsebridge"
+      FHIR_STORE_ID                 = "pulsebridge-fhir"
+      AUDIT_FHIR_STORE_ID           = "pulsebridge-audit"
+      HL7V2_STORE_ID                = "pulsebridge-hl7v2"
+      PATIENT_ID                    = "PAT-0001"
+      PATIENT_ASSIGNING_AUTHORITY   = "EXAMPLE"
+      PATIENT_FAMILY_NAME           = "Example"
+      PATIENT_GIVEN_NAME            = "Pat"
+      SESSION_SIGNING_KEY_FILE      = "/secrets/session-signing-key/value"
+      CUFF_SIM_URL                  = "https://pulsebridge-cuff-sim-abc123-uc.a.run.app"
+      HEALTH_SYNC_URL               = "https://pulsebridge-health-sync-abc123-uc.a.run.app"
+      PATH_PREFIX                   = "/api"
+      PUBLIC_BASE_URL               = "https://example-project.web.app/api"
+      ALLOWED_ORIGINS               = "https://example-project.web.app,https://example-project.firebaseapp.com"
+      TRUSTED_PROXY_HOPS            = "2"
+      TOKEN_ISSUER                  = "pulsebridge-fhir-proxy:example-project:pulsebridge"
+      REQUEST_BUDGET_SECONDS        = "50"
+      CUFF_FORWARD_TIMEOUT_SECONDS  = "55"
+      REQUEST_TIMEOUT_SECONDS       = "70"
+      RECAPTCHA_SITE_KEY            = "synthetic-test-site-key-0000000000000000"
+      RECAPTCHA_ACTION              = "view_demo"
+      RECAPTCHA_MIN_SCORE           = "0.5"
+      SESSION_TTL_SECONDS           = "86400"
+      SESSIONS_PER_ADDRESS_PER_HOUR = "5"
+      BOT_CHECKS_PER_DAY            = "300"
+      DEMO_COUNTER_BUCKET           = "example-project-pulsebridge-demo-counters"
+      # T46's rate limits and T47's window, at fhir-proxy's own defaults (T48).
+      REQUESTS_PER_ADDRESS_PER_MINUTE       = "300"
+      READS_PER_SESSION_PER_MINUTE          = "120"
+      CUFF_SENDS_PER_SESSION_PER_10_MINUTES = "3"
+      SHARES_PER_SESSION_PER_10_MINUTES     = "2"
+      SHARES_PER_INSTANCE_PER_HOUR          = "30"
+      HISTORY_DAYS                          = "7"
     }
-    error_message = "fhir-proxy must get exactly the environment its README lists for T22."
+    error_message = "fhir-proxy must get exactly the environment its README lists for T22, plus the demo settings of the T43 to T45 contract (D16)."
   }
 }
 
@@ -373,7 +392,7 @@ run "custom_origin_hops_and_dev_origin" {
   assert {
     condition = (
       { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["PUBLIC_BASE_URL"] == "https://phr.example.org/api" &&
-      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["ALLOWED_ORIGINS"] == "https://phr.example.org,http://localhost:5173" &&
+      { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["ALLOWED_ORIGINS"] == "https://phr.example.org,https://example-project.web.app,https://example-project.firebaseapp.com,http://localhost:5173" &&
       { for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value }["TRUSTED_PROXY_HOPS"] == "1"
     )
     error_message = "public_origin, extra_allowed_origins and trusted_proxy_hops must reach the proxy."
@@ -409,7 +428,7 @@ run "openemr_settings_when_given" {
   assert {
     condition = (
       toset([for v in google_cloud_run_v2_service.fhir_proxy.template[0].volumes : "${v.name} ${v.secret[0].secret} ${v.secret[0].items[0].version}"]) ==
-      toset(["reviewer-password pulsebridge-reviewer-password latest", "openemr-client pb-openemr-client-private-key latest"])
+      toset(["session-signing-key pulsebridge-session-signing-key latest", "openemr-client pb-openemr-client-private-key latest"])
     )
     error_message = "With openemr given, its client secret must be a second volume at version latest."
   }
@@ -459,6 +478,12 @@ run "hosting_site_and_rewrite" {
       [for k in sort(keys(jsondecode(file("${path.module}/hosting/security-headers.json")))) : { key = k, value = jsondecode(file("${path.module}/hosting/security-headers.json"))[k] }]
     )
     error_message = "Every response must get the committed security headers."
+  }
+  assert {
+    condition = (
+      [for h in jsondecode(output.firebase_json).hosting.headers : h.source if h.headers == [{ key = "Cache-Control", value = "no-cache" }]] == ["/", "/index.html", "/privacy.html"]
+    )
+    error_message = "The two pages (/, /index.html, and the privacy note /privacy.html) must be revalidated: Cache-Control no-cache, and nothing else."
   }
   assert {
     condition = (

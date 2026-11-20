@@ -56,7 +56,23 @@ authoritative.
   Used here twice, deliberately, before the container images exist (steps 3, 4 and 6).
 - **`-replace`**: destroy and re-create one resource on the next apply (used to patch the VM).
 - **Write-only argument / ephemeral variable**: a value Terraform sends to the API but never
-  saves in the plan or state (the dev reviewer password).
+  saves in the plan or state. Until T44 the dev reviewer password used one; since D16 no secret
+  value passes through Terraform at all (scripts add every version).
+- **`terraform state rm`**: makes Terraform forget a resource without touching it in Google
+  Cloud. Used once, in "Rolling out the public demo", for a protected secret that must leave the
+  configuration.
+- **The public demo (D16)**: anyone can open the dashboard, with no password. A visitor selects
+  "View the live demo"; an invisible **bot check** runs: Google's **reCAPTCHA** script (part of
+  **Google Cloud Fraud Defense**, formerly reCAPTCHA Enterprise) gives the page a one-time token,
+  and fhir-proxy asks Google to **assess** it, getting a score from 0.0 (likely a bot) to 1.0
+  (likely a person). On a pass the proxy sets a signed **session cookie**, `__session`, for 24
+  hours: the only cookie Firebase Hosting passes on to Cloud Run. Each assessment is counted in
+  a small **counter bucket** so the daily cap holds across instances and restarts. Module phr's
+  README, "The public demo (D16)", has the detail.
+- **Rate limit**: how many requests of a kind one session, one client address or everyone
+  together may make in a time window; above it the proxy answers `429` with `Retry-After`. The
+  proxy keeps them in memory, **per instance**, so with its two instances each real limit is up
+  to twice the number ("The public demo's settings" below).
 
 ## Why one composition (`_stack`) and two thin roots
 
@@ -99,7 +115,6 @@ fails if any other file differs or if `env.tf` holds anything else.
 | `environment` | `"dev"` | `"prod"` | The `environment` label on every resource, and the outputs. |
 | `use_synthetic_data` (variable default) | `true` | `false` | dev is the quick start: a stranger can run it without a Pixel Watch or a Google Health OAuth app (the seeder fills the store). prod shows the real data. Either can be overridden in tfvars. |
 | `protect_from_destroy` | `false` | `true` | prod holds real health data and is the public demo: the Healthcare dataset and stores get `deletion_policy = "PREVENT"`, the secrets `deletion_protection`, and the Cloud Run services and job `deletion_protection`, so a stray `terraform destroy` fails; and the edge VM's data disk (the OpenEMR database) gets a daily snapshot kept 7 days. dev is destroyed nightly and keeps no snapshots. |
-| `allow_reviewer_password_from_tfvars` | `true` | `false` | The brief's table: dev has a "default credential from tfvars", prod a credential in Secret Manager, rotated. In dev the reviewer password may come from tfvars through module identity's write-only version; prod refuses it (a validation) and uses `scripts/secrets/set-reviewer-password.sh`. |
 | `backend.tf` prefix | `dev` | `prod` | One state per environment. Fixed in the committed file (not author-specific), so a `backend.hcl` copied from the other environment cannot point one root at the other's state. |
 
 Deliberately **not** different:
@@ -134,20 +149,51 @@ rewrite to; a `check` warns outside the free tier, module phr refuses a region H
 reach), `enable_iap_ssh` (for the first-boot checklist), `enable_cloud_nat` (billed hourly;
 fallback only), `trusted_proxy_hops` (default 2, measured behind Firebase Hosting; step 12),
 `openemr_scopes` (step 6), `public_origin` (a custom domain; T30, deferred), `name_prefix` /
-`identity_name_prefix`, the two ingress fallbacks.
+`identity_name_prefix`, the two ingress fallbacks, and the public demo's settings below.
 
 Rules the root enforces before anything is created: a `SYN-` patient ID is **required** with
 synthetic data and **refused** without it; a real name is refused with synthetic data (the cuff
 simulator always sends the seeder's synthetic name, Synthetic / Demo, so the seeder accepts a
 Patient the cuff path created first) and required without it; an alert destination is
-required; the zone must be in the region; images must be pinned by digest; prod refuses a
-reviewer password from tfvars.
+required; the zone must be in the region; images must be pinned by digest. (Until T44 prod
+also refused a reviewer password from tfvars; D16 removed the password and that switch,
+`allow_reviewer_password_from_tfvars`: both environments now set the session signing key with
+the same script.)
 
 **One patient for everything.** `patient_id` and `patient_assigning_authority` are one variable
 each. `_stack` passes the same values to module ingestion (v2-to-fhir, health-sync or the
 seeder) and module phr (cuff-sim, fhir-proxy), and the `setup_env` output hands `PATIENT_ID` to
 the connect script. `checks.tf` compares what each module received; `_stack/tests/plan_scan.py`
 compares the planned `PATIENT_ID` and `PATIENT_ASSIGNING_AUTHORITY` of every service.
+
+### The public demo's settings
+
+All optional: leave them unset (`null`) and module phr's defaults apply, which are
+fhir-proxy's own (`services/fhir-proxy/fhir_proxy/config.py`). `terraform output demo_settings`
+shows what the proxy gets.
+
+| Variable | Default | Range | What it does |
+| --- | --- | --- | --- |
+| `recaptcha_min_score` | 0.5 | above 0, at most 1 | the lowest bot-check score that gets a session; tune it from the scores real visitors get (checklist P19) |
+| `bot_checks_per_day` | 300 | 1 to 3000 | assessments per UTC day, across all instances (the counter bucket); past it the page says "The demo is busy, try again tomorrow." |
+| `session_ttl_seconds` | 86400 | 300 to 86400 | how long a session lasts (24 hours) |
+| `sessions_per_address_per_hour` | 5 | 1 to 100 | bot-check attempts per client address an hour, checked before any assessment is made |
+| `requests_per_address_per_minute` | 300 | 60 to 6000 | requests without a valid session per client address a minute |
+| `reads_per_session_per_minute` | 120 | 60 to 1200 | a session's requests other than cuff sends and shares (every read, logout) a minute; the dashboard's busiest measured minute is 37 |
+| `cuff_sends_per_session_per_10_minutes` | 3 | 1 to 30 | cuff readings per session in any 10 minutes |
+| `shares_per_session_per_10_minutes` | 2 | 1 to 20 | shares to OpenEMR per session in any 10 minutes |
+| `shares_per_instance_per_hour` | 30 | 1 to 600 | shares by everyone together in any hour |
+| `history_days` | 7 | 1 to 30 | how many days back the demo shows; older data is hidden, never deleted |
+
+**Every rate limit is per fhir-proxy instance.** The proxy keeps its counts in memory (no shared
+store, so nothing is billed while the demo is idle), and Cloud Run runs up to two instances, so
+each real limit is up to twice its number: 10 bot-check attempts an hour per address, 6 cuff
+sends and 4 shares in 10 minutes per session, 60 shares an hour for everyone. Only
+`bot_checks_per_day` is exact: it is counted in the bucket both instances share.
+
+`history_days` and `session_ttl_seconds` are stated on the page's privacy note
+(`web/privacy.html`: "the last 7 days", "24 hours"); if you change them, change the note too
+(`infra/modules/phr/tests/check_proxy_settings.py` fails until you do).
 
 ## What a plan shows
 
@@ -260,8 +306,8 @@ terraform apply -target=module.stack.module.identity
 ```
 
 Separate from step 3 because the secrets need the Secret Manager API that step 3 enabled
-(module identity does not depend on project-base). In dev, a reviewer password from tfvars is
-written here too (write-only).
+(module identity does not depend on project-base). It also grants fhir-proxy
+`roles/recaptchaenterprise.agent` on the project (D16: creating bot-check assessments).
 
 This step also creates the **Pub/Sub service agent** (`google_project_service_identity.pubsub`,
 T36) before granting it Token Creator on the push account. On 16 November, before that resource
@@ -290,9 +336,10 @@ the apply ends without error (it created `google_service_account_iam_member.pubs
 
 ### 5. Secret versions (deployer; scripts/secrets)
 
-Add a version to the three edge-VM passwords before the VM's first boot (step 6), and in prod to
-the reviewer password (in dev it may come from tfvars instead, never both; or from the script
-in dev too, before step 8, as the first dev deploy did). The scripts read the
+Add a version to the three edge-VM passwords before the VM's first boot (step 6), and to the
+**session signing key** before step 8 (D16, both environments): Cloud Run refuses to create
+fhir-proxy while a secret it mounts has no version (checklist A8 and A19), so step 8 stops at
+fhir-proxy without it. The scripts read the
 value from a hidden prompt (typed twice) or from standard input, or generate it; store it without
 a trailing newline; and refuse the secrets that something else writes
 (`<prefix>-openemr-client-private-key`: the VM; the three Google Health secrets: the connect
@@ -307,20 +354,21 @@ export SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/<env> output -raw secre
 scripts/secrets/set-secret.sh --generate db-root-password
 scripts/secrets/set-secret.sh --generate openemr-db-password
 scripts/secrets/set-secret.sh openemr-admin-password      # typed twice; or --generate (not shown)
-scripts/secrets/set-reviewer-password.sh --generate        # prod; shows it once, after storing
+scripts/secrets/set-session-signing-key.sh                 # 32 random bytes; never shown
 ```
 
 Typed edge-VM passwords: 16 to 128 letters, digits and `!#$%&()*+,-./:;<>?@[]^_{|}~`, not
 starting with `-` (OpenEMR's first-time setup splits on spaces, cuts at `=`, and writes the
-database password unescaped into `sqlconf.php`). The reviewer password: 16 to 128 printable ASCII
-characters. A generated admin password is never shown; it is the only OpenEMR admin login, and
+database password unescaped into `sqlconf.php`). The session signing key is not typed: the script
+pipes 32 bytes from `/dev/urandom` straight into `gcloud`, so the value is in no variable, file or
+terminal. A generated admin password is never shown; it is the only OpenEMR admin login, and
 root on the VM can read it from `/mnt/disks/edge/secrets/openemr-admin-password`
 (scripts/secrets/README.md, "Reading a generated admin password back").
 
 Worked when: `gcloud secrets versions list <secret> --project <project-id>` shows version 1
 `enabled` for each, and
 `gcloud secrets versions access latest --secret <secret> --project <project-id> | wc -c`
-prints the value's length (no extra byte for a newline).
+prints the value's length (no extra byte for a newline; 32 for the session signing key).
 
 ### 6. Targeted apply of the edge VM, and its first boot (deployer, with a shell on the VM)
 
@@ -524,7 +572,8 @@ site only with this deploy. Once CI has taken over an environment ("CI/CD"), eve
 followed by a page deploy job that does this itself, with the `firebase-tools` locked in
 `ci/deploy-tools/package-lock.json` (`ci/tf_ci.py deploy-page`).
 
-Worked when: `dashboard_url` shows the login page. (16 November: the locked firebase-tools
+Worked when: `dashboard_url` shows the landing view with "View the live demo" (before T45, the
+login page). (16 November: the locked firebase-tools
 15.34.2 from `ci/deploy-tools` deployed the page, but with an Owner's service account key, not
 the deployer. 18 November, P12: `roles/firebasehosting.admin` alone is **not** enough; the CI
 page deployer also needs `serviceusage.services.get` on the project and `run.services.get` on
@@ -533,7 +582,8 @@ its other roles.)
 
 ### 12. The front door's first-deploy checks (deployer)
 
-Items P1 to P10 of the master checklist, **hop measurement first**. `trusted_proxy_hops`
+Items P1 to P10 of the master checklist, **hop measurement first**, then the public demo's
+P17 to P26 (a new deployment, or the first after "Rolling out the public demo"). `trusted_proxy_hops`
 defaults to 2, the value measured behind Firebase Hosting on dev (P1); the measurement confirms
 it on your deployment (through Hosting: 2 entries and your own address as `client_address`,
 never the made-up `192.0.2.1`). Set another value and re-apply only if it shows a different
@@ -552,13 +602,24 @@ second run (`stored_read: ok`, `windows_unchanged > 0`), `/status` timing, the a
 a simulated cuff reading over MLLP to the FHIR store (Observation and Provenance checked
 against the message sent), shared to OpenEMR and read back, shared again (`already-shared`),
 plus malformed readings that must create nothing and the `/status` strip. Run it with your own
-`gcloud` login (it reads `<prefix>-reviewer-password` from Secret Manager in memory):
+`gcloud` login: it signs its own demo sessions with `<prefix>-session-signing-key`, read from
+Secret Manager into memory (a command line cannot pass the browser's bot check, and the proxy
+has no bypass), so your account needs `roles/secretmanager.secretAccessor` on that secret:
 
 ```bash
 PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/<env> output -raw dashboard_url)/api" \
 SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/<env> output -raw secret_name_prefix)" \
+PULSEBRIDGE_TOKEN_ISSUER="$(terraform -chdir=infra/envs/<env> output -raw token_issuer)" \
 make smoke
 ```
+
+`PULSEBRIDGE_TOKEN_ISSUER` is fhir-proxy's exact `TOKEN_ISSUER` (`pulsebridge-fhir-proxy:<project_id>:<name_prefix>`;
+output `token_issuer`, not a secret): the smoke test signs its sessions with it (T43). It is
+built from `name_prefix`, not from `secret_name_prefix` (that is `identity_name_prefix`).
+It uses two sessions, one for the reading and the share, one for the negatives, because the
+proxy allows each session 3 cuff sends and 2 shares in any 10 minutes (T46; T48 found that one
+session would be refused at N4). Its junk-token check (S1b) costs one real assessment of the
+day's `bot_checks_per_day`.
 
 On a real-data stack it refuses to write a test reading into the patient's record unless
 `SMOKE_ARGS=--allow-real-data-writes` is given, and it runs I4's and I6's health-sync checks
@@ -665,19 +726,102 @@ monthly, and whenever the COS release notes announce a security fix. Afterwards 
 it asked for, not the image the VM booted from. Check with `terraform output edge_vm`
 (`boot_image`) and the startup log (`edge VM startup: done, all steps ok`).
 
-### Rotating the reviewer password
+### Rolling out the public demo (D16) on an existing stack
 
-prod (and dev if not set from tfvars): `scripts/secrets/set-reviewer-password.sh` adds a new
-version; fhir-proxy reads `latest` within about 30 seconds and every session ends at once (its
-token key derives from the password). dev from tfvars: raise `reviewer_password_wo_version` and
-apply with the new `TF_VAR_reviewer_password` (read with `IFS= read -rs`, unset after the apply
-whatever its result; dev's `terraform.tfvars.example`); there may be a moment with no enabled version
-(login answers 503). Never mix the two ways in one environment.
+A stack built before T44 has the reviewer password; this changes it to the bot check and the
+session cookie. A new stack needs none of this: the runbook's steps already include the
+signing key (step 5) and the new permissions (step 1). Order matters because of three rules:
 
-With `reviewer_password_wo_version > 0`, **every later plan and apply** of that root needs
-`TF_VAR_reviewer_password` set again (module identity refuses a version without a password), so
-an environment that CI manages ("CI/CD") must have it at `0`: set the password with the script
-first, then lower the version to 0 (which removes the tfvars-made version).
+- **A Cloud Run service whose mounted secret has no version cannot be deployed** (checklist A8,
+  A19). So the signing-key secret must exist and hold a version before fhir-proxy is changed to
+  mount it: create the secret (targeted apply), add the version (script), then deploy the proxy.
+- **A protected secret cannot be destroyed by Terraform.** In prod the old
+  `<prefix>-reviewer-password` has `deletion_protection = true` (`protect_from_destroy`), so an
+  apply that drops it from the configuration fails. Terraform is told to forget it first, and the
+  secret is deleted by hand once the demo works.
+- **The deployer and the planner need new permissions** (reCAPTCHA keys, the counter bucket), and
+  only the owner can grant them, by re-applying bootstrap. CI cannot do it.
+
+A short break of the live demo between steps 4 and 6 is expected (the running revision still
+mounts the old secret, whose read grant step 4 removes) and accepted for prod (D16 rollout).
+
+1. **Images.** Build and push the T43 fhir-proxy image (and the T45 page is built by the page
+   deploy); put the new `fhir_proxy_image` digest in the tfvars. The old proxy image cannot run
+   with the new environment (it requires `REVIEWER_PASSWORD_FILE`).
+2. **Bootstrap, by hand, as the owner** (infra/bootstrap/README.md, "Re-applying for the public
+   demo"): `terraform -chdir=infra/bootstrap apply`. It adds the deployer's two custom roles
+   (reCAPTCHA keys, buckets), and the planner's read permissions. Do this **before**
+   CI plans or applies the stack, or the planner's refresh and the deployer's create are refused.
+3. **tfvars.** Remove `reviewer_password` and `reviewer_password_wo_version` from the local
+   `terraform.tfvars` and from the CI tfvars object ("Where the tfvars come from"): the variables
+   no longer exist.
+4. **Forget the old secret, then the targeted apply** (deployer, from `infra/envs/<env>`):
+
+   ```bash
+   terraform state rm 'module.stack.module.identity.google_secret_manager_secret.this["reviewer-password"]'
+   terraform apply -target=module.stack.module.project_base -target=module.stack.module.identity
+   ```
+
+   The apply enables `recaptchaenterprise.googleapis.com`, creates `<prefix>-session-signing-key`
+   (empty), grants fhir-proxy `roles/recaptchaenterprise.agent`, and removes fhir-proxy's read
+   grant on the old secret (the only destroy in the plan; if it plans to destroy a secret, stop).
+5. **The signing key's version** (deployer, from the repository root):
+   `scripts/secrets/set-session-signing-key.sh --project <project-id> --prefix <identity_name_prefix>`.
+   Check: `gcloud secrets versions list <prefix>-session-signing-key` shows version 1 `enabled`.
+6. **The rest of the stack** (CI, or `terraform apply` by hand): creates the reCAPTCHA key, the
+   counter bucket and its grant (before the proxy, which depends on the grant), then deploys
+   fhir-proxy with the new image, the signing-key volume and the `RECAPTCHA_*` settings. Then the
+   page deploy (step 11) publishes the T45 page with the new Content-Security-Policy.
+7. **Check** (README step 12 and module phr's "Verify on the first real deploy", items 6 to 8):
+   "View the live demo" works on `<site>.web.app`; today's counter object appears in
+   `gcloud storage ls gs://<project-id>-<name_prefix>-demo-counters`; no CSP error in the console;
+   then `make smoke` (step 14) and the checklist's rows P17 to P26.
+8. **Delete the old secret by hand**, once step 7 passes:
+   `gcloud secrets delete <prefix>-reviewer-password --project <project-id>`. Until then it is
+   only unused (nothing can read it: step 4 removed the one grant).
+
+### The public demo: what is public, and its known limits
+
+Since D16 anyone with the address can open the demo, with no password and nothing to sign up
+for. Decide with that in mind:
+
+- **Your real data is public within the window.** On a real-data stack (prod) every visitor sees
+  your heart rate for the last `history_days` (7) days, and the blood-pressure readings and
+  shares of that window. Older data stays in the stores and in OpenEMR; the proxy only hides it
+  (a read of something older answers like a missing resource). This was the owner's decision
+  (D16). A synthetic stack (dev) shows invented data only.
+- **Visitors can write.** A session may send cuff readings and share readings to OpenEMR, within
+  the limits above; what they send stays in the record (nothing the API offers removes it) and
+  is shown to the next visitors while it is in the window.
+- **What visitors are told.** The landing view says the page uses reCAPTCHA and links to the
+  privacy note (`web/privacy.html`, also linked from the dashboard's header): the cookies, what
+  the bot check sends to Google (since 2 April 2026 you, the site owner, are the data controller
+  for it and Google the processor), what the proxy and Cloud Run log (the client address only in
+  sampled refusals; Cloud Run's request log of every API call), and that logs are kept 30 days
+  (Cloud Logging's default for the `_Default` bucket, which nothing here changes). It names
+  nobody: no contact line, since that would need a configured address the repository does not
+  have.
+- **The direct `run.app` URL.** fhir-proxy must accept requests from Firebase Hosting, so its
+  `*.run.app` URL is public too. A caller of that URL can write its own `X-Forwarded-For` and so
+  choose which address it is counted as: it can use up another address's 5 bot-check attempts an
+  hour and its budget for requests without a session (a visitor who already has a session is
+  not affected, because sessions are counted by their own ID). What still bounds it is the daily
+  bot-check cap. The fix belongs at the edge (trust the forwarded address only from Hosting, or
+  make the URL reachable from Hosting only) and is a recorded follow-up of T46 (module phr's
+  README, "The client address and the direct run.app URL").
+- **When the cap is reached** the page says "The demo is busy, try again tomorrow." until UTC
+  midnight. Assessments that fail count too, so a scripted flood can use the day up; it costs
+  nothing beyond the cap.
+
+### Rotating the session signing key
+
+`scripts/secrets/set-session-signing-key.sh --rotate` adds a new random 32-byte version.
+fhir-proxy mounts the secret at `latest`, so the new key applies without a redeploy once the
+proxy reads the file again, and **every open demo session ends** (tokens signed with the old key
+no longer verify; visitors click "View the live demo" again). Without `--rotate` the script
+refuses to replace an existing key, so running it twice by mistake ends nobody's session. Older
+versions stay enabled; disable them with `gcloud secrets versions disable` when you like
+(scripts/secrets/README.md).
 
 ### Reconnecting Google Health (real data)
 
@@ -697,7 +841,7 @@ What remains afterwards:
 | --- | --- | --- |
 | The default Firebase Hosting site **and its last deployed page**, public at `https://<project>.web.app`, every `/api` call failing | The provider skips deleting a project's default site | `firebase hosting:disable --project <project>` if no page should stay live |
 | Firebase on the project | It cannot be removed | Nothing; it costs nothing |
-| The serverless subnet (and the VPC) on the first try | Google: after the Cloud Run services that used Direct VPC egress are deleted, "wait 1-2 hours" before the subnet can be deleted | Run `terraform destroy` again after one to two hours |
+| Possibly the serverless subnet (and the VPC) on the first try | Google: after the Cloud Run services that used Direct VPC egress are deleted, "wait 1-2 hours" before the subnet can be deleted | Run `terraform destroy` again after one to two hours |
 | The enabled APIs | `disable_on_destroy = false` on purpose | Nothing; an enabled API costs nothing |
 | The state bucket, deployer and WIF pool | They are bootstrap's | infra/bootstrap/README.md, "Teardown" |
 | `gs://<project>_cloudbuild` | Created by `gcloud builds submit`, not by Terraform | `gcloud storage rm -r gs://<project>_cloudbuild` |
@@ -707,8 +851,8 @@ What remains afterwards:
 The secrets go with their versions, the Healthcare dataset with every stored resource and
 message (`deletion_policy = "DELETE"` in dev), the VM with both disks and its address (in dev
 there is no snapshot: a destroyed data disk is gone), the Artifact Registry repositories with their
-images. Not verified: that a repository holding images deletes without error (D21 in the
-checklist).
+images. A repository holding images deletes without error (checklist T2, verified on dev on
+19 November).
 
 ### Cost
 
@@ -725,12 +869,17 @@ here either).
 | Pub/Sub, Secret Manager, log-based metrics, IAM, VPC, firewall | about $0 | about $0 |
 | Alert policies | $0 until 1 September 2027; then $0.35 per metric reference a month: about $1.05 (real data, 3 policies) or $0.70 (synthetic, 2) | the same |
 | Firebase Hosting | $0 under 10 GB stored and 10 GB a month transferred | the same |
+| reCAPTCHA assessments (Fraud Defense) | $0 | 10,000 a month free per organisation, then an $8 flat fee for 10,001 to 100,000 in a month ([Billing information](https://docs.cloud.google.com/recaptcha/docs/billing-information), read 20 November 2026). The default cap of 300 a day is at most 9,300 a month: $0, unless the same organisation's other keys, or a second deployment's 300 a day, push the month past 10,000 |
+| The demo counter bucket | $0: at most 7 tiny objects (one per day, deleted after 7 days) | one read and one write per bot check: fractions of a cent |
 | Data disk snapshots (prod only, 7 daily, incremental) | snapshot storage of a fraction of a GB: cents a month, not confirmed | the same |
 | Cloud NAT (off) | **billed hourly** if turned on: about $4.70 a month plus $0.045 per GiB | |
 
 So **near $0 a month idle** for one deployment on a fresh billing account, plus cents of
 storage; about $6 more for a second deployment's VM; about $1 more for alerts from September
-2027. The only always-on resource is the VM.
+2027; $8 in a month when the organisation's reCAPTCHA assessments pass 10,000 (two deployments
+at the full default cap every day would). The only always-on resource is the VM. A project with
+a billing account is on Fraud Defense's Premium tier, where assessments past the free 10,000
+keep working and are billed; without billing they would be refused (Essentials).
 
 ## CI/CD (T26)
 
@@ -847,8 +996,8 @@ Rules for a CI-managed environment's tfvars: the sensitive variables (`patient_i
 `ingest_enabled` as you want it to stay; `deployer_service_account_email` unset;
 `page_deployer_service_account_email` set to bootstrap's output of that name (without it the
 page deploy job is refused when it finalizes the version);
-`reviewer_password_wo_version = 0` or unset, with the reviewer password set by
-`scripts/secrets/set-reviewer-password.sh` ("Rotating the reviewer password"). **Whoever can write
+no `reviewer_password` or `reviewer_password_wo_version` (removed by T44: delete them from the
+object, "Rolling out the public demo"). **Whoever can write
 that object controls what CI applies**: keep write access to the state bucket to the owner and
 the deployer.
 
@@ -1130,11 +1279,13 @@ reboot, patching, seeder-alert and Scheduler items; what it left is listed here)
   and the first plan and apply with T41's grants in code (P12).
 - **The real-data path**: connect script and health-sync (I1, I4, I14 to I20, I23, A8), and prod
   (A20).
+- **The public demo (D16)**, built offline by T43 to T48 and never deployed: P17 to P26, at its
+  rollout to prod ("Rolling out the public demo").
 - The deployer creating the Pub/Sub service agent itself (A22), prices (A16), and every item
   marked `partly`. Source abbreviations: **B** bootstrap, **PB** project-base, **ID** identity, **HC**
 healthcare, **IN** ingestion, **EV** edge-vm, **OE** openemr, **PHR** phr, **HS** health-sync,
 **SEED** services/seed, **SVC** services/README.md, **CG** connect-google-health, **CS**
-cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the smoke test
+cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **web** web/README.md, **T25** this task, **T29** the smoke test
 (`make smoke`, tests/e2e/README.md).
 
 ### Before and during the applies (steps 1 to 5, 7 and 8)
@@ -1152,7 +1303,7 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | A9 | A Cloud Run revision that never becomes Ready makes `terraform apply` fail and keeps the previous revision serving | IN, PHR | |
 | A10 | Creating the default Hosting site (`site_id = project_id`) through the API works on a project that has none yet | PHR | 2026-11-16 dev: ok. Step 8 created the default site; the page deployed to `<project>.web.app` |
 | A11 | The deployer can create a push subscription with an OIDC token (`iam.serviceAccounts.actAs` on pubsub-push) | HC | 2026-11-16 dev: ok. Step 10, as the deployer, turned the ingest subscription into a push subscription |
-| A12 | dev: the reviewer password from tfvars creates a version; raising `reviewer_password_wo_version` replaces it (and whether there is a moment with no enabled version) | ID | |
+| A12 | ~~dev: the reviewer password from tfvars creates a version~~ Removed by T44 (D16): no secret value comes from tfvars any more | ID | n/a |
 | A13 | Bootstrap on a brand-new project: the first apply may stop on "API has not been used ... or it is disabled"; a re-run continues; `add_firebase` adds Firebase with the owner's ADC (`billing_project` set); `firebase_added = true` | B | 2026-11-16 dev: partly. The first apply stopped on "API has not been used", but for the **caller's** project (a service account key from another project); `USER_PROJECT_OVERRIDE`/`GOOGLE_BILLING_PROJECT` fixed it; then 24 resources and `firebase_added = true`. An existing project was adopted; not run with a person's own login 2026-11-18 prod (adopting an existing project, the caller's own): the first apply stopped after 40 of 42 resources on the planner's custom role, "Identity and Access Management (IAM) API has not been used in project … or it is disabled" (it was being enabled in the same apply); a second apply 30 s later added the last 2. Firebase was added with the owner's credentials. |
 | A14 | Workload Identity Federation: a workflow of the configured repository gets deployer tokens; one from another repository is refused; `google.subject` stays under 127 bytes for the branch names used | B | 2026-11-18 dev: partly. Workflows of the configured repository got tokens through the pool: the deployer (apply on main), the planner (pull request) and the page deployer (`dev-page`). A workflow from another repository not tried. `google.subject` length not inspected; the exchange succeeded for the refs used |
 | A15 | IAP TCP forwarding works once `enable_iap_ssh = true` enabled `iap.googleapis.com` (understood to be required) | PB | 2026-11-16 dev: ok. With `enable_iap_ssh = true` (the firewall rule and `iap.googleapis.com`), an SSH tunnel through IAP reached OpenEMR on the VM (the README screenshot was taken through it); set back to `false` the same day |
@@ -1268,7 +1419,7 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | P3 | The rewrite path: `/api/fhir/metadata` with the token gives the CapabilityStatement; `/api/unknown` gives the proxy's OperationOutcome; search links start with `/api/` | PHR | 2026-11-17 dev: ok. `/api/fhir/metadata` 200 with a `CapabilityStatement` (4.0.1); `/api/unknown` 404 with an `OperationOutcome`; the search's `self` and `next` links start with `/api/` |
 | P4 | cuff-sim's and health-sync's `run.app` URLs refuse outside callers even with a valid token; a cuff send through the page works; the status strip shows health-sync's state | PHR, IN | 2026-11-16 dev: partly. A cuff send over HTTPS through fhir-proxy worked; outside calls to the `run.app` URLs not tried; no health-sync (synthetic) |
 | P5 | MLLP through the VPC: a cuff send over MLLP returns `AA` | PHR, EV | 2026-11-16 dev: ok. A cuff send over MLLP returned `AA` |
-| P6 | The secret mount: login 503 before a version; works within about 30 s after `scripts/secrets/set-reviewer-password.sh`; an old token is refused after a second new version | PHR | 2026-11-18 dev: ok for rotation. The owner set a new password with `scripts/secrets/set-reviewer-password.sh` (version 3, 11:16:18 UTC); 37 s later the new password logged in (200) and the previous one was refused (401), with no restart; the owner's open dashboard session was signed out. Not checked: login 503 before any version exists. Note: the script leaves earlier versions enabled (they no longer log in, but stay readable to anyone with access to the secret) |
+| P6 | The secret mount (D9's reviewer password, which T44 replaced by the session signing key; module phr's "Verify on the first real deploy", item 6, is the new check): login 503 before a version; works within about 30 s after `scripts/secrets/set-reviewer-password.sh`; an old token is refused after a second new version | PHR | 2026-11-18 dev: ok for rotation. The owner set a new password with `scripts/secrets/set-reviewer-password.sh` (version 3, 11:16:18 UTC); 37 s later the new password logged in (200) and the previous one was refused (401), with no restart; the owner's open dashboard session was signed out. Not checked: login 503 before any version exists. Note: the script leaves earlier versions enabled (they no longer log in, but stay readable to anyone with access to the secret). **T44 (D16) replaced the reviewer password**: the same mount now carries the session signing key; module phr's "Verify on the first real deploy", item 6, is the new check |
 | P7 | CSP in the browser: zero violations through login, every tab, the chart, a cuff send; `/` carries the policy and `frame-ancestors 'none'`; `/.vite/manifest.json` is 404 | PHR | 2026-11-16 dev: partly. Login, status strip and chart in Chromium with no console errors; the other tabs, a cuff send from the page, the headers and the manifest 404 not checked |
 | P8 | The 60 s limit: a forced slow cuff send gets the proxy's own 504 within about 55 s, and its AuditEvent appears | PHR | |
 | P9 | Direct VPC egress cold starts: time the first `/api/status` and the first MLLP send after 20 idle minutes | PHR | 2026-11-18 dev: ok. After 20 minutes with no request reaching fhir-proxy (checked in its request log), from 11:38 UTC: first request (login) 3.78 s, first `/api/status` 0.94 s, first cuff send over MLLP 12.16 s with ACK `AA` (cold proxy, cuff-sim and adapter path), then a warm `/api/status` 0.22 s |
@@ -1279,15 +1430,28 @@ cuff-sim, **V2F** v2-to-fhir, **FP** fhir-proxy, **T25** this task, **T29** the 
 | P14 | Network: Cloud Run Direct VPC egress traffic is admitted by the subnet-range firewall rule (tags and service identity cannot be the source); a /24 is plenty | PB | 2026-11-16 dev: ok. cuff-sim's MLLP sends and fhir-proxy's shares reached the VM from the serverless subnet |
 | P15 | fhir-proxy's Cloud Healthcare searches: `gt`/`lt` on `effectivePeriod`, `_sort=date`, `_page_token` reuse, `_summary=count`, `_sort=-_lastUpdated` with `_elements=id,meta`, identifier OR lists, AuditEvent `type`/`subtype`/`date`/`_sort=-date`, Provenance `recorded` and `_include=Provenance:target`; the indexing delay for non-identifier searches | FP | 2026-11-16 dev: partly. `_summary=count` is **refused** (fhir-proxy now counts with `_total=accurate&_count=0`, fixed before T36); a heart-rate search sorted by date works; the others not checked |
 | P16 | fhir-proxy: HL7v2 `messages.list` with a `create_time` filter and `view=RAW_ONLY`; the identity-token audience; a mounted secret file reflects a new `latest` without a restart; `fhirResourceReader` allows every search above | FP | 2026-11-18 dev: mostly ok. The messages log (`messages.list` with a `create_time` filter, `view=RAW_ONLY` reads) works through `make smoke` and the dashboard; fhir-proxy's identity token to cuff-sim is accepted (every cuff send); the mounted reviewer-password file reflected a new `latest` without a restart (P6); `fhirResourceReader` allowed every search the smoke test and dashboard make. The audience value itself was not inspected |
+| P17 | The `__session` cookie through Hosting's rewrite, both ways: after "View the live demo" the browser holds `__session` with `Path=/api`, `HttpOnly`, `Secure`, `SameSite=Strict` and `Max-Age=86400` (Hosting passed the proxy's `Set-Cookie` back); `/api/status` then answers 200, not 401 (Hosting passed `Cookie` on); "Log out" removes it; a visit to `/privacy.html` and back keeps it; no `/api` answer is cached (`Cache-Control: no-store`) | PHR, FP | |
+| P18 | The assessment call: a click gives 200 and a `session-created` line with a score and `checks_today`; `curl` with a made-up token gives 403 and `bot-check-failed` with `reason=invalid-token`, `invalid_reason=MALFORMED` (the endpoint, the request body, `roles/recaptchaenterprise.agent` and the answer's field names); `tokenProperties.hostname` is the bare host; the key accepts both `<site>.web.app` and `<site>.firebaseapp.com`; the assessment is in `GCP_PROJECT_ID` | FP, PHR | |
+| P19 | The score real browsers get: the `score` of a few `session-created` lines (a desktop browser, a phone, a private window, a browser with a content blocker); none of them refused at `recaptcha_min_score` 0.5, else lower it and record why | FP, PHR | |
+| P20 | `make smoke` (step 14) with `PULSEBRIDGE_TOKEN_ISSUER` from the `token_issuer` output: `SMOKE RESULT: PASSED`, the locally signed sessions accepted (S1), the junk token refused after a real assessment (S1b), the negatives in their second session not rate-limited | T29, FP | |
+| P21 | The CSP with reCAPTCHA in the browser: zero violations while `enterprise.js` and its iframe load, the click, the dashboard and a cuff send; whether reCAPTCHA adds an inline style the policy (`style-src 'self'`) refuses, and if so whether anything visible breaks (the badge is hidden anyway); `/privacy.html` loads with no violation and no request off the site | PHR, web | |
+| P22 | The `Origin` header through Hosting: a `POST` through Hosting arrives with the page's origin and passes; `curl -X POST` with `Origin: https://example.org` gets `403 origin-refused` and an `origin-refused` log line | FP | |
+| P23 | The counter bucket under two instances: the first check of the day creates `bot-checks/<YYYY-MM-DD>` and later checks count up (`metadata.count`, which needs `storage.objects.delete` as well as `create`); under a burst of sessions that wakes the second instance, the count equals the number of `session-created` plus `bot-check-failed` lines (no increment lost to a race); `gcloud storage buckets describe` shows public access prevention `enforced` and the 7-day delete rule | FP, PHR | |
+| P24 | The rate limits on a normal visit: page load, the 7-day chart, three cuff sends, two shares and an idle hour log no `rate-limited` line; with two instances running, each counts on its own (the limits double, as documented) | FP | |
+| P25 | T47's window against Cloud Healthcare: `date=ge<boundary>` on `effectivePeriod` matches a heart-rate window that overlaps the boundary; `date` beside `_total=accurate&_count=0` (the status counts) and beside `_sort=-_lastUpdated`; a `_page_token` sent with a `date` a few seconds later than it was issued with; `recorded=ge` with `_include=Provenance:target`; nothing older than 7 days in the chart, the log or the counts | FP | |
+| P26 | What the privacy note says about logs: Cloud Run's request log for an `/api` call through Hosting (which `remoteIp` it records, the visitor's or Hosting's, and that it holds no cookie); the proxy's lines carry a `client_address` only in `rate-limited`, `session-rate-limited` and `origin-refused`; `gcloud logging buckets describe _Default --location=global` shows 30 days' retention; Hosting is not linked to Cloud Logging | PHR, FP, web | |
+
+No row for a quota override: Fraud Defense has no per-day assessments quota that Terraform could
+lower (T44 read Google's "Quotas and limits" page), so the bucket counter is the only daily cap.
 
 ### Teardown (dev)
 
 | # | Check | Source | Verified on / result |
 | --- | --- | --- | --- |
-| T1 | `terraform destroy` removes everything listed above; the serverless subnet fails at first and goes on a retry 1-2 hours later | PHR, T25 | |
-| T2 | The Artifact Registry repositories delete while holding images | T25 | |
-| T3 | After destroy the default Hosting site still serves the last page; `firebase hosting:disable` stops it | PHR | |
-| T4 | Nothing billable is left: the billing report shows no charges for the project after a day (AC "destroy leaves nothing billable") | T25 | |
+| T1 | `terraform destroy` removes everything listed above; the serverless subnet fails at first and goes on a retry 1-2 hours later | PHR, T25 | 2026-11-19 dev: ok, with one difference. The destroy (CI, see CI11) removed all 95 resources in under 2 minutes, and the state was empty afterwards. The serverless subnet did **not** fail: it was deleted in 13 seconds on the first try, shortly after its Cloud Run services were deleted earlier in the same run, then the edge subnet and the VPC. So the 1-2 hour wait may not apply every time; the retry stays as a safety net. Left afterwards, as listed above: Google's automatic `default` network (not ours), the enabled APIs, the default Hosting site, `gs://<project>_cloudbuild` and bootstrap's state bucket |
+| T2 | The Artifact Registry repositories delete while holding images | T25 | 2026-11-19 dev: ok. Both repositories (the services repository with the images dev ran, and the Docker Hub mirror holding the cached OpenEMR and MariaDB images) deleted without error, in 0 and 1 seconds |
+| T3 | After destroy the default Hosting site still serves the last page; `firebase hosting:disable` stops it | PHR | 2026-11-19 dev: ok. After the destroy the site still answered 200 with the last page, and `/api/status` answered 404. A `SITE_DISABLE` release (what `firebase hosting:disable` creates) took it offline: the site then answered 404 |
+| T4 | Nothing billable is left: the billing report shows no charges for the project after a day (AC "destroy leaves nothing billable") | T25 | 2026-11-20 dev: ok. The billing report for the dev project shows no new charges after 19 November, the day of the destroy (checked by the owner in the console, Billing → Reports, filtered to the project). Left afterwards: bootstrap's state bucket (a few KB), which goes with bootstrap's teardown |
 
 ### CI/CD's first real run
 
@@ -1297,21 +1461,21 @@ In this order (each needs the ones before). "CI" is T26; "B" bootstrap; "PB" pro
 | --- | --- | --- | --- |
 | CI1 | prod's bootstrap plan shows exactly the listed changes: the condition (ref and environments), the `ci_context` mapping, the deployer binding moving to `env-prod-main`, the planner and page deployer with their roles and bindings | CI, B | |
 | CI2 | With the variables unset, every authenticating job shows as skipped and each workflow run is green | CI | 2026-11-18 dev: partly. Before the `DEV_` variables were set, the Terraform apply runs on main (runs 7 and 8) concluded **skipped**; in the 18 November apply run every prod job skipped (no `PROD_` variables) while dev's jobs ran. The plan workflow before the variables was not checked |
-| CI3 | `prod-preflight` passes with the three prod Environments (and `dev-preflight` with `dev-page`) configured as in step 2, and fails with a clear error when `prod` has no reviewer or uses "Protected branches only" (try both once). The GET answer carries `can_admins_bypass` (GitHub's schema does not list it; without it the preflight always fails) and each branch policy's `type` | CI | 2026-11-18 dev: partly. `dev-preflight` passed with `dev-page` configured as in step 2 (main only, admin bypass off, no reviewers), so (inferred: the preflight fails without them) the GET answer carried `can_admins_bypass` and the branch policy's `type` for that Environment. `prod-preflight` and the two failure cases not tried |
+| CI3 | `prod-preflight` passes with the three prod Environments (and `dev-preflight` with `dev-page`) configured as in step 2, and fails with a clear error when `prod` has no reviewer or uses "Protected branches only" (try both once). The GET answer carries `can_admins_bypass` (GitHub's schema does not list it; without it the preflight always fails) and each branch policy's `type` | CI | 2026-11-18 dev: partly. `dev-preflight` passed with `dev-page` configured as in step 2 (main only, admin bypass off, no reviewers), so (inferred: the preflight fails without them) the GET answer carried `can_admins_bypass` and the branch policy's `type` for that Environment. `prod-preflight` and the two failure cases not tried. 2026-11-18 prod: `prod-preflight` passed with the three prod Environments configured as in step 2 (the failure cases still not tried) |
 | CI4 | WIF: the `ci_context` mapping is accepted by Google (CEL `"environment" in assertion`, `in` lists, nested ternaries) and evaluates as documented: a pull request is `pull-request`, a push to main `main`, a `prod-plan` job on main `env-prod-plan-main`, a branch push `other`; the planner cannot be reached from `main`, the deployer not from `pull-request` | CI, B | 2026-11-18 dev: partly. Google accepted the mapping, and three contexts evaluated as documented: the pull request's plan job reached the planner (`pull-request`), the apply on merge the deployer (`main`), the page job in `dev-page` the page deployer (`env-dev-page-main`). A branch push (`other`), `env-prod-plan-main`, and the refusals (planner from `main`, deployer from `pull-request`) not tested |
 | CI5 | `fetch-tfvars`: the 5-minute access token reads `ci/<env>.tfvars`; the answer carries `x-goog-generation`; `&generation=` returns that version; the masked values do not appear in the log | CI | 2026-11-18 dev: partly. The 5-minute token read `ci/dev.tfvars` in the plan job and the apply job; the access token minted from the deployer's credentials showed masked as `***`, and the logs showed no access token, patient identifier or personal email (they do show the project ID, project number and service account emails). `x-goog-generation` and `&generation=` not checked: the generation pin is used only by `prod-apply` |
 | CI6 | The Firebase CLI deploys with the page deployer's external-account credentials, from `ci/deploy-tools` with `--config <checkout>/web/firebase.json` (an absolute path; `public: dist` must resolve next to firebase.json), and `roles/firebasehosting.admin` alone is enough with the Cloud Run rewrite (also P12). `npm ci --ignore-scripts` skips the install scripts of `protobufjs` and `re2` (optional), the two packages of the locked tree that have one: the CLI must still work without them | CI, PHR | 2026-11-18 dev: **ok after the two grants of P12**. The Firebase CLI from `ci/deploy-tools` (npm installed the deploy tools) deployed with the page deployer's external-account credentials and the absolute `--config` path: the second attempt already uploaded the 5 files, the third passed, and the site served the new page (last-modified at the deploy time). `roles/firebasehosting.admin` alone was **not** enough (P12). Whether the CLI needs the skipped install scripts of `protobufjs` and `re2` was not checked separately: only that the deploy worked with `npm ci --ignore-scripts` as `tf_ci.py` runs it |
 | CI7 | `terraform init` with `-backend-config=bucket=...` and the external-account credentials; the deployer's plan takes and releases the state lock; the planner's `-lock=false` plan works | CI | 2026-11-18 dev: partly. `tf_ci.py init` with the backend config and the external-account credentials worked for the planner and the deployer; the planner's `-lock=false` plan completed ("No changes"); the deployer's apply completed in 16 s with no changes. Whether the apply took and released the state lock was not inspected |
 | CI8 | The plan comment appears on the pull request and is updated, not duplicated, on the next push (`gh pr comment --edit-last --create-if-none`) | CI | 2026-11-18 dev: partly. The "Post the plan on the pull request" job posted one comment ("### Terraform plan: dev ... 0 resource change(s). Planned by the read-only planner ...", with "No changes." in a details block). Only one push followed the fix, so update-not-duplicate was not observed |
-| CI9 | The prod plan's job summary is readable before approving; approving runs the apply; the digest matches when nothing changed (if refreshed attributes make it differ every time, record which); rejecting applies nothing; a second merge during the wait makes the first apply refuse (not tip) | CI | |
+| CI9 | The prod plan's job summary is readable before approving; approving runs the apply; the digest matches when nothing changed (if refreshed attributes make it differ every time, record which); rejecting applies nothing; a second merge during the wait makes the first apply refuse (not tip) | CI | 2026-11-18 prod: partly. The `Plan prod` job summary was readable before approving; approving ran `prod-apply`, which re-planned and found the same digest (`No changes`, the digest matched, so refreshed attributes do not make it differ). Rejecting and a second merge during the wait not tried |
 | CI10 | An apply longer than an hour (or the destroy) keeps working: the credential file fetches fresh OIDC tokens | CI | |
-| CI11 | The nightly destroy: the 03:17 run leaves at most the serverless subnet and the VPC; the 06:17 run removes them; a partly built dev is left alone; afterwards T1 to T4 | CI, T25 | |
+| CI11 | The nightly destroy: the 03:17 run leaves at most the serverless subnet and the VPC; the 06:17 run removes them; a partly built dev is left alone; afterwards T1 to T4 | CI, T25 | 2026-11-19 dev: partly. GitHub started the scheduled runs hours late (the 03:17 UTC run started at about 11:40 UTC on 16 to 18 November, the 06:17 run at about 15:50; a schedule is not a promise), so the destroy was started by hand (`workflow_dispatch` on main, the first run's rules). It passed: everything was destroyed, nothing was left, so the retry had nothing to do. The retry run's `--final` check and the partly-built guard were not exercised. T1 to T3 ok; T4 open |
 | CI12 | The redaction check: the posted plan shows `(sensitive value)` for the patient and the alert address, and no tfvars value | CI | 2026-11-18 dev: partly. The comment says sensitive values show as `(sensitive value)`, but the plan had no changes, so no sensitive value appeared to check; no tfvars value was seen in it |
 | CI13 | Trigger: the deployer (with `allow_build_trigger`) can create it on a 2nd-gen repository (if refused on `cloudbuild.repositories.get`, add `roles/cloudbuild.connectionViewer`); a tag push starts a build that waits for approval, then runs as the build account; then C1 to C6 | CI, PB, SVC | |
 | CI14 | The cleanup policy is accepted with `older_than` in seconds and `keep_count`; the newest ten versions are never deleted; whether Cloud Run still starts instances of a revision whose image the policy deleted | CI, PB | |
 | CI15 | The auth action's `access_token_lifetime: 300s` is accepted, and `token_format: access_token` and the credential file work together in one step | CI | 2026-11-18 dev: ok. `access_token_lifetime: 300s` with `token_format: access_token` was accepted in the two jobs that use it (Plan dev, Apply dev): the same step's token fetched the tfvars and its credential file ran `terraform`. The page job's auth step (no access token) also passed |
 | CI16 | The planner's custom role suffices for a full `terraform plan` of dev and of prod (if refused, the error names the permission: add it to `planner_extra_permissions` if it is a get or getIamPolicy that reads no data) | CI, B | 2026-11-18 dev: **no at first, then ok**. The first CI plan was refused on `serviceusage.services.list` for every `google_project_service` (the provider refreshes them by listing the enabled services). That is a `.list`, which `planner_extra_permissions` does not accept, so it was added to the built-in list. With it, a full plan of dev as the planner completes: "No changes". It was the only permission missing for dev (synthetic data); prod and a real-data stack are not yet checked |
-| CI17 | Artifacts: `web-dist`, `page-config-<env>` and `plan-<env>` upload and download within the run; `prod-page` starts without a further approval after `prod-apply`, in its own Environment, and its token reaches only the page deployer | CI | 2026-11-18 dev: partly. `web-dist` and `page-config-dev` uploaded and downloaded within the apply run; `plan-dev` within the pull request's run (the comment job downloads it and posted the comment). `plan-prod`, `page-config-prod` and `prod-page` not exercised (no `PROD_` variables) |
+| CI17 | Artifacts: `web-dist`, `page-config-<env>` and `plan-<env>` upload and download within the run; `prod-page` starts without a further approval after `prod-apply`, in its own Environment, and its token reaches only the page deployer | CI | 2026-11-18 dev: partly. `web-dist` and `page-config-dev` uploaded and downloaded within the apply run; `plan-dev` within the pull request's run (the comment job downloads it and posted the comment). `plan-prod`, `page-config-prod` and `prod-page` not exercised (no `PROD_` variables). 2026-11-18 prod: ok. `plan-prod` and `page-config-prod` uploaded and downloaded within the apply run; `prod-page` started without a further approval after `prod-apply`, in its own Environment, and deployed the page on the first attempt (the site's last-modified time matched the run) |
 
 ## Findings for the modules
 
@@ -1396,8 +1560,8 @@ make tf-scan       # T26: Trivy's Terraform checks over infra/; HIGH and CRITICA
 
 | File | Checks |
 | --- | --- |
-| `_stack/tests/stack.tftest.hcl` | the composition under mocked providers: four scenarios (real or synthetic, ingest off or on) and a prod one, applied in the mock with the service accounts' emails unknown at plan (as on a real first plan, so "Invalid count argument" would show); push and Scheduler follow `ingest_enabled`; the right workloads per mode; project-base gets the edge VM's account; the mirror stays on; edge-vm gets openemr's two hooks and 40 minutes; openemr gets the VM's reserved address; one patient for ingestion and phr; the `setup_env` and `next_steps` outputs; prod refuses a tfvars reviewer password; a full plan needs the images; each targeted step (3, 4, 6) plans without them; T26: an alert channel only with an address, image builds off by default, the build account's two grants and the trigger when enabled, the trigger refused without the account; T38: healthcare's three agent grants' members are known at plan on a new project, and stay known and unchanged when project-base enables an API (IAP SSH) or adds Cloud NAT on top of an applied state |
-| `_stack/tests/plan_scan.py` | the scenario runs' full state (every resource in every module), with the scenario table required to equal the state-producing runs: no `allUsers`/`allAuthenticatedUsers`, no key, no authoritative IAM, one project-level grant; exactly one public service; every Cloud Run service and the job run as their own account and get the literal project, location, dataset and store IDs they should (and not the ones they should not: cuff-sim has no `FHIR_STORE_ID`); Scheduler jobs and push config per `ingest_enabled`; `PATIENT_ID` and the authority equal everywhere; the synthetic name; firewall target, ports and the mirror grant; the VM's account, address, subnet, no external IP, hooks, hook limit, secret files and adapter flags; cuff-sim's MLLP host and port; fhir-proxy's settings and mounts; the alert channel; PREVENT, deletion protection and the 7-day snapshot schedule in prod only; and a human-readable plan shows no patient value and no alert address (T26; the alert channel's display name and its redacted `email_address` label are the positive controls); T38: the plans of the IAP and Cloud NAT runs change only project-base (the IAP one exactly its API and firewall rule) and no plan defers a data source read to apply (the mock provider shows a forced replacement as an update, so "nothing outside project-base" is the check that matters); CI's page deployer: exactly one `roles/run.viewer` grant, on fhir-proxy, in the scenario that sets `page_deployer_service_account_email` (real_ingest_on), and no Cloud Run grant to it in the others (T41) |
+| `_stack/tests/stack.tftest.hcl` | the composition under mocked providers: four scenarios (real or synthetic, ingest off or on) and a prod one, applied in the mock with the service accounts' emails unknown at plan (as on a real first plan, so "Invalid count argument" would show); push and Scheduler follow `ingest_enabled`; the right workloads per mode; project-base gets the edge VM's account; the mirror stays on; edge-vm gets openemr's two hooks and 40 minutes; openemr gets the VM's reserved address; one patient for ingestion and phr; the `setup_env` and `next_steps` outputs; a full plan needs the images; each targeted step (3, 4, 6) plans without them; T26: an alert channel only with an address, image builds off by default, the build account's two grants and the trigger when enabled, the trigger refused without the account; T38: healthcare's three agent grants' members are known at plan on a new project, and stay known and unchanged when project-base enables an API (IAP SSH) or adds Cloud NAT on top of an applied state |
+| `_stack/tests/plan_scan.py` | the scenario runs' full state (every resource in every module), with the scenario table required to equal the state-producing runs: no `allUsers`/`allAuthenticatedUsers`, no key, no authoritative IAM, one project-level grant; exactly one public service; every Cloud Run service and the job run as their own account and get the literal project, location, dataset and store IDs they should (and not the ones they should not: cuff-sim has no `FHIR_STORE_ID`); Scheduler jobs and push config per `ingest_enabled`; `PATIENT_ID` and the authority equal everywhere; the synthetic name; firewall target, ports and the mirror grant; the VM's account, address, subnet, no external IP, hooks, hook limit, secret files and adapter flags; cuff-sim's MLLP host and port; fhir-proxy's settings and mounts; the alert channel; PREVENT, deletion protection and the 7-day snapshot schedule in prod only; and a human-readable plan shows no patient value and no alert address (T26; the alert channel's display name and its redacted `email_address` label are the positive controls); T38: the plans of the IAP and Cloud NAT runs change only project-base (the IAP one exactly its API and firewall rule) and no plan defers a data source read to apply (the mock provider shows a forced replacement as an update, so "nothing outside project-base" is the check that matters); CI's page deployer: exactly one `roles/run.viewer` grant, on fhir-proxy, in the scenario that sets `page_deployer_service_account_email` (real_ingest_on), and no Cloud Run grant to it in the others (T41); T44: fhir-proxy mounts `session-signing-key` and no reviewer password, its only project grant is `roles/recaptchaenterprise.agent`, `DEMO_COUNTER_BUCKET` names the private counter bucket that only fhir-proxy writes, and the bucket's `force_destroy` and the key's `deletion_policy` follow the environment |
 | `_stack/tests/check_agent_ordering.sh` | T38, from `terraform graph`: healthcare's two Pub/Sub agent grants come after identity's `google_project_service_identity.pubsub`, its Healthcare agent grant after its own service identity, and the dataset, topics and Healthcare agent after project-base's APIs; healthcare does not depend on project-base's network or firewall (what a module-level `depends_on` adds) |
 | `_stack/tests/check_env_roots.py` | dev and prod differ only in `env.tf`, `backend.tf`, the example and the tests, and `env.tf` holds exactly the documented settings; git's file list is non-empty and holds the known files; no author-specific project (in a path or assigned to any `project*` key), number (also before a full stop), bucket, email or host (also inside a URL) in any file under `infra/envs` except the deploy tools' generated lockfile, which is checked instead for registry URLs, sha512 integrity hashes and the exact version of `package.json`; no secret-version data source or `secret_data`; `terraform.tfvars` and `backend.hcl` ignored, the examples and lock files not; the examples hold placeholders only, set every required variable, and plan; lock files consistent with the modules and with bootstrap's platforms; both roots' `versions.tf` constraints; provider settings; the `depends_on` edges (ingestion on identity and project-base; phr on project-base and identity) and none on identity or healthcare (T38: a module-level `depends_on` defers their data sources); the patient variables and `alert_email` declared sensitive |
 | `dev/tests`, `prod/tests` | T26 adds: the build trigger is refused without the build account; triggered builds wait for an approval by default |
@@ -1406,4 +1570,4 @@ make tf-scan       # T26: Trivy's Terraform checks over infra/; HIGH and CRITICA
 | `tests/tooling/test_wif_truth_table.py` | bootstrap's real `ci_context` mapping, prod's pool condition and the bindings, from the mocked plans, evaluated with cel-python for 1,008 token combinations per project: each reaches exactly the expected account, none reaches two, page jobs only the page deployer, and every account is reachable (not vacuous) |
 | `tests/tooling/test_terraform_lint_scan.py` | `make tf-lint` passes clean code and fails on a missing `required_version`, an invalid machine type (Google ruleset) and a problem in a subdirectory; `make tf-scan` fails on SSH open to `0.0.0.0/0`; a download whose checksum does not match is refused and nothing is installed |
 | `dev/tests/root.tftest.hcl` | dev's defaults (synthetic, ingest off); the `SYN-` rules both ways; the name rules; the alert destination; zone in region; images by digest; the patient check fires (`override_module`) on a mismatch and on a missing authority; `page_deployer_service_account_email` null by default, a user email refused, a service account email planned (T41) |
-| `prod/tests/root.tftest.hcl` | prod's defaults (real data, ingest off); prod refuses a tfvars reviewer password, with or without a version, and a version alone; a `SYN-` patient with real data is refused; synthetic data still possible; the patient check |
+| `prod/tests/root.tftest.hcl` | prod's defaults (real data, ingest off); a `SYN-` patient with real data is refused; synthetic data still possible; the patient check |

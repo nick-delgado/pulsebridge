@@ -45,10 +45,13 @@ import {
 import { DAY_MS, formatOffset, formatWindow, HOUR_MS } from './time';
 import { tracePanel } from './trace';
 
+/**
+ * The ranges on offer. There is no 30 d any more (T47, D16): the proxy shows only the last
+ * `HISTORY_DAYS` days (7 by default), so a longer range would only ever show the same week.
+ */
 export const RANGES = [
   { id: '24h', label: '24 h', name: 'last 24 hours', ms: DAY_MS },
   { id: '7d', label: '7 d', name: 'last 7 days', ms: 7 * DAY_MS },
-  { id: '30d', label: '30 d', name: 'last 30 days', ms: 30 * DAY_MS },
 ] as const;
 export type RangeId = (typeof RANGES)[number]['id'];
 

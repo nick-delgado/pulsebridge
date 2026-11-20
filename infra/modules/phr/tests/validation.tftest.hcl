@@ -21,7 +21,7 @@ variables {
     "cuff-sim"   = "pb-cuff-sim@example-project.iam.gserviceaccount.com"
   }
   secret_ids = {
-    "reviewer-password" = "pulsebridge-reviewer-password"
+    "session-signing-key" = "pulsebridge-session-signing-key"
   }
   network_name           = "pulsebridge-vpc"
   serverless_subnet_name = "pulsebridge-serverless"
@@ -283,7 +283,7 @@ run "missing_cuff_sim_account_refused" {
   expect_failures = [var.service_account_emails]
 }
 
-run "missing_reviewer_password_secret_refused" {
+run "missing_session_signing_key_secret_refused" {
   command = plan
   variables {
     secret_ids = { "openemr-client-private-key" = "pb-openemr-client-private-key" }

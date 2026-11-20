@@ -21,14 +21,30 @@ import type {
 } from './fhir';
 
 // ---------------------------------------------------------------------------------------------
-// Login (D9, docs/spikes/s6.md)
+// Demo session (D16, docs/workplan.md "The contract T43 to T45 share")
 
-export interface LoginResult {
-  /** Opaque signed bearer token. The page never decodes it. */
-  token: string;
-  /** ISO 8601 instant; 8 hours after login by default. */
+/**
+ * `GET /auth/config`: what the page needs to run the bot check. The site key is public, but it is
+ * fetched, never written into the page or its build, so a stranger's deployment uses its own key.
+ */
+export interface AuthConfig {
+  /** The reCAPTCHA (Google Cloud Fraud Defense) score-based web key's id. */
+  recaptchaSiteKey: string;
+  /** The action name the page passes to `execute` and the proxy expects back (`view_demo`). */
+  recaptchaAction: string;
+}
+
+/**
+ * `POST /auth/session` on a pass. The session itself is the `__session` cookie, which is HttpOnly:
+ * the page cannot read it and never sees a token. Only the expiry is returned.
+ */
+export interface DemoSession {
+  /** RFC 3339 instant; 24 hours after the session started by default. */
   expiresAt: string;
 }
+
+/** What `checkSession` found: a session the proxy accepts, or none (it answered 401). */
+export type SessionState = 'active' | 'none';
 
 // ---------------------------------------------------------------------------------------------
 // Status strip
@@ -731,7 +747,9 @@ export type ShareFailureReason =
   | 'share-busy'
   /** 502, with the steps so far: the proxy itself failed after OpenEMR was called. */
   | 'share-internal-error'
-  /** Any other status or reason (including the gate's 503 `login-not-configured`). */
+  /** 429 (T46), before OpenEMR is called: too many shares; `retryAfterSeconds` says how long. */
+  | 'rate-limited'
+  /** Any other status or reason (including the gate's 503 `session-not-configured`, or a 429). */
   | 'other';
 
 // ---------------------------------------------------------------------------------------------
@@ -745,11 +763,25 @@ export interface CallOptions {
 export interface PulseBridgeApi {
   readonly mode: 'mock' | 'http';
 
-  /** Checks the password; on success stores the token in the session. Throws `LoginError`. */
-  login(password: string, options?: CallOptions): Promise<LoginResult>;
-  /** Forgets the token. Stateless tokens need no server call. */
-  logout(): void;
-  isLoggedIn(): boolean;
+  /** `GET /auth/config` (public). Rejects with `SessionError` (errors.ts). */
+  getAuthConfig(options?: CallOptions): Promise<AuthConfig>;
+  /**
+   * `POST /auth/session` (public) with a fresh reCAPTCHA token. On a pass the proxy sets the
+   * `__session` cookie and every later call carries it. Rejects with `SessionError`, whose
+   * `reason` is the proxy's code (`bot-check-failed`, `demo-busy`, `rate-limited`, ...).
+   */
+  startSession(recaptchaToken: string, options?: CallOptions): Promise<DemoSession>;
+  /**
+   * Whether the browser still has a session the proxy accepts (for example after a reload: the
+   * page cannot read the HttpOnly cookie, so it asks). A 401 resolves `'none'` without calling
+   * `onUnauthorized`; any other failure rejects with `ApiError`.
+   */
+  checkSession(options?: CallOptions): Promise<SessionState>;
+  /**
+   * Ends the session: `POST /auth/logout`, which clears the cookie. Never rejects; requests still
+   * in flight that answer 401 afterwards no longer end anything.
+   */
+  logout(): Promise<void>;
 
   getStatus(options?: CallOptions): Promise<StatusSummary>;
 

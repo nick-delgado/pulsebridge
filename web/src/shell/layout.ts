@@ -8,6 +8,7 @@
  * Landmarks: banner (header), main, one region per side and for the share area and the log.
  */
 import { el } from '../ui/dom';
+import { PRIVACY_HREF } from './landing';
 import type { CuffSlot, HeartRateSlot, MessagesSlot, ShareSlot } from './features';
 import { messagesStrip, type MessagesStrip } from './messages-strip';
 import { silhouette } from './silhouette';
@@ -17,6 +18,8 @@ export interface DashboardLayout {
   root: DocumentFragment;
   status: ReturnType<typeof statusStrip>;
   logoutButton: HTMLButtonElement;
+  /** A live notice under the header, empty when there is nothing to say (the rate-limit wait). */
+  notice: HTMLElement;
   messages: MessagesStrip;
   slots: {
     heartRate: Record<HeartRateSlot, HTMLElement>;
@@ -80,6 +83,13 @@ export function dashboardLayout(options: {
     attrs: { type: 'button' },
   });
   const messages = messagesStrip(options.signal);
+  const notice = el('p', {
+    id: 'shell-notice',
+    class: 'shell-notice',
+    // Always in the document, only empty, so a screen reader announces the text when it arrives
+    // (a live region that is hidden or added late is often not read).
+    attrs: { role: 'status' },
+  });
 
   const slots = {
     cuff: { panel: slot('cuff-panel', 'slot'), trace: slot('cuff-trace', 'slot') },
@@ -108,6 +118,9 @@ export function dashboardLayout(options: {
         : null,
     ),
     status.root,
+    // The privacy note (T48), a page of its own; the cookie keeps the session, so coming back
+    // reopens the dashboard.
+    el('a', { class: 'app-header__privacy', text: 'Privacy', attrs: { href: PRIVACY_HREF } }),
     logoutButton,
   );
 
@@ -179,8 +192,9 @@ export function dashboardLayout(options: {
   root.append(
     el('a', { class: 'skip-link', text: 'Skip to dashboard', attrs: { href: '#main' } }),
     header,
+    notice,
     main,
     messages.root,
   );
-  return { root, status, logoutButton, messages, slots };
+  return { root, status, logoutButton, notice, messages, slots };
 }

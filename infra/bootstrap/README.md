@@ -156,7 +156,7 @@ in a Firebase project.
 
 The deployer must later create the whole stack: APIs, VPC and firewall, an e2-micro, Artifact
 Registry, service accounts and their IAM bindings, Secret Manager secrets, Healthcare dataset and
-stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, the Firebase Hosting site and, optionally, the image build trigger. The default `deployer_roles` is one
+stores, Pub/Sub, Cloud Run, Cloud Scheduler, log-based metrics and alerting, the Firebase Hosting site, the public demo's reCAPTCHA key and counter bucket (T44) and, optionally, the image build trigger. The default `deployer_roles` is one
 predefined admin role per product the stack uses, rather than `roles/owner` or `roles/editor`
 (which the variable's validation rejects):
 
@@ -181,8 +181,32 @@ predefined admin role per product the stack uses, rather than `roles/owner` or `
 | `roles/firebasehosting.admin` | module phr's Firebase Hosting site, and deploying the page to it (T26) |
 | `roles/cloudbuild.builds.editor` (only with `allow_build_trigger = true`) | project-base's opt-in Cloud Build trigger on release tags (T26): creating, changing and deleting a trigger needs `cloudbuild.builds.create`, which also lets the holder start builds, so it is not in the default list |
 
-The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only Cloud
-Storage access (the stack creates no bucket), so it can always read and write state.
+The deployer also gets `roles/storage.objectAdmin` on the state bucket itself: its only object
+read and write access, so it can always read and write state.
+
+**The bucket role (T44).** Since D16 the stack creates one bucket: module phr's demo counter
+bucket. No predefined role fits: `roles/storage.admin` also reads and writes every object in every
+bucket of the project. So bootstrap creates a **custom role** (`deployer_bucket_role_id`, default
+`pulsebridgeDeployerBuckets`; `google_project_iam_custom_role.deployer_buckets`) and grants it to
+the deployer: `storage.buckets.create`, `.get`, `.update`, `.delete`, `.getIamPolicy`,
+`.setIamPolicy`, and `storage.objects.list` and `.delete`, which `force_destroy` needs to empty
+the bucket on a dev destroy. It has no `storage.objects.get` or `.create`, so by default the
+deployer has no right to read or write a counter (only fhir-proxy writes them). That is a
+default, not a wall: with `storage.buckets.setIamPolicy` and `roles/resourcemanager.projectIamAdmin`
+it could grant itself object access, visibly in the IAM policy and the audit log ("What the role
+list does and does not limit", above). A test pins the list.
+
+**The reCAPTCHA key role (T44).** Module phr creates one reCAPTCHA (Fraud Defense) score key. The
+key methods need, on the project ([Access control with IAM](https://docs.cloud.google.com/recaptcha/docs/access-control),
+API permissions table, read 19 November 2026): `CreateKey` `recaptchaenterprise.keys.create`,
+`GetKey` `.keys.get` (also what Terraform's refresh and import call), `UpdateKey` `.keys.update`,
+`DeleteKey` `.keys.delete`, `ListKeys` `.keys.list`. Every predefined role is wider: Editor and
+Admin also hold `recaptchaenterprise.keys.retrievelegacysecretkey`, which returns a key's legacy
+secret, plus firewall policies (and, for Admin, all of `recaptchaenterprise.*`). So bootstrap
+creates a second **custom role** (`deployer_recaptcha_role_id`, default
+`pulsebridgeDeployerRecaptchaKeys`; `google_project_iam_custom_role.deployer_recaptcha_keys`) with
+exactly those five and grants it to the deployer. It creates no assessments: fhir-proxy does that
+with `roles/recaptchaenterprise.agent` (module identity), whose extra permissions are list-only.
 
 **What the role list does and does not limit.** For an account whose job is to create IAM,
 "least privilege" has a hard ceiling:
@@ -225,6 +249,27 @@ the first dev deploy the agent was created by hand, outside Terraform, before th
 existed). If the deployer is refused, run that one
 step as the owner: `terraform apply -target=module.stack.module.identity` (infra/envs/README.md,
 step 4).
+
+## Re-applying for the public demo (T44)
+
+T44 added three things to bootstrap: the deployer's two custom roles (reCAPTCHA keys and
+buckets, above), and three read permissions for the planner (`recaptchaenterprise.keys.get`, `storage.buckets.get`, `storage.buckets.getIamPolicy`).
+CI never applies bootstrap (its state is the owner's, and the deployer cannot grant itself
+roles through a reviewed path), so **the owner must re-apply bootstrap by hand before CI plans or
+applies the stack** with T44's modules:
+
+```bash
+cd infra/bootstrap
+terraform plan    # expect 4 to add (the two custom roles and their two grants)
+                  # and, with create_planner, 1 to change (the planner's role: three reads added,
+                  # secretmanager.versions.get removed); nothing to destroy
+terraform apply
+```
+
+Without it the prod plan is refused on the key and the bucket (the planner cannot read them),
+and the apply on creating them (the deployer may not). The custom roles do not depend on
+`deployer_roles`, so a deployment that set its own list needs no change for T44. The rollout order for the whole stack is in infra/envs/README.md ("Rolling out the public
+demo").
 
 ## Workload Identity Federation
 
@@ -364,7 +409,7 @@ calls) and the IAM-policy read of each type that has `*_iam_member` resources:
 | `resourcemanager.projects.get`, `.getIamPolicy` | `data "google_project"`, `google_project_iam_member` |
 | `serviceusage.services.get`, `serviceusage.services.list`, `serviceusage.services.use` | `google_project_service` (the provider refreshes it by listing the project's enabled services: without `.list` the first CI plan on dev was refused on every one); the beta provider bills its calls to the project (`user_project_override`) |
 | `iam.serviceAccounts.get`, `.getIamPolicy` | the service accounts and their bindings |
-| `secretmanager.secrets.get`, `.getIamPolicy`, `secretmanager.versions.get` | secrets' metadata, their bindings, the dev version's state; not `secretmanager.versions.access` |
+| `secretmanager.secrets.get`, `.getIamPolicy` | secrets' metadata and their bindings; not `secretmanager.versions.access`. (`secretmanager.versions.get`, for dev's tfvars-written reviewer-password version, was removed with it in T44: Terraform manages no secret version any more) |
 | `artifactregistry.repositories.get`, `.getIamPolicy` | the two repositories (with the cleanup policy) and their bindings; no image pull |
 | `compute.networks.get`, `subnetworks.get`, `firewalls.get`, `routers.get`, `addresses.get`, `disks.get`, `instances.get`, `resourcePolicies.get` | the network, the VM, its disks, address and snapshot schedule; not `getSerialPortOutput` or `getScreenshot` |
 | `healthcare.datasets.get`, `fhirStores.get`, `fhirStores.getIamPolicy`, `hl7V2Stores.get`, `hl7V2Stores.getIamPolicy` | the dataset and the stores' configuration and bindings; no `fhirResources.*` or `hl7V2Messages.*` |
@@ -375,6 +420,8 @@ calls) and the IAM-policy read of each type that has `*_iam_member` resources:
 | `monitoring.alertPolicies.get`, `monitoring.notificationChannels.get` | alert policies and the email channel |
 | `firebasehosting.sites.get`, `firebase.projects.get` | the Hosting site (and Firebase, when phr manages it) |
 | `cloudbuild.builds.get` | the build trigger (`triggers.get` needs it) |
+| `recaptchaenterprise.keys.get` | module phr's reCAPTCHA key (T44): its settings; the key ID is public anyway |
+| `storage.buckets.get`, `.getIamPolicy` | module phr's demo counter bucket (T44) and its one binding: metadata only, no `storage.objects.*` |
 
 **What the planner can still read, plainly:** the Terraform **state** and the CI tfvars (object
 viewer on the state bucket), which hold in clear the patient's identifier and, in prod, the
@@ -477,8 +524,12 @@ No modules.
 | [google_iam_workload_identity_pool.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool) | resource |
 | [google_iam_workload_identity_pool_provider.github](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/iam_workload_identity_pool_provider) | resource |
 | [google_project.this](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project) | resource |
+| [google_project_iam_custom_role.deployer_buckets](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_custom_role) | resource |
+| [google_project_iam_custom_role.deployer_recaptcha_keys](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_custom_role) | resource |
 | [google_project_iam_custom_role.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_custom_role) | resource |
 | [google_project_iam_member.deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
+| [google_project_iam_member.deployer_buckets](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
+| [google_project_iam_member.deployer_recaptcha_keys](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.page_deployer](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.page_deployer_service_usage](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |
 | [google_project_iam_member.planner](https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/project_iam_member) | resource |

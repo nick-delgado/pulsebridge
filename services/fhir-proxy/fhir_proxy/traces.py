@@ -26,11 +26,15 @@ message text comes from (open question 3):
   bytes, on purpose, and the store did not keep it.
 
 Both lookups are pinned to the configured patient: a resource about anyone else is "not found".
+Both are also limited to the shown window (T47, ``fhir_proxy.history``): a heart-rate
+Observation by its effective time, a send attempt by its attempt time; anything older is "not
+found" with the same answer. An attempt inside the window whose resulting Observation is older
+(a sample whose OBX-14 is years back) is shown without that Observation.
 """
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 
 from pulsebridge_fhir import (
     NotASendAttempt,
@@ -45,6 +49,7 @@ from pulsebridge_hl7v2.samples import load as load_sample
 from fhir_proxy import hl7
 from fhir_proxy.config import SamplePatient
 from fhir_proxy.errors import Problem
+from fhir_proxy.history import attempt_in_window, effective_in_window
 from fhir_proxy.messages import MessagesLog, application_from_labels, attempt_row
 from fhir_proxy.search import HEART_RATE, LOINC, parse_instant
 from fhir_proxy.store import Stores
@@ -149,18 +154,20 @@ def _provenance_for(stores: Stores, observation: dict) -> dict | None:
     return provenance if target in targets else None
 
 
-def heart_rate_trace(stores: Stores, observation_id: str) -> dict:
+def heart_rate_trace(stores: Stores, observation_id: str, *, since: datetime) -> dict:
     """The wire shape ``{"resources": Bundle, "source": {"kind", "window"} | null}``."""
     refs = stores.patient_references()
     try:
         observation = stores.read("Observation", observation_id)
     except NotFoundError:
         raise not_found("The heart-rate Observation") from None
-    if not stores.is_ours(observation, refs) or not _has_code(
-        observation.get("code"), LOINC, HEART_RATE
+    if (
+        not stores.is_ours(observation, refs)
+        or not _has_code(observation.get("code"), LOINC, HEART_RATE)
+        or not effective_in_window(observation, since)
     ):
-        # Another patient's, or not a heart rate: the same answer as absent, so the route
-        # cannot be used to probe for other resources.
+        # Another patient's, not a heart rate, or older than the shown window: the same answer
+        # as absent, so the route cannot be used to probe for other or older resources.
         raise not_found("The heart-rate Observation")
     device = _read_or_none(stores, "Device", _reference_id(observation.get("device"), "Device"))
     provenance = _provenance_for(stores, observation)
@@ -203,6 +210,7 @@ def cuff_attempt_trace(
     *,
     patient_id: str,
     sample_patient: SamplePatient | None,
+    since: datetime,
 ) -> dict:
     """The wire shape ``{"attempt", "messageSent", "resources": Bundle}``."""
     try:
@@ -214,6 +222,13 @@ def cuff_attempt_trace(
     except NotASendAttempt:
         raise not_found("The send attempt") from None
     except UnreadableSendAttempt:
+        # Its attempt time cannot be read, but it was recorded after it was sent: one recorded
+        # before the boundary (or with no readable time, which no date search would find) is
+        # older than the window, and is answered as absent rather than as unreadable.
+        text = resource.get("recorded") if isinstance(resource, dict) else None
+        recorded = parse_instant(text) if isinstance(text, str) else None
+        if recorded is None or not attempt_in_window(recorded, since):
+            raise not_found("The send attempt") from None
         raise Problem(
             422,
             "processing",
@@ -221,7 +236,12 @@ def cuff_attempt_trace(
             "This send attempt's AuditEvent could not be read; it is listed in the messages log "
             "as unreadable.",
         ) from None
-    if record.patient_id != patient_id or record.destination != stores.hl7v2_store_name:
+    if (
+        record.patient_id != patient_id
+        or record.destination != stores.hl7v2_store_name
+        or not attempt_in_window(record.sent_at, since)
+    ):
+        # Another patient's or store's, or older than the shown window: answered as absent.
         raise not_found("The send attempt")
 
     name = record.message_name or record.derived_message_name
@@ -235,7 +255,11 @@ def cuff_attempt_trace(
         key = hl7.observation_identifier(message.data, patient_id)
         if key is not None:
             found = stores.observations_by_identifier([key]).get(key)
-            if found is not None and stores.is_ours(found, stores.patient_references()):
+            if (
+                found is not None
+                and stores.is_ours(found, stores.patient_references())
+                and effective_in_window(found, since)
+            ):
                 observation = found
                 provenance = _provenance_for(stores, found)
 

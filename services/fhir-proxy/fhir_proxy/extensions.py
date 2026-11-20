@@ -14,9 +14,10 @@ def register(proxy: ProxyContext) -> None:
 code gets from :class:`ProxyContext`:
 
 - ``add_route``: the route joins the same route table, so it is behind the same session-token
-  check, gets CORS, the security headers, the request budget and the error handling, and appears
-  in the CapabilityStatement's route list. The public routes are fixed by the core table (login
-  only): an extension cannot add a public route, reuse a core endpoint name, register a method
+  check (the ``__session`` cookie, and ``Origin`` on a ``POST``), gets the security headers, the
+  request budget and the error handling, and appears in the CapabilityStatement's route list.
+  The public routes are fixed by the core table (the three ``/auth/`` session routes only): an
+  extension cannot add a public route, reuse a core endpoint name, register a method
   and path that already exist, or register a pattern that could match a core URL (for example
   ``/fhir/Observation/<int:n>``, which would win over the patient-pinned read route). Use
   distinct literal paths. ``create_app`` checks again after registering that every core URL

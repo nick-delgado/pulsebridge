@@ -1,6 +1,5 @@
 # Inputs of the stack composition. The env roots pass their own variables through unchanged and
-# add the per-environment settings (environment, protect_from_destroy,
-# allow_reviewer_password_from_tfvars) from their env.tf.
+# add the per-environment settings (environment, protect_from_destroy) from their env.tf.
 #
 # The user-facing rules (the SYN- patient rules, the synthetic name, an alert destination, the
 # zone inside the region) are validated at the ROOT, where a stranger meets them first
@@ -24,12 +23,6 @@ variable "environment" {
 
 variable "protect_from_destroy" {
   description = "true (prod): the Healthcare dataset and stores get deletion_policy PREVENT, the Secret Manager secrets deletion_protection, and the Cloud Run services and job deletion_protection, so a stray `terraform destroy` fails instead of deleting real data or taking the demo down. false (dev): everything can be destroyed, which the nightly destroy test needs."
-  type        = bool
-  nullable    = false
-}
-
-variable "allow_reviewer_password_from_tfvars" {
-  description = "true (dev only): reviewer_password and reviewer_password_wo_version may write the reviewer-password secret version from tfvars (module identity, write-only, never in state). false (prod): the password is set only with scripts/secrets/set-reviewer-password.sh (T27) and rotated there."
   type        = bool
   nullable    = false
 }
@@ -201,32 +194,6 @@ variable "alert_notification_channels" {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Reviewer password (dev only; see allow_reviewer_password_from_tfvars)
-# ---------------------------------------------------------------------------------------------
-
-variable "reviewer_password" {
-  description = "Dev only: the shared reviewer password, passed to module identity's write-only secret version. Ephemeral: never in plan or state."
-  type        = string
-  default     = null
-  sensitive   = true
-  ephemeral   = true
-}
-
-variable "reviewer_password_wo_version" {
-  description = "Dev only: 0 writes no version; 1 or more writes reviewer_password; raise it to send a new one."
-  type        = number
-  default     = 0
-  nullable    = false
-
-  validation {
-    # Prod rotates the password with T27's script; a tfvars-managed version would be partly undone
-    # by the script and partly undo it (module identity README, "Dev only").
-    condition     = var.reviewer_password_wo_version == 0 || var.allow_reviewer_password_from_tfvars
-    error_message = "The reviewer password may come from tfvars only in dev. In prod leave reviewer_password and reviewer_password_wo_version unset and use scripts/secrets/set-reviewer-password.sh."
-  }
-}
-
-# ---------------------------------------------------------------------------------------------
 # Network and VM
 # ---------------------------------------------------------------------------------------------
 
@@ -331,4 +298,73 @@ variable "build_trigger_approval_required" {
   description = "Triggered builds wait for a manual approval in the Cloud Build console (module project-base)."
   type        = bool
   nullable    = false
+}
+
+# ---------------------------------------------------------------------------------------------
+# The public demo (D16, T44): optional; null keeps module phr's default
+# ---------------------------------------------------------------------------------------------
+
+variable "recaptcha_min_score" {
+  description = "fhir-proxy's RECAPTCHA_MIN_SCORE: the lowest reCAPTCHA score (0.0 likely a bot, 1.0 likely a person) that gets a demo session, above 0 and at most 1. null (default): module phr's 0.5. Tune it after the first real deploy, from the scores real visitors get."
+  type        = number
+  default     = null
+}
+
+variable "bot_checks_per_day" {
+  description = "fhir-proxy's BOT_CHECKS_PER_DAY: the most reCAPTCHA assessments in one UTC day across all instances (the counter bucket), 1 to 3000; past it the page says the demo is busy. null (default): module phr's 300 (about 9,000 a month, under the 10,000 free per organisation)."
+  type        = number
+  default     = null
+}
+
+variable "session_ttl_seconds" {
+  description = "fhir-proxy's SESSION_TTL_SECONDS: how long a demo session lasts, 300 to 86400. null (default): module phr's 86400 (24 hours, D16)."
+  type        = number
+  default     = null
+}
+
+variable "sessions_per_address_per_hour" {
+  description = "fhir-proxy's SESSIONS_PER_ADDRESS_PER_HOUR: session attempts per client address an hour, per instance, checked before any assessment, 1 to 100. null (default): module phr's 5."
+  type        = number
+  default     = null
+}
+
+# ---------------------------------------------------------------------------------------------
+# The public demo's rate limits (T46) and shown window (T47), since T48: optional; null keeps
+# module phr's default (fhir-proxy's own, services/fhir-proxy/fhir_proxy/config.py)
+# ---------------------------------------------------------------------------------------------
+
+variable "requests_per_address_per_minute" {
+  description = "fhir-proxy's REQUESTS_PER_ADDRESS_PER_MINUTE: requests without a valid session per client address a minute, all routes together, 60 to 6000. Per instance (up to twice this with fhir-proxy's 2 instances). null (default): module phr's 300."
+  type        = number
+  default     = null
+}
+
+variable "reads_per_session_per_minute" {
+  description = "fhir-proxy's READS_PER_SESSION_PER_MINUTE: requests per demo session a minute other than cuff sends and shares (every GET and HEAD, and the few others such as logout), 60 to 1200. Per instance (up to twice this with 2 instances). null (default): module phr's 120."
+  type        = number
+  default     = null
+}
+
+variable "cuff_sends_per_session_per_10_minutes" {
+  description = "fhir-proxy's CUFF_SENDS_PER_SESSION_PER_10_MINUTES: cuff readings per demo session in any 10 minutes, 1 to 30. Per instance (up to twice this with 2 instances). null (default): module phr's 3."
+  type        = number
+  default     = null
+}
+
+variable "shares_per_session_per_10_minutes" {
+  description = "fhir-proxy's SHARES_PER_SESSION_PER_10_MINUTES: shares to OpenEMR per demo session in any 10 minutes, 1 to 20. Per instance (up to twice this with 2 instances). null (default): module phr's 2."
+  type        = number
+  default     = null
+}
+
+variable "shares_per_instance_per_hour" {
+  description = "fhir-proxy's SHARES_PER_INSTANCE_PER_HOUR: shares to OpenEMR by all visitors together in any hour, counted per instance, 1 to 600. null (default): module phr's 30, so up to 60 an hour with 2 instances."
+  type        = number
+  default     = null
+}
+
+variable "history_days" {
+  description = "fhir-proxy's HISTORY_DAYS: how many days back the demo shows (older data is hidden, never deleted), 1 to 30. null (default): module phr's 7, which the page's privacy note states."
+  type        = number
+  default     = null
 }

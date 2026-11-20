@@ -44,12 +44,13 @@ from fhir_proxy.share.testing import ShareEnv, build_share_env, stored_patient
 from fhir_proxy.testing import (
     AUDIT_STORE,
     DATASET,
+    DEMO_LIMITS,
     FHIR_STORE,
     HEALTH_URL,
     HL7_STORE,
     LOCATION,
-    PASSWORD,  # obviously synthetic; the proxy's test configuration writes it to its file
     PROJECT,
+    SIGNING_KEY,  # obviously synthetic; the proxy's test configuration writes it to its file
     STORE_NAME,
     FakeHealthcare,
     apply_transaction,
@@ -61,6 +62,14 @@ from pulsebridge_smoke.http import Response
 from v2_to_fhir.mapping import MappingConfig, map_message
 
 SYNTHETIC_PATIENT = "SYN-E2E-0001"
+# The deployment the smoke test is told about, with the defaults' shape: the secret name prefix
+# (module identity's identity_name_prefix, the secret_name_prefix output, "pb" by default) is NOT
+# the name prefix module phr builds TOKEN_ISSUER from ("pulsebridge" by default). The issuer is
+# built here exactly as module phr builds it, so a smoke test that derived it from the secret
+# prefix would sign with the wrong issuer and fail S1.
+SECRET_PREFIX = "pb"  # noqa: S105 - a name prefix, not a secret
+NAME_PREFIX = "pulsebridge"
+TOKEN_ISSUER = f"pulsebridge-fhir-proxy:{PROJECT}:{NAME_PREFIX}"  # infra/modules/phr/fhir_proxy.tf
 REAL_PATIENT = "E2E-PERSON-0001"  # what a real-data stack's patient id looks like (no SYN-)
 
 SEGMENT = re.compile(rb"[A-Z][A-Z0-9]{2}")
@@ -258,6 +267,8 @@ def build_stack(
         # Synthetic data: the stack deploys no health-sync, so the proxy has no URL for it.
         health_sync_url=HEALTH_URL if real_data else None,
         sample_patient=SamplePatient("PULSEBRIDGE", "Synthetic", "Demo"),
+        token_issuer=TOKEN_ISSUER,
+        **DEMO_LIMITS,
     )
     env.store.put(FHIR_STORE, stored_patient(value=patient))
     edge = FakeEdge(env.store, patient)
@@ -296,4 +307,4 @@ def build_stack(
     return Stack(env, edge, transport, cuff_client, patient)
 
 
-__all__ = ["PASSWORD", "Stack", "build_stack"]
+__all__ = ["NAME_PREFIX", "SECRET_PREFIX", "SIGNING_KEY", "TOKEN_ISSUER", "Stack", "build_stack"]

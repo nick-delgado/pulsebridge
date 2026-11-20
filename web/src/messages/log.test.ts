@@ -259,7 +259,7 @@ describe('empty, loading and error states', () => {
     expect(m.q('#log-alert').textContent).toBe('');
   });
 
-  it('503 login-not-configured: "the service is not configured", the session is kept', async () => {
+  it('503 session-not-configured: "the service is not configured", the session is kept', async () => {
     const m = mount();
     m.calls[0]?.answer.reject(
       new ApiError(503, 'x', {
@@ -270,7 +270,7 @@ describe('empty, loading and error states', () => {
             code: 'transient',
             details: {
               coding: [
-                { system: 'urn:pulsebridge:fhir-proxy:reason', code: 'login-not-configured' },
+                { system: 'urn:pulsebridge:fhir-proxy:reason', code: 'session-not-configured' },
               ],
             },
           },
@@ -279,7 +279,7 @@ describe('empty, loading and error states', () => {
     );
     await flush();
     expect(m.q('#log-alert').textContent).toContain('The service is not configured');
-    expect(m.q('#log-alert').textContent).toContain('You are still logged in');
+    expect(m.q('#log-alert').textContent).toContain('Your demo session is kept');
   });
 
   it('a 401 is left to the shell', async () => {
@@ -472,6 +472,55 @@ describe('refreshing (data changes, polling) without losing focus', () => {
     await m.answer(page([attempt()]));
     await vi.advanceTimersByTimeAsync(30_000);
     expect(m.calls).toHaveLength(2);
+  });
+
+  it('a 429 while polling waits for Retry-After, then polling resumes (T47)', async () => {
+    vi.useFakeTimers();
+    const m = mount();
+    const pending = page([
+      attempt({ application: { outcome: 'pending', reason: null }, observation: null }),
+    ]);
+    await m.answer(pending);
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(m.calls).toHaveLength(2);
+    m.calls[1]?.answer.reject(new ApiError(429, 'Too many requests. Wait 50 seconds.', null, 50));
+    await flush();
+    expect(m.q('#log-alert').textContent).toContain('Too many requests. Wait 50 seconds.');
+    // Nothing is asked while the wait runs, and the log has not given up.
+    await vi.advanceTimersByTimeAsync(49_000);
+    expect(m.calls).toHaveLength(2);
+    expect(m.slots.log.textContent).not.toContain('still pending after 2 minutes');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(m.calls).toHaveLength(3);
+    await m.answer(page([attempt()]));
+    expect(m.q('#log-alert').textContent).toBe('');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(m.calls).toHaveLength(3); // settled
+  });
+
+  it('a 429 on a later page of a polling refresh also waits for Retry-After (T47)', async () => {
+    vi.useFakeTimers();
+    const m = mount();
+    const pendingRow = attempt({
+      application: { outcome: 'pending', reason: null },
+      observation: null,
+    });
+    // The first load: a short page with more after it, so the log reads page 2 by itself.
+    await m.answer(page([pendingRow], 'c1'));
+    expect(m.calls[1]?.query).toEqual({ count: 25, cursor: 'c1' });
+    await m.answer(page([], null));
+    await vi.advanceTimersByTimeAsync(3000);
+    // The poll's refresh: page 1 answers, page 2 is refused (gather keeps page 1 and returns it).
+    expect(m.calls).toHaveLength(3);
+    await m.answer(page([pendingRow], 'c1'));
+    expect(m.calls).toHaveLength(4);
+    m.calls[3]?.answer.reject(new ApiError(429, 'Too many requests. Wait 40 seconds.', null, 40));
+    await flush();
+    expect(m.q('#log-alert').textContent).toContain('Too many requests. Wait 40 seconds.');
+    await vi.advanceTimersByTimeAsync(39_000);
+    expect(m.calls).toHaveLength(4); // nothing asked while the wait runs
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(m.calls).toHaveLength(5);
   });
 
   it('polling is bounded and then offers "Check again"', async () => {

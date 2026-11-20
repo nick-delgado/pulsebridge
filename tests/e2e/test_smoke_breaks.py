@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import e2e_fake_stack
 import pytest
@@ -323,7 +324,15 @@ BREAKS = [
     ),
     Break(
         "the time differs",
-        mapper_edit(lambda o: o.update(effectiveDateTime="2026-01-01T00:00:00+00:00")),
+        # A time that differs from the message's but is inside the proxy's shown window (T47):
+        # the stack's proxy clock follows real time, so a fixed date would be hidden instead.
+        mapper_edit(
+            lambda o: o.update(
+                effectiveDateTime=(datetime.now(UTC) - timedelta(hours=1))
+                .replace(microsecond=0)
+                .isoformat()
+            )
+        ),
         "A7f",
         "the message said",
     ),
@@ -463,10 +472,10 @@ BREAKS = [
 
 @pytest.mark.parametrize("case", BREAKS, ids=lambda b: b.name)
 def test_a_broken_stack_fails_that_check(
-    case: Break, stack: Stack, password: str, monkeypatch: pytest.MonkeyPatch
+    case: Break, stack: Stack, signing_key: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case.setup(stack, monkeypatch)
-    result = run(stack, password, *case.args)
+    result = run(stack, signing_key, *case.args)
     assert result.status_of(case.check_id) == "FAIL", result.text
     assert case.says in result.line_of(case.check_id), result.line_of(case.check_id)
     assert result.code == 1

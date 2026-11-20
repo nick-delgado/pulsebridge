@@ -206,9 +206,17 @@ def check_security(s: Scan) -> None:
     project_grants = sorted(
         (r["values"]["role"], r["values"]["member"]) for r in s.of_type("google_project_iam_member")
     )
+    # T44: fhir-proxy creates reCAPTCHA assessments; an assessment's parent is the project.
     s.check(
-        project_grants == [("roles/logging.logWriter", f"serviceAccount:{email('edge-vm')}")],
-        f"the only project-level grant must be the edge VM's log writer, found {project_grants}",
+        project_grants
+        == sorted(
+            [
+                ("roles/logging.logWriter", f"serviceAccount:{email('edge-vm')}"),
+                ("roles/recaptchaenterprise.agent", f"serviceAccount:{email('fhir-proxy')}"),
+            ]
+        ),
+        "the only project-level grants must be the edge VM's log writer and fhir-proxy's "
+        f"assessment role, found {project_grants}",
     )
 
     services = {r["values"]["name"]: r["values"] for r in s.of_type("google_cloud_run_v2_service")}
@@ -484,8 +492,25 @@ def check_front_door(s: Scan) -> None:
         f"fhir-proxy must mount the OpenEMR client secret by its short ID: {volumes}",
     )
     s.check(
-        volumes.get("reviewer-password") == f"{IDENTITY_PREFIX}-reviewer-password",
-        "fhir-proxy must mount the reviewer password",
+        volumes.get("session-signing-key") == f"{IDENTITY_PREFIX}-session-signing-key",
+        "fhir-proxy must mount the session signing key (D16)",
+    )
+    s.check(
+        "reviewer-password" not in volumes and "REVIEWER_PASSWORD_FILE" not in env,
+        "the reviewer password is gone (D16): no volume, no REVIEWER_PASSWORD_FILE",
+    )
+    # T44: the demo's bucket is the one DEMO_COUNTER_BUCKET names, and only fhir-proxy writes it.
+    bucket = s.get("module.phr.google_storage_bucket.demo_counters") or {}
+    s.check(
+        bucket.get("name") == env.get("DEMO_COUNTER_BUCKET")
+        and bucket.get("public_access_prevention") == "enforced",
+        f"DEMO_COUNTER_BUCKET must name the private counter bucket: {bucket.get('name')}",
+    )
+    writer = s.get("module.phr.google_storage_bucket_iam_member.demo_counter_writer") or {}
+    s.check(
+        writer.get("member") == f"serviceAccount:{email('fhir-proxy')}"
+        and writer.get("role") == "roles/storage.objectUser",
+        f"only fhir-proxy may write the counters: {writer.get('member')} {writer.get('role')}",
     )
     s.check(
         proxy["vpc_access"][0]["egress"] == "ALL_TRAFFIC",
@@ -559,6 +584,14 @@ def check_environment(s: Scan) -> None:
         for r in s.of_type("google_cloud_run_v2_service") + s.of_type("google_cloud_run_v2_job")
     }
     s.check(runs == {protect}, f"Cloud Run deletion_protection {runs}")
+    # T44: the demo's counter bucket goes with a dev destroy (force_destroy) and is kept in prod;
+    # the reCAPTCHA key follows the same switch.
+    buckets = {r["values"].get("force_destroy") for r in s.of_type("google_storage_bucket")}
+    s.check(buckets == {not protect}, f"counter bucket force_destroy {buckets}")
+    keys = {
+        r["values"].get("deletion_policy") for r in s.of_type("google_recaptcha_enterprise_key")
+    }
+    s.check(keys == {"PREVENT" if protect else "DELETE"}, f"reCAPTCHA key deletion_policy {keys}")
     labels = {
         r["values"].get("labels", {}).get("environment")
         for r in s.of_type("google_cloud_run_v2_service")

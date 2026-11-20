@@ -379,7 +379,7 @@ What **T15** does with it:
 - Verify TLS as below.
 
 What **T22** does: mount `client_secret_id` (version `latest`) as a file in fhir-proxy, like the
-reviewer password (so a new version takes effect without a redeploy), and set as plain environment
+session signing key (so a new version takes effect without a redeploy), and set as plain environment
 variables `OPENEMR_SITE_ADDRESS` = `site_address`, `OPENEMR_TOKEN_URL` = `token_url`,
 `OPENEMR_FHIR_BASE_URL` = `fhir_base_url` (names are T15's to choose; these are suggestions). The
 scopes come from the document, so they always match the registered client. Direct VPC egress on the serverless subnet (already in T22's AC) is what

@@ -64,14 +64,27 @@ def test_fhir_proxy_starts_with_the_modules_environment(proxy_env: dict[str, str
     # What the module means to set, as the service understands it.
     assert cfg.path_prefix == "/api"
     assert cfg.public_base_url.endswith("/api")
-    assert cfg.allowed_origins == (cfg.public_base_url.removesuffix("/api"),)
+    # The page's origin first, then the site's other Hosting origin: the reCAPTCHA key accepts
+    # tokens from both, so the Origin check must too (T44).
+    origin = cfg.public_base_url.removesuffix("/api")
+    assert cfg.allowed_origins == (origin, origin.replace(".web.app", ".firebaseapp.com"))
     assert cfg.request_timeout == 70
     assert cfg.cuff_forward_timeout == 55 and cfg.request_budget == 50
     # Module phr's default, measured behind Firebase Hosting; the service's own default is 1.
     assert cfg.trusted_proxy_hops == 2
     assert cfg.sample_patient is not None  # the PID values cuff-sim sends
     assert cfg.health_sync_url is not None
-    assert cfg.password_file == "/secrets/reviewer-password/value"  # noqa: S105 - a path
+    # D16 (T43, T44): the signing key's mounted file and the demo's settings, under the
+    # contract's names.
+    assert cfg.session_key_file == "/secrets/session-signing-key/value"
+    assert cfg.recaptcha_action == "view_demo"
+    assert cfg.recaptcha_min_score == 0.5
+    assert cfg.session_ttl_seconds == 86400
+    assert cfg.sessions_per_address_per_hour == 5
+    assert cfg.bot_checks_per_day == 300
+    assert cfg.recaptcha_site_key == proxy_env["RECAPTCHA_SITE_KEY"]
+    assert cfg.demo_counter_bucket == proxy_env["DEMO_COUNTER_BUCKET"]
+    assert not {"REVIEWER_PASSWORD_FILE", "PASSWORD_CACHE_SECONDS"} & set(proxy_env)
 
 
 def test_cuff_sim_starts_with_the_modules_environment(cuff_env: dict[str, str]) -> None:
@@ -106,6 +119,10 @@ def test_the_check_sees_a_broken_map(proxy_env: dict[str, str]) -> None:
     bad = {**proxy_env, "REQUEST_TIMEOUT_SECONDS": "60"}  # 55 + 10 > 60
     with pytest.raises(proxy_config.ConfigError):
         proxy_config.ServiceConfig.from_env(bad)
+    # A bucket name Cloud Storage would refuse (upper case) is refused at start, not at the
+    # first visitor.
+    with pytest.raises(proxy_config.ConfigError):
+        proxy_config.ServiceConfig.from_env({**proxy_env, "DEMO_COUNTER_BUCKET": "Not_A_Bucket"})
     renamed = {k: v for k, v in proxy_env.items() if k != "PUBLIC_BASE_URL"}
     renamed["PUBLIC_URL"] = proxy_env["PUBLIC_BASE_URL"]
     with pytest.raises(proxy_config.ConfigError):

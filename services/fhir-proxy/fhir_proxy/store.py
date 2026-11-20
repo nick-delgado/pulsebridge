@@ -148,13 +148,17 @@ class Stores:
                         found[identifier["value"]] = resource
         return found
 
-    def count_observations(self, code: str, refs: Sequence[str]) -> int:
+    def count_observations(self, code: str, refs: Sequence[str], since: str) -> int:
+        """How many of the patient's Observations with this code are in the shown window:
+        ``date=ge<since>`` (T47), R4's rule on ``effective[x]``, so a heart-rate window that
+        overlaps the boundary counts, as it is shown."""
         bundle = self.client.search(
             self.fhir_store,
             "Observation",
             [
                 ("subject", ",".join(refs)),
                 ("code", token(codes.LOINC, code)),
+                ("date", "ge" + since),
                 # Cloud Healthcare refuses ``_summary`` ("_summary argument is not supported yet",
                 # found on the first real deploy). ``_total=accurate`` with ``_count=0`` gives an
                 # exact ``Bundle.total`` and no entries.
@@ -167,8 +171,10 @@ class Stores:
             raise ValueError("count search without a total")
         return total
 
-    def newest_write(self, code: str, refs: Sequence[str]) -> str | None:
-        """``meta.lastUpdated`` of the most recently written Observation with this code.
+    def newest_write(self, code: str, refs: Sequence[str], since: str) -> str | None:
+        """``meta.lastUpdated`` of the most recently written Observation with this code, among
+        those in the shown window (``date=ge<since>``, T47): a write of a reading that is not
+        shown is not reported either.
 
         ``_sort=-_lastUpdated`` is Cloud Healthcare's default order (its search documentation
         says so), so this is one cheap search for one resource."""
@@ -178,6 +184,7 @@ class Stores:
             [
                 ("subject", ",".join(refs)),
                 ("code", token(codes.LOINC, code)),
+                ("date", "ge" + since),
                 ("_sort", "-_lastUpdated"),
                 ("_count", "1"),
                 ("_elements", "id,meta"),

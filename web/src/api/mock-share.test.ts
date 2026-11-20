@@ -8,21 +8,18 @@ import { SHARE_FHIR_STEP_SECRETS, SHARE_TOKEN_STEP_SECRETS } from './contract';
 import { ShareError } from './errors';
 import { LOINC, type Observation } from './fhir';
 import { MockClient, redact, type MockClientOptions } from './mock-client';
-import { Session } from './session';
 
 const NOW = Date.parse('2026-03-10T15:02:00Z');
 const DAY = 86_400_000;
 
 async function setup(options: Partial<MockClientOptions> = {}) {
-  sessionStorage.clear();
   const c = new MockClient({
-    session: new Session(sessionStorage, () => NOW),
     onUnauthorized: () => undefined,
     now: () => NOW,
     latencyMs: 0,
     ...options,
   });
-  await c.login('x');
+  await c.startSession('mock-recaptcha-test');
   const range = { start: new Date(NOW - DAY), end: new Date(NOW) };
   const hr = await c.searchObservations({ code: LOINC.heartRate, range });
   const final = hr.filter((o) => o.status === 'final');

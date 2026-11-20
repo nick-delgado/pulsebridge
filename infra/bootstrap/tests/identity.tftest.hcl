@@ -163,6 +163,15 @@ run "prod_identities_are_bound_to_their_environments" {
     error_message = "The planner's custom role is missing a permission the plan needs."
   }
 
+  # T44 (D16): module phr's reCAPTCHA key and demo counter bucket must be readable by the plan,
+  # metadata only (no storage.objects.*, checked above).
+  assert {
+    condition = length(setsubtract(toset([
+      "recaptchaenterprise.keys.get", "storage.buckets.get", "storage.buckets.getIamPolicy",
+    ]), toset(google_project_iam_custom_role.planner[0].permissions))) == 0
+    error_message = "The planner must read the reCAPTCHA key and the counter bucket with its IAM policy (T44)."
+  }
+
   assert {
     condition     = google_storage_bucket_iam_member.planner_state[0].role == "roles/storage.objectViewer" && google_storage_bucket_iam_member.planner_state[0].member == "serviceAccount:terraform-planner@example-project.iam.gserviceaccount.com"
     error_message = "The planner may only read the state bucket (it plans with -lock=false)."
@@ -300,6 +309,13 @@ run "default_deployer_roles_are_not_basic_roles" {
     error_message = "The default deployer roles must include roles/firebasehosting.admin and not roles/storage.admin."
   }
   assert {
+    # T44: module phr's reCAPTCHA score key.
+    # T44: no predefined reCAPTCHA role (all hold keys.retrievelegacysecretkey); the custom role
+    # below covers the key.
+    condition     = length([for r in keys(google_project_iam_member.deployer) : r if startswith(r, "roles/recaptchaenterprise.")]) == 0
+    error_message = "The default deployer roles must hold no predefined reCAPTCHA role: the deployer's key rights are its custom role (T44)."
+  }
+  assert {
     # T26: no Cloud Build role by default; allow_build_trigger adds it (run below).
     condition     = length([for r in keys(google_project_iam_member.deployer) : r if startswith(r, "roles/cloudbuild.")]) == 0
     error_message = "The default deployer roles must not include a Cloud Build role."
@@ -359,4 +375,88 @@ run "build_trigger_role_only_when_opted_in" {
     condition     = [for r in keys(google_project_iam_member.deployer) : r if startswith(r, "roles/cloudbuild.")] == ["roles/cloudbuild.builds.editor"]
     error_message = "allow_build_trigger must add roles/cloudbuild.builds.editor and no other Cloud Build role."
   }
+}
+
+# ---- T44: the deployer's bucket role -----------------------------------------------------------
+
+# Module phr creates one bucket (the demo counters). The deployer gets a custom role that manages
+# buckets and their IAM, and may list and delete objects only to empty a bucket on destroy: it can
+# neither read nor write an object, so only fhir-proxy can write a counter.
+run "deployer_bucket_role_manages_buckets_but_reads_no_objects" {
+  command = plan
+
+  assert {
+    condition = toset(google_project_iam_custom_role.deployer_buckets.permissions) == toset([
+      "storage.buckets.create",
+      "storage.buckets.delete",
+      "storage.buckets.get",
+      "storage.buckets.update",
+      "storage.buckets.getIamPolicy",
+      "storage.buckets.setIamPolicy",
+      "storage.objects.list",
+      "storage.objects.delete",
+    ])
+    error_message = "The deployer's bucket role must be exactly bucket create/get/update/delete and IAM, plus object list and delete for force_destroy."
+  }
+  assert {
+    condition = length([
+      for p in google_project_iam_custom_role.deployer_buckets.permissions : p
+      if contains(["storage.objects.get", "storage.objects.create", "storage.objects.update", "storage.objects.setIamPolicy"], p)
+    ]) == 0
+    error_message = "The deployer must not read, create or change objects (only fhir-proxy writes counters)."
+  }
+  assert {
+    condition = (
+      google_project_iam_custom_role.deployer_buckets.role_id == "pulsebridgeDeployerBuckets" &&
+      google_project_iam_custom_role.deployer_buckets.project == "example-project" &&
+      google_project_iam_member.deployer_buckets.member == google_service_account.deployer.member &&
+      google_project_iam_member.deployer_buckets.project == "example-project"
+    )
+    error_message = "The bucket role must be a custom role in the project, granted to the deployer."
+  }
+}
+
+run "deployer_bucket_role_id_is_validated" {
+  command = plan
+
+  variables {
+    deployer_bucket_role_id = "has spaces"
+  }
+
+  expect_failures = [var.deployer_bucket_role_id]
+}
+
+# ---- T44: the deployer's reCAPTCHA key role ----------------------------------------------------
+
+run "deployer_recaptcha_role_manages_keys_only" {
+  command = plan
+
+  assert {
+    condition = toset(google_project_iam_custom_role.deployer_recaptcha_keys.permissions) == toset([
+      "recaptchaenterprise.keys.create",
+      "recaptchaenterprise.keys.delete",
+      "recaptchaenterprise.keys.get",
+      "recaptchaenterprise.keys.list",
+      "recaptchaenterprise.keys.update",
+    ])
+    error_message = "The deployer's reCAPTCHA role must be exactly keys create/get/list/update/delete (no retrievelegacysecretkey, no assessments)."
+  }
+  assert {
+    condition = (
+      google_project_iam_custom_role.deployer_recaptcha_keys.role_id == "pulsebridgeDeployerRecaptchaKeys" &&
+      google_project_iam_member.deployer_recaptcha_keys.member == google_service_account.deployer.member &&
+      google_project_iam_member.deployer_recaptcha_keys.project == "example-project"
+    )
+    error_message = "The reCAPTCHA key role must be a custom role in the project, granted to the deployer."
+  }
+}
+
+run "deployer_recaptcha_role_id_is_validated" {
+  command = plan
+
+  variables {
+    deployer_recaptcha_role_id = "has spaces"
+  }
+
+  expect_failures = [var.deployer_recaptcha_role_id]
 }

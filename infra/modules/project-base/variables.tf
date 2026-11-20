@@ -43,8 +43,9 @@ variable "enabled_apis" {
   description = <<-EOT
     Google APIs (service names) to enable in the project. The default covers every component in
     the brief. Identity Platform (identitytoolkit.googleapis.com) is deliberately absent and is
-    rejected: decision D9 replaced it with a shared password checked by fhir-proxy. Firebase
-    Hosting (D4) is included.
+    rejected: decision D16 lets visitors in with a reCAPTCHA bot check and a session cookie
+    from fhir-proxy instead (Identity Platform's config cannot be destroyed by Terraform).
+    Firebase Hosting (D4) and reCAPTCHA / Fraud Defense (D16) are included.
   EOT
   type        = set(string)
   default = [
@@ -62,10 +63,11 @@ variable "enabled_apis" {
     "logging.googleapis.com",              # Cloud Run and VM logs
     "monitoring.googleapis.com",           # alert policies and charts of the ingestion log-based metrics (free to enable)
     "pubsub.googleapis.com",               # HL7v2 ingest notifications to v2-to-fhir
+    "recaptchaenterprise.googleapis.com",  # D16 bot check: module phr's score key, fhir-proxy's assessments (T43, T44)
     "run.googleapis.com",                  # Cloud Run services
-    "secretmanager.googleapis.com",        # OAuth client, refresh token, reviewer password, DB and OpenEMR keys
+    "secretmanager.googleapis.com",        # OAuth client, refresh token, session signing key, DB and OpenEMR keys
     "serviceusage.googleapis.com",         # lets Terraform list and enable services
-    "storage.googleapis.com",              # Cloud Build source uploads (gcloud builds submit); Terraform state lives in bootstrap's bucket
+    "storage.googleapis.com",              # Cloud Build source uploads; module phr's demo counter bucket (D16); Terraform state lives in bootstrap's bucket
   ]
 
   validation {
@@ -75,7 +77,7 @@ variable "enabled_apis" {
 
   validation {
     condition     = !contains(var.enabled_apis, "identitytoolkit.googleapis.com")
-    error_message = "identitytoolkit.googleapis.com (Identity Platform) must not be enabled: decision D9 uses a shared password checked by fhir-proxy instead."
+    error_message = "identitytoolkit.googleapis.com (Identity Platform) must not be enabled: decision D16 uses a reCAPTCHA bot check and a session cookie set by fhir-proxy instead."
   }
 }
 

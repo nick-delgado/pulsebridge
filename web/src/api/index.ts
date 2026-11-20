@@ -8,11 +8,13 @@
 import { proxyBaseUrl } from '../config';
 import type { PulseBridgeApi } from './contract';
 import { HttpClient } from './http-client';
-import type { Session } from './session';
 
+/** What the app gives the client: how to tell it a session ended, or a route asked to wait. */
 export interface ClientDeps {
-  session: Session;
+  /** A protected call got 401: return to the landing view. */
   onUnauthorized: () => void;
+  /** A protected call got 429: say how long to wait (seconds from `Retry-After`, or null). */
+  onRateLimited?: (retryAfterSeconds: number | null) => void;
 }
 
 export async function createClient(deps: ClientDeps): Promise<PulseBridgeApi> {
@@ -27,7 +29,8 @@ export async function createClient(deps: ClientDeps): Promise<PulseBridgeApi> {
     // `?mock-data=dst-new-york` picks the data set written in America/New_York, `?mock-data=hostile`
     // the one with markup in text from other systems; `?mock-audit=build|write` makes every cuff
     // send fail to record its AuditEvent; `?mock-lookup=`, `?mock-log=`, `?mock-status=` and
-    // `?mock-share=` reach the proxy's other states (mock-data.ts, `mockSwitchesFromSearch`).
+    // `?mock-share=` reach the proxy's other states, and `?mock-demo=`, `?mock-session-seconds=`
+    // and `?mock-throttle=` the demo-session outcomes (mock-data.ts, `mockSwitchesFromSearch`).
     return new MockClient({
       ...deps,
       dataSet: mockDataSetFromSearch(search),
@@ -39,5 +42,4 @@ export async function createClient(deps: ClientDeps): Promise<PulseBridgeApi> {
 }
 
 export type * from './contract';
-export { ApiError, LoginError, ShareError, UnauthorizedError } from './errors';
-export { Session } from './session';
+export { ApiError, SessionError, ShareError, UnauthorizedError } from './errors';

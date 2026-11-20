@@ -7,7 +7,6 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { CuffReadingRequest } from './contract';
 import { ApiError, CuffSendError } from './errors';
 import { HttpClient } from './http-client';
-import { Session } from './session';
 
 const ORIGIN = 'https://dashboard.example.test';
 
@@ -18,17 +17,11 @@ function json(status: number, body: unknown, headers: Record<string, string> = {
   });
 }
 
-let session: Session;
-beforeEach(() => {
-  sessionStorage.clear();
-  session = new Session(sessionStorage);
-  session.save({ token: 't', expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
-});
+beforeEach(() => {});
 
 function client(...responses: Response[]): HttpClient {
   return new HttpClient({
     baseUrl: '/api',
-    session,
     onUnauthorized: () => undefined,
     origin: ORIGIN,
     fetch: () => Promise.resolve(responses.shift() ?? json(200, {})),
@@ -480,13 +473,13 @@ describe('Retry-After', () => {
     expect((e as ApiError).retryAfterSeconds).toBe(expected);
   });
 
-  it('applies to the login route too', async () => {
+  it('applies to the session route too', async () => {
     const e: unknown = await client(json(429, {}, { 'Retry-After': '10abc' }))
-      .login('pw')
+      .startSession('token')
       .catch((x: unknown) => x);
     expect(e).toMatchObject({ reason: 'rate-limited', retryAfterSeconds: null });
     const ok: unknown = await client(json(429, {}, { 'Retry-After': '30' }))
-      .login('pw')
+      .startSession('token')
       .catch((x: unknown) => x);
     expect(ok).toMatchObject({ retryAfterSeconds: 30 });
   });

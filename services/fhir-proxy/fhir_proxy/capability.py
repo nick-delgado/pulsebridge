@@ -17,10 +17,17 @@ What it says, and why:
   running instance (``kind: instance``) and changes only when a new revision starts.
 - **Security, stated truthfully.** R4 ``rest.security.service`` is bound (extensibly) to
   ``restful-security-service``, whose codes are OAuth, SMART-on-FHIR, NTLM, Basic, Kerberos and
-  Certificates. None describes this login, so no code from that set is claimed (in particular
-  not SMART-on-FHIR): ``service`` carries only text, and ``description`` says what it is: a
-  shared demo password exchanged for an 8-hour bearer token (D9), with no per-user identity,
-  no scopes and no launch context. ``cors: true`` because the dashboard calls it cross-origin.
+  Certificates. None describes this access, so no code from that set is claimed (in particular
+  not SMART-on-FHIR): ``service`` carries only text, and ``description`` says what it is: an
+  anonymous demo session (D16), granted after a bot check and carried in a cookie, with no
+  user identity, no scopes and no launch context. ``cors: false`` (R4: "Server adds CORS
+  headers when responding to requests"): the page and the proxy share one origin, and the
+  proxy sends no CORS headers.
+- **The shown window** (T47): only the last ``HISTORY_DAYS`` days are visible. The ``date``
+  parameter's documentation says the server always adds ``ge<now - N days>`` and raises an
+  earlier lower bound to it (not an error), and the resource's documentation that a read of
+  anything older answers 404 like a missing resource. R4 has no element for "this server shows
+  a moving window", so it is stated in ``documentation``, the place R4 gives for such rules.
 - The dashboard's other routes are not FHIR interactions; ``rest.documentation`` lists them so
   the statement does not hide what else the server answers.
 """
@@ -51,13 +58,37 @@ SEARCH_PARAMETER_DEFINITIONS = {
 }
 
 
+def window_docs(history_days: int) -> tuple[str, str]:
+    """The window's wording: for the ``date`` parameter, and for the resource (T47)."""
+    days = f"{history_days} day" + ("" if history_days == 1 else "s")
+    on_date = (
+        f" Only the last {days} are shown: the server always adds the lower bound "
+        f"ge<now minus {days}> (computed on each request), and a requested lower bound that is "
+        "earlier is raised to it, not refused. By R4's rule a heart-rate window whose "
+        "effectivePeriod overlaps that boundary is included."
+    )
+    on_resource = (
+        f" Only Observations whose effective time lies in the last {days} are shown (a period "
+        "that ends at or after the boundary counts); a read of an older one answers 404 exactly "
+        "like a missing one. Nothing is deleted: the data stays in the store."
+    )
+    return on_date, on_resource
+
+
 def capability_statement(
-    routes: Iterable[Route], *, prefix: str, ttl_hours: float, software_version: str, date: str
+    routes: Iterable[Route],
+    *,
+    prefix: str,
+    ttl_hours: float,
+    software_version: str,
+    date: str,
+    history_days: int = 7,
 ) -> dict:
     routes = list(routes)
     fhir = [r for r in routes if r.kind == "fhir"]
     others = [r for r in routes if r.kind != "fhir"]
     resources: dict[str, dict] = {}
+    on_date, on_resource = window_docs(history_days)
     for route in fhir:
         if route.resource_type is None:
             continue
@@ -65,7 +96,7 @@ def capability_statement(
             route.resource_type,
             {
                 "type": route.resource_type,
-                "documentation": RESULT_PARAMETER_DOCS,
+                "documentation": RESULT_PARAMETER_DOCS + on_resource,
                 "interaction": [],
                 "searchParam": [],
             },
@@ -73,13 +104,14 @@ def capability_statement(
         entry["interaction"].append({"code": route.interaction})
         if route.interaction == "search-type":
             for name, kind in SEARCH_PARAMETERS.items():
-                param = {"name": name, "type": kind, "documentation": SEARCH_PARAMETER_DOCS[name]}
+                text = SEARCH_PARAMETER_DOCS[name] + (on_date if name == "date" else "")
+                param = {"name": name, "type": kind, "documentation": text}
                 if name in SEARCH_PARAMETER_DEFINITIONS:
                     param["definition"] = SEARCH_PARAMETER_DEFINITIONS[name]
                 entry["searchParam"].append(param)
     listing = "\n".join(
         f"- `{r.method} {prefix}{r.path}`: {r.summary}"
-        + (" (no session token needed)" if r.public else "")
+        + (" (no session needed)" if r.public else "")
         for r in others
     )
     hours = f"{ttl_hours:g}"
@@ -101,20 +133,23 @@ def capability_statement(
                 "documentation": "Besides the FHIR interactions below, this server answers these "
                 "JSON routes for the PulseBridge dashboard (not FHIR interactions):\n" + listing,
                 "security": {
-                    "cors": True,
+                    "cors": False,
                     "service": [
                         {
-                            "text": "Shared-password bearer token (PulseBridge reviewer login); "
-                            "not SMART on FHIR, not OAuth 2.0"
+                            "text": "Anonymous demo session after a bot check (PulseBridge, "
+                            "Google Cloud Fraud Defense); not SMART on FHIR, not OAuth 2.0"
                         }
                     ],
-                    "description": "Every request except POST "
-                    f"{prefix}/auth/login needs Authorization: Bearer <token>. The token comes "
-                    f"from POST {prefix}/auth/login with the one shared demo password, is an "
-                    "HS256 JWT "
-                    f"valid for {hours} hours, and carries no user identity, no scopes and no "
-                    "launch context. Changing the password ends every session. Every search is "
-                    "limited to the one configured patient.",
+                    "description": f"Every request except those under {prefix}/auth/ needs the "
+                    f"__session cookie, which POST {prefix}/auth/session sets after an "
+                    "invisible bot check (a reCAPTCHA score). The cookie holds an HS256 JWT "
+                    f"valid for {hours} hours that carries no user identity, no scopes and no "
+                    "launch context; Authorization headers are not accepted. Every POST must "
+                    "come from the dashboard's own origin (Origin header). Every search is "
+                    "limited to the one configured patient. Requests are rate limited per "
+                    "client address and per session (T46): a refusal is HTTP 429 with "
+                    "Retry-After in seconds and an OperationOutcome (issue code throttled, "
+                    "reason rate-limited).",
                 },
                 "resource": list(resources.values()),
             }
