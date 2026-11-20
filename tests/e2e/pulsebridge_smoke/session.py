@@ -25,9 +25,13 @@ what the key is (``fhir_proxy.signing_key``) is applied here too: the bytes, wit
 newline dropped when at least 32 bytes remain; fewer than 32 bytes is refused. The key is held
 in memory only, never printed, and its text forms are registered with the redactor.
 
-**The issuer** defaults to what module phr sets (``TOKEN_ISSUER =
-"pulsebridge-fhir-proxy:<project_id>:<name_prefix>"``, infra/modules/phr/fhir_proxy.tf), from the
-project and prefix the command already has; ``--token-issuer`` overrides it.
+**The issuer** is the proxy's ``TOKEN_ISSUER``, given to the command (``--token-issuer`` or
+``PULSEBRIDGE_TOKEN_ISSUER``, normally the stack's ``token_issuer`` Terraform output). It is
+never derived here: module phr builds it from the project and module identity's
+``name_prefix`` (``pulsebridge-fhir-proxy:<project_id>:<name_prefix>``), and the
+``name_prefix`` is not the secret name prefix (``secret_name_prefix`` is
+``identity_name_prefix``, ``pb`` by default, while ``name_prefix`` defaults to
+``pulsebridge``), so a derived issuer would be wrong on a default stack.
 """
 
 from __future__ import annotations
@@ -48,7 +52,6 @@ from pulsebridge_smoke.children import child_environment, gcloud_said
 MIN_KEY_BYTES = 32  # fhir_proxy.signing_key.MIN_KEY_BYTES
 MAX_KEY_BYTES = 1024
 TOKEN_LIFETIME_SECONDS = 900
-ISSUER_PREFIX = "pulsebridge-fhir-proxy"  # module phr: "pulsebridge-fhir-proxy:<project>:<prefix>"
 
 
 class SigningKeyError(Exception):
@@ -57,10 +60,6 @@ class SigningKeyError(Exception):
 
 def secret_name(prefix: str) -> str:
     return f"{prefix}-session-signing-key"
-
-
-def default_issuer(project: str, prefix: str) -> str:
-    return f"{ISSUER_PREFIX}:{project}:{prefix}"
 
 
 def key_from_secret_bytes(data: bytes) -> bytes:

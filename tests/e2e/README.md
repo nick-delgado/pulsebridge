@@ -42,27 +42,33 @@ creates it).
 # session); your gcloud account needs secretAccessor on <prefix>-session-signing-key.
 PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/dev output -raw dashboard_url)/api" \
 SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/dev output -raw secret_name_prefix)" \
+PULSEBRIDGE_TOKEN_ISSUER="$(terraform -chdir=infra/envs/dev output -raw token_issuer)" \
 make smoke
 ```
 
 `terraform output` reads the remote state with your Google credentials. Where that is not wanted
-(CLAUDE.md asks that `terraform` run without credentials outside an agreed apply), set the two
+(CLAUDE.md asks that `terraform` run without credentials outside an agreed apply), set the three
 variables yourself: the dashboard URL is the Hosting address reviewers open (for a default
-Hosting site `https://<hosting_site_id>.web.app`), and the prefix is module identity's
-`name_prefix` from your `terraform.tfvars`.
+Hosting site `https://<hosting_site_id>.web.app`); the secret prefix is module identity's
+`identity_name_prefix` (`pb` by default); and the issuer is
+`pulsebridge-fhir-proxy:<project_id>:<name_prefix>`, with `name_prefix` from your
+`terraform.tfvars` (`pulsebridge` by default), exactly as module phr sets the proxy's
+`TOKEN_ISSUER`. The two prefixes differ on a default stack, which is why the issuer is asked for
+rather than worked out from the secret prefix.
 
 | Variable | Needed for | Value |
 | --- | --- | --- |
 | `PULSEBRIDGE_BASE_URL` | always | `<dashboard_url>/api` (`https://` only; `http://` only for `localhost`) |
 | `CLOUDSDK_CORE_PROJECT` | always (the signing key); Part B | the project id |
-| `SECRET_NAME_PREFIX` | always (the signing key, and the token's issuer) | `terraform output -raw secret_name_prefix` |
+| `SECRET_NAME_PREFIX` | always (the signing key's name) | `terraform output -raw secret_name_prefix` |
+| `PULSEBRIDGE_TOKEN_ISSUER` | always (the token's `iss` and `aud`); or `--token-issuer` | `terraform output -raw token_issuer` (the proxy's `TOKEN_ISSUER`) |
 | `PULSEBRIDGE_HEALTH_SYNC_SERVICE` | Part B on a real-data stack | `terraform output -raw health_sync_service_name` |
 
 Flags (pass them through `SMOKE_ARGS="..."`): `--verbose` (one line per request: method, path,
 status, milliseconds), `--report-json <path>` (the results as JSON), `--fail-on-skip`,
 `--allow-real-data-writes`, `--sync-runs-from gcloud|<file>`, `--log-freshness 12h`,
 `--status-max-seconds 5`, `--poll-timeout 180`, `--transport mllp|https`, `--token-issuer`
-(default module phr's `pulsebridge-fhir-proxy:<project>:<prefix>`). `--help` lists them.
+(instead of `PULSEBRIDGE_TOKEN_ISSUER`; one of the two is required). `--help` lists them.
 
 **The session (D16).** The proxy has no password, and no way around its bot check: a visitor
 gets a session after an invisible reCAPTCHA check in a browser, which a command line cannot
@@ -74,7 +80,8 @@ the stack's signing key:
    raw bytes as base64 (gcloud's reference: plain output "can corrupt binary secrets"), so the
    key never goes through a file. It exists only in the smoke test's memory: never on a command
    line, in a file, in shell history or in another process's environment.
-2. An HS256 JWT with the proxy's claims (`iss` and `aud` the proxy's `TOKEN_ISSUER`, `iat`,
+2. An HS256 JWT with the proxy's claims (`iss` and `aud` the proxy's `TOKEN_ISSUER`, as given
+   in `PULSEBRIDGE_TOKEN_ISSUER`, `iat`,
    `exp` 15 minutes later, a random `jti`), built with the standard library
    (`pulsebridge_smoke/session.py`), not with the proxy's code: the check is that the deployed
    proxy accepts a standard token.
@@ -181,7 +188,7 @@ patient id). On a real-data stack without a log source, B2 and B3 `FAIL` with wh
 | --- | --- |
 | 0 | no check failed (skips are listed in the summary) |
 | 1 | a check failed, or a part stopped after a failure; an answer of an unexpected shape is a `FAIL` too (`X2`, naming only the exception's type), never a traceback |
-| 2 | configuration: no base URL (the message names `PULSEBRIDGE_BASE_URL`), no project or prefix, a signing key that cannot be read (with what to check and gcloud's own message) or is shorter than 32 bytes, a bad setting |
+| 2 | configuration: no base URL (the message names `PULSEBRIDGE_BASE_URL`), no project or prefix, no token issuer (the message names the `token_issuer` output), a signing key that cannot be read (with what to check and gcloud's own message) or is shorter than 32 bytes, a bad setting |
 | 3 | with `--fail-on-skip`: nothing failed, but something was skipped |
 
 ## What each run adds, and cleanup

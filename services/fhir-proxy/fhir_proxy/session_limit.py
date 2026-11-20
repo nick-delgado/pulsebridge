@@ -6,6 +6,8 @@ beyond the proxy's own CPU once that address has used its attempts.
 
 - **Every attempt counts**, a pass included: a visitor needs one session a day (the cookie lasts
   24 hours), so five attempts an hour leave room for a few failed checks and a second browser.
+  An attempt that ends in 503 (Fraud Defense or the counter unavailable) counts too: giving it
+  back would let a bot hammer freely for as long as an outage lasts.
   Counting only failures, as the old login limit did, would let a bot that passes the check
   mint sessions without limit.
 - **A sliding window of one hour.** An attempt is forgotten one hour after it was made; when an

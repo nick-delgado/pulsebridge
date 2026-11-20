@@ -13,9 +13,10 @@ import time
 from pathlib import Path
 
 import pytest
-from e2e_fake_stack import REAL_PATIENT, TOKEN_ISSUER, Stack, build_stack
+from e2e_fake_stack import REAL_PATIENT, SECRET_PREFIX, TOKEN_ISSUER, Stack, build_stack
 from e2e_runs import BASE, bp_component, edit_json, run
 from fhir_proxy.share.testing import FakeOpenEmr
+from fhir_proxy.testing import PROJECT
 from pulsebridge_smoke.first_sync import GcloudSyncRuns
 from pulsebridge_smoke.http import Response, TransportError
 from pulsebridge_smoke.session import SigningKeyError, secret_manager_signing_key
@@ -247,7 +248,29 @@ def test_a_key_the_stack_does_not_use_fails_the_session_and_stops(stack: Stack) 
 def test_a_wrong_issuer_fails_the_session(stack: Stack, signing_key: bytes) -> None:
     result = run(stack, signing_key, "--token-issuer", "pulsebridge-fhir-proxy")
     assert result.status_of("S1") == "FAIL"
-    assert "--token-issuer" in result.line_of("S1")
+    assert "PULSEBRIDGE_TOKEN_ISSUER" in result.line_of("S1")
+
+
+def test_an_issuer_built_from_the_secret_prefix_is_refused(
+    stack: Stack, signing_key: bytes
+) -> None:
+    # The review's finding: SECRET_NAME_PREFIX ("pb") is not module phr's name_prefix
+    # ("pulsebridge"), so an issuer derived from it must not be what the stack accepts.
+    derived = f"pulsebridge-fhir-proxy:{PROJECT}:{SECRET_PREFIX}"
+    assert derived != TOKEN_ISSUER
+    result = run(stack, signing_key, env={"PULSEBRIDGE_TOKEN_ISSUER": derived})
+    assert result.status_of("S1") == "FAIL"
+
+
+def test_the_flag_wins_over_the_environment(stack: Stack, signing_key: bytes) -> None:
+    result = run(
+        stack,
+        signing_key,
+        "--token-issuer",
+        TOKEN_ISSUER,
+        env={"PULSEBRIDGE_TOKEN_ISSUER": "pulsebridge-fhir-proxy:other:other"},
+    )
+    assert result.status_of("S1") == "PASS", result.text
 
 
 def test_a_junk_token_that_is_accepted_fails_s1b(stack: Stack, signing_key: bytes) -> None:
@@ -293,6 +316,12 @@ def test_a_broken_config_route_or_open_gate_fails(stack: Stack, signing_key: byt
         ({"CLOUDSDK_CORE_PROJECT": ""}, [], "no session: set CLOUDSDK_CORE_PROJECT and"),
         ({"SECRET_NAME_PREFIX": "PB; rm"}, [], "not a valid name prefix"),
         ({}, ["--token-issuer", "bad issuer"], "not a valid TOKEN_ISSUER"),
+        ({"PULSEBRIDGE_TOKEN_ISSUER": "bad issuer"}, [], "not a valid TOKEN_ISSUER"),
+        (
+            {"PULSEBRIDGE_TOKEN_ISSUER": ""},
+            [],
+            "terraform -chdir=infra/envs/<env> output -raw token_issuer",
+        ),
         ({}, ["--sync-runs-from", "gcloud"], "PULSEBRIDGE_HEALTH_SYNC_SERVICE"),
     ],
 )
@@ -361,7 +390,7 @@ def test_the_key_comes_from_secret_manager_with_the_callers_gcloud(
     assert result.code == 0, result.text
     (command, kwargs) = calls[0]
     assert command[:5] == ["gcloud", "secrets", "versions", "access", "latest"]
-    assert "--secret=pbe2e-session-signing-key" in command
+    assert "--secret=pb-session-signing-key" in command
     assert "--project=example-project" in command
     assert "--format=get(payload.data)" in command  # raw bytes survive, no file
     assert kwargs["capture_output"] is True  # stdout is captured, never printed
@@ -396,11 +425,11 @@ def test_an_unusable_key_is_a_clear_usage_error(stdout: str, message: str) -> No
 
 def test_an_unreadable_key_exits_2(stack: Stack) -> None:
     def failing(project: str, prefix: str) -> bytes:
-        raise SigningKeyError("could not read pbe2e-session-signing-key with gcloud (exit 1).")
+        raise SigningKeyError("could not read pb-session-signing-key with gcloud (exit 1).")
 
     result = run(stack, b"", key_reader=failing)
     assert result.code == 2
-    assert "could not read pbe2e-session-signing-key" in result.text
+    assert "could not read pb-session-signing-key" in result.text
     assert stack.transport.requests == []
 
 

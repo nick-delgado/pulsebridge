@@ -61,10 +61,14 @@ from pulsebridge_smoke.http import Response
 from v2_to_fhir.mapping import MappingConfig, map_message
 
 SYNTHETIC_PATIENT = "SYN-E2E-0001"
-# The deployment the smoke test is told about: module identity's name prefix, and the proxy's
-# TOKEN_ISSUER as module phr builds it from the project and the prefix.
-SECRET_PREFIX = "pbe2e"  # noqa: S105 - a name prefix, not a secret
-TOKEN_ISSUER = f"pulsebridge-fhir-proxy:{PROJECT}:{SECRET_PREFIX}"
+# The deployment the smoke test is told about, with the defaults' shape: the secret name prefix
+# (module identity's identity_name_prefix, the secret_name_prefix output, "pb" by default) is NOT
+# the name prefix module phr builds TOKEN_ISSUER from ("pulsebridge" by default). The issuer is
+# built here exactly as module phr builds it, so a smoke test that derived it from the secret
+# prefix would sign with the wrong issuer and fail S1.
+SECRET_PREFIX = "pb"  # noqa: S105 - a name prefix, not a secret
+NAME_PREFIX = "pulsebridge"
+TOKEN_ISSUER = f"pulsebridge-fhir-proxy:{PROJECT}:{NAME_PREFIX}"  # infra/modules/phr/fhir_proxy.tf
 REAL_PATIENT = "E2E-PERSON-0001"  # what a real-data stack's patient id looks like (no SYN-)
 
 SEGMENT = re.compile(rb"[A-Z][A-Z0-9]{2}")
@@ -301,4 +305,4 @@ def build_stack(
     return Stack(env, edge, transport, cuff_client, patient)
 
 
-__all__ = ["SECRET_PREFIX", "SIGNING_KEY", "TOKEN_ISSUER", "Stack", "build_stack"]
+__all__ = ["NAME_PREFIX", "SECRET_PREFIX", "SIGNING_KEY", "TOKEN_ISSUER", "Stack", "build_stack"]

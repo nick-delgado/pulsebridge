@@ -251,6 +251,20 @@ def test_failed_and_malformed_attempts_count_too(harness) -> None:
     assert harness.start_session(**xff).status_code == 429
 
 
+def test_attempts_that_end_in_an_outage_count_too(harness) -> None:
+    # On purpose (README, "Demo sessions"): refunding a 503 would let a bot hammer the proxy
+    # for as long as an outage lasts.
+    xff = {"X-Forwarded-For": "203.0.113.9"}
+    harness.fraud.failure = 503
+    for _ in range(3):
+        assert harness.start_session(**xff).status_code == 503
+    harness.bucket.fail_reads = 500
+    for _ in range(2):
+        assert harness.start_session(**xff).status_code == 503
+    harness.fraud.failure, harness.bucket.fail_reads = None, None
+    assert harness.start_session(**xff).status_code == 429
+
+
 def test_the_window_slides_and_retry_after_counts_down(harness) -> None:
     xff = {"X-Forwarded-For": "203.0.113.9"}
     for _ in range(5):

@@ -5,8 +5,8 @@ Configuration comes from flags or environment variables, never from the reposito
 - the front door: ``--base-url`` or ``PULSEBRIDGE_BASE_URL`` (``<dashboard_url>/api``);
 - the session: the signing key ``<SECRET_NAME_PREFIX>-session-signing-key`` in
   ``CLOUDSDK_CORE_PROJECT``, read with the caller's own ``gcloud``; the token is signed here
-  (:mod:`pulsebridge_smoke.session`); ``--token-issuer`` (default module phr's
-  ``pulsebridge-fhir-proxy:<project>:<prefix>``);
+  (:mod:`pulsebridge_smoke.session`) for the proxy's ``TOKEN_ISSUER``, which is required:
+  ``--token-issuer`` or ``PULSEBRIDGE_TOKEN_ISSUER`` (the stack's ``token_issuer`` output);
 - Part B's logs: ``--sync-runs-from gcloud`` (with ``PULSEBRIDGE_HEALTH_SYNC_SERVICE`` and
   ``CLOUDSDK_CORE_PROJECT``; the default when the service variable is set) or
   ``--sync-runs-from <file>``.
@@ -54,7 +54,6 @@ from pulsebridge_smoke.redact import Redactor
 from pulsebridge_smoke.report import EXIT_USAGE, Report, Status, Stop
 from pulsebridge_smoke.session import (
     SigningKeyError,
-    default_issuer,
     key_text_forms,
     secret_manager_signing_key,
     session_token,
@@ -78,8 +77,8 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--secret-prefix", help="secret name prefix (default SECRET_NAME_PREFIX)")
     p.add_argument(
         "--token-issuer",
-        help="the proxy's TOKEN_ISSUER (default module phr's "
-        "pulsebridge-fhir-proxy:<project>:<prefix>)",
+        help="the proxy's TOKEN_ISSUER, required (PULSEBRIDGE_TOKEN_ISSUER; "
+        "terraform output -raw token_issuer)",
     )
     p.add_argument(
         "--allow-real-data-writes",
@@ -147,9 +146,18 @@ def signing_settings(args: argparse.Namespace, env: Mapping[str, str]) -> tuple[
         raise UsageError("CLOUDSDK_CORE_PROJECT (or --project) is not a valid project id")
     if not PREFIX.fullmatch(prefix):
         raise UsageError("SECRET_NAME_PREFIX (or --secret-prefix) is not a valid name prefix")
-    issuer = args.token_issuer or default_issuer(project, prefix)
+    # Given, never derived: module phr builds it from module identity's name_prefix, which is
+    # not SECRET_NAME_PREFIX (pulsebridge_smoke.session, "The issuer").
+    issuer = args.token_issuer or env.get("PULSEBRIDGE_TOKEN_ISSUER", "")
+    if not issuer:
+        raise UsageError(
+            "no token issuer: set PULSEBRIDGE_TOKEN_ISSUER (or --token-issuer) to the proxy's "
+            "TOKEN_ISSUER, the stack's token_issuer output: "
+            'PULSEBRIDGE_TOKEN_ISSUER="$(terraform -chdir=infra/envs/<env> output -raw '
+            'token_issuer)"'
+        )
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", issuer):  # fhir_proxy.config's TOKEN_ISSUER
-        raise UsageError("--token-issuer is not a valid TOKEN_ISSUER")
+        raise UsageError("PULSEBRIDGE_TOKEN_ISSUER (or --token-issuer) is not a valid TOKEN_ISSUER")
     return project, prefix, issuer
 
 
@@ -213,7 +221,7 @@ def run_smoke(ctx: Context, token: str, source: SyncRunSource | None) -> Report:
             "the locally signed session is accepted (GET /fhir/metadata)",
             Status.FAIL,
             f"HTTP {metadata.status} (reason {problem_reason(metadata)}); expected 200. Check "
-            "that SECRET_NAME_PREFIX and --token-issuer match the stack",
+            "that SECRET_NAME_PREFIX and PULSEBRIDGE_TOKEN_ISSUER match the stack",
         )
         r.stop("the smoke test", "S1")
         return r

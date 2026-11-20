@@ -81,6 +81,6 @@ EXPOSE 8080
 # parallel; Cloud Run's per-instance concurrency is set to the same 8 by module phr), request
 # deadlines left to Cloud Run, and --preload: the app (and its configuration check) loads in the
 # master before the port opens, so a bad configuration exits before anything listens and Cloud
-# Run's startup probe fails. create_app() starts no thread before the fork (its thread pools start threads on first
-# use) and opens no connection (services/README.md, "Fork safety").
+# Run's startup probe fails. create_app() starts no thread before the fork (its thread pools
+# start threads on first use) and opens no connection (services/README.md, "Fork safety").
 CMD ["gunicorn", "--workers", "1", "--threads", "8", "--timeout", "0", "--preload", "fhir_proxy.app:create_app()"]

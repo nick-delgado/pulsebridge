@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from e2e_fake_stack import SECRET_PREFIX, Stack
+from e2e_fake_stack import SECRET_PREFIX, TOKEN_ISSUER, Stack
 from fhir_proxy.testing import PROJECT
 from pulsebridge_smoke.cli import main
 from pulsebridge_smoke.http import Response
@@ -59,6 +59,8 @@ def run(
         "PULSEBRIDGE_BASE_URL": BASE,
         "CLOUDSDK_CORE_PROJECT": PROJECT,
         "SECRET_NAME_PREFIX": SECRET_PREFIX,
+        # What an operator copies from `terraform output -raw token_issuer`.
+        "PULSEBRIDGE_TOKEN_ISSUER": TOKEN_ISSUER,
     }
     environment.update(env or {})
     kwargs.setdefault("key_reader", lambda _project, _prefix: signing_key)

@@ -201,9 +201,13 @@ Every step is cheaper than the next, so a flood of junk is refused before it cos
 2. **Per-address limit** (`session_limit.py`): `SESSIONS_PER_ADDRESS_PER_HOUR` (5) attempts per
    client address in a sliding hour, checked and recorded under one lock before the body is
    read. **Every attempt counts**, a pass included: counting only failures would let a bot that
-   passes mint sessions without limit, and a visitor needs one session a day. The next attempt
-   gets `429 rate-limited` with `Retry-After` (whole seconds until the oldest attempt ages
-   out). The address is the same key as D9's login limit (`client_address.py`, below), an IPv6
+   passes mint sessions without limit, and a visitor needs one session a day. That includes
+   attempts that end in `503` because Fraud Defense or the counter is unavailable, so a visitor
+   who keeps retrying during an outage can be held off for up to an hour after it ends. It is
+   kept that way on purpose: giving the attempt back on a 503 would let a bot hammer the proxy
+   freely for as long as an outage lasts, which is when every request is cheapest for it and
+   the logs are already busy. The next attempt gets `429 rate-limited` with `Retry-After`
+   (whole seconds until the oldest attempt ages out). The address is the same key as D9's login limit (`client_address.py`, below), an IPv6
    /64 counted as one. The table is capped at 10,000 addresses; only fully aged-out entries
    make room, so a flood of fresh addresses cannot evict an abuser's history (a new address is
    refused for 60 s while the table is full of live entries). In memory per process: the real
