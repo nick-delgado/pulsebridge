@@ -281,6 +281,34 @@ def test_tracing_an_older_attempt_is_like_tracing_a_missing_one(harness, patient
     assert harness.get(f"/trace/cuff-attempts/{new}").status_code == 200
 
 
+def test_an_attempt_inside_is_traced_without_an_older_observation(harness, map_into_store) -> None:
+    from fhir_proxy.testing import sample_bytes
+
+    name = f"{STORE_NAME}/messages/synthetic-message-0002"  # the HTTPS example's message name
+    data = sample_bytes("valid_bp_reading")  # OBX-14 2026-11-13T20:53:29Z
+    harness.fake.add_message(name, data, labels=map_into_store(name, data))
+    event = copy.deepcopy(example("auditevent-send-accepted.json"))
+    event["period"] = {"start": "2026-12-19T10:00:00+00:00", "end": "2026-12-19T10:00:01+00:00"}
+    event["recorded"] = "2026-12-19T10:00:01+00:00"
+    harness.fake.put(AUDIT_STORE, event)
+
+    def trace() -> dict:
+        response = harness.get(f"/trace/cuff-attempts/{event['id']}")
+        assert response.status_code == 200, response.get_data(as_text=True)
+        return response.get_json()
+
+    harness.clock.now = datetime(2026, 12, 19, 12, tzinfo=UTC)  # the reading is 36 days old
+    body = trace()
+    types = [e["resource"]["resourceType"] for e in body["resources"]["entry"]]
+    assert types == ["AuditEvent"]  # the attempt, but not the older Observation or Provenance
+    assert body["attempt"]["observation"] is None
+    assert body["messageSent"] == data.decode()  # the message itself is the attempt's
+    harness.clock.now = datetime(2026, 11, 14, 12, tzinfo=UTC)  # the reading is a day old
+    harness._session = None  # the clock went back: start a session valid at this time
+    types = [e["resource"]["resourceType"] for e in trace()["resources"]["entry"]]
+    assert types == ["AuditEvent", "Observation", "Provenance"]
+
+
 def test_an_older_unreadable_attempt_is_not_found_not_unreadable(harness, logs) -> None:
     def broken(rid: str, recorded: str) -> None:
         resource = copy.deepcopy(example("auditevent-send-rejected.json"))
