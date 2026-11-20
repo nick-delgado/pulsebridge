@@ -995,7 +995,7 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 | T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/`, and `tests/tooling/test_phr_service_config.py` (added 19 Nov) | done |
 | T45 | Dashboard: "View the live demo" | D16 | `web/` | done |
 | T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | done |
-| T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, and the minimum needed elsewhere in `web/` | in-progress |
+| T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, the minimum needed elsewhere in `web/`, and the one smoke break in `tests/e2e/test_smoke_breaks.py` that the window changes (added 20 Nov) | in-review (reviewed 20 Nov: approve with minor fixes; fixes under way) |
 | T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/` (beyond what T43 changed), service and module READMEs not owned above | todo |
 
 ### The contract T43 to T45 share
