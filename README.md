@@ -334,7 +334,8 @@ directory ([edge-vm README](infra/modules/edge-vm/README.md#first-initialisation
 
 Prod's first apply through CI followed on 18 November: the plan waited for approval, then the
 apply and the page deploy passed. On 19 November CI destroyed dev: nothing was left in its state,
-and the default Hosting site was then taken offline.
+and the default Hosting site was then taken offline. A day later the billing report showed no new
+charges for the dev project.
 
 **The public demo (D16, 19 to 20 November 2026)** replaced the reviewer password with the bot
 check, the session cookie, the rate limits and the 7-day window (tasks T43 to T48). It is built
@@ -345,8 +346,7 @@ client, and its rollout to prod has not happened yet.
 assessment call, the scores real browsers get, the page's Content-Security-Policy with Google's
 script, the cookie and the `Origin` header through Hosting, the counter with two instances, the
 limits on a normal visit, the 7-day searches against Cloud Healthcare, `make smoke` with its
-locally signed sessions: checklist rows P17 to P26); that dev's billing report shows no charges a
-day after the destroy, a forced slow cuff send, and a few inspections that need a shell on the
+locally signed sessions: checklist rows P17 to P26), a forced slow cuff send, and a few inspections that need a shell on the
 VM. The
 runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's result and
 lists what is still open. The demo is shown at the Firebase Hosting address of the prod project;

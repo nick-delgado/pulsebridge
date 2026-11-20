@@ -14,11 +14,11 @@ explained the first time it appears.
 > dev (alerts firing, patching, password rotation, CI) and a prod deploy with real watch data on
 > 18 November (Step 2, the connect script, health-sync) are recorded in the runbook too. dev was
 > torn down by CI's destroy on 19 November: nothing was left in its state, and what stays behind
-> matched the table in [Tearing it down](#tearing-it-down). Whether the billing report then shows
-> no charges is not yet verified on a real project (checked a day later). **The public demo**
+> matched the table in [Tearing it down](#tearing-it-down). A day later the billing report
+> showed no new charges for the project (checklist T4). **The public demo**
 > (decision D16, 19 November: no password, a bot check, a 24-hour session cookie, rate limits and
 > a 7-day window; [Step 4](#step-4-open-the-public-demo)) was built and tested offline after
-> those runs and has not been deployed yet: its first real run is the rollout to prod, and what
+> those runs and is not yet verified on a real project: its first real run is the rollout to prod, and what
 > only that can show is listed in the checklist (rows P17 to P26). The runbook's
 > [master checklist](../infra/envs/README.md#master-checklist) lists every assumption in the order
 > you will meet them and records what the dev run confirmed. If a step below does not behave as
@@ -252,7 +252,7 @@ deployments on one billing account, or change the machine type, and the VM is bi
    to stop every charge: `gcloud projects delete <project-id>` (Google keeps a deleted project
    recoverable for 30 days, then removes it).
 3. Watch the billing report for the project a day later: it should show no new charges (this is
-   checklist item [T4](../infra/envs/README.md#teardown-dev), not yet checked).
+   checklist item [T4](../infra/envs/README.md#teardown-dev), confirmed on dev on 20 November).
 
 ## Choose your data: synthetic or your own watch
 
