@@ -91,7 +91,10 @@ the stack's signing key:
    and 2 shares in any 10 minutes (T46, keyed on the token's `jti`), and counts every attempt,
    even one cuff-sim refuses. The run sends 4 (A1, then N1, N2 and N4) and shares twice (A10,
    A12), so before the negatives it signs a second token the same way, with a new `jti`: each
-   session stays inside its budget and the run does not wait ten minutes. The in-process stack
+   session stays inside its budget and the run does not wait ten minutes. A send refused with
+   `429` (cuff-sim's limit or the proxy's) is retried after its wait in another new session, for
+   the same reason: the refused attempt was counted
+   (`test_a_429_during_the_negatives_is_retried_in_a_fresh_session`). The in-process stack
    runs the proxy with those production limits, so a run that went over them fails `make test`
    (`test_no_session_goes_over_the_proxys_per_session_limits`).
 

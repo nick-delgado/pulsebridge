@@ -701,7 +701,7 @@ and 55 s each + 10 s ≤ 70 s (the proxy's request timeout)**.
   | --- | --- | --- |
   | `sessions_per_address_per_hour` (5) | `POST /auth/session` attempts per client address an hour | 10 |
   | `requests_per_address_per_minute` (300) | requests without a valid session per client address a minute | 600 |
-  | `reads_per_session_per_minute` (120) | `GET`/`HEAD` per demo session a minute | 240 |
+  | `reads_per_session_per_minute` (120) | a session's requests other than cuff sends and shares (every `GET`/`HEAD`, logout) a minute | 240 |
   | `cuff_sends_per_session_per_10_minutes` (3) | cuff readings per session in any 10 minutes | 6 |
   | `shares_per_session_per_10_minutes` (2) | shares to OpenEMR per session in any 10 minutes | 4 |
   | `shares_per_instance_per_hour` (30) | shares by all visitors together in any hour | 60 (accepted for D16's rollout) |

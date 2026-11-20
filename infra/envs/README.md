@@ -179,7 +179,7 @@ shows what the proxy gets.
 | `session_ttl_seconds` | 86400 | 300 to 86400 | how long a session lasts (24 hours) |
 | `sessions_per_address_per_hour` | 5 | 1 to 100 | bot-check attempts per client address an hour, checked before any assessment is made |
 | `requests_per_address_per_minute` | 300 | 60 to 6000 | requests without a valid session per client address a minute |
-| `reads_per_session_per_minute` | 120 | 60 to 1200 | reads per session a minute (the dashboard's busiest measured minute is 37) |
+| `reads_per_session_per_minute` | 120 | 60 to 1200 | a session's requests other than cuff sends and shares (every read, logout) a minute; the dashboard's busiest measured minute is 37 |
 | `cuff_sends_per_session_per_10_minutes` | 3 | 1 to 30 | cuff readings per session in any 10 minutes |
 | `shares_per_session_per_10_minutes` | 2 | 1 to 20 | shares to OpenEMR per session in any 10 minutes |
 | `shares_per_instance_per_hour` | 30 | 1 to 600 | shares by everyone together in any hour |

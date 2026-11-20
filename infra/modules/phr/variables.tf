@@ -584,7 +584,7 @@ variable "requests_per_address_per_minute" {
 }
 
 variable "reads_per_session_per_minute" {
-  description = "READS_PER_SESSION_PER_MINUTE: GET and HEAD requests one demo session may make in a minute (a token bucket keyed on the session token's jti). The dashboard's busiest measured minute is 37 (fhir-proxy README, \"Rate limits\"). Per proxy instance, so up to twice this with 2 instances. 120 (default). From 60 to 1200."
+  description = "READS_PER_SESSION_PER_MINUTE: the requests one demo session may make in a minute other than cuff sends and shares: every GET and HEAD, and its few other requests such as logout (a token bucket keyed on the session token's jti). The dashboard's busiest measured minute is 37 (fhir-proxy README, \"Rate limits\"). Per proxy instance, so up to twice this with 2 instances. 120 (default). From 60 to 1200."
   type        = number
   default     = 120
   nullable    = false

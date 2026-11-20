@@ -340,7 +340,7 @@ variable "requests_per_address_per_minute" {
 }
 
 variable "reads_per_session_per_minute" {
-  description = "fhir-proxy's READS_PER_SESSION_PER_MINUTE: GET and HEAD requests per demo session a minute, 60 to 1200. Per instance (up to twice this with 2 instances). null (default): module phr's 120."
+  description = "fhir-proxy's READS_PER_SESSION_PER_MINUTE: requests per demo session a minute other than cuff sends and shares (every GET and HEAD, and the few others such as logout), 60 to 1200. Per instance (up to twice this with 2 instances). null (default): module phr's 120."
   type        = number
   default     = null
 }

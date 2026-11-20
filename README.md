@@ -117,7 +117,7 @@ from 0.0, likely a bot, to 1.0, likely a person). On a pass the proxy sets a sig
 session cookie, `__session` (`HttpOnly`, `Secure`, `SameSite=Strict`, plus an `Origin` check on
 every write, against cross-site request forgery).
 
-- **Limits.** Per session: 120 reads a minute, 3 cuff sends and 2 shares in any 10 minutes;
+- **Limits.** Per session: 120 requests a minute other than cuff sends and shares (the reads), 3 cuff sends and 2 shares in any 10 minutes;
   30 shares an hour for everyone; 300 requests a minute per address without a session; 5
   bot-check attempts an hour per address. Each is kept in memory **per instance**, so with the
   proxy's two instances it is up to twice that. At most 300 bot checks a UTC day, counted in a

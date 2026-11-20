@@ -829,7 +829,7 @@ line "This site is protected by reCAPTCHA.", a link to the page's privacy note, 
    says "The demo is busy, try again tomorrow." The 300 keeps a month under the 10,000 free
    assessments ([What it costs](#what-it-costs-and-how-to-stop-paying)).
 
-**The rate limits.** A session may make 120 reads a minute, 3 cuff sends and 2 shares in any 10
+**The rate limits.** A session may make 120 requests a minute other than cuff sends and shares (its reads), 3 cuff sends and 2 shares in any 10
 minutes; everyone together 30 shares an hour; requests without a session are limited to 300 a
 minute per address. Above a limit the proxy answers `429` and the page says how long to wait,
 without logging the visitor out. These limits are counted **per instance** of `fhir-proxy`, in
