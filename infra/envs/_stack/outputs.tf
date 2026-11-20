@@ -188,7 +188,7 @@ output "next_steps" {
 }
 
 output "demo_settings" {
-  description = "The public demo's settings fhir-proxy gets (D16): recaptcha_min_score, session_ttl_seconds, sessions_per_address_per_hour, bot_checks_per_day (module phr's defaults where unset)."
+  description = "The public demo's settings fhir-proxy gets (D16): recaptcha_min_score, session_ttl_seconds, sessions_per_address_per_hour, bot_checks_per_day, T46's five rate limits and history_days (module phr's defaults where unset)."
   value       = module.phr.demo_settings
 }
 

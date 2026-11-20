@@ -266,23 +266,52 @@ run "demo_settings_follow_the_variables" {
     sessions_per_address_per_hour = 9
     bot_checks_per_day            = 120
     name_prefix                   = "pbx"
+    # T48: T46's limits and T47's window, each a value no default has, so a setting that
+    # ignored its variable (or was not passed at all) fails.
+    requests_per_address_per_minute       = 450
+    reads_per_session_per_minute          = 240
+    cuff_sends_per_session_per_10_minutes = 4
+    shares_per_session_per_10_minutes     = 1
+    shares_per_instance_per_hour          = 15
+    history_days                          = 14
   }
 
   assert {
     condition = {
       for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value
-      if contains(["RECAPTCHA_SITE_KEY", "RECAPTCHA_ACTION", "RECAPTCHA_MIN_SCORE", "SESSION_TTL_SECONDS", "SESSIONS_PER_ADDRESS_PER_HOUR", "BOT_CHECKS_PER_DAY", "DEMO_COUNTER_BUCKET", "SESSION_SIGNING_KEY_FILE"], e.name)
+      if contains(["RECAPTCHA_SITE_KEY", "RECAPTCHA_ACTION", "RECAPTCHA_MIN_SCORE", "SESSION_TTL_SECONDS", "SESSIONS_PER_ADDRESS_PER_HOUR", "BOT_CHECKS_PER_DAY", "DEMO_COUNTER_BUCKET", "SESSION_SIGNING_KEY_FILE", "REQUESTS_PER_ADDRESS_PER_MINUTE", "READS_PER_SESSION_PER_MINUTE", "CUFF_SENDS_PER_SESSION_PER_10_MINUTES", "SHARES_PER_SESSION_PER_10_MINUTES", "SHARES_PER_INSTANCE_PER_HOUR", "HISTORY_DAYS"], e.name)
       } == {
-      RECAPTCHA_SITE_KEY            = "synthetic-test-site-key-0000000000000000"
-      RECAPTCHA_ACTION              = "view_demo"
-      RECAPTCHA_MIN_SCORE           = "0.7"
-      SESSION_TTL_SECONDS           = "3600"
-      SESSIONS_PER_ADDRESS_PER_HOUR = "9"
-      BOT_CHECKS_PER_DAY            = "120"
-      DEMO_COUNTER_BUCKET           = "example-project-pbx-demo-counters"
-      SESSION_SIGNING_KEY_FILE      = "/secrets/session-signing-key/value"
+      RECAPTCHA_SITE_KEY                    = "synthetic-test-site-key-0000000000000000"
+      RECAPTCHA_ACTION                      = "view_demo"
+      RECAPTCHA_MIN_SCORE                   = "0.7"
+      SESSION_TTL_SECONDS                   = "3600"
+      SESSIONS_PER_ADDRESS_PER_HOUR         = "9"
+      BOT_CHECKS_PER_DAY                    = "120"
+      DEMO_COUNTER_BUCKET                   = "example-project-pbx-demo-counters"
+      SESSION_SIGNING_KEY_FILE              = "/secrets/session-signing-key/value"
+      REQUESTS_PER_ADDRESS_PER_MINUTE       = "450"
+      READS_PER_SESSION_PER_MINUTE          = "240"
+      CUFF_SENDS_PER_SESSION_PER_10_MINUTES = "4"
+      SHARES_PER_SESSION_PER_10_MINUTES     = "1"
+      SHARES_PER_INSTANCE_PER_HOUR          = "15"
+      HISTORY_DAYS                          = "14"
     }
     error_message = "Each demo setting must reach fhir-proxy under its contract name."
+  }
+  assert {
+    condition = output.demo_settings == {
+      recaptcha_min_score                   = 0.7
+      session_ttl_seconds                   = 3600
+      sessions_per_address_per_hour         = 9
+      bot_checks_per_day                    = 120
+      requests_per_address_per_minute       = 450
+      reads_per_session_per_minute          = 240
+      cuff_sends_per_session_per_10_minutes = 4
+      shares_per_session_per_10_minutes     = 1
+      shares_per_instance_per_hour          = 15
+      history_days                          = 14
+    }
+    error_message = "The demo_settings output must echo every setting, so _stack and the roots can test their pass-through."
   }
   # The removed password settings must not come back.
   assert {
@@ -342,6 +371,124 @@ run "fractional_bot_checks_refused" {
     bot_checks_per_day = 2.5
   }
   expect_failures = [var.bot_checks_per_day]
+}
+
+# T48: T46's limits and T47's window keep fhir-proxy's own ranges (config.py), so a value the
+# proxy would refuse at start is refused at plan. The edges themselves are accepted below.
+run "requests_per_address_per_minute_below_range_refused" {
+  command = plan
+  variables {
+    requests_per_address_per_minute = 59
+  }
+  expect_failures = [var.requests_per_address_per_minute]
+}
+
+run "requests_per_address_per_minute_above_range_refused" {
+  command = plan
+  variables {
+    requests_per_address_per_minute = 6001
+  }
+  expect_failures = [var.requests_per_address_per_minute]
+}
+
+run "reads_per_session_per_minute_below_range_refused" {
+  command = plan
+  variables {
+    reads_per_session_per_minute = 59
+  }
+  expect_failures = [var.reads_per_session_per_minute]
+}
+
+run "reads_per_session_per_minute_above_range_refused" {
+  command = plan
+  variables {
+    reads_per_session_per_minute = 1201
+  }
+  expect_failures = [var.reads_per_session_per_minute]
+}
+
+run "cuff_sends_per_session_per_10_minutes_below_range_refused" {
+  command = plan
+  variables {
+    cuff_sends_per_session_per_10_minutes = 0
+  }
+  expect_failures = [var.cuff_sends_per_session_per_10_minutes]
+}
+
+run "cuff_sends_per_session_per_10_minutes_above_range_refused" {
+  command = plan
+  variables {
+    cuff_sends_per_session_per_10_minutes = 31
+  }
+  expect_failures = [var.cuff_sends_per_session_per_10_minutes]
+}
+
+run "shares_per_session_per_10_minutes_below_range_refused" {
+  command = plan
+  variables {
+    shares_per_session_per_10_minutes = 0
+  }
+  expect_failures = [var.shares_per_session_per_10_minutes]
+}
+
+run "shares_per_session_per_10_minutes_above_range_refused" {
+  command = plan
+  variables {
+    shares_per_session_per_10_minutes = 21
+  }
+  expect_failures = [var.shares_per_session_per_10_minutes]
+}
+
+run "shares_per_instance_per_hour_below_range_refused" {
+  command = plan
+  variables {
+    shares_per_instance_per_hour = 0
+  }
+  expect_failures = [var.shares_per_instance_per_hour]
+}
+
+run "shares_per_instance_per_hour_above_range_refused" {
+  command = plan
+  variables {
+    shares_per_instance_per_hour = 601
+  }
+  expect_failures = [var.shares_per_instance_per_hour]
+}
+
+run "history_days_below_range_refused" {
+  command = plan
+  variables {
+    history_days = 0
+  }
+  expect_failures = [var.history_days]
+}
+
+run "history_days_above_range_refused" {
+  command = plan
+  variables {
+    history_days = 31
+  }
+  expect_failures = [var.history_days]
+}
+
+run "history_days_fractional_range_refused" {
+  command = plan
+  variables {
+    history_days = 7.5
+  }
+  expect_failures = [var.history_days]
+}
+
+run "proxy_setting_range_edges_accepted" {
+  command = plan
+  variables {
+    requests_per_address_per_minute       = 6000
+    reads_per_session_per_minute          = 60
+    cuff_sends_per_session_per_10_minutes = 30
+    shares_per_session_per_10_minutes     = 20
+    shares_per_instance_per_hour          = 1
+    history_days                          = 30
+  }
 }
 
 # A split Healthcare project would make every assessment go to the wrong project (the contract's

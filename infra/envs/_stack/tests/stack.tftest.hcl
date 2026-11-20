@@ -587,10 +587,16 @@ run "demo_settings_default_to_module_phr" {
 
   assert {
     condition = module.phr.demo_settings == {
-      recaptcha_min_score           = 0.5
-      session_ttl_seconds           = 86400
-      sessions_per_address_per_hour = 5
-      bot_checks_per_day            = 300
+      recaptcha_min_score                   = 0.5
+      session_ttl_seconds                   = 86400
+      sessions_per_address_per_hour         = 5
+      bot_checks_per_day                    = 300
+      requests_per_address_per_minute       = 300
+      reads_per_session_per_minute          = 120
+      cuff_sends_per_session_per_10_minutes = 3
+      shares_per_session_per_10_minutes     = 2
+      shares_per_instance_per_hour          = 30
+      history_days                          = 7
     }
     error_message = "Unset (null) demo settings must give module phr's defaults."
   }
@@ -600,18 +606,30 @@ run "demo_settings_reach_module_phr" {
   command = plan
 
   variables {
-    recaptcha_min_score           = 0.7
-    bot_checks_per_day            = 120
-    session_ttl_seconds           = 3600
-    sessions_per_address_per_hour = 9
+    recaptcha_min_score                   = 0.7
+    bot_checks_per_day                    = 120
+    session_ttl_seconds                   = 3600
+    sessions_per_address_per_hour         = 9
+    requests_per_address_per_minute       = 450
+    reads_per_session_per_minute          = 240
+    cuff_sends_per_session_per_10_minutes = 4
+    shares_per_session_per_10_minutes     = 1
+    shares_per_instance_per_hour          = 15
+    history_days                          = 14
   }
 
   assert {
     condition = module.phr.demo_settings == {
-      recaptcha_min_score           = 0.7
-      session_ttl_seconds           = 3600
-      sessions_per_address_per_hour = 9
-      bot_checks_per_day            = 120
+      recaptcha_min_score                   = 0.7
+      session_ttl_seconds                   = 3600
+      sessions_per_address_per_hour         = 9
+      bot_checks_per_day                    = 120
+      requests_per_address_per_minute       = 450
+      reads_per_session_per_minute          = 240
+      cuff_sends_per_session_per_10_minutes = 4
+      shares_per_session_per_10_minutes     = 1
+      shares_per_instance_per_hour          = 15
+      history_days                          = 14
     }
     error_message = "Each demo setting set at the stack must reach module phr."
   }

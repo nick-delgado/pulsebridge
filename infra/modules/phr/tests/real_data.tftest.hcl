@@ -346,6 +346,13 @@ run "fhir_proxy_environment" {
       SESSIONS_PER_ADDRESS_PER_HOUR = "5"
       BOT_CHECKS_PER_DAY            = "300"
       DEMO_COUNTER_BUCKET           = "example-project-pulsebridge-demo-counters"
+      # T46's rate limits and T47's window, at fhir-proxy's own defaults (T48).
+      REQUESTS_PER_ADDRESS_PER_MINUTE       = "300"
+      READS_PER_SESSION_PER_MINUTE          = "120"
+      CUFF_SENDS_PER_SESSION_PER_10_MINUTES = "3"
+      SHARES_PER_SESSION_PER_10_MINUTES     = "2"
+      SHARES_PER_INSTANCE_PER_HOUR          = "30"
+      HISTORY_DAYS                          = "7"
     }
     error_message = "fhir-proxy must get exactly the environment its README lists for T22, plus the demo settings of the T43 to T45 contract (D16)."
   }
