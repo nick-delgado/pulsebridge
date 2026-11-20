@@ -67,13 +67,15 @@ def test_search_parameters_equal_what_the_validator_accepts(harness) -> None:
 
 def test_security_is_stated_truthfully(harness) -> None:
     security = _statement(harness)["rest"][0]["security"]
-    assert security["cors"] is True
+    assert security["cors"] is False  # same origin, no CORS headers
     service = security["service"]
     # No code from restful-security-service is claimed, SMART-on-FHIR least of all.
     assert all("coding" not in s for s in service)
     assert "not SMART on FHIR" in service[0]["text"]
-    assert "shared demo password" in security["description"]
-    assert "8 hours" in security["description"]
+    assert "bot check" in security["description"]
+    assert "__session cookie" in security["description"]
+    assert "24 hours" in security["description"]
+    assert "password" not in str(security).lower()
     assert "SMART-on-FHIR" not in str(_statement(harness))
 
 
@@ -88,14 +90,15 @@ def test_result_parameters_are_not_search_params_and_the_date_is_the_start_date(
     assert statement["date"] == datetime.now(UTC).date().isoformat()
 
 
-def test_both_login_mentions_carry_the_prefix(tmp_path) -> None:
+def test_the_session_mentions_carry_the_prefix(tmp_path) -> None:
     from fhir_proxy.testing import build_harness
 
     h = build_harness(tmp_path, path_prefix="/api")
-    token = h.client.post("/api/auth/login", json={"password": h.password_file.read_text().strip()})
-    auth = {"Authorization": f"Bearer {token.get_json()['token']}"}
-    description = h.client.get("/api/fhir/metadata", headers=auth).get_json()["rest"][0][
-        "security"
-    ]["description"]
-    assert description.count("/api/auth/login") == 2
-    assert " /auth/login" not in description
+    statement = h.client.get("/api/fhir/metadata", headers=h.auth()).get_json()["rest"][0]
+    description = statement["security"]["description"]
+    assert "/api/auth/session" in description and "/api/auth/" in description
+    assert " /auth/" not in description
+    # The three session routes are listed as the ones that need no session.
+    for path in ("/api/auth/config", "/api/auth/session", "/api/auth/logout"):
+        assert f"{path}`" in statement["documentation"]
+    assert statement["documentation"].count("(no session needed)") == 3

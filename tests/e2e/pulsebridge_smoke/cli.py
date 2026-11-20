@@ -3,20 +3,23 @@
 Configuration comes from flags or environment variables, never from the repository:
 
 - the front door: ``--base-url`` or ``PULSEBRIDGE_BASE_URL`` (``<dashboard_url>/api``);
-- the password: ``--password-source env`` reads ``PULSEBRIDGE_REVIEWER_PASSWORD``;
-  ``--password-source secret-manager`` reads ``<SECRET_NAME_PREFIX>-reviewer-password`` in
-  ``CLOUDSDK_CORE_PROJECT`` with ``gcloud``; ``auto`` (the default) takes the variable when it is
-  set, else Secret Manager;
+- the session: the signing key ``<SECRET_NAME_PREFIX>-session-signing-key`` in
+  ``CLOUDSDK_CORE_PROJECT``, read with the caller's own ``gcloud``; the token is signed here
+  (:mod:`pulsebridge_smoke.session`) for the proxy's ``TOKEN_ISSUER``, which is required:
+  ``--token-issuer`` or ``PULSEBRIDGE_TOKEN_ISSUER`` (the stack's ``token_issuer`` output);
 - Part B's logs: ``--sync-runs-from gcloud`` (with ``PULSEBRIDGE_HEALTH_SYNC_SERVICE`` and
   ``CLOUDSDK_CORE_PROJECT``; the default when the service variable is set) or
   ``--sync-runs-from <file>``.
 
-**Why the password is read from Secret Manager by default.** The proxy's password lives only
-in Secret Manager (``<prefix>-reviewer-password``). Reading it here, with the caller's own
-``gcloud`` credentials, keeps it in this process's memory only: it is never on a command line,
-in the environment of other processes, in shell history, or in a file. An environment variable
-is accepted too (CI, or a runner without ``gcloud``), but then it is in the environment of every
-child of that shell. Either way it is registered with the redactor before it is used.
+**Why the session is signed here (D16).** The proxy has no password and no bot-check bypass: a
+visitor's session comes from a browser bot check a command line cannot pass. The proxy signs a
+passed visitor's token with the key in Secret Manager; the smoke test, run by an operator who
+may read that key, signs its own the same way. The key is read with the caller's own ``gcloud``
+credentials and kept in this process's memory only: never on a command line, in the
+environment, in shell history or in a file. It and the token are registered with the redactor
+before they are used. The session routes are still checked: ``GET /auth/config`` answers, and
+``POST /auth/session`` refuses a junk token with ``403 bot-check-failed`` (which costs the stack
+one assessment of its daily cap).
 """
 
 from __future__ import annotations
@@ -25,11 +28,11 @@ import argparse
 import json
 import os
 import re
-import subprocess
+import secrets
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 
-from pulsebridge_smoke.children import PASSWORD_ENV, child_environment, gcloud_said
 from pulsebridge_smoke.cuff_path import Context, Settings, check_status, guard, run_part_a
 from pulsebridge_smoke.first_sync import (
     PROJECT_ID,
@@ -40,65 +43,27 @@ from pulsebridge_smoke.first_sync import (
 )
 from pulsebridge_smoke.http import (
     ApiClient,
-    LoginFailed,
     Transport,
     TransportError,
     UrllibTransport,
     check_base_url,
+    origin_of,
+    problem_reason,
 )
 from pulsebridge_smoke.redact import Redactor
 from pulsebridge_smoke.report import EXIT_USAGE, Report, Status, Stop
+from pulsebridge_smoke.session import (
+    SigningKeyError,
+    key_text_forms,
+    secret_manager_signing_key,
+    session_token,
+)
 
 PREFIX = re.compile(r"[a-z]([a-z0-9-]{0,10}[a-z0-9])?")  # module identity's name_prefix rule
 
 
 class UsageError(Exception):
     pass
-
-
-def secret_manager_password(
-    project: str, prefix: str, run: Callable[..., subprocess.CompletedProcess] = subprocess.run
-) -> str:
-    """``gcloud secrets versions access latest`` for ``<prefix>-reviewer-password``, with the
-    caller's own credentials (``roles/secretmanager.secretAccessor`` on that secret, or Owner).
-    The value is returned to the caller only; stdout is never printed."""
-    if not PROJECT_ID.fullmatch(project):
-        raise UsageError("CLOUDSDK_CORE_PROJECT (or --project) is not a valid project id")
-    if not PREFIX.fullmatch(prefix):
-        raise UsageError("SECRET_NAME_PREFIX (or --secret-prefix) is not a valid name prefix")
-    try:
-        done = run(
-            [
-                "gcloud",
-                "secrets",
-                "versions",
-                "access",
-                "latest",
-                f"--secret={prefix}-reviewer-password",
-                f"--project={project}",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-            env=child_environment(),
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise UsageError(f"gcloud did not run ({type(exc).__name__})") from None
-    if done.returncode != 0:
-        # stderr of a failed access holds no secret (there was no value to print); it is
-        # redacted again when printed.
-        raise UsageError(
-            f"could not read {prefix}-reviewer-password with gcloud (exit {done.returncode}). "
-            "Check that gcloud is logged in as you (gcloud auth list), that "
-            "CLOUDSDK_CORE_PROJECT is the stack's project, that SECRET_NAME_PREFIX is its "
-            "secret_name_prefix output, and that your account may access the secret "
-            "(roles/secretmanager.secretAccessor). " + gcloud_said(done.stderr)
-        )
-    password = (done.stdout or "").rstrip("\r\n")  # the proxy drops a trailing newline too
-    if not password:
-        raise UsageError(f"{prefix}-reviewer-password has an empty latest version")
-    return password
 
 
 def parser() -> argparse.ArgumentParser:
@@ -108,14 +73,13 @@ def parser() -> argparse.ArgumentParser:
         "See tests/e2e/README.md.",
     )
     p.add_argument("--base-url", help="front door, <dashboard_url>/api (PULSEBRIDGE_BASE_URL)")
-    p.add_argument(
-        "--password-source",
-        choices=("auto", "env", "secret-manager"),
-        default="auto",
-        help=f"auto: {PASSWORD_ENV} if set, else Secret Manager",
-    )
     p.add_argument("--project", help="project for gcloud (default CLOUDSDK_CORE_PROJECT)")
     p.add_argument("--secret-prefix", help="secret name prefix (default SECRET_NAME_PREFIX)")
+    p.add_argument(
+        "--token-issuer",
+        help="the proxy's TOKEN_ISSUER, required (PULSEBRIDGE_TOKEN_ISSUER; "
+        "terraform output -raw token_issuer)",
+    )
     p.add_argument(
         "--allow-real-data-writes",
         action="store_true",
@@ -169,51 +133,99 @@ def front_door(args: argparse.Namespace, env: Mapping[str, str]) -> str:
         raise UsageError(f"PULSEBRIDGE_BASE_URL: {exc}") from None
 
 
-MIN_PASSWORD = 4  # the redactor's floor; T27's script sets at least 16 characters
-
-
-def password_from(
-    args: argparse.Namespace,
-    env: Mapping[str, str],
-    secret_reader: Callable[[str, str], str],
-) -> str:
-    source = args.password_source
-    if source == "auto":
-        source = "env" if env.get(PASSWORD_ENV) else "secret-manager"
-    if source == "env":
-        if not env.get(PASSWORD_ENV):
-            raise UsageError(f"{PASSWORD_ENV} is not set")
-        return _long_enough(env[PASSWORD_ENV], PASSWORD_ENV)
+def signing_settings(args: argparse.Namespace, env: Mapping[str, str]) -> tuple[str, str, str]:
+    """The project, the secret prefix and the token issuer, checked."""
     project = args.project or env.get("CLOUDSDK_CORE_PROJECT", "")
     prefix = args.secret_prefix or env.get("SECRET_NAME_PREFIX", "")
     if not project or not prefix:
         raise UsageError(
-            f"no password: set {PASSWORD_ENV}, or CLOUDSDK_CORE_PROJECT and SECRET_NAME_PREFIX "
-            "to read it from Secret Manager"
+            "no session: set CLOUDSDK_CORE_PROJECT and SECRET_NAME_PREFIX (or --project and "
+            "--secret-prefix) so the signing key can be read from Secret Manager"
         )
-    return _long_enough(secret_reader(project, prefix), f"{prefix}-reviewer-password")
-
-
-def _long_enough(password: str, where: str) -> str:
-    if len(password) < MIN_PASSWORD:
+    if not PROJECT_ID.fullmatch(project):
+        raise UsageError("CLOUDSDK_CORE_PROJECT (or --project) is not a valid project id")
+    if not PREFIX.fullmatch(prefix):
+        raise UsageError("SECRET_NAME_PREFIX (or --secret-prefix) is not a valid name prefix")
+    # Given, never derived: module phr builds it from module identity's name_prefix, which is
+    # not SECRET_NAME_PREFIX (pulsebridge_smoke.session, "The issuer").
+    issuer = args.token_issuer or env.get("PULSEBRIDGE_TOKEN_ISSUER", "")
+    if not issuer:
         raise UsageError(
-            f"the password from {where} is shorter than {MIN_PASSWORD} characters, so it cannot "
-            "be the stack's reviewer password (scripts/secrets/set-reviewer-password.sh sets at "
-            "least 16)"
+            "no token issuer: set PULSEBRIDGE_TOKEN_ISSUER (or --token-issuer) to the proxy's "
+            "TOKEN_ISSUER, the stack's token_issuer output: "
+            'PULSEBRIDGE_TOKEN_ISSUER="$(terraform -chdir=infra/envs/<env> output -raw '
+            'token_issuer)"'
         )
-    return password
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,100}", issuer):  # fhir_proxy.config's TOKEN_ISSUER
+        raise UsageError("PULSEBRIDGE_TOKEN_ISSUER (or --token-issuer) is not a valid TOKEN_ISSUER")
+    return project, prefix, issuer
 
 
-def run_smoke(ctx: Context, password: str, source: SyncRunSource | None) -> Report:
-    """Everything after configuration: login, status, Part B, Part A."""
+# A token-shaped value no browser made: the proxy must refuse it after an assessment.
+JUNK_TOKEN_PREFIX = "pulsebridge-smoke-not-a-recaptcha-token-"  # noqa: S105 - not a secret
+
+
+def check_session_routes(ctx: Context) -> None:
+    """S1a to S1c: the session routes and the gate answer as the contract says (D16)."""
+    r, api = ctx.report, ctx.api
+    config = api.call("GET", "/auth/config", with_session=False)
+    body = config.json()
+    fields = ("recaptcha_site_key", "recaptcha_action")
+    if (
+        config.status == 200
+        and isinstance(body, dict)
+        and all(isinstance(body.get(f), str) and body[f] for f in fields)
+    ):
+        r.record("S1a", "GET /auth/config gives the bot check's site key and action", Status.PASS)
+    else:
+        r.record(
+            "S1a",
+            "GET /auth/config gives the bot check's site key and action",
+            Status.FAIL,
+            f"HTTP {config.status} (reason {problem_reason(config)}); expected 200 with "
+            "recaptcha_site_key and recaptcha_action",
+        )
+    junk = JUNK_TOKEN_PREFIX + secrets.token_urlsafe(16)
+    refused = api.call("POST", "/auth/session", {"recaptcha_token": junk}, with_session=False)
+    reason = problem_reason(refused)
+    name = "POST /auth/session refuses a token no browser made (403 bot-check-failed)"
+    if refused.status == 403 and reason == "bot-check-failed":
+        r.record("S1b", name, Status.PASS)
+    elif (refused.status, reason) in ((429, "rate-limited"), (503, "demo-busy")):
+        r.record("S1b", name, Status.SKIP, f"skipped: the proxy answered {reason} first")
+    else:
+        r.record("S1b", name, Status.FAIL, f"HTTP {refused.status} (reason {reason}); expected 403")
+    gate = api.call("GET", "/fhir/metadata", with_session=False)
+    name = "without the cookie, GET /fhir/metadata is 401 session-required"
+    if gate.status == 401 and problem_reason(gate) == "session-required":
+        r.record("S1c", name, Status.PASS)
+    else:
+        r.record(
+            "S1c",
+            name,
+            Status.FAIL,
+            f"HTTP {gate.status} (reason {problem_reason(gate)}); expected 401",
+        )
+
+
+def run_smoke(ctx: Context, token: str, source: SyncRunSource | None) -> Report:
+    """Everything after configuration: the session routes, the session, status, Part B,
+    Part A."""
     r = ctx.report
-    try:
-        ctx.api.login(password)
-    except LoginFailed as exc:
-        r.record("S1", "reviewer login", Status.FAIL, str(exc))
+    check_session_routes(ctx)
+    ctx.api.use_session(token)
+    metadata = ctx.api.call("GET", "/fhir/metadata")
+    if metadata.status != 200:
+        r.record(
+            "S1",
+            "the locally signed session is accepted (GET /fhir/metadata)",
+            Status.FAIL,
+            f"HTTP {metadata.status} (reason {problem_reason(metadata)}); expected 200. Check "
+            "that SECRET_NAME_PREFIX and PULSEBRIDGE_TOKEN_ISSUER match the stack",
+        )
         r.stop("the smoke test", "S1")
         return r
-    r.record("S1", "reviewer login", Status.PASS)
+    r.record("S1", "the locally signed session is accepted (GET /fhir/metadata)", Status.PASS)
     try:
         facts = check_status(ctx)
         may_write = guard(ctx, facts)
@@ -238,7 +250,8 @@ def main(
     *,
     env: Mapping[str, str] | None = None,
     transport: Transport | None = None,
-    secret_reader: Callable[[str, str], str] = secret_manager_password,
+    key_reader: Callable[[str, str], bytes] = secret_manager_signing_key,
+    clock: Callable[[], datetime] | None = None,
     out: Callable[[str], None] | None = None,
     sleep: Callable[[float], None] | None = None,
 ) -> int:
@@ -253,9 +266,13 @@ def main(
     try:
         base_url = front_door(args, env)
         source = sync_source(args, env)
-        password = password_from(args, env, secret_reader)
-        redact.add(password)
-    except (UsageError, ValueError) as exc:
+        project, prefix, issuer = signing_settings(args, env)
+        key = key_reader(project, prefix)
+        for form in key_text_forms(key):
+            redact.add(form)
+        token = session_token(key, issuer, now=clock() if clock else None)
+        redact.add(token)
+    except (UsageError, SigningKeyError, ValueError) as exc:
         emit(f"smoke: {exc}")
         return EXIT_USAGE
     settings = Settings(
@@ -267,14 +284,17 @@ def main(
     )
     report = Report(out=emit, redact=redact)
     api = ApiClient(
-        transport or UrllibTransport(base_url), redact, log=emit if args.verbose else None
+        transport or UrllibTransport(base_url),
+        redact,
+        log=emit if args.verbose else None,
+        origin=origin_of(base_url),
     )
     ctx = Context(api, report, settings)
     if sleep is not None:
         ctx.sleep = sleep
     emit(f"PulseBridge smoke test against {base_url}")
     try:
-        run_smoke(ctx, password, source)
+        run_smoke(ctx, token, source)
     except TransportError as exc:
         report.record("X1", "the front door answers", Status.FAIL, str(exc))
     except Exception as exc:  # noqa: BLE001 - last resort: a FAIL with exit 1, never a traceback

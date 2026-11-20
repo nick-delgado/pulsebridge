@@ -17,10 +17,12 @@ What it says, and why:
   running instance (``kind: instance``) and changes only when a new revision starts.
 - **Security, stated truthfully.** R4 ``rest.security.service`` is bound (extensibly) to
   ``restful-security-service``, whose codes are OAuth, SMART-on-FHIR, NTLM, Basic, Kerberos and
-  Certificates. None describes this login, so no code from that set is claimed (in particular
-  not SMART-on-FHIR): ``service`` carries only text, and ``description`` says what it is: a
-  shared demo password exchanged for an 8-hour bearer token (D9), with no per-user identity,
-  no scopes and no launch context. ``cors: true`` because the dashboard calls it cross-origin.
+  Certificates. None describes this access, so no code from that set is claimed (in particular
+  not SMART-on-FHIR): ``service`` carries only text, and ``description`` says what it is: an
+  anonymous demo session (D16), granted after a bot check and carried in a cookie, with no
+  user identity, no scopes and no launch context. ``cors: false`` (R4: "Server adds CORS
+  headers when responding to requests"): the page and the proxy share one origin, and the
+  proxy sends no CORS headers.
 - The dashboard's other routes are not FHIR interactions; ``rest.documentation`` lists them so
   the statement does not hide what else the server answers.
 """
@@ -79,7 +81,7 @@ def capability_statement(
                 entry["searchParam"].append(param)
     listing = "\n".join(
         f"- `{r.method} {prefix}{r.path}`: {r.summary}"
-        + (" (no session token needed)" if r.public else "")
+        + (" (no session needed)" if r.public else "")
         for r in others
     )
     hours = f"{ttl_hours:g}"
@@ -101,19 +103,19 @@ def capability_statement(
                 "documentation": "Besides the FHIR interactions below, this server answers these "
                 "JSON routes for the PulseBridge dashboard (not FHIR interactions):\n" + listing,
                 "security": {
-                    "cors": True,
+                    "cors": False,
                     "service": [
                         {
-                            "text": "Shared-password bearer token (PulseBridge reviewer login); "
-                            "not SMART on FHIR, not OAuth 2.0"
+                            "text": "Anonymous demo session after a bot check (PulseBridge, "
+                            "Google Cloud Fraud Defense); not SMART on FHIR, not OAuth 2.0"
                         }
                     ],
-                    "description": "Every request except POST "
-                    f"{prefix}/auth/login needs Authorization: Bearer <token>. The token comes "
-                    f"from POST {prefix}/auth/login with the one shared demo password, is an "
-                    "HS256 JWT "
-                    f"valid for {hours} hours, and carries no user identity, no scopes and no "
-                    "launch context. Changing the password ends every session. Every search is "
+                    "description": f"Every request except those under {prefix}/auth/ needs the "
+                    f"__session cookie, which POST {prefix}/auth/session sets after an "
+                    "invisible bot check (a reCAPTCHA score). The cookie holds an HS256 JWT "
+                    f"valid for {hours} hours that carries no user identity, no scopes and no "
+                    "launch context; Authorization headers are not accepted. Every POST must "
+                    "come from the dashboard's own origin (Origin header). Every search is "
                     "limited to the one configured patient.",
                 },
                 "resource": list(resources.values()),

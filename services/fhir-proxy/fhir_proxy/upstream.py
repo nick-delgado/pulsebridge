@@ -3,7 +3,7 @@
 Neither allows unauthenticated calls. Cloud Run checks an OIDC **identity token** before a
 request reaches the container: a Google-signed JWT whose ``aud`` is the receiving service's URL,
 issued to the proxy's own service account, which T22 gives ``roles/run.invoker`` on both. The
-proxy never forwards the reviewer's session token; it attaches its own identity.
+proxy never forwards the visitor's session cookie; it attaches its own identity.
 
 Token minting is behind :class:`IdTokenSource` so tests use a fake: no metadata server, no
 credentials. In production :class:`GoogleIdTokens` asks the metadata server through
@@ -12,7 +12,8 @@ it when it expires (Google's ID tokens last an hour).
 
 **Forwarding a cuff request** (D10, cuff-sim's README):
 
-- only after the proxy's own login check (the route is behind the token check like every other);
+- only after the proxy's own session check (the route is behind the cookie check like every
+  other, and as a ``POST`` it needs an allowed ``Origin``);
 - the body bytes go **unchanged** (cuff-sim refuses unknown fields itself, so nothing is
   stripped or added here), with ``Content-Type`` only when the caller sent a JSON type;
 - cuff-sim's status, body and ``Retry-After`` come back unchanged for 200, 400, 413, 422, 429 and

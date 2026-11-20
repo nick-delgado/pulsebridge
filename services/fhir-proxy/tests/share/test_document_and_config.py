@@ -20,10 +20,12 @@ BASE_ENV = {
     "AUDIT_FHIR_STORE_ID": "audit",
     "HL7V2_STORE_ID": "example-store",
     "PATIENT_ID": "PB-SYN-0001",
-    "REVIEWER_PASSWORD_FILE": "/secrets/reviewer-password",
+    "SESSION_SIGNING_KEY_FILE": "/secrets/session-signing-key/value",
     "ALLOWED_ORIGINS": "https://dashboard.example.test",
     "CUFF_SIM_URL": "https://cuff-sim.example.test",
     "PUBLIC_BASE_URL": "https://proxy.example.test",
+    "RECAPTCHA_SITE_KEY": "synthetic-site-key-0000000000000000000000",
+    "DEMO_COUNTER_BUCKET": "example-demo-counters",
 }
 OPENEMR_ENV = {
     "OPENEMR_SITE_ADDRESS": "https://10.10.0.2",

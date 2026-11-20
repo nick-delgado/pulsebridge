@@ -1,9 +1,11 @@
 """What the smoke test passes to the ``gcloud`` commands it runs, and what it shows of them.
 
 **The child's environment.** ``gcloud`` needs the caller's own environment (``PATH``, its
-configuration directory, the proxy settings, ``CLOUDSDK_*``), but never the reviewer password:
-when ``PULSEBRIDGE_REVIEWER_PASSWORD`` is set it is removed from the copy handed to the child,
-so no other program, and no crash report or debug log of one, can see it.
+configuration directory, the proxy settings, ``CLOUDSDK_*``). The smoke test holds no secret in
+the environment (the signing key is read by ``gcloud`` itself and kept in memory), but
+``PULSEBRIDGE_REVIEWER_PASSWORD``, the D9 password variable an operator may still have set from
+before, is removed from the copy handed to a child all the same: no other program, and no crash
+report or debug log of one, should see it.
 
 **What is shown of a failure.** A fixed sentence saying what to check, then gcloud's own
 message: its whole stderr with whitespace collapsed and at most :data:`STDERR_LIMIT`
@@ -15,14 +17,16 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 
-PASSWORD_ENV = "PULSEBRIDGE_REVIEWER_PASSWORD"  # noqa: S105 - a variable name, not a value
+# D9's variable, no longer read; dropped from a child's environment in case it is still set.
+LEGACY_PASSWORD_ENV = "PULSEBRIDGE_REVIEWER_PASSWORD"  # noqa: S105 - a variable name
 STDERR_LIMIT = 600
 
 
 def child_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
-    """A copy of ``source`` (default: this process's environment) without the password."""
+    """A copy of ``source`` (default: this process's environment) without the legacy
+    password variable."""
     env = dict(os.environ if source is None else source)
-    env.pop(PASSWORD_ENV, None)
+    env.pop(LEGACY_PASSWORD_ENV, None)
     return env
 
 

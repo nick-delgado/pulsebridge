@@ -181,8 +181,7 @@ def test_paging_link_keeps_the_prefix(tmp_path) -> None:
             },
         )
     h.fake.page_size_override = 1
-    token = h.client.post("/api/auth/login", json={"password": h.password_file.read_text().strip()})
-    auth = {"Authorization": f"Bearer {token.get_json()['token']}"}
+    auth = h.auth()
     page = h.client.get(f"/api/fhir/Observation?{BP}&_count=1", headers=auth).get_json()
     nxt = next(link["url"] for link in page["link"] if link["relation"] == "next")
     assert nxt.startswith("/api/fhir/Observation?")

@@ -8,7 +8,10 @@ map as well). A route is one of:
   the CapabilityStatement's ``rest.resource`` / ``rest.interaction``;
 - ``view``: a JSON view the proxy assembles for the dashboard (not FHIR), listed in
   ``rest.documentation`` so the statement still says what else the server answers;
-- ``login``: ``POST /auth/login``, the one route without a session token.
+- ``auth``: the demo-session routes (D16): ``GET /auth/config``, ``POST /auth/session`` and
+  ``POST /auth/logout``, the only routes that need no ``__session`` cookie. (Logout needs none
+  so that it can always clear the cookie, an expired one included; like every ``POST`` it
+  still needs an allowed ``Origin``.)
 
 T15's share route is added through :mod:`fhir_proxy.extensions`, into this same list.
 """
@@ -23,18 +26,32 @@ class Route:
     method: str
     path: str  # Flask rule without the PATH_PREFIX, e.g. "/trace/heart-rate/<observation_id>"
     endpoint: str
-    kind: str  # "fhir", "view" or "login"
+    kind: str  # "fhir", "view" or "auth"
     summary: str
     interaction: str | None = None  # FHIR: "search-type" or "capabilities"
     resource_type: str | None = None
 
     @property
     def public(self) -> bool:
-        return self.kind == "login"
+        return self.kind == "auth"
 
 
 CORE_ROUTES: tuple[Route, ...] = (
-    Route("POST", "/auth/login", "login", "login", "Check the reviewer password; issue a token"),
+    Route(
+        "GET",
+        "/auth/config",
+        "auth_config",
+        "auth",
+        "The bot check's public site key and action, for the page",
+    ),
+    Route(
+        "POST",
+        "/auth/session",
+        "auth_session",
+        "auth",
+        "Run the bot check (one Fraud Defense assessment); on a pass, set the __session cookie",
+    ),
+    Route("POST", "/auth/logout", "auth_logout", "auth", "Clear the __session cookie"),
     Route("GET", "/status", "status", "view", "Status strip: watch sync, counts, reachability"),
     Route(
         "GET",

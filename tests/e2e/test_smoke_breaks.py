@@ -463,10 +463,10 @@ BREAKS = [
 
 @pytest.mark.parametrize("case", BREAKS, ids=lambda b: b.name)
 def test_a_broken_stack_fails_that_check(
-    case: Break, stack: Stack, password: str, monkeypatch: pytest.MonkeyPatch
+    case: Break, stack: Stack, signing_key: bytes, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     case.setup(stack, monkeypatch)
-    result = run(stack, password, *case.args)
+    result = run(stack, signing_key, *case.args)
     assert result.status_of(case.check_id) == "FAIL", result.text
     assert case.says in result.line_of(case.check_id), result.line_of(case.check_id)
     assert result.code == 1

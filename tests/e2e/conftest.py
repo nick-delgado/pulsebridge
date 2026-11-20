@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
-from e2e_fake_stack import PASSWORD, Stack, build_stack  # noqa: E402
+from e2e_fake_stack import SIGNING_KEY, Stack, build_stack  # noqa: E402
 from fhir_proxy.share.testing import make_certificate, make_key  # noqa: E402
 
 
@@ -37,5 +37,6 @@ def real_stack(tmp_path: Path, monkeypatch, key_and_cert) -> Stack:
 
 
 @pytest.fixture
-def password() -> str:
-    return PASSWORD
+def signing_key() -> bytes:
+    """The fake stack's session-signing key: what Secret Manager would hold (synthetic)."""
+    return SIGNING_KEY

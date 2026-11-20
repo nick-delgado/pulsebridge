@@ -5,12 +5,17 @@ the fhir-proxy behind the Firebase Hosting rewrite, the same way the dashboard r
 (fhir-proxy README, "One front door"). Nothing here talks to Cloud Healthcare, cuff-sim,
 health-sync or OpenEMR directly: what the smoke test asserts is what the public API says.
 
-**No redirects.** A redirect would carry the ``Authorization`` header to wherever the
-``Location`` points; :class:`UrllibTransport` never follows one (a 3xx comes back as a response
-and fails the check that expected a 200).
+**The session** (D16) travels as the page's does: the ``__session`` cookie on every request,
+and on every ``POST`` the ``Origin`` of the page (the front door's own origin), which the proxy
+requires against cross-site request forgery. The token is signed locally
+(:mod:`pulsebridge_smoke.session`); no ``Authorization`` header is sent.
+
+**No redirects.** A redirect would carry the ``Cookie`` header to wherever the ``Location``
+points; :class:`UrllibTransport` never follows one (a 3xx comes back as a response and fails
+the check that expected a 200).
 
 **Nothing secret is logged.** ``--verbose`` prints one line per request: method, path, status
-and duration. Never headers, never bodies, never the query string of a login (there is none).
+and duration. Never headers, never bodies.
 """
 
 from __future__ import annotations
@@ -61,6 +66,13 @@ class Transport(Protocol):
         body: bytes | None,
         timeout: float,
     ) -> Response: ...
+
+
+def origin_of(base_url: str) -> str:
+    """The front door's origin (RFC 6454: scheme, host, port), what a browser on the page sends
+    in ``Origin``: ``https://dash.example.test/api`` gives ``https://dash.example.test``."""
+    parts = urlsplit(check_base_url(base_url))
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def check_base_url(base_url: str) -> str:
@@ -136,13 +148,10 @@ def problem_reason(response: Response) -> str:
     return issue.get("code") if isinstance(issue.get("code"), str) else "-"
 
 
-class LoginFailed(Exception):
-    pass
-
-
 class ApiClient:
-    """Calls the proxy with the session token. ``log`` receives one line per request when
-    verbose (method, path, status, milliseconds), already redacted."""
+    """Calls the proxy with the session cookie and, on a ``POST``, the page's ``Origin``.
+    ``log`` receives one line per request when verbose (method, path, status, milliseconds),
+    already redacted."""
 
     def __init__(
         self,
@@ -152,22 +161,34 @@ class ApiClient:
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         monotonic: Callable[[], float] = time.monotonic,
         log: Callable[[str], None] | None = None,
+        origin: str | None = None,
     ) -> None:
         self._transport = transport
+        self._origin = origin
         self._redact = redactor
         self._timeout = timeout
         self._monotonic = monotonic
         self._log = log
-        self._token: str | None = None
+        self._session: str | None = None
 
-    def call(self, method: str, path: str, body: object = NO_BODY) -> Response:
+    def use_session(self, token: str) -> None:
+        """Send ``token`` as the ``__session`` cookie from now on. It is registered with the
+        redactor first, so no line can show it."""
+        self._redact.add(token)
+        self._session = token
+
+    def call(
+        self, method: str, path: str, body: object = NO_BODY, *, with_session: bool = True
+    ) -> Response:
         headers = {"Accept": "application/json"}
         data = None
         if body is not NO_BODY:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        if self._token is not None:
-            headers["Authorization"] = f"Bearer {self._token}"
+        if with_session and self._session is not None:
+            headers["Cookie"] = f"__session={self._session}"
+        if method not in ("GET", "HEAD") and self._origin is not None:
+            headers["Origin"] = self._origin
         started = self._monotonic()
         response = self._transport.send(
             method, path, headers=headers, body=data, timeout=self._timeout
@@ -178,19 +199,3 @@ class ApiClient:
                 self._redact(f"  {method} {path} -> {response.status} ({elapsed * 1000:.0f} ms)")
             )
         return Response(response.status, response.body, response.headers, elapsed)
-
-    def login(self, password: str) -> Response:
-        """``POST /auth/login``. The password is registered with the redactor before it is
-        sent, the token as soon as it arrives; neither is returned or stored anywhere else."""
-        self._redact.add(password)
-        response = self.call("POST", "/auth/login", {"password": password})
-        body = response.json()
-        token = body.get("token") if isinstance(body, dict) else None
-        if response.status != 200 or not isinstance(token, str) or not token:
-            raise LoginFailed(
-                f"POST /auth/login answered HTTP {response.status} "
-                f"(reason {problem_reason(response)}); expected 200 with a token"
-            )
-        self._redact.add(token)
-        self._token = token
-        return response

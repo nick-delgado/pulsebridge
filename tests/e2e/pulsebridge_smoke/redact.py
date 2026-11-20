@@ -1,9 +1,10 @@
 """Keep credential material out of everything the smoke test prints or writes.
 
-The smoke test holds two secrets: the reviewer password (read at run time, never from a file in
-the repository) and the session token the proxy issues for it. Both are registered here as soon
-as they are known, and every line of output, every failure message and the optional JSON report
-pass through :meth:`Redactor.__call__` first. That is the backstop; the plan is that no code path
+The smoke test holds two secrets: the stack's session-signing key (read at run time from Secret
+Manager, never from a file; registered in its text forms, ``session.key_text_forms``) and the
+session token signed with it. Both are registered here as soon as they are known, and every
+line of output, every failure message and the optional JSON report pass through
+:meth:`Redactor.__call__` first. That is the backstop; the plan is that no code path
 formats a header, a request body or a token in the first place (CLAUDE.md, "Credentials and
 secrets").
 

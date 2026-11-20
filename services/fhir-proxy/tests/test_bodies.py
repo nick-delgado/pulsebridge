@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 import pytest
-from fhir_proxy.testing import PASSWORD, EchoSender, build_harness
+from fhir_proxy.testing import ORIGIN, SIGNING_KEY, START, EchoSender, build_harness
 from werkzeug.test import EnvironBuilder
 
 LIMIT = 16 * 1024
@@ -52,10 +52,11 @@ def test_cuff_body_without_content_length(echo, size: int, status: int) -> None:
         assert echo.sender.calls == []  # nothing was forwarded
 
 
-def test_login_body_without_content_length(echo) -> None:
-    body = json.dumps({"password": "x" * 2000}).encode()
-    code, _ = _gunicorn_style(echo.app, "/auth/login", body, {})
+def test_session_body_without_content_length(echo) -> None:
+    body = json.dumps({"recaptcha_token": "x" * 20000}).encode()
+    code, _ = _gunicorn_style(echo.app, "/auth/session", body, {"Origin": ORIGIN})
     assert code == 413
+    assert echo.fraud.assessments == 0
 
 
 @pytest.mark.parametrize(("size", "status"), [(LIMIT, 200), (LIMIT + 1, 413)])
@@ -106,14 +107,14 @@ def test_a_real_gunicorn_with_a_chunked_body(tmp_path: Path) -> None:
                 break
             except OSError:
                 time.sleep(0.1)
-        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-        conn.request(
-            "POST",
-            "/auth/login",
-            body=json.dumps({"password": PASSWORD}),
-            headers={"Content-Type": "application/json"},
+        # The server's fake Fraud Defense lives in its own process, so the session token is
+        # signed here with the same synthetic key and the server's fixed clock (START).
+        from fhir_proxy.session_token import TokenSigner
+
+        signer = TokenSigner(
+            issuer="pulsebridge-fhir-proxy", ttl_seconds=86400, clock=lambda: START
         )
-        token = json.loads(conn.getresponse().read())["token"]
+        token = signer.issue(SIGNING_KEY).token
         results = {}
         for size in (LIMIT, LIMIT + 1, 40000):
             body = b"{" + b" " * (size - 2) + b"}"
@@ -124,7 +125,11 @@ def test_a_real_gunicorn_with_a_chunked_body(tmp_path: Path) -> None:
                 "/cuff/readings",
                 body=pieces,
                 encode_chunked=True,
-                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+                headers={
+                    "Content-Type": "application/json",
+                    "Cookie": f"__session={token}",
+                    "Origin": ORIGIN,
+                },
             )
             response = conn.getresponse()
             results[size] = (response.status, json.loads(response.read()))

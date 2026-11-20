@@ -1,4 +1,4 @@
-# fhir-proxy: the one public service (task T14, decision D10). Reviewer login (D9), a narrow
+# fhir-proxy: the one public service (task T14, decision D10). Demo sessions (D16), a narrow
 # read API over the FHIR stores and the HL7v2 store, the messages log, and cuff forwarding to the
 # cuff simulator with the proxy's own identity. The share to OpenEMR is T15 (fhir_proxy/share/).
 # See README.md.
@@ -10,7 +10,7 @@ build-backend = "hatchling.build"
 [project]
 name = "pulsebridge-fhir-proxy"
 version = "0.1.0"
-description = "The dashboard's only backend: reviewer login, a narrow FHIR read API, the messages log and cuff forwarding."
+description = "The dashboard's only backend: demo sessions, a narrow FHIR read API, the messages log and cuff forwarding."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -24,7 +24,7 @@ dependencies = [
   "Flask==3.1.3",
   "gunicorn==26.2.0",
   # The session token is a JWT (RFC 7519) signed with HS256; PyJWT is the well-known library
-  # docs/spikes/s6.md asks for, so the token check is not our own parser.
+  # docs/spikes/s6.md asked for, so the token check is not our own parser.
   "PyJWT==2.15.1",
   # RSA for the OpenEMR client assertion (RS384, T15) and the client document's PKCS#8 key.
   # Already installed through google-auth 2.62.0, so naming it adds nothing to the image; it is

@@ -251,13 +251,13 @@ def test_sync_source_is_chosen_from_flags_and_environment(tmp_path: Path) -> Non
 
 
 def test_a_real_data_stack_runs_part_b_from_a_saved_log_file(
-    real_stack: Stack, password: str, tmp_path: Path
+    real_stack: Stack, signing_key: bytes, tmp_path: Path
 ) -> None:
     """The whole command on a real-data stack: Part B from the file the runner saved with
     `gcloud logging read ... --format=json`, and Part A with the explicit flag."""
     path = tmp_path / "sync-runs.json"
     path.write_text(json.dumps(GOOD))
-    result = run(real_stack, password, "--sync-runs-from", str(path), "--allow-real-data-writes")
+    result = run(real_stack, signing_key, "--sync-runs-from", str(path), "--allow-real-data-writes")
     for check_id in ("B1", "B2", "B3", "B4", "A10", "N5"):
         assert result.status_of(check_id) == "PASS", result.text
     assert result.code == 0, result.text

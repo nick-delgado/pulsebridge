@@ -13,7 +13,7 @@ from fhir_proxy.share.testing import (
     stored_observation,
     stored_patient,
 )
-from fhir_proxy.testing import FHIR_STORE
+from fhir_proxy.testing import FHIR_STORE, ORIGIN
 
 
 def reason(response) -> str:  # noqa: ANN001
@@ -170,8 +170,16 @@ def test_not_configured_is_503_and_the_probe_says_so(tmp_path, client_key, serve
 
 
 def test_the_route_needs_the_session_token(env) -> None:
-    response = env.harness.client.post("/share", json={"observationId": BP_ID})
+    # From the page's own origin but without the __session cookie.
+    response = env.harness.client.post(
+        "/share", json={"observationId": BP_ID}, headers={"Origin": ORIGIN}
+    )
     assert response.status_code == 401 and env.openemr.requests == []
+    # Without an allowed Origin it is refused before the cookie is even looked at.
+    response = env.harness.client.post(
+        "/share", json={"observationId": BP_ID}, headers=env.harness.auth() | {"Origin": "null"}
+    )
+    assert response.status_code == 403 and env.openemr.requests == []
 
 
 def test_the_share_route_is_listed_as_a_view_not_a_fhir_interaction(env) -> None:

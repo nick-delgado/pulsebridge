@@ -2,7 +2,9 @@
 
 An in-memory fake of the three Cloud Healthcare stores, behind the real
 ``pulsebridge_gcp.HealthcareClient``; a fake HTTP sender for cuff-sim and health-sync; a fake
-identity-token source; an injected clock. No network beyond 127.0.0.1, no credentials, no GCP.
+identity-token source; fakes of Fraud Defense's assessments API and of the Cloud Storage counter
+bucket (``FakeFraudDefense``, ``FakeBucket``), each behind the real client code; an injected
+clock. No network beyond 127.0.0.1, no credentials, no GCP.
 
 All data is synthetic. The configuration uses the placeholder names of T31's AuditEvent examples
 (``example-project``, ``example-dataset``, ``example-store``, patient ``PB-SYN-0001``), so those
@@ -16,13 +18,16 @@ import copy
 import json
 import logging
 import re
+import secrets
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
-from pulsebridge_gcp import HttpResponse, TimedOutError
+from pulsebridge_gcp import HttpResponse, RetryableError, TimedOutError
 from pulsebridge_hl7v2 import Patient
 from pulsebridge_hl7v2.samples import load as load_sample
 
@@ -40,10 +45,13 @@ HL7_STORE = "example-store"
 STORE_NAME = f"projects/{PROJECT}/locations/{LOCATION}/datasets/{DATASET}/hl7V2Stores/{HL7_STORE}"
 FHIR_BASE = f"{BASE}/projects/{PROJECT}/locations/{LOCATION}/datasets/{DATASET}/fhirStores"
 PATIENT_ID = "PB-SYN-0001"
-# Obviously fake: never a real password anywhere in this repository.
-PASSWORD = "synthetic-reviewer-password-for-tests-only"  # noqa: S105 - synthetic
-OTHER_PASSWORD = "rotated-synthetic-password-for-tests-only"  # noqa: S105 - synthetic
+# Obviously fake signing keys (32 bytes and more): never a real key anywhere in this repository.
+SIGNING_KEY = b"synthetic-session-key-for-tests-only-0001"
+OTHER_SIGNING_KEY = b"rotated-synthetic-session-key-for-tests-02"
 ORIGIN = "https://dashboard.example.test"
+ORIGIN_HOST = "dashboard.example.test"
+SITE_KEY = "synthetic-site-key-0000000000000000000000"
+COUNTER_BUCKET = "example-demo-counters"
 CUFF_URL = "https://cuff-sim.example.test"
 HEALTH_URL = "https://health-sync.example.test"
 PUBLIC_BASE = "https://proxy.example.test"
@@ -487,35 +495,271 @@ class FakeIdTokens:
 # ---- the app ---------------------------------------------------------------------------------
 
 
+# ---- Fraud Defense (reCAPTCHA Enterprise) assessments --------------------------------------------
+
+
+class FakeFraudDefense:
+    """``POST https://recaptchaenterprise.googleapis.com/v1/projects/<project>/assessments`` as
+    the REST reference describes it, behind the proxy's real ``FraudDefense`` client.
+
+    :meth:`issue` stands in for the browser's ``grecaptcha.enterprise.execute``: it returns a
+    synthetic token and what Google will say about it. As the reference documents, a bad token
+    is still a ``200`` assessment with ``valid`` false: a token is good for one assessment (a
+    second one says ``DUPE``), an unknown token is ``MALFORMED``, and a request whose ``siteKey``
+    is not the key the token was made with says ``KEY_MISMATCH``. A request the API cannot parse
+    is ``400``. ``failure`` makes every call fail: ``"timeout"``, ``"unreachable"``, an HTTP
+    status, or ``"not-json"``. The answer leaves out default values, as protobuf's JSON form
+    does (no ``valid`` when false, no ``score`` when 0.0)."""
+
+    def __init__(self, project: str = PROJECT, site_key: str = SITE_KEY) -> None:
+        self.url = f"https://recaptchaenterprise.googleapis.com/v1/projects/{project}/assessments"
+        self.site_key = site_key
+        self.requests: list[dict] = []
+        self.failure: str | int | None = None
+        self._tokens: dict[str, dict] = {}
+        self._used: set[str] = set()
+        self._lock = threading.Lock()
+
+    def issue(
+        self,
+        *,
+        score: float = 0.9,
+        action: str = "view_demo",
+        hostname: str = ORIGIN_HOST,
+        valid: bool = True,
+        invalid_reason: str = "EXPIRED",
+    ) -> str:
+        token = "03" + secrets.token_urlsafe(300)  # the shape and about the length of a real one
+        self._tokens[token] = {
+            "score": score,
+            "action": action,
+            "hostname": hostname,
+            "valid": valid,
+            "invalid_reason": invalid_reason,
+        }
+        return token
+
+    @property
+    def assessments(self) -> int:
+        return len(self.requests)
+
+    def request(self, method, url, *, params, body, headers, timeout):  # noqa: ANN001, ANN201
+        with self._lock:
+            try:
+                event = json.loads(body.decode())["event"]
+            except (AttributeError, ValueError, KeyError, TypeError):
+                event = None
+            self.requests.append(
+                {"method": method, "url": url, "params": params, "event": event, "timeout": timeout}
+            )
+            if self.failure == "timeout":
+                raise TimedOutError(f"{method} {url}", None)
+            if self.failure == "unreachable":
+                raise RetryableError(f"{method} {url}", None)
+            if self.failure == "not-json":
+                return HttpResponse(200, b"<html>", {"content-type": "text/html"})
+            if isinstance(self.failure, int):
+                return _json(self.failure, {"error": {"code": self.failure}})
+            if (
+                method != "POST"
+                or url != self.url
+                or params
+                or headers.get("Content-Type") != "application/json"
+                or not isinstance(event, dict)
+                or set(event) - {"token", "siteKey", "expectedAction"}
+            ):
+                return _json(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT"}})
+            token = event.get("token", "")
+            facts = self._tokens.get(token)
+            name = f"projects/123456789/assessments/{secrets.token_hex(8)}"
+            props: dict = {"createTime": "2026-01-02T12:00:00.000Z"}
+            answer: dict = {"name": name, "event": event, "tokenProperties": props}
+            if facts is None:
+                reason = "MALFORMED"
+            elif event.get("siteKey") != self.site_key:
+                reason = "KEY_MISMATCH"
+            elif token in self._used:
+                reason = "DUPE"
+            elif not facts["valid"]:
+                reason = facts["invalid_reason"]
+            else:
+                reason = None
+            if reason is not None:
+                props["invalidReason"] = reason
+                return _json(200, answer)
+            self._used.add(token)
+            props.update(
+                {
+                    "valid": True,
+                    "invalidReason": "INVALID_REASON_UNSPECIFIED",
+                    "hostname": facts["hostname"],
+                    "action": facts["action"],
+                }
+            )
+            risk: dict = {"reasons": []}
+            if facts["score"]:
+                risk["score"] = facts["score"]
+            answer["riskAnalysis"] = risk
+            return _json(200, answer)
+
+
+# ---- the Cloud Storage counter bucket ----------------------------------------------------------
+
+
+class FakeBucket:
+    """Cloud Storage's JSON API for one bucket, as far as ``DailyCounter`` uses it:
+    ``objects.get`` (metadata) and a multipart ``objects.insert`` with ``ifGenerationMatch``.
+    Every write gets a new generation; a precondition that does not hold answers ``412`` and
+    writes nothing, as Cloud Storage does.
+
+    ``before_write(name)`` runs inside each insert before the precondition is checked: a test
+    uses it to let "another instance" write in between (the race). ``fail_reads`` /
+    ``fail_writes`` make those calls answer that status, or raise for ``"timeout"`` /
+    ``"unreachable"``."""
+
+    def __init__(self, bucket: str = COUNTER_BUCKET) -> None:
+        self.bucket = bucket
+        self.objects: dict[str, dict] = {}
+        self.requests: list[tuple[str, str]] = []
+        self.before_write: Callable[[str], None] | None = None
+        self.fail_reads: str | int | None = None
+        self.fail_writes: str | int | None = None
+        self._generation = 1_700_000_000_000_000
+        self._lock = threading.RLock()
+
+    def count(self, name: str) -> int | None:
+        found = self.objects.get(name)
+        return None if found is None else int(found["metadata"]["count"])
+
+    def put(self, name: str, count: str) -> None:
+        """Write directly (what another instance's increment leaves behind)."""
+        with self._lock:
+            self._generation += 1
+            self.objects[name] = {"generation": str(self._generation), "metadata": {"count": count}}
+
+    def _fail(self, failure: str | int | None, what: str) -> HttpResponse | None:
+        if failure == "timeout":
+            raise TimedOutError(what, None)
+        if failure == "unreachable":
+            raise RetryableError(what, None)
+        if isinstance(failure, int):
+            return _json(failure, {"error": {"code": failure}})
+        return None
+
+    def request(self, method, url, *, params, body, headers, timeout):  # noqa: ANN001, ANN201, ARG002
+        self.requests.append((method, url))
+        get_prefix = f"https://storage.googleapis.com/storage/v1/b/{self.bucket}/o/"
+        insert_url = f"https://storage.googleapis.com/upload/storage/v1/b/{self.bucket}/o"
+        if method == "GET" and url.startswith(get_prefix):
+            failed = self._fail(self.fail_reads, "get")
+            if failed is not None:
+                return failed
+            from urllib.parse import unquote
+
+            encoded = url[len(get_prefix) :]
+            if "/" in encoded:
+                return _json(404, {"error": {"code": 404}})  # a "/" in the name must be %2F
+            with self._lock:
+                found = self.objects.get(unquote(encoded))
+                if found is None:
+                    return _json(404, {"error": {"code": 404}})
+                return _json(
+                    200,
+                    {"kind": "storage#object", "name": unquote(encoded), "bucket": self.bucket}
+                    | copy.deepcopy(found),
+                )
+        if method == "POST" and url == insert_url:
+            failed = self._fail(self.fail_writes, "insert")
+            if failed is not None:
+                return failed
+            params = dict(params or {})
+            boundary = headers.get("Content-Type", "").partition("boundary=")[2]
+            if params.get("uploadType") != "multipart" or not boundary:
+                return _json(400, {"error": {"code": 400}})
+            parts = body.decode().split(f"--{boundary}")
+            resource = json.loads(parts[1].split("\r\n\r\n", 1)[1].rstrip("\r\n"))
+            name = resource["name"]
+            if self.before_write is not None:
+                self.before_write(name)
+            with self._lock:
+                current = self.objects.get(name)
+                expected = params.get("ifGenerationMatch")
+                actual = "0" if current is None else current["generation"]
+                if expected is None or expected != actual:
+                    return _json(412, {"error": {"code": 412, "message": "conditionNotMet"}})
+                self._generation += 1
+                self.objects[name] = {
+                    "generation": str(self._generation),
+                    "metadata": dict(resource.get("metadata") or {}),
+                }
+                return _json(200, {"name": name, "generation": str(self._generation)})
+        return _json(404, {"error": {"code": 404}})
+
+
+# ---- the app ---------------------------------------------------------------------------------
+
+
 @dataclass
 class Harness:
+    """The app over fakes. ``client`` keeps no cookie jar: every request states its own cookie
+    (``auth()``), so a test sees exactly what the browser would send."""
+
     app: object
     client: object
     fake: FakeHealthcare
     sender: FakeSender
     tokens: FakeIdTokens
     clock: Clock
-    password_file: Path
+    key_file: Path
     config: ServiceConfig
+    fraud: FakeFraudDefense = field(default_factory=FakeFraudDefense)
+    bucket: FakeBucket = field(default_factory=FakeBucket)
+    _session: str | None = field(default=None, repr=False)
 
-    def login(self, password: str = PASSWORD, **headers: str) -> str:
-        response = self.client.post("/auth/login", json={"password": password}, headers=headers)
+    def start_session(self, token: str | None = None, **headers: str):  # noqa: ANN201
+        """``POST /auth/session`` as the page sends it (same origin, a fresh bot-check token)."""
+        return self.client.post(
+            f"{self.config.path_prefix}/auth/session",
+            json={"recaptcha_token": token if token is not None else self.fraud.issue()},
+            headers={"Origin": ORIGIN, **headers},
+        )
+
+    def login(self, **headers: str) -> str:
+        """A new demo session's token, taken from its ``Set-Cookie``."""
+        response = self.start_session(**headers)
         if not (response.status_code == 200):
             raise AssertionError(response.get_data(as_text=True))
-        return response.get_json()["token"]
+        return session_from(response)
 
     def auth(self, token: str | None = None) -> dict:
-        return {"Authorization": f"Bearer {token or self.login()}"}
+        """What the page's same-origin requests carry: the cookie and, as every browser does on
+        a POST, the page's Origin. Without ``token``, one session per harness is started on
+        first use and reused, as a browser keeps its cookie (a new session per request would
+        run into the per-address limit, which counts every attempt)."""
+        if token is None:
+            if self._session is None:
+                self._session = self.login()
+            token = self._session
+        return {"Cookie": f"__session={token}", "Origin": ORIGIN}
 
     def get(self, path: str, **kwargs):  # noqa: ANN201
         headers = kwargs.pop("headers", None) or self.auth()
         return self.client.get(path, headers=headers, **kwargs)
 
 
+def session_from(response) -> str:  # noqa: ANN001
+    """The token in a response's ``__session`` Set-Cookie (exactly one is expected)."""
+    cookies = response.headers.getlist("Set-Cookie")
+    name, _, rest = (cookies[0] if len(cookies) == 1 else "").partition("=")
+    if name != "__session":
+        raise AssertionError(f"expected one __session cookie, got {cookies}")
+    return rest.split(";", 1)[0]
+
+
 def make_config(tmp_path: Path, **overrides: object) -> ServiceConfig:
-    password_file = tmp_path / "reviewer-password"
-    if not password_file.exists():
-        password_file.write_text(PASSWORD + "\n")
+    key_file = tmp_path / "session-signing-key"
+    if not key_file.exists():
+        key_file.write_bytes(SIGNING_KEY)
     values = dict(
         project_id=PROJECT,
         location=LOCATION,
@@ -524,12 +768,13 @@ def make_config(tmp_path: Path, **overrides: object) -> ServiceConfig:
         audit_fhir_store_id=AUDIT_STORE,
         hl7v2_store_id=HL7_STORE,
         patient_id=PATIENT_ID,
-        password_file=str(password_file),
+        session_key_file=str(key_file),
         allowed_origins=(ORIGIN,),
         cuff_sim_url=CUFF_URL,
+        recaptcha_site_key=SITE_KEY,
+        demo_counter_bucket=COUNTER_BUCKET,
         health_sync_url=HEALTH_URL,
         sample_patient=SAMPLE_PATIENT,
-        password_cache_seconds=0,
         status_cache_seconds=60,
         fhir_timeout=5,
     )
@@ -549,17 +794,30 @@ def build_harness(
     sender = sender or FakeSender()
     tokens = FakeIdTokens()
     clock = Clock()
+    fraud = FakeFraudDefense()
+    bucket = FakeBucket()
     app = create_app(
         config,
         fake,
         id_tokens=tokens,
         send=sender,
+        recaptcha_transport=fraud,
+        storage_transport=bucket,
         clock=clock,
         monotonic=clock.monotonic,
         extension_module=extension_module,
     )
     return Harness(
-        app, app.test_client(), fake, sender, tokens, clock, Path(config.password_file), config
+        app,
+        app.test_client(use_cookies=False),
+        fake,
+        sender,
+        tokens,
+        clock,
+        Path(config.session_key_file),
+        config,
+        fraud,
+        bucket,
     )
 
 
