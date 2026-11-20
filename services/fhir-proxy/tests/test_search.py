@@ -146,15 +146,22 @@ def test_paging_links_point_at_the_proxy(harness, seed_heart_rate) -> None:
         seen += [e["resource"]["id"] for e in page["entry"]]
         links = {link["relation"]: link["url"] for link in page["link"]}
     assert len(seen) == len(set(seen)) == 30
-    # The store saw our pinned query plus its own page token, never anything else.
-    for call in harness.fake.calls("GET", "/Observation$"):
+    # The store saw our pinned query plus its own page token, never anything else; the date is
+    # the shown window's boundary (T47), on every page, the same one the links carry.
+    boundary = "ge" + "2025-12-26T12:00:00.000Z"  # the harness clock minus HISTORY_DAYS (7)
+    assert query["date"] == boundary
+    calls = harness.fake.calls("GET", "/Observation$")
+    assert len(calls) == 3
+    for call in calls:
         assert {name for name, _ in call[2]} <= {
             "subject",
             "code",
+            "date",
             "_sort",
             "_count",
             "_page_token",
         }
+        assert [v for name, v in call[2] if name == "date"] == [boundary]
 
 
 def test_paging_link_keeps_the_prefix(tmp_path) -> None:

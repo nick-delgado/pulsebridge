@@ -44,6 +44,16 @@ only what no source could still be missing (a source that returned a full page m
 just below what it returned). Store-only messages are looked for in the same time window, by
 ``createTime``.
 
+**The shown window** (T47, ``fhir_proxy.history``). Every page covers only the last
+``HISTORY_DAYS`` days, with the boundary given by the route (computed per request): attempts by
+their attempt time (the audit search is bounded by ``recorded >= boundary``, which every
+attempt sent since then satisfies, and an attempt sent before the boundary but recorded after
+it is dropped here), unreadable attempts by ``recorded`` (their send time cannot be read),
+store-only messages by ``createTime``, and transactions by ``recorded``. An Observation older
+than the window (by its effective time) is never named: a row's ``observation`` link to one is
+null, and a transaction lists only Observations inside the window (one that wrote nothing
+inside it is not a row). Nothing is deleted from any store.
+
 **Time budget.** Independent calls run in parallel, and the page stops starting calls when the
 request's budget is spent (``fhir_proxy.deadline``). A page cut short that way says
 ``partial: true``: rows of its window may be missing (a message lookup not finished is
@@ -86,6 +96,7 @@ from pulsebridge_gcp import HealthcareApiError, Hl7v2Message, NotFoundError
 
 from fhir_proxy import deadline, hl7
 from fhir_proxy.errors import Problem
+from fhir_proxy.history import attempt_in_window, effective_in_window
 from fhir_proxy.logs import log
 from fhir_proxy.store import Stores, entries, next_link
 
@@ -420,12 +431,15 @@ def _writer(resource: dict) -> str:
     return "unknown"
 
 
-def groups_from_provenances(bundle: dict, patients: Iterable[str]) -> tuple[list[Item], int]:
+def groups_from_provenances(
+    bundle: dict, patients: Iterable[str], since: datetime | None = None
+) -> tuple[list[Item], int]:
     """One item per (recorded, assembler): the Provenances one ingest Bundle wrote, **pinned to
     the configured patient**. Each Provenance's targets come back in the same Bundle
-    (``_include=Provenance:target``); only targets that are the patient's Observations are kept,
-    and a Provenance with none is left out. Returns the items and how many Provenances were read
-    (for the truncation check)."""
+    (``_include=Provenance:target``); only targets that are the patient's Observations are kept
+    (with ``since``, only those inside the shown window by their effective time), and a
+    Provenance with none is left out. Returns the items and how many Provenances were read (for
+    the truncation check)."""
     patients = set(patients)
     ours: set[str] = set()
     for resource in entries(bundle, "Observation"):
@@ -434,6 +448,7 @@ def groups_from_provenances(bundle: dict, patients: Iterable[str]) -> tuple[list
             isinstance(resource.get("id"), str)
             and isinstance(subject, dict)
             and subject.get("reference") in patients
+            and (since is None or effective_in_window(resource, since))
         ):
             ours.add(f"Observation/{resource['id']}")
     provenances = entries(bundle, "Provenance")
@@ -441,7 +456,7 @@ def groups_from_provenances(bundle: dict, patients: Iterable[str]) -> tuple[list
     for resource in provenances:
         at = _parse_instant(resource.get("recorded"))
         resource_id = resource.get("id")
-        if at is None or not isinstance(resource_id, str):
+        if at is None or not isinstance(resource_id, str) or (since is not None and at < since):
             continue
         targets = {
             t.get("reference")
@@ -493,11 +508,13 @@ class MessagesLog:
 
     # ---- sources -------------------------------------------------------------------------
 
-    def _attempts(self, count: int, cursor: Cursor | None) -> tuple[Stream, int]:
+    def _attempts(self, count: int, cursor: Cursor | None, since: datetime) -> tuple[Stream, int]:
         """Attempts by send time. The search is by ``recorded`` (the only date the audit store
         indexes), so it reaches ``SEND_RECORD_SKEW`` above the cursor and reads further pages
-        until ``count`` rows are known to be in order (above the lowest ``recorded`` read)."""
-        params = send_attempt_search_params(count=min(max(count * 2, 50), 200))
+        until ``count`` rows are known to be in order (above the lowest ``recorded`` read). Its
+        lower bound is the window's boundary (``date=ge``): an attempt is recorded after it is
+        sent, so every attempt sent inside the window is found."""
+        params = send_attempt_search_params(count=min(max(count * 2, 50), 200), since=since)
         if cursor is not None:
             params.insert(2, ("date", "le" + instant_text(cursor.before + SEND_RECORD_SKEW)))
         bundle = self._stores.audit_events(params)
@@ -516,6 +533,10 @@ class MessagesLog:
                     skipped += 1
                     continue
                 except UnreadableSendAttempt as exc:
+                    if at is None or not attempt_in_window(at, since):
+                        # Its send time cannot be read; its recorded time (never before the
+                        # send) is missing or before the boundary: older than the window.
+                        continue
                     log(
                         logging.WARNING,
                         "unreadable-send-attempt",
@@ -530,6 +551,8 @@ class MessagesLog:
                 ):
                     skipped += 1  # the patient pin: another patient's or another store's attempt
                     continue
+                if not attempt_in_window(record.sent_at, since):
+                    continue  # sent before the boundary, recorded just after it: not shown
                 items.append(Item(record.sent_at, record.id, "attempt", record))
             more = next_link(bundle) is not None
             floor = min(recorded) if recorded else None
@@ -556,8 +579,11 @@ class MessagesLog:
         frontier = min(recorded) if (more and recorded) else None
         return Stream(items, more, frontier, inclusive=False), skipped
 
-    def _transactions(self, cursor: Cursor | None, patients: tuple[str, ...]) -> Stream:
+    def _transactions(
+        self, cursor: Cursor | None, patients: tuple[str, ...], since: datetime
+    ) -> Stream:
         params = [
+            ("recorded", "ge" + instant_text(since)),
             ("_sort", "-recorded"),
             ("_count", str(PROVENANCE_PAGE)),
             ("_include", "Provenance:target"),
@@ -565,7 +591,7 @@ class MessagesLog:
         if cursor is not None:
             params.insert(0, ("recorded", "le" + instant_text(cursor.before)))
         bundle = self._stores.provenances(params)
-        items, read = groups_from_provenances(bundle, patients)
+        items, read = groups_from_provenances(bundle, patients, since)
         truncated = read >= PROVENANCE_PAGE or next_link(bundle) is not None
         if truncated and len(items) > 1:
             # The oldest group may continue on the next store page: drop it here, and let
@@ -677,8 +703,11 @@ class MessagesLog:
             and r.sent_at <= at <= r.sent_at + MATCH_WINDOW
         ]
 
-    def _observations(self, data_by_ref: dict[str, bytes | None]) -> dict[str, str]:
-        """``Observation/<id>`` per key of ``data_by_ref`` whose stored bytes map to one."""
+    def _observations(
+        self, data_by_ref: dict[str, bytes | None], since: datetime
+    ) -> dict[str, str]:
+        """``Observation/<id>`` per key of ``data_by_ref`` whose stored bytes map to one that is
+        the patient's and inside the shown window (by its effective time)."""
         identifiers: dict[str, str] = {}
         for ref, data in data_by_ref.items():
             value = hl7.observation_identifier(data, self._patient_id)
@@ -695,6 +724,7 @@ class MessagesLog:
                 resource is not None
                 and isinstance(resource.get("id"), str)
                 and self._stores.is_ours(resource, patients)
+                and effective_in_window(resource, since)
             ):
                 result[ref] = f"Observation/{resource['id']}"
         return result
@@ -708,7 +738,10 @@ class MessagesLog:
         outcome: str | None,
         count: int,
         cursor: Cursor | None,
+        since: datetime,
     ) -> dict:
+        """One page of the log, newest first, covering only what is at or after ``since`` (the
+        shown window's boundary, see the module docstring)."""
         want_attempts = kind in (None, "cuff-send", "unreadable-send-attempt")
         want_transactions = kind in (None, "fhir-transaction") and outcome is None
         want_store_only = kind in (None, "cuff-send")
@@ -718,9 +751,9 @@ class MessagesLog:
         patients = self._stores.patient_references()
         calls = []
         if want_attempts:
-            calls.append(lambda: self._attempts(count, cursor))
+            calls.append(lambda: self._attempts(count, cursor, since))
         if want_transactions:
-            calls.append(lambda: self._transactions(cursor, patients))
+            calls.append(lambda: self._transactions(cursor, patients, since))
         results = deadline.run_parallel(self._executor, calls)
         streams: list[Stream] = []
         for result in results:
@@ -750,6 +783,8 @@ class MessagesLog:
             }
         )
         lower = merged.lower if merged.more else None
+        # Store-only messages: never older than the window, whatever the page's own lower edge.
+        lower = since if lower is None else max(lower, since)
         step = [partial(self._lookup, n) for n in names]
         if want_store_only:
             step.append(partial(self._listing, lower, cursor))
@@ -826,7 +861,7 @@ class MessagesLog:
         observations: dict[str, str] = {}
         if data_by_ref:
             try:
-                observations = self._observations(data_by_ref)
+                observations = self._observations(data_by_ref, since)
             except HealthcareApiError:
                 partial_page = True  # the rows stand; only their Observation link is missing
 

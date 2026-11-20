@@ -256,6 +256,8 @@ def test_no_call_starts_once_the_budget_is_spent(tmp_path) -> None:
             "id": "hr-1",
             "subject": {"reference": "Patient/pat-1"},
             "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+            # Inside the shown window (T47), so the trace goes on to the Device and Provenance.
+            "effectivePeriod": {"start": "2026-01-02T11:00:00Z", "end": "2026-01-02T11:05:00Z"},
             "device": {"reference": "Device/dev-1"},
         },
     )

@@ -131,11 +131,14 @@ def test_a_heart_rate_without_ucum_per_minute_is_not_shareable(env) -> None:
 
 
 @pytest.mark.parametrize("value", ["2026-01-01", "2026-01-01T09:30:00", "yesterday", None])
-def test_a_reading_without_a_zoned_time_is_not_shareable(env, value) -> None:  # noqa: ANN001
+def test_a_reading_without_a_zoned_time_is_not_found(env, value) -> None:  # noqa: ANN001
+    # T47: a reading whose effective time cannot be placed is not inside the shown window (no
+    # date search finds it either), so it answers like a missing one, before any 422 could
+    # tell anything about it. Nothing is sent.
     observation = stored_observation("observation-blood-pressure.json", BP_ID)
     observation["effectiveDateTime"] = value
     env.store.put(FHIR_STORE, observation)
-    refused(env, env.share(), 422, "observation-not-shareable")
+    refused(env, env.share(), 404, "not-found")
 
 
 @pytest.mark.parametrize(

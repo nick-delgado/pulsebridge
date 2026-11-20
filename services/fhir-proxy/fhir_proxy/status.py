@@ -16,7 +16,9 @@ The rest comes from the FHIR store, in three cheap searches, reused for
   only windows that changed, so this moves only when there is new data (README, open question 9).
 - ``observationCounts``: ``_total=accurate&_count=0`` (Cloud Healthcare has no
   ``_summary``) for heart rate (watch) and the blood-pressure panel
-  (cuff), for the configured patient.
+  (cuff), for the configured patient, inside the shown window (T47: ``date=ge<boundary>``, the
+  boundary taken when the counts are made; they are reused for ``STATUS_CACHE_SECONDS``).
+  ``lastSyncAt`` is limited to the window the same way.
 - ``fhirStore``: reachable when those searches answered. When they did not (an error, or the
   request's time budget ran out), the counts are ``null`` ("not known", never 0) and
   ``lastSyncAt`` is null.
@@ -46,6 +48,8 @@ from pulsebridge_gcp import HealthcareApiError
 
 from fhir_proxy import deadline
 from fhir_proxy.errors import reachability_reason
+from fhir_proxy.history import instant_text as boundary_text
+from fhir_proxy.history import window_start
 from fhir_proxy.logs import log
 from fhir_proxy.messages import instant_text
 from fhir_proxy.search import BLOOD_PRESSURE_PANEL, HEART_RATE, parse_instant
@@ -107,6 +111,7 @@ class StatusService:
         *,
         cache_seconds: float,
         openemr_probe: Callable[[], dict] | None = None,
+        history_days: int = 7,
         workers: int = 8,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic: Callable[[], float] = time.monotonic,
@@ -115,6 +120,7 @@ class StatusService:
         self._health_sync = health_sync
         self._cache_seconds = cache_seconds
         self.openemr_probe = openemr_probe
+        self._history_days = history_days
         # Two pools of /status's own: the outer one runs health-sync and the store part, the
         # inner one the store part's three searches. Nothing is submitted into the pool it runs
         # in, and slow /messages requests (which use the shared pool) cannot delay /status.
@@ -163,13 +169,14 @@ class StatusService:
         try:
             refs = self._stores.patient_references()
             if refs:
+                since = boundary_text(window_start(now, self._history_days))
                 # The three searches are independent: run them at once, within the budget.
                 parts = deadline.run_parallel(
                     self._inner,
                     [
-                        lambda: self._stores.count_observations(HEART_RATE, refs),
-                        lambda: self._stores.count_observations(BLOOD_PRESSURE_PANEL, refs),
-                        lambda: self._stores.newest_write(HEART_RATE, refs),
+                        lambda: self._stores.count_observations(HEART_RATE, refs, since),
+                        lambda: self._stores.count_observations(BLOOD_PRESSURE_PANEL, refs, since),
+                        lambda: self._stores.newest_write(HEART_RATE, refs, since),
                     ],
                 )
                 for part in parts:
