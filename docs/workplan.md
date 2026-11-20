@@ -994,7 +994,7 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 | T43 | fhir-proxy: anonymous demo sessions (bot check, `__session` cookie) | D16 | `services/fhir-proxy/` except `fhir_proxy/share/` (but including `fhir_proxy/share/testing.py`, the share tests' harness), `tests/e2e/`, and the proxy's entries in `tests/tooling/test_image_smoke.py` (added 19 Nov so the suite stays green) | done |
 | T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/`, and `tests/tooling/test_phr_service_config.py` (added 19 Nov) | done |
 | T45 | Dashboard: "View the live demo" | D16 | `web/` | done |
-| T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | in-progress |
+| T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | done |
 | T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, and the minimum needed elsewhere in `web/` | todo |
 | T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/` (beyond what T43 changed), service and module READMEs not owned above | todo |
 
@@ -1171,6 +1171,21 @@ failures until T48: two `test_docs` cases for `docs/setup.md`, which still links
 reviewer-password section and script. Also for T48: the Makefile's smoke comment (reviewer
 password; add `PULSEBRIDGE_TOKEN_ISSUER`), and a short privacy note on the page (the site owner
 is now the data controller for reCAPTCHA data), if the user wants one.
+
+**T46 outcome (20 November).** Reviewed (approve with minor fixes; 21 of 21 reviewer
+break-checks caught) and merged. Defaults as planned, measured against the dashboard (peak 37
+reads in a minute for one tab, worst case the code allows about 100). Changed after review: a
+request with a valid session counts only against its session's limits (keyed on the verified
+`jti`); the per-address limit (300 a minute) applies only to requests without a valid session,
+so a caller of the direct `*.run.app` URL who forges `X-Forwarded-For` can no longer lock a
+visitor with a session out. What remains, recorded as a follow-up: that caller can still use up
+a victim address's session attempts (5 an hour) and its unauthenticated budget; the fix is at
+the edge (trust the forwarded entry only when the immediate peer is a Hosting address). A full
+limiter table answers `table-full` ("The demo is busy; wait a minute and try again."). The five
+new environment variables (`REQUESTS_PER_ADDRESS_PER_MINUTE`, `READS_PER_SESSION_PER_MINUTE`,
+`CUFF_SENDS_PER_SESSION_PER_10_MINUTES`, `SHARES_PER_SESSION_PER_10_MINUTES`,
+`SHARES_PER_INSTANCE_PER_HOUR`) have defaults and are not passed by module phr yet. Open with
+the user: whether the share total should be 30 an hour (15 per instance) rather than up to 60.
 
 ### Rollout (orchestrator, after T48)
 
