@@ -996,7 +996,7 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 | T45 | Dashboard: "View the live demo" | D16 | `web/` | done |
 | T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | done |
 | T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, the minimum needed elsewhere in `web/`, and the one smoke break in `tests/e2e/test_smoke_breaks.py` that the window changes (added 20 Nov) | done |
-| T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/` (beyond what T43 changed), service and module READMEs not owned above | todo |
+| T48 | Docs, settings and privacy note for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/`, the `Makefile` (comments only), `infra/modules/phr/`, `infra/envs/_stack/`, `infra/envs/dev/`, `infra/envs/prod/`, `infra/modules/ingestion/tests/`, `web/` (the privacy note), `tests/tooling/` where the docs tests need it, and service and module READMEs (scope widened 20 Nov) | in-progress |
 
 ### The contract T43 to T45 share
 
@@ -1150,6 +1150,21 @@ measured), and by the attempt time for send attempts.
 - AC: the master checklist gets rows for what only a real deployment can show (the assessment
   call, the score a real browser gets, the CSP with reCAPTCHA, the cookie through Hosting's
   rewrite, the counter under two instances, the quota override if any).
+- AC (added 20 Nov, the user's decisions): module phr passes `HISTORY_DAYS` (T47) and T46's five
+  limits to fhir-proxy as optional variables with the proxy's ranges and defaults, through
+  `_stack` and both env roots (null = the module default), like T44's demo settings; tests and
+  break-checks. `SHARES_PER_INSTANCE_PER_HOUR` keeps 30 (up to 60 an hour with two instances;
+  the user accepted that). The docs say each limit is per instance.
+- AC (added 20 Nov, the user's decision): the page has a short privacy note, linked from the
+  landing view and the dashboard: what the bot check sends to Google (Fraud Defense, the site
+  owner is the data controller, Google the processor), the `__session` cookie (a signed session
+  ID and expiry, no personal data, 24 hours) and Google's own reCAPTCHA cookie, what the proxy
+  and Cloud Run log (client addresses, sampled refusals; how long logs are kept), and that the
+  health data shown is the deployer's own, last 7 days only. Nothing author-specific in the repo;
+  every claim checked against the code and Google's docs.
+- AC: stale leftovers are gone: the Makefile's smoke comment (reviewer password; add
+  `PULSEBRIDGE_TOKEN_ISSUER`), the `reviewer-password` key in ingestion's real-data test, and every
+  remaining mention of the reviewer password outside history; `make test` has no failures.
 
 **T43 to T45 outcome (20 November).** All three reviewed and merged together (the page's CSP
 check needs both the page and the header). T45: approve with minor fixes (wording, a rate-limit
