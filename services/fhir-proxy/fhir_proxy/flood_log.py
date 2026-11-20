@@ -30,6 +30,10 @@ class FloodLogSampler:
         self._logged: set[str] = set()
         self._suppressed = 0
 
+    @property
+    def window_seconds(self) -> float:
+        return self._window
+
     def _roll(self, now: float) -> int | None:
         report = None
         if self._started is None or now - self._started >= self._window:

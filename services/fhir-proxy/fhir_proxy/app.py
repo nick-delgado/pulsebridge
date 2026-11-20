@@ -8,25 +8,28 @@ Order of checks on every request (``before_request``):
 0. The request's time budget starts (``fhir_proxy.deadline``): ``CUFF_FORWARD_TIMEOUT_SECONDS``
    for the cuff send, ``REQUEST_BUDGET_SECONDS`` for everything else. No upstream call starts
    after it is spent.
-1. The per-address rate limit (T46): ``REQUESTS_PER_ADDRESS_PER_MINUTE`` requests per client
-   address, every route together, the public ``/auth/`` routes and requests refused below
-   included; otherwise ``429 rate-limited``. First: it is as cheap as a check gets (one
-   dictionary entry, no I/O), and a flood is then counted before anything is done for it,
-   even before a refusal below is logged.
-2. A token in the query string (``access_token=``, RFC 6750 section 2.3, or ``__session=``) is
+1. The ``__session`` cookie, if there is one, is verified (an HMAC-SHA256 check of a short token
+   with the cached key: no I/O). Only its outcome is kept here; nothing is refused yet. It
+   comes first because it decides which rate limit the request counts against.
+2. **One rate limit** (T46), before anything is refused or done: a request with a valid session
+   counts against its session's limits only, keyed on the verified ``jti`` (reads, cuff sends,
+   shares, then the per-instance limit on shares by everyone); every other request (no cookie,
+   an invalid or expired one, the public ``/auth/`` routes without a session) counts against
+   ``REQUESTS_PER_ADDRESS_PER_MINUTE`` of its client address. Otherwise ``429 rate-limited``.
+   A valid session is never refused by its address's limit: with ``TRUSTED_PROXY_HOPS=2`` a
+   caller of the direct ``*.run.app`` URL can name any address (README, "The client address"),
+   and could otherwise lock a visitor out by flooding in that visitor's name.
+3. A token in the query string (``access_token=``, RFC 6750 section 2.3, or ``__session=``) is
    refused, whatever else the request carries: query strings end up in request logs.
-3. Every request that can change something (any method but ``GET`` and ``HEAD``; in practice
+4. Every request that can change something (any method but ``GET`` and ``HEAD``; in practice
    every ``POST``) must carry an ``Origin`` header naming one of ``ALLOWED_ORIGINS``;
    otherwise ``403 origin-refused``. With the cookie's ``SameSite=Strict`` this is the defence
-   against cross-site request forgery (README, "Demo sessions").
-4. Every route except the three under ``/auth/`` needs a valid session token in the
+   against cross-site request forgery (README, "Demo sessions"). A request refused at 3 or 4
+   was counted at 2 as a plain request (a read, for a session), never as a cuff send or share.
+5. Every route except the three under ``/auth/`` needs a valid session token in the
    ``__session`` cookie; otherwise ``401 session-required``. That includes unknown paths, so an
    unauthenticated caller cannot list the routes. ``Authorization: Bearer`` is not accepted.
-5. The per-session rate limits (T46), keyed on the verified token's ``jti``: reads (every
-   ``GET``/``HEAD``), cuff sends (``POST /cuff/readings``) and shares (``POST /share``, then the
-   per-instance limit on shares by everyone); otherwise ``429 rate-limited``. After the session
-   check, because only a verified token's ``jti`` is a key a caller cannot make up. Then the
-   route itself; ``POST /auth/session`` adds its own per-address limit on session attempts.
+6. The route. ``POST /auth/session`` adds its own per-address limit on session attempts (T43).
 
 There is no CORS: the page and the proxy share one origin (Firebase Hosting's ``/api``
 rewrite), so no ``Access-Control-*`` header is ever sent and a cross-origin script cannot read
@@ -70,7 +73,7 @@ from fhir_proxy.messages import (
     MessagesLog,
     decode_cursor,
 )
-from fhir_proxy.rate_limit import MAX_TRACKED_KEYS, SlidingWindows, TokenBuckets
+from fhir_proxy.rate_limit import MAX_TRACKED_KEYS, SlidingWindows, TableFull, TokenBuckets
 from fhir_proxy.routes import CORE_ROUTES, Route
 from fhir_proxy.search import parse_instant
 from fhir_proxy.session_limit import SessionLimiter
@@ -115,7 +118,10 @@ TEN_MINUTES_SECONDS = 600
 HOUR_SECONDS = 3600
 RATE_LOG_WINDOW_SECONDS = 60
 # Every 429 the gate answers; the page shows the wait from Retry-After for any of them (T45).
+# "table-full": a limiter's table is full of live keys, so a NEW key cannot be tracked; the
+# caller used no budget of its own (rate_limit.TableFull).
 RATE_LIMIT_TEXTS = {
+    "table-full": "The demo is busy; wait a minute and try again.",
     "address": "Too many requests from this address; wait and try again.",
     "session-reads": "Too many requests in this demo session; wait and try again.",
     "session-cuff-sends": (
@@ -385,25 +391,52 @@ def create_app(
                 "session-events-suppressed",
                 kind=event,
                 count=suppressed,
-                window_seconds=SESSION_LOG_WINDOW_SECONDS,
+                window_seconds=sampler.window_seconds,
             )
         if log_it:
             log(logging.WARNING, event, client_address=address, **fields)
 
     def _rate_limited(limit: str, wait: int, address: str) -> Problem:
+        if isinstance(wait, TableFull):
+            # Not this caller's budget: the table of `limit` is full of live keys.
+            table, limit = limit, "table-full"
+        else:
+            table = None
         # Sampled: under a flood, one line per address per minute plus a count of the rest.
-        _sampled(rate_log, "rate-limited", address, limit=limit, retry_after=wait)
+        fields: dict[str, object] = {"limit": limit, "retry_after": int(wait)}
+        if table is not None:
+            fields["table"] = table
+        _sampled(rate_log, "rate-limited", address, **fields)
         return Problem(
             429,
             "throttled",  # R4 issue-type: "the system is not prepared to handle this request"
             "rate-limited",
             RATE_LIMIT_TEXTS[limit],
-            headers={"Retry-After": str(wait)},
+            headers={"Retry-After": str(int(wait))},
         )
 
-    def _session_limits(jti: str, address: str) -> None:
-        """The per-session limits of this request, by what it does (T46)."""
-        if request.method in ("GET", "HEAD"):
+    def _session_from_cookie() -> tuple[dict | None, str | None]:
+        """``(claims, None)`` for a valid ``__session`` cookie, else ``(None, why)``: ``None``
+        when there is no cookie, else a reason code. Refuses nothing: the gate decides later."""
+        token = request.cookies.get(COOKIE_NAME)
+        if not token:
+            return None, None
+        try:
+            key = signing_key.current()
+        except KeyUnavailable:
+            return None, "key-unavailable"  # a protected route answers 503 below
+        try:
+            return signer.verify(token, key), None
+        except InvalidToken as exc:
+            return None, str(exc)
+
+    def _session_limits(jti: str, address: str, *, plain: bool) -> None:
+        """The per-session limits of this request, by what it does (T46). ``plain``: the gate
+        will refuse it (token in the URL, missing Origin), so it counts as a plain request."""
+        if plain or request.endpoint not in ("cuff_readings", SHARE_ENDPOINT):
+            # Every GET and HEAD, and the session's few other requests (logout, a new session
+            # attempt, a request the gate refuses): one budget, so nothing a session sends is
+            # free. The page's only POSTs besides sends and shares are logout and sign-in.
             wait = session_reads.take(jti)
             if wait is not None:
                 raise _rate_limited("session-reads", wait, address)
@@ -432,41 +465,49 @@ def create_app(
         )
         deadline.start(budget)
         address = _address()
-        wait = per_address.take(address)
-        if wait is not None:
-            raise _rate_limited("address", wait, address)
-        if any(name in request.args for name in QUERY_TOKEN_NAMES):
+        session, refused_because = _session_from_cookie()
+        token_in_query = any(name in request.args for name in QUERY_TOKEN_NAMES)
+        origin = request.headers.get("Origin")
+        origin_refused = request.method not in ("GET", "HEAD") and (
+            origin not in config.allowed_origins
+        )
+        # 2. One rate limit, before anything is refused or done.
+        if session is not None:
+            _session_limits(session["jti"], address, plain=token_in_query or origin_refused)
+        else:
+            wait = per_address.take(address)
+            if wait is not None:
+                raise _rate_limited("address", wait, address)
+        # 3. A token in the URL.
+        if token_in_query:
             raise Problem(
                 400,
                 "security",
                 "token-in-query",
                 "Never send a session token in the URL.",
             )
-        if request.method not in ("GET", "HEAD"):
-            # The Origin check (CSRF). An exact match with a configured origin, the form a
-            # browser sends (RFC 6454 section 7); a missing header is refused too: every
-            # browser sends Origin on a POST (Fetch standard, "append a request Origin header").
-            origin = request.headers.get("Origin")
-            if origin not in config.allowed_origins:
-                _sampled(origin_log, "origin-refused", address, origin_present=origin is not None)
-                raise Problem(
-                    403,
-                    "forbidden",
-                    "origin-refused",
-                    "This request must come from the dashboard's own page.",
-                )
+        # 4. The Origin check (CSRF). An exact match with a configured origin, the form a
+        # browser sends (RFC 6454 section 7); a missing header is refused too: every browser
+        # sends Origin on a POST (Fetch standard, "append a request Origin header").
+        if origin_refused:
+            _sampled(origin_log, "origin-refused", address, origin_present=origin is not None)
+            raise Problem(
+                403,
+                "forbidden",
+                "origin-refused",
+                "This request must come from the dashboard's own page.",
+            )
         if request.endpoint in public_endpoints:
             return None
-        token = request.cookies.get(COOKIE_NAME)
-        if not token:
+        # 5. The session.
+        if session is None:
+            if refused_because is None:
+                raise _session_required()
+            if refused_because == "key-unavailable":
+                _current_key()  # logs and answers 503 session-not-configured
+            log(logging.INFO, "token-refused", reason=refused_because)
             raise _session_required()
-        key = _current_key()
-        try:
-            g.session = signer.verify(token, key)
-        except InvalidToken as exc:
-            log(logging.INFO, "token-refused", reason=str(exc))
-            raise _session_required() from None
-        _session_limits(g.session["jti"], address)
+        g.session = session
         return None
 
     @app.after_request
@@ -536,6 +577,8 @@ def create_app(
         address = _address()
         # 1. The per-address limit, before the body is even read.
         wait = session_limiter.attempt(address)
+        if isinstance(wait, TableFull):
+            raise _rate_limited("session-attempts", wait, address)
         if wait is not None:
             _sampled(refused_log, "session-rate-limited", address, retry_after=wait)
             raise Problem(

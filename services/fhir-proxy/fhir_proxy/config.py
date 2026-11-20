@@ -84,13 +84,14 @@ VARIABLES: dict[str, Variable] = {
     # The rate limits of the public demo (T46; README "Rate limits"). Per instance, in memory:
     # the real limit is each one times the instance count (fhir-proxy's max_instance_count, 2).
     "REQUESTS_PER_ADDRESS_PER_MINUTE": Variable(
-        "Requests per client address a minute, every route together (the public /auth/ routes "
-        "included), 60 to 6000, at least READS_PER_SESSION_PER_MINUTE (a token bucket)",
+        "Requests without a valid session per client address a minute, every route together "
+        "(the public /auth/ routes, missing, invalid or expired cookies), 60 to 6000 (a token "
+        "bucket); a request with a valid session counts against its session's limits instead",
         "300",
     ),
     "READS_PER_SESSION_PER_MINUTE": Variable(
-        "GET (and HEAD) requests per demo session a minute, 60 to 1200 (a token bucket keyed on "
-        "the session token's jti)",
+        "GET and HEAD requests (and the session's few other non-send, non-share requests) per "
+        "demo session a minute, 60 to 1200 (a token bucket keyed on the session token's jti)",
         "120",
     ),
     "CUFF_SENDS_PER_SESSION_PER_10_MINUTES": Variable(
@@ -357,13 +358,10 @@ class ServiceConfig:
                     f"{name} must be at least {REQUEST_TIMEOUT_MARGIN_SECONDS} s below "
                     "REQUEST_TIMEOUT_SECONDS"
                 )
+        # No rule between the two: a request counts against one of them only (a valid session's
+        # against its session, every other against its address), so neither bounds the other.
         per_address = int(_number("REQUESTS_PER_ADDRESS_PER_MINUTE", values, 60, 6000, whole=True))
         reads = int(_number("READS_PER_SESSION_PER_MINUTE", values, 60, 1200, whole=True))
-        if per_address < reads:
-            # Otherwise one visitor's own reads would run into its address's limit first.
-            raise ConfigError(
-                "REQUESTS_PER_ADDRESS_PER_MINUTE must be at least READS_PER_SESSION_PER_MINUTE"
-            )
         public_base_url = _public_base_url(values["PUBLIC_BASE_URL"], values["PATH_PREFIX"])
         health_sync_url = values["HEALTH_SYNC_URL"] or None
         return cls(

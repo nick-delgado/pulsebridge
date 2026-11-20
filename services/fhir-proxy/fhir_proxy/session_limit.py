@@ -63,5 +63,5 @@ class SessionLimiter:
 
     def attempt(self, address: str) -> int | None:
         """Record one attempt from ``address``: ``None`` if allowed, else whole seconds to wait
-        (and nothing is recorded)."""
+        (and nothing is recorded); a ``rate_limit.TableFull`` wait when the table is full."""
         return self._windows.take(address)

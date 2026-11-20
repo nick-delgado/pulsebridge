@@ -274,21 +274,27 @@ def test_the_session_limit_on_shares_is_checked_before_the_limit_on_everyone(tmp
 # ---- requests per address --------------------------------------------------------------------
 
 
-def test_300_requests_a_minute_per_address_on_every_route_together(tmp_path) -> None:
+def test_300_requests_a_minute_per_address_without_a_session(tmp_path) -> None:
     h = demo(tmp_path)
-    token = h.login(**ADDRESS)  # 1
+    h.login(**ADDRESS)  # 1: a session attempt has no session yet
+    expired = h.login(**ADDRESS)  # 2
     for _ in range(100):
         h.client.get("/auth/config", headers=ADDRESS)
         h.client.get("/status", headers=ADDRESS)  # no cookie: 401, counted all the same
-    for _ in range(99):
-        read(h, token, **ADDRESS)
-    # 1 + 200 + 99 = 300 requests; five a second come back.
+    for _ in range(50):
+        h.client.get("/status", headers={"Cookie": "__session=junk", **ADDRESS})  # invalid
+    h.clock.advance(86400)  # the session has expired; the bucket is full again
+    for _ in range(150):
+        h.client.get("/auth/config", headers=ADDRESS)
+    for _ in range(150):
+        read(h, expired, **ADDRESS)  # an expired cookie is no session: 401, counted
+    # 300 requests in this minute; five a second come back.
     refused = h.client.get("/auth/config", headers=ADDRESS)
     assert_rate_limited(refused, "1", "address")
     assert (
         h.client.get("/auth/config", headers={"X-Forwarded-For": "203.0.113.21"}).status_code == 200
     )
-    h.clock.advance(0.2)
+    h.clock.advance(0.25)  # 0.2 s gives one token; a little more absorbs float rounding
     assert h.client.get("/auth/config", headers=ADDRESS).status_code == 200
 
 
@@ -324,6 +330,68 @@ def test_the_session_attempt_limit_still_applies(tmp_path) -> None:
     assert h.start_session(**ADDRESS).headers["Retry-After"] == "3600"  # the hourly limit's
 
 
+# ---- a valid session is never held by its address (the direct run.app URL) ---------------------
+
+HOSTING = "35.191.0.1"
+VICTIM = "198.51.100.7"
+
+
+def test_a_flood_in_a_visitors_name_does_not_refuse_the_visitors_session(tmp_path) -> None:
+    # TRUSTED_PROXY_HOPS=2: through Hosting the visitor arrives as "<visitor>, <Hosting>". A
+    # caller of the direct run.app URL sends its own header naming the victim and arrives as
+    # "<victim>, <caller>": the same key. 400 junk requests empty that address's bucket.
+    h = demo(tmp_path, trusted_proxy_hops=2)
+    via_hosting = {"X-Forwarded-For": f"{VICTIM}, {HOSTING}"}
+    token = h.login(**via_hosting)
+    direct = {"X-Forwarded-For": f"{VICTIM}, 203.0.113.66"}
+    for _ in range(400):
+        h.client.get("/status", headers=direct)
+    assert h.client.get("/status", headers=direct).status_code == 429  # the flood is limited
+    # The victim's session requests count only against the session's own limits.
+    assert [read(h, token, **via_hosting).status_code for _ in range(120)] == [200] * 120
+    assert_rate_limited(read(h, token, **via_hosting), "1", "session-reads")
+    h.sender.answer("/cuff/readings", 200, {"result": "accepted"})
+    assert cuff_send(h, token).status_code == 200
+    # What remains (README, "Rate limits"): the same address without a session is held off.
+    assert h.client.get("/auth/config", headers=via_hosting).status_code == 429
+
+
+def test_a_valid_sessions_requests_do_not_use_its_addresss_budget(tmp_path) -> None:
+    h = demo(tmp_path, reads_per_session_per_minute=1200)
+    token = h.login(**ADDRESS)
+    for _ in range(600):
+        assert read(h, token, **ADDRESS).status_code == 200
+    # 1 attempt counted against the address, 600 reads against the session only.
+    assert (
+        sum(h.client.get("/auth/config", headers=ADDRESS).status_code == 200 for _ in range(300))
+        == 299
+    )
+
+
+def test_a_sessions_refused_requests_count_as_plain_requests_of_the_session(tmp_path) -> None:
+    h = demo(tmp_path)
+    h.sender.answer("/cuff/readings", 200, {"result": "accepted"})
+    token = h.login()
+    no_origin = {"Cookie": f"__session={token}"}
+    for _ in range(5):  # a POST without Origin: 403, a read of the session, not a cuff send
+        assert h.client.post("/cuff/readings", json={}, headers=no_origin).status_code == 403
+    for _ in range(5):  # a token in the URL: 400, also a read
+        assert read(h, token, path="/fhir/metadata?access_token=x").status_code == 400
+    assert [cuff_send(h, token).status_code for _ in range(3)] == [200] * 3
+    assert sum(read(h, token).status_code == 200 for _ in range(120)) == 110
+
+
+def test_a_missing_signing_key_still_answers_503_for_a_cookie(tmp_path) -> None:
+    h = demo(tmp_path)
+    token = h.login()
+    h.key_file.unlink()
+    h.clock.advance(3600)  # past the key file's cache
+    response = read(h, token)
+    assert response.status_code == 503
+    assert reason(response) == "session-not-configured"
+    assert h.client.get("/auth/config").status_code == 200  # public routes still answer
+
+
 def test_the_per_session_limits_come_after_the_session_check(tmp_path) -> None:
     h = demo(tmp_path)
     for _ in range(120):
@@ -344,7 +412,8 @@ def test_the_address_table_is_capped_without_evicting_live_history(tmp_path, mon
         h.client.get("/auth/config", headers=first)  # an abuser: its bucket is empty
     h.client.get("/auth/config", headers=second)
     fresh = {"X-Forwarded-For": "203.0.113.3"}
-    assert_rate_limited(h.client.get("/auth/config", headers=fresh), "60", "address")
+    # Not the address limit's text: the caller used no budget; the table has no room.
+    assert_rate_limited(h.client.get("/auth/config", headers=fresh), "60", "table-full")
     h.clock.advance(1)  # "second" has refilled (spent); "first" has 5 of 300 tokens back
     assert h.client.get("/auth/config", headers=fresh).status_code == 200
     assert (
@@ -359,10 +428,31 @@ def test_the_session_table_is_capped_without_evicting_live_history(tmp_path, mon
     for _ in range(120):
         read(h, first)
     late = h.login()
-    assert_rate_limited(read(h, late), "60", "session-reads")
+    assert_rate_limited(read(h, late), "60", "table-full")
     assert read(h, first).status_code == 429  # still limited: its history was kept
     h.clock.advance(60)
     assert read(h, late).status_code == 200
+
+
+def test_a_full_session_attempt_table_says_table_full(tmp_path, monkeypatch, logs) -> None:
+    from fhir_proxy import session_limit
+
+    real = session_limit.SessionLimiter
+
+    def small(**kwargs):  # noqa: ANN003, ANN202
+        return real(**{**kwargs, "max_addresses": 1})
+
+    monkeypatch.setattr(app_module, "SessionLimiter", small)
+    h = demo(tmp_path)
+    h.start_session(**ADDRESS)
+    refused = h.start_session(**{"X-Forwarded-For": "203.0.113.99"})
+    assert_rate_limited(refused, "60", "table-full")
+    (event,) = [e for e in logs.events() if e.get("event") == "rate-limited"]
+    assert (event["limit"], event["table"], event["retry_after"]) == (
+        "table-full",
+        "session-attempts",
+        60,
+    )
 
 
 # ---- logs ------------------------------------------------------------------------------------
@@ -387,6 +477,7 @@ def test_refusals_are_logged_sampled(tmp_path, logs) -> None:
         h.client.get("/auth/config", headers=ADDRESS)
     summaries = [e for e in logs.events() if e.get("event") == "session-events-suppressed"]
     assert [(e["kind"], e["count"]) for e in summaries] == [("rate-limited", 28)]
+    assert summaries[0]["window_seconds"] == app_module.RATE_LOG_WINDOW_SECONDS
 
 
 def test_a_session_refusal_logs_the_limit_and_never_the_token(tmp_path, logs) -> None:
@@ -405,7 +496,7 @@ def test_a_session_refusal_logs_the_limit_and_never_the_token(tmp_path, logs) ->
 
 
 RANGES = {
-    "REQUESTS_PER_ADDRESS_PER_MINUTE": (1200, 6000),
+    "REQUESTS_PER_ADDRESS_PER_MINUTE": (60, 6000),
     "READS_PER_SESSION_PER_MINUTE": (60, 1200),
     "CUFF_SENDS_PER_SESSION_PER_10_MINUTES": (1, 30),
     "SHARES_PER_SESSION_PER_10_MINUTES": (1, 20),
@@ -435,13 +526,7 @@ def base_env(tmp_path) -> dict[str, str]:  # noqa: ANN001
 @pytest.mark.parametrize(("name", "bounds"), RANGES.items())
 def test_each_limit_is_a_variable_with_a_bounded_range(base_env, name, bounds) -> None:
     low, high = bounds
-    # REQUESTS_PER_ADDRESS_PER_MINUTE's range starts at 60; its low bound here is the most
-    # reads a session may make, which it may not be below (tested below).
-    env = {
-        **base_env,
-        "READS_PER_SESSION_PER_MINUTE": "1200",
-        "REQUESTS_PER_ADDRESS_PER_MINUTE": "6000",
-    }
+    env = dict(base_env)
     field = name.lower()
     for good in (low, high):
         assert getattr(ServiceConfig.from_env({**env, name: str(good)}), field) == good
@@ -451,21 +536,19 @@ def test_each_limit_is_a_variable_with_a_bounded_range(base_env, name, bounds) -
         assert name in str(caught.value)
 
 
-def test_the_address_range_starts_at_60(base_env) -> None:
-    env = {**base_env, "READS_PER_SESSION_PER_MINUTE": "60"}
-    assert ServiceConfig.from_env({**env, "REQUESTS_PER_ADDRESS_PER_MINUTE": "60"})
-    # Refused by its own range, not only because it is below the reads limit.
-    with pytest.raises(
-        ConfigError, match="REQUESTS_PER_ADDRESS_PER_MINUTE must be a whole number from 60 to 6000"
-    ):
-        ServiceConfig.from_env({**env, "REQUESTS_PER_ADDRESS_PER_MINUTE": "59"})
-
-
-def test_the_address_limit_may_not_be_below_a_sessions_reads(base_env) -> None:
-    env = {**base_env, "READS_PER_SESSION_PER_MINUTE": "200"}
-    assert ServiceConfig.from_env({**env, "REQUESTS_PER_ADDRESS_PER_MINUTE": "200"})
-    with pytest.raises(ConfigError, match="at least READS_PER_SESSION_PER_MINUTE"):
-        ServiceConfig.from_env({**env, "REQUESTS_PER_ADDRESS_PER_MINUTE": "199"})
+def test_the_address_and_reads_limits_are_independent(base_env) -> None:
+    # A request counts against one of them only, so no rule ties them (T46 review, finding 1).
+    config = ServiceConfig.from_env(
+        {
+            **base_env,
+            "REQUESTS_PER_ADDRESS_PER_MINUTE": "60",
+            "READS_PER_SESSION_PER_MINUTE": "1200",
+        }
+    )
+    assert (config.requests_per_address_per_minute, config.reads_per_session_per_minute) == (
+        60,
+        1200,
+    )
 
 
 def test_unset_limits_take_the_defaults(base_env) -> None:

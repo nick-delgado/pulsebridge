@@ -29,7 +29,10 @@ history is spent (a sliding window with no request left in it, a bucket that has
 full) holds no information and is dropped to make room; a key that still holds history is
 **never** dropped, so a flood of fresh keys cannot evict an abuser's history and hand it fresh
 budget (the rule of ``fhir_proxy.session_limit``). When the table is full of live keys, a new
-key is refused for :data:`OVERFLOW_RETRY_SECONDS`. Looking for spent keys walks the whole
+key is refused with a :class:`TableFull` wait of :data:`OVERFLOW_RETRY_SECONDS`, which the app
+answers with its own text ("the demo is busy"), not the limit's: the caller has not used its
+budget. The 60 s is a ceiling on what the client is told, not a promise: room usually appears
+sooner, and a client still refused then is told again. Looking for spent keys walks the whole
 table, so it runs at most once a second (:data:`SWEEP_INTERVAL_SECONDS`): a flood of fresh keys
 against a full table costs one walk a second, not one per request.
 
@@ -52,6 +55,12 @@ from collections.abc import Callable
 MAX_TRACKED_KEYS = 10_000
 OVERFLOW_RETRY_SECONDS = 60
 SWEEP_INTERVAL_SECONDS = 1.0
+
+
+class TableFull(int):
+    """A refusal because the table is full of live keys, not because this key used its budget.
+    An ``int`` (the seconds to wait), so it is used like any other wait; ``isinstance`` tells
+    the two apart."""
 
 
 def whole_seconds(seconds: float) -> int:
@@ -123,7 +132,7 @@ class SlidingWindows(_CappedTable):
             times = self._entries.get(key)
             if times is None:
                 if not self._room_for_new_key(now):
-                    return OVERFLOW_RETRY_SECONDS
+                    return TableFull(OVERFLOW_RETRY_SECONDS)
                 times = deque()
                 self._entries[key] = times
             assert isinstance(times, deque)  # noqa: S101
@@ -180,7 +189,7 @@ class TokenBuckets(_CappedTable):
             entry = self._entries.get(key)
             if entry is None:
                 if not self._room_for_new_key(now):
-                    return OVERFLOW_RETRY_SECONDS
+                    return TableFull(OVERFLOW_RETRY_SECONDS)
                 entry = [self._capacity, now]
                 self._entries[key] = entry
             assert isinstance(entry, list)  # noqa: S101
