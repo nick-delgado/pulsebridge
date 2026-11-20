@@ -481,6 +481,12 @@ run "hosting_site_and_rewrite" {
   }
   assert {
     condition = (
+      [for h in jsondecode(output.firebase_json).hosting.headers : h.source if h.headers == [{ key = "Cache-Control", value = "no-cache" }]] == ["/", "/index.html", "/privacy.html"]
+    )
+    error_message = "The two pages (/, /index.html, and the privacy note /privacy.html) must be revalidated: Cache-Control no-cache, and nothing else."
+  }
+  assert {
+    condition = (
       strcontains(output.content_security_policy, "default-src 'none'") &&
       strcontains(output.content_security_policy, "frame-ancestors 'none'") &&
       !strcontains(output.content_security_policy, "unsafe-inline") &&

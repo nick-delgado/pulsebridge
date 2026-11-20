@@ -232,7 +232,7 @@ written by hand in a second place. Uploading `web/dist` with that file is the de
 | `Permissions-Policy` | `camera=(), microphone=(), geolocation=()` | The page uses none of them; nothing injected could ask for them. |
 | `Strict-Transport-Security` | `max-age=31536000` | HTTPS only, remembered for a year; effective on a custom domain only (below). |
 
-Plus `Cache-Control: no-cache` on `/` and `/index.html` (a stale `index.html` would name assets a
+Plus `Cache-Control: no-cache` on `/`, `/index.html` and `/privacy.html` (the privacy note, T48) (a stale `index.html` would name assets a
 new deploy removed) and `public, max-age=31536000, immutable` on `/assets/**` (Vite names them
 by content hash). "The URL pattern matching for custom headers is done before any rewrite rules
 are applied" (Hosting configuration page), so `/api/**` answers get the security headers too;
