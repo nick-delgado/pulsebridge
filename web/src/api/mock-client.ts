@@ -91,6 +91,8 @@ import {
   HOSTILE_REFUSED_SYSTOLIC,
   heartRateObservation,
   heartRateObservations,
+  historyBoundary,
+  inHistory,
   heartRateWritesAt,
   lastHeartRateWrite,
   lastSyncRun,
@@ -385,8 +387,11 @@ export class MockClient implements PulseBridgeApi {
         lastSyncAt: written === null ? null : new Date(written).toISOString(),
       },
       observationCounts: {
-        watch: heartRateObservations(now - 30 * 864e5, now, sync).length,
-        cuff: this.#bloodPressure().length,
+        // Counted within the shown window, as the proxy counts (T47).
+        watch: heartRateObservations(historyBoundary(now) - 1, now, sync).filter((o) =>
+          inHistory(o, historyBoundary(now)),
+        ).length,
+        cuff: this.#bloodPressure().filter((o) => inHistory(o, historyBoundary(now))).length,
       },
       fhirStore: { reachable: true, checkedAt, detail: null },
       // The mock implements the share, so it reports OpenEMR as T15's probe would. Before T15
@@ -403,15 +408,23 @@ export class MockClient implements PulseBridgeApi {
     options: CallOptions = {},
   ): Promise<Observation[]> {
     await this.#authorised(options.signal);
+    // The proxy raises a lower bound before its boundary to the boundary (T47), so nothing
+    // older than the shown window comes back, whatever range the page asks for.
+    const boundary = historyBoundary(this.#now());
     const start = query.range.start.getTime();
     const end = query.range.end.getTime();
     if (query.code === LOINC.heartRate) {
-      return heartRateObservations(start, end, this.#lastSync(), this.#zone);
+      // heartRateObservations keeps windows that END AFTER its start (date=gt); one millisecond
+      // before the boundary keeps a window that ends exactly at it (the proxy's date=ge).
+      const from = start >= boundary ? start : boundary - 1;
+      return heartRateObservations(from, end, this.#lastSync(), this.#zone).filter((o) =>
+        inHistory(o, boundary),
+      );
     }
     if (query.code === LOINC.bloodPressurePanel) {
       return this.#bloodPressure().filter((o) => {
         const t = Date.parse(o.effectiveDateTime ?? '');
-        return t > start && t < end; // date=gt<start>&date=lt<end>
+        return t > start && t < end && inHistory(o, boundary); // date=gt<start>&date=lt<end>
       });
     }
     // A refused search parameter is a 400 (R4; amendment 7), as search.py `_refuse` words it.
@@ -446,6 +459,10 @@ export class MockClient implements PulseBridgeApi {
       throw notFound(`Observation/${observationId}`);
     }
     const observation = heartRateObservation(window, sync, this.#zone);
+    // Older than the shown window: the proxy answers exactly as for a missing one (T47).
+    if (!inHistory(observation, historyBoundary(this.#now()))) {
+      throw notFound(`Observation/${observationId}`);
+    }
     return {
       observation,
       provenance: provenanceFor(`Observation/${observationId}`, window.endTime, 'watch'),
@@ -569,7 +586,14 @@ export class MockClient implements PulseBridgeApi {
     if (!SAFE_ID.test(attemptId)) {
       throw proxyProblem(400, 'invalid', 'invalid-id', 'That is not a valid id.');
     }
-    if (this.#unreadable.some((u) => u.id === attemptId)) {
+    const boundary = historyBoundary(this.#now());
+    const unreadable = this.#unreadable.find((u) => u.id === attemptId);
+    // An attempt older than the shown window (by its attempt time; an unreadable one by its
+    // recorded time) answers exactly as a missing one (T47).
+    if (unreadable && !(Date.parse(unreadable.recordedAt ?? '') >= boundary)) {
+      throw notFound(`AuditEvent/${attemptId}`);
+    }
+    if (unreadable) {
       // Amendment 12: final, like a 404; the row stays in the log as unreadable.
       throw proxyProblem(
         422,
@@ -579,7 +603,9 @@ export class MockClient implements PulseBridgeApi {
       );
     }
     const attempt = this.#attempts.find((a) => a.audited && a.entry.id === attemptId);
-    if (!attempt) throw notFound(`AuditEvent/${attemptId}`);
+    if (!attempt || !(Date.parse(attempt.entry.sentAt) >= boundary)) {
+      throw notFound(`AuditEvent/${attemptId}`);
+    }
     const row = this.#present(attempt);
     const observation = row.observation === null ? null : this.#observationFor(attempt);
     return {
@@ -649,6 +675,12 @@ export class MockClient implements PulseBridgeApi {
     if (wantTransactions) {
       for (const t of this.#allTransactions()) rows.push({ at: t.recordedAt, entry: t });
     }
+    // Only the shown window (T47): an attempt by its send time, a store-only row by its
+    // createTime, a transaction by its recorded time, an unreadable row by its recorded time.
+    const boundary = historyBoundary(this.#now());
+    const shown = rows.filter((r) => r.at !== null && Date.parse(r.at) >= boundary);
+    rows.length = 0;
+    rows.push(...shown);
     // Newest first by send time, ties by id descending; undated rows last (amendment 17).
     rows.sort((x, y) => {
       if (x.at === null || y.at === null) return x.at === y.at ? 0 : x.at === null ? 1 : -1;
@@ -1260,13 +1292,16 @@ export class MockClient implements PulseBridgeApi {
 
   /** The configured patient's Observation with this id (heart rate or blood pressure), or null. */
   async #findObservation(id: string): Promise<Observation | null> {
+    // Older than the shown window: not found, as on the proxy (read and share alike, T47).
+    const boundary = historyBoundary(this.#now());
     const bp = this.#bloodPressure().find((o) => o.id === id);
-    if (bp) return bp;
+    if (bp) return inHistory(bp, boundary) ? bp : null;
     const start = windowStartFromId(id);
     const window = start === null ? null : syntheticRollUp(start);
     const sync = this.#lastSync();
     if (start === null || window === null || start + 5 * 60 * 1000 > sync) return null;
-    return Promise.resolve(heartRateObservation(window, sync, this.#zone));
+    const observation = heartRateObservation(window, sync, this.#zone);
+    return Promise.resolve(inHistory(observation, boundary) ? observation : null);
   }
 
   #observationFor(attempt: MockAttempt): Observation | null {
@@ -1571,7 +1606,9 @@ export class MockClient implements PulseBridgeApi {
       problem:
         "written in format version 2, newer than this library's 1: the MSA-1 detail is missing",
     });
-    // One without an id or a readable time (amendment 6): id "", sorted last.
+    // One without an id or a readable time (amendment 6). Since T47 the proxy lists it no more:
+    // its age cannot be known, and the audit search's date=ge<boundary> cannot match it. It
+    // stays seeded so the mock shows that it is hidden (mock-messages.test.ts).
     this.#unreadable.push({
       kind: 'unreadable-send-attempt',
       id: '',

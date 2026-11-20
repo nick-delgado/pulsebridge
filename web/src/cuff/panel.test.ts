@@ -640,6 +640,29 @@ describe('polling the application-level outcome', () => {
     expect(m.traces).toHaveLength(2);
   });
 
+  it('a 429 pauses the polling until Retry-After, then it resumes and the row settles (T47)', async () => {
+    const m = await sentPending();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(m.traces).toHaveLength(2);
+    m.traces[1]?.answer.reject(new ApiError(429, 'Too many requests.', null, 100));
+    await flush();
+    // Waiting: nothing is asked during the 100 s, and the row is still waiting, not given up.
+    await vi.advanceTimersByTimeAsync(99_000);
+    expect(m.traces).toHaveLength(2);
+    expect(m.rows()[0]?.textContent).not.toContain('stopped checking');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(m.traces).toHaveLength(3);
+    m.traces[2]?.answer.resolve(
+      attemptTrace(
+        sendResult(),
+        { outcome: 'accepted', reason: null },
+        { observation: bpObservation('bp-1') },
+      ),
+    );
+    await flush();
+    expect(m.rows()[0]?.querySelectorAll('.cuff-reading__label')[1]?.textContent).toBe('Accepted');
+  });
+
   it('pending → error: the reason in words, and the selection says why it cannot be shared', async () => {
     const m = await sentPending();
     await vi.advanceTimersByTimeAsync(3000);

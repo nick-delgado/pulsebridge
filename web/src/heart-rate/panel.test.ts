@@ -242,6 +242,19 @@ describe('loading a range', () => {
   });
 });
 
+describe('the ranges (T47)', () => {
+  it('offers 24 h and 7 d only: there is no 30 d, the proxy shows no more than a week', () => {
+    const m = mount();
+    const buttons = [
+      ...m.slots.panel.querySelectorAll<HTMLButtonElement>('.hr-ranges__button'),
+    ].map((b) => [b.textContent, b.getAttribute('aria-label')]);
+    expect(buttons).toEqual([
+      ['24 h', 'Show the last 24 hours'],
+      ['7 d', 'Show the last 7 days'],
+    ]);
+  });
+});
+
 describe('switching range', () => {
   it('aborts the request in flight and ignores its late answer', async () => {
     const m = mount();
@@ -280,7 +293,7 @@ describe('empty and error states', () => {
   it('says the watch has not synced yet when the status has no last sync time', async () => {
     const m = mount();
     m.setStatus({ ...status(), watchSync: { ...status().watchSync, lastSyncAt: null } });
-    m.button('Show the last 30 days').click();
+    m.button('Show the last 7 days').click();
     m.searches[1]?.answer.resolve([]);
     await settle();
     const text = m.slots.panel.querySelector('.hr-message')?.textContent ?? '';
@@ -292,7 +305,7 @@ describe('empty and error states', () => {
   it('says a reconnect is needed when the status strip reports it', async () => {
     const m = mount();
     m.setStatus(status('reconnect-needed'));
-    m.button('Show the last 30 days').click();
+    m.button('Show the last 7 days').click();
     m.searches[1]?.answer.resolve([]);
     await settle();
     const text = m.slots.panel.querySelector('.hr-message')?.textContent ?? '';

@@ -55,7 +55,7 @@ from flask import Flask, Response, g, request
 from pulsebridge_gcp import HealthcareApiError, HealthcareClient, NotFoundError, default_transport
 from werkzeug.exceptions import HTTPException, RequestEntityTooLarge
 
-from fhir_proxy import capability, deadline, search, traces
+from fhir_proxy import capability, deadline, history, search, traces
 from fhir_proxy.bodies import MAX_BODY_BYTES, read_body, too_large
 from fhir_proxy.bot_check import BotCheckUnavailable, FraudDefense, token_has_shape
 from fhir_proxy.client_address import client_address
@@ -320,6 +320,10 @@ def create_app(
     )
     messages_log = MessagesLog(stores, patient_id=config.patient_id, executor=executor, now=clock)
 
+    def shown_since() -> datetime:
+        # T47: the boundary of the shown window, computed afresh on every request.
+        return history.window_start(clock(), config.history_days)
+
     context = ProxyContext(
         config=config,
         stores=stores,
@@ -334,6 +338,7 @@ def create_app(
         upstream.health_sync_caller(),
         cache_seconds=config.status_cache_seconds,
         openemr_probe=context.openemr_probe,
+        history_days=config.history_days,
         clock=clock,
         monotonic=monotonic,
     )
@@ -668,13 +673,19 @@ def create_app(
             routes,
             prefix=prefix,
             ttl_hours=config.session_ttl_seconds / 3600,
+            history_days=config.history_days,
             software_version=SOFTWARE_VERSION,
             date=started_on,
         )
         return _json(statement, content_type=FHIR_JSON)
 
     def search_observations() -> Response:
-        query = search.parse_observation_query(list(request.args.items(multi=True)))
+        since = shown_since()
+        # The caller's query is validated first (a bad one is a 400 whatever the window), then
+        # its lower date bound is raised to the window's boundary (history.bounded_query).
+        query = history.bounded_query(
+            search.parse_observation_query(list(request.args.items(multi=True))), since
+        )
         try:
             refs = stores.patient_references()
             bundle = stores.search_observations(query.store_params(",".join(refs))) if refs else {}
@@ -683,7 +694,9 @@ def create_app(
         found = [
             r
             for r in entries(bundle, "Observation")
-            if stores.is_ours(r, refs) and search.matches_dates(r, query)
+            if stores.is_ours(r, refs)
+            and search.matches_dates(r, query)
+            and history.effective_in_window(r, since)
         ]
         path = f"{prefix}/fhir/Observation"
         links = [
@@ -733,8 +746,13 @@ def create_app(
             resource = None
         except HealthcareApiError as exc:
             raise upstream_problem(exc, "the FHIR store") from None
-        if resource is None or not stores.is_ours(resource, refs):
-            # Another patient's Observation answers exactly like a missing one.
+        if (
+            resource is None
+            or not stores.is_ours(resource, refs)
+            or not history.effective_in_window(resource, shown_since())
+        ):
+            # Another patient's Observation, or one older than the shown window (T47), answers
+            # exactly like a missing one: the same body, headers and (no) log line.
             raise Problem(404, "not-found", "not-found", "The Observation was not found.")
         response = _json(resource, content_type=FHIR_JSON)
         # R4 http.html "read": the server SHOULD return an ETag with the versionId (a weak
@@ -762,7 +780,7 @@ def create_app(
     def heart_rate_trace(observation_id: str) -> Response:
         observation_id = _checked_id(observation_id)
         try:
-            return _json(traces.heart_rate_trace(stores, observation_id))
+            return _json(traces.heart_rate_trace(stores, observation_id, since=shown_since()))
         except HealthcareApiError as exc:
             raise upstream_problem(exc, "the FHIR store") from None
 
@@ -776,6 +794,7 @@ def create_app(
                     attempt_id,
                     patient_id=config.patient_id,
                     sample_patient=config.sample_patient,
+                    since=shown_since(),
                 )
             )
         except HealthcareApiError as exc:
@@ -815,7 +834,9 @@ def create_app(
             count = min(int(text), MAX_COUNT)
         cursor = decode_cursor(given["cursor"], clock()) if "cursor" in given else None
         try:
-            page = messages_log.page(kind=kind, outcome=outcome, count=count, cursor=cursor)
+            page = messages_log.page(
+                kind=kind, outcome=outcome, count=count, cursor=cursor, since=shown_since()
+            )
         except HealthcareApiError as exc:
             raise upstream_problem(exc, "the stores") from None
         return _json(page)

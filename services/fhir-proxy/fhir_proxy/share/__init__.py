@@ -39,6 +39,7 @@ def register(proxy: ProxyContext) -> None:
         transport=transport,  # type: ignore[arg-type]
         tokens=TokenCache(proxy.monotonic),
         clock=proxy.clock,
+        history_days=proxy.config.history_days,
     )
     proxy.add_route(ROUTE, service.handle)
     proxy.set_openemr_probe(

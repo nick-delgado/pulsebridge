@@ -42,6 +42,29 @@ export const MOCK_CUFF_REF = 'Device/mock-cuff';
 
 /** Five-minute roll-up windows (D8). */
 export const WINDOW_MS = 5 * 60 * 1000;
+
+/**
+ * The proxy's shown window (T47, services/fhir-proxy/README.md "The shown window"): only the
+ * last `HISTORY_DAYS` days (7 by default) are visible. Nothing is deleted; the proxy hides.
+ */
+export const MOCK_HISTORY_DAYS = 7;
+
+/** The window's boundary at `nowMs`: now minus MOCK_HISTORY_DAYS. */
+export function historyBoundary(nowMs: number): number {
+  return nowMs - MOCK_HISTORY_DAYS * 24 * 3600_000;
+}
+
+/**
+ * Whether the proxy shows an Observation, by its effective time: an `effectiveDateTime` at or
+ * after the boundary, or an `effectivePeriod` that ends at or after it (so a heart-rate window
+ * that overlaps the boundary is shown, R4's rule for `date=ge<boundary>` on a Period).
+ */
+export function inHistory(observation: Observation, boundaryMs: number): boolean {
+  const at = observation.effectivePeriod
+    ? Date.parse(observation.effectivePeriod.end ?? '')
+    : Date.parse(observation.effectiveDateTime ?? '');
+  return Number.isFinite(at) && at >= boundaryMs;
+}
 /** Windows that end within this long before a sync run are still `preliminary` (T10's cutoff). */
 export const PRELIMINARY_MS = 30 * 60 * 1000;
 

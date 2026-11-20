@@ -6,7 +6,8 @@ parse.ts). In order:
 1. **Refusals before OpenEMR is called** are ``Problem`` s (an OperationOutcome with a reason
    code): ``share-not-configured`` 503 (no OpenEMR settings, or the client document is not
    usable), ``invalid-body`` 400, ``not-found`` 404 (unknown, or another patient's: answered
-   alike), ``observation-not-final`` / ``observation-not-shareable`` / ``patient-incomplete``
+   alike; so is one older than the shown window, T47), ``observation-not-final`` /
+   ``observation-not-shareable`` / ``patient-incomplete``
    422, and ``share-busy`` 503 (another share holds this instance's lock until the budget runs
    out). Only these mean "nothing was sent" to the page.
 2. **The sequence** (spike S1), each step recorded with ``extensions.trace_step`` as it
@@ -52,6 +53,7 @@ from fhir_proxy.bodies import read_body
 from fhir_proxy.config import OpenEmrSettings
 from fhir_proxy.errors import Problem, upstream_problem
 from fhir_proxy.extensions import NOT_SHOWN, trace_step
+from fhir_proxy.history import effective_in_window, window_start
 from fhir_proxy.logs import log
 from fhir_proxy.share import resources
 from fhir_proxy.share.document import PROBLEMS, ClientDocument, DocumentProblem, load_document
@@ -178,12 +180,14 @@ class ShareService:
         tokens: TokenCache,
         clock: Callable[[], datetime],
         lock: threading.Lock | None = None,
+        history_days: int = 7,
     ) -> None:
         self.settings = settings
         self.stores = stores
         self.transport = transport
         self.tokens = tokens
         self.clock = clock
+        self.history_days = history_days
         # One share at a time on this instance (see the module docstring).
         self.lock = lock or threading.Lock()
 
@@ -240,8 +244,16 @@ class ShareService:
             raise not_found from None
         except HealthcareApiError as exc:
             raise upstream_problem(exc, "the FHIR store") from None
-        if not isinstance(observation, dict) or not self.stores.is_ours(observation, refs):
-            raise not_found  # another patient's answers exactly like a missing one
+        if (
+            not isinstance(observation, dict)
+            or not self.stores.is_ours(observation, refs)
+            or not effective_in_window(observation, window_start(self.clock(), self.history_days))
+        ):
+            # Another patient's, or one older than the shown window (T47), answers exactly like
+            # a missing one. Checked before anything else about the reading, so a 422 never
+            # tells an old reading's status. The read-back that follows a share is of this
+            # reading, so it covers the same window.
+            raise not_found
         status = observation.get("status")
         if status != "final":
             named = status if status in resources.OBSERVATION_STATUSES else "not final"

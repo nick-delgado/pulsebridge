@@ -103,6 +103,13 @@ VARIABLES: dict[str, Variable] = {
     "SHARES_PER_INSTANCE_PER_HOUR": Variable(
         "POST /share by all visitors together in any hour, per instance, 1 to 600", "30"
     ),
+    # T47 (D16): only the last HISTORY_DAYS days are shown; nothing is deleted, the proxy hides.
+    "HISTORY_DAYS": Variable(
+        "How many days back the proxy shows, 1 to 30: readings by their effective time (a "
+        "heart-rate window that overlaps the boundary is shown), send attempts by their attempt "
+        "time; anything older answers like a missing resource. Nothing is deleted",
+        "7",
+    ),
     "DEMO_COUNTER_BUCKET": Variable(
         "Cloud Storage bucket holding one counter object per UTC day (the daily bot-check cap)"
     ),
@@ -283,6 +290,7 @@ class ServiceConfig:
     cuff_sends_per_session_per_10_minutes: int = 3
     shares_per_session_per_10_minutes: int = 2
     shares_per_instance_per_hour: int = 30
+    history_days: int = 7
     fhir_timeout: float = 10.0
     cuff_forward_timeout: float = 55.0
     request_budget: float = 50.0
@@ -404,6 +412,7 @@ class ServiceConfig:
             shares_per_instance_per_hour=int(
                 _number("SHARES_PER_INSTANCE_PER_HOUR", values, 1, 600, whole=True)
             ),
+            history_days=int(_number("HISTORY_DAYS", values, 1, 30, whole=True)),
             fhir_timeout=_number("FHIR_TIMEOUT_SECONDS", values, 1, 30),
             cuff_forward_timeout=forward,
             request_budget=budget,

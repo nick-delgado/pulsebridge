@@ -116,14 +116,10 @@ describe('mock messages log: rows (amendments 1, 2, 5, 6, 14, 18)', () => {
     for (const s of storeOnly) expect(s.id).toContain('/messages/');
   });
 
-  it('unreadable rows: one with an id, one with id "" and no time, which sorts last', () => {
+  it('unreadable rows: the one with a time; one with no time is not listed (T47 window)', () => {
     const unreadable = rows.filter((r) => r.kind === 'unreadable-send-attempt');
-    expect(unreadable.map((u) => u.id)).toEqual(['mock-unreadable-0001', '']);
-    expect(rows.at(-1)).toMatchObject({
-      kind: 'unreadable-send-attempt',
-      id: '',
-      recordedAt: null,
-    });
+    expect(unreadable.map((u) => u.id)).toEqual(['mock-unreadable-0001']);
+    expect(rows.every((r) => sortTime(r) !== null)).toBe(true);
   });
 
   it('transaction rows: four writers, httpStatus always null, only Observations and Provenances', () => {
