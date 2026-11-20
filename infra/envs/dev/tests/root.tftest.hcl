@@ -262,3 +262,17 @@ run "demo_settings_default_at_the_root" {
     error_message = "Unset demo settings must give module phr's defaults."
   }
 }
+
+# T44: make smoke reads the proxy's issuer from this output (PULSEBRIDGE_TOKEN_ISSUER).
+run "token_issuer_output_follows_name_prefix" {
+  command = plan
+
+  variables {
+    name_prefix = "pbsmoke"
+  }
+
+  assert {
+    condition     = endswith(output.token_issuer, ":pbsmoke") && startswith(output.token_issuer, "pulsebridge-fhir-proxy:")
+    error_message = "token_issuer must end with name_prefix (not identity_name_prefix)."
+  }
+}

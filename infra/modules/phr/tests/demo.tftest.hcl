@@ -160,6 +160,26 @@ run "allowed_origins_with_custom_domain_and_extras_deduplicated" {
   }
 }
 
+# ---- the issuer make smoke signs with is the proxy's ------------------------------------------
+
+run "token_issuer_output_is_the_proxys_token_issuer" {
+  command = apply
+  variables {
+    name_prefix = "pbx"
+  }
+
+  assert {
+    condition = output.token_issuer == {
+      for e in google_cloud_run_v2_service.fhir_proxy.template[0].containers[0].env : e.name => e.value
+    }["TOKEN_ISSUER"]
+    error_message = "token_issuer must be exactly fhir-proxy's TOKEN_ISSUER, or make smoke signs sessions the proxy refuses."
+  }
+  assert {
+    condition     = output.token_issuer == "pulsebridge-fhir-proxy:example-project:pbx"
+    error_message = "token_issuer must be pulsebridge-fhir-proxy:<project_id>:<name_prefix> (name_prefix, not the identity prefix)."
+  }
+}
+
 # ---- the counter bucket -----------------------------------------------------------------------
 
 run "counter_bucket_is_private_short_lived_and_destroyable_in_dev" {

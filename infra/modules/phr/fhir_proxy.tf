@@ -163,7 +163,7 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
             TRUSTED_PROXY_HOPS = tostring(var.trusted_proxy_hops)
             # The session token's `iss`: deployment-specific, so a token from another PulseBridge
             # deployment never verifies here even if a key were reused.
-            TOKEN_ISSUER = "pulsebridge-fhir-proxy:${var.project_id}:${var.name_prefix}"
+            TOKEN_ISSUER = local.token_issuer
             # D16, the T43 to T45 contract (demo.tf). The site key is public; the page reads it
             # from GET /auth/config, never from its build. The assessment is created in
             # GCP_PROJECT_ID, the project that owns the key.

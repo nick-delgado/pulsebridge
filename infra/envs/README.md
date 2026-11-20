@@ -565,8 +565,13 @@ with `<prefix>-session-signing-key`, read from Secret Manager in memory):
 ```bash
 PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/<env> output -raw dashboard_url)/api" \
 SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/<env> output -raw secret_name_prefix)" \
+PULSEBRIDGE_TOKEN_ISSUER="$(terraform -chdir=infra/envs/<env> output -raw token_issuer)" \
 make smoke
 ```
+
+`PULSEBRIDGE_TOKEN_ISSUER` is fhir-proxy's exact `TOKEN_ISSUER` (`pulsebridge-fhir-proxy:<project_id>:<name_prefix>`;
+output `token_issuer`, not a secret): the smoke test signs its session with it (T43, after T48).
+It is built from `name_prefix`, not from `secret_name_prefix` (that is `identity_name_prefix`).
 
 On a real-data stack it refuses to write a test reading into the patient's record unless
 `SMOKE_ARGS=--allow-real-data-writes` is given, and it runs I4's and I6's health-sync checks

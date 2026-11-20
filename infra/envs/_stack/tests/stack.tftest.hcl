@@ -569,6 +569,17 @@ run "another_project_base_change_keeps_the_agent_grants" {
   expect_failures = [check.cloud_nat_is_billed_hourly]
 }
 
+# ---- T44: make smoke's issuer is module phr's, built from name_prefix -----------------------------
+
+run "token_issuer_comes_from_module_phr" {
+  command = plan
+
+  assert {
+    condition     = output.token_issuer == module.phr.token_issuer && output.token_issuer == "pulsebridge-fhir-proxy:${var.project_id}:${var.name_prefix}"
+    error_message = "The stack's token_issuer must be module phr's (name_prefix, not identity_name_prefix)."
+  }
+}
+
 # ---- T44: the demo settings pass through, null keeps module phr's defaults ---------------------
 
 run "demo_settings_default_to_module_phr" {

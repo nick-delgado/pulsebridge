@@ -592,7 +592,7 @@ module passes; a blank means the service's default applies.
 | `PATIENT_ASSIGNING_AUTHORITY`, `PATIENT_FAMILY_NAME`, `PATIENT_GIVEN_NAME` | no (all or none) | all three: cuff-sim's values, so traces show a sent sample's exact bytes |
 | `PATH_PREFIX` | no | `/api` |
 | `TRUSTED_PROXY_HOPS` | no (1) | `trusted_proxy_hops` (default 2: measured behind Hosting; "The client address and the direct run.app URL") |
-| `TOKEN_ISSUER` | no | `pulsebridge-fhir-proxy:<project_id>:<name_prefix>` (deployment-specific `iss`) |
+| `TOKEN_ISSUER` | no | `pulsebridge-fhir-proxy:<project_id>:<name_prefix>` (deployment-specific `iss` and `aud`; built once in `local.token_issuer`, also output `token_issuer`, which `make smoke` signs with) |
 | `REQUEST_BUDGET_SECONDS` | no (50) | `50` |
 | `CUFF_FORWARD_TIMEOUT_SECONDS` | no (55) | `55` |
 | `REQUEST_TIMEOUT_SECONDS` | no (120) | `70`, the same as the Cloud Run request timeout ("Timeouts end to end") |
@@ -996,3 +996,4 @@ Read directly (`curl`, 2026-11-15) unless marked otherwise:
 | `cuff_sim_rate_limit_per_minute` | 6 × `cuff_sim_max_instances`. |
 | `recaptcha_site_key`, `recaptcha_allowed_domains` | The score key's ID (public) and its allowed domains. |
 | `demo_counter_bucket` | The counter bucket's name. |
+| `token_issuer` | fhir-proxy's exact `TOKEN_ISSUER`, for `make smoke` (`PULSEBRIDGE_TOKEN_ISSUER`); not a secret. |

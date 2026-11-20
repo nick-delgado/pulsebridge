@@ -73,7 +73,13 @@ locals {
 
   # The rewrite puts the proxy under /api on the page's own origin. Hosting forwards the full
   # path (/api/status), so the proxy serves every route under PATH_PREFIX.
-  path_prefix   = "/api"
+  path_prefix = "/api"
+
+  # The session token's `iss` and `aud` (fhir-proxy's TOKEN_ISSUER), built once: the proxy gets
+  # it as TOKEN_ISSUER and the output token_issuer publishes the same string, so `make smoke`
+  # signs its session with exactly what the proxy checks. Deployment-specific, so a token from
+  # another PulseBridge deployment never verifies here. Not a secret.
+  token_issuer  = "pulsebridge-fhir-proxy:${var.project_id}:${var.name_prefix}"
   site_id       = coalesce(var.hosting_site_id, var.project_id)
   public_origin = coalesce(var.public_origin, "https://${local.site_id}.web.app")
 

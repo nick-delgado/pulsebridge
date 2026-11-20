@@ -94,3 +94,8 @@ output "demo_settings" {
     bot_checks_per_day            = var.bot_checks_per_day
   }
 }
+
+output "token_issuer" {
+  description = "fhir-proxy's TOKEN_ISSUER, the `iss` and `aud` of its session tokens: \"pulsebridge-fhir-proxy:<project_id>:<name_prefix>\". `make smoke` signs its session with it (PULSEBRIDGE_TOKEN_ISSUER). Not a secret."
+  value       = local.token_issuer
+}
