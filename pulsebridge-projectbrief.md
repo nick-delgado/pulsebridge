@@ -49,12 +49,12 @@ Fourteen pieces, all on GCP, all created by Terraform except the Google Health O
 | Ingest topic | Pub/Sub topic + push subscription | Fans HL7v2 ingest events out to `v2-to-fhir` | \~$0 |
 | v2-to-fhir | Cloud Run service (Python, hl7apy) | Reads the stored v2 message, parses OBX, writes Observation | $0 |
 | MLLP adapter | Compute Engine e2-micro (new, clean), container from Google's open-source mllp-adapter | Terminates MLLP (TCP) from the simulator and forwards to the HL7v2 store; also hosts OpenEMR and MariaDB | free tier |
-| Cuff simulator | Cloud Run service | Backend for the left side of the page: builds an ORU^R01 (two OBX) from entered BP values, sends it over MLLP to the VM, returns the ACK. Not public: the page reaches it only through the FHIR proxy, so it sits behind the reviewer login | $0 |
+| Cuff simulator | Cloud Run service | Backend for the left side of the page: builds an ORU^R01 (two OBX) from entered BP values, sends it over MLLP to the VM, returns the ACK. Not public: the page reaches it only through the FHIR proxy, so it sits behind the demo session (D16) | $0 |
 | PHR dashboard | Firebase Hosting | Static SPA: chart, trace panel, share button | cents |
-| FHIR proxy | Cloud Run service | The single public entry point for the SPA: checks the reviewer password and issues a short-lived signed token; holds service-account credentials; exposes a narrow read API; forwards cuff readings to the cuff simulator; executes the share action against OpenEMR | $0 |
+| FHIR proxy | Cloud Run service | The single public entry point for the SPA: runs the bot check (Fraud Defense assessment) and sets a signed 24-hour `__session` cookie (D16); applies the rate limits and the 7-day window; holds service-account credentials; exposes a narrow read API; forwards cuff readings to the cuff simulator; executes the share action against OpenEMR | $0 |
 | OpenEMR | Docker on the e2-micro (official OpenEMR image + MariaDB) | The clinic. Receives shared vitals via its FHIR API. Its screens are not exposed to the internet; the dashboard shows what it stored by reading it back | rides the VM |
-| Secrets | Secret Manager | Google Health OAuth client ID, client secret and refresh token, OpenEMR client private key, reviewer password, DB password | \~$0 |
-| Identity | Service accounts, IAM bindings, reviewer password in Secret Manager checked by `fhir-proxy` | Least-privilege per service; password-protected demo | $0 |
+| Secrets | Secret Manager | Google Health OAuth client ID, client secret and refresh token, OpenEMR client private key, session signing key (D16), DB password | \~$0 |
+| Identity | Service accounts, IAM bindings, the session signing key in Secret Manager read by `fhir-proxy` | Least-privilege per service; a self-serve public demo behind a bot check (D16) | $0 |
 
 The e2-micro is the only always-on piece and the only one that costs money if it leaves the free tier. It carries three jobs, OpenEMR, MariaDB and MLLP termination, because each needs a long-lived process or persistent local state and none fits Cloud Run cleanly. Add a 2 GB swap file, cap Apache at four worker processes and keep a low-memory MariaDB config. Spike S2 (`docs/spikes/s2.md`) measured 216 to 330 MB of RAM still available at idle and no out-of-memory kills. The real limit is the shared CPU: after about 20 seconds of sustained load, responses slow roughly eightfold until the VM rests, and first boot takes about 15 minutes. That is acceptable for one reviewer at a time. If it is not, move to e2-small, which leaves the free tier.
 
@@ -121,7 +121,7 @@ One root module per environment composes seven reusable modules; modules own res
 infra/
   modules/
     project-base/      # APIs enabled, VPC, subnet, Cloud NAT (off by default), firewall, Artifact Registry
-    identity/          # service accounts, IAM bindings, Secret Manager secrets including the reviewer password (values set out of band)
+    identity/          # service accounts, IAM bindings, Secret Manager secrets including the session signing key (values set out of band)
     healthcare/        # Healthcare dataset, FHIR R4 store, HL7v2 store, Pub/Sub topic + subscription, store notification config
     ingestion/         # Cloud Run: health-sync, v2-to-fhir; Cloud Scheduler job; OIDC invoker bindings
     edge-vm/           # e2-micro, startup script, mllp-adapter + MariaDB containers, persistent disk; no public ports (Cloud Run reaches the VM privately; the firewall rule lives in project-base)
@@ -199,7 +199,7 @@ Run these before building; each is a half-day and any one of them can change the
 - [x] **Google Health API registration.** Resolved by spike S3 (`docs/spikes/s3.md`): the OAuth app, the connect flow and a one-day pull of `heart-rate` all work with the `googlehealth.health_metrics_and_measurements.readonly` scope, and the field names are recorded. Still unknown: what a webhook notification carries. Known limit: while the OAuth app is in Testing status the refresh token expires after 7 days.
 - [x] **mllp-adapter on e2-micro.** Resolved by spike S4 (`docs/spikes/s4.md`): Google's adapter runs next to MariaDB in about 27 MiB and relays the store's ACK in a median of 75 ms. No Python listener is needed. Memory with OpenEMR also running is spike S2's question.
 - [x] **HL7v2 store notification.** Resolved by spike S5 (`docs/spikes/s5.md`): `ingest` and `create` both publish one Pub/Sub message per newly stored message. It carries only the message's resource name and a `msgType` attribute. Identical bytes sent again are stored once and not re-notified. The push request body was not observed (the spike used a pull subscription).
-- [x] **Reviewer auth.** Resolved by spike S6 (`docs/spikes/s6.md`): a shared password in Secret Manager checked by the fhir-proxy, with a signed bearer token and a login rate limit. No Identity Platform.
+- [x] **Reviewer auth.** Resolved by spike S6 (`docs/spikes/s6.md`): a shared password in Secret Manager checked by the fhir-proxy, with a signed bearer token and a login rate limit. No Identity Platform. Superseded on 19 November 2026 by the self-serve demo (D16): no password, a bot check and a session cookie.
 - [ ] **Name.** Decided: PulseBridge, slug pulsebridge, demo at the prod project's Firebase Hosting address (no custom domain for now). Check slug availability on GitHub.
 
 ## Out of scope
