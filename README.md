@@ -338,15 +338,16 @@ and the default Hosting site was then taken offline. A day later the billing rep
 charges for the dev project.
 
 **The public demo (D16, 19 to 20 November 2026)** replaced the reviewer password with the bot
-check, the session cookie, the rate limits and the 7-day window (tasks T43 to T48). It is built
-and tested offline only, against fakes of Fraud Defense and Cloud Storage and the page's mock
-client, and its rollout to prod has not happened yet.
+check, the session cookie, the rate limits and the 7-day window (tasks T43 to T48). It was built
+and tested offline, then rolled out to prod on 20 November through CI: the real assessment call,
+a real browser's score (0.9 against a threshold of 0.5), the cookie and the `Origin` header
+through Hosting, the page's Content-Security-Policy with Google's script, the daily counter and
+`make smoke` (39 passed, 0 failed) all worked (checklist rows P17 to P26).
 
-**Not yet verified:** everything about the public demo that needs a real deployment (the
-assessment call, the scores real browsers get, the page's Content-Security-Policy with Google's
-script, the cookie and the `Origin` header through Hosting, the counter with two instances, the
-limits on a normal visit, the 7-day searches against Cloud Healthcare, `make smoke` with its
-locally signed sessions: checklist rows P17 to P26), a forced slow cuff send, and a few inspections that need a shell on the
+**Not yet verified:** the parts of the public demo that need more traffic or other devices (the
+counter and the limits with two instances, a phone's and a content blocker's score, three sends
+and two shares in one session, some of the 7-day search forms: rows P19 and P23 to P25), a forced
+slow cuff send, and a few inspections that need a shell on the
 VM. The
 runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's result and
 lists what is still open. The demo is shown at the Firebase Hosting address of the prod project;

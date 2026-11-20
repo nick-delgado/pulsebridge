@@ -1226,6 +1226,17 @@ were updated by the orchestrator. Checked together on the working branch, creden
 lint, `make test` (3,802 passed, 0 failed), every Terraform check, the dashboard (808 unit, 73
 browser tests, build), pre-commit and the secret scan.
 
+**Rollout outcome (20 November).** Done on prod in the runbook's order: the `v0.3.0` images built
+(only the proxy's digest changed); bootstrap re-applied by hand (4 added, 1 changed); the old
+secret forgotten in state and a targeted apply (4 added, 1 changed, 1 destroyed: the old secret's
+read grant); the signing key's version added; PR #18 merged; CI's prod plan (3 to add, 1 to
+change, 0 to destroy) approved by the user, applied, and the page deployed. `make smoke` passed
+(39 passed, 0 failed, 1 skipped as expected on real data); the owner's browser opened the
+dashboard with a score of 0.9 and no CSP violation; the old `pb-reviewer-password` secret was then
+deleted. Results are in the runbook's checklist (P17 to P26); still open there: two instances,
+other devices' scores, and some search forms. The page's start-up session check logs one
+expected `401` in the browser console; the user chose to leave it.
+
 ### Rollout (orchestrator, after T48)
 
 Build and push new images; re-apply bootstrap by hand for the new deployer and planner
