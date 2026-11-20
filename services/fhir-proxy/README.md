@@ -496,8 +496,11 @@ information and is dropped to make room; a key with live history is never droppe
 of fresh addresses cannot evict an abuser's history (T43's rule). When a table is full of live
 keys, a new key is refused for 60 s. The search for spent keys walks the table, so it runs at
 most once a second. Sessions cannot fill their tables: a `jti` exists only for a session the
-bot check let through, and at most `BOT_CHECKS_PER_DAY` are made a day. Addresses can, through
-the direct `*.run.app` URL ("The client address" below); then new addresses wait a minute.
+bot check let through, and at most `BOT_CHECKS_PER_DAY` are made a day. The address table is
+hard to fill even through the direct `*.run.app` URL, where a caller can choose its own key
+("The client address" below): an address that made one request has its bucket full again 0.2 s
+later and makes room, so filling the table takes about 10,000 fresh addresses within a second
+or so, far more than one instance serves. If it ever is full, new addresses wait a minute.
 
 **The defaults, against what the dashboard really sends.** Measured on 20 November 2026 by
 driving the dashboard's own code (`web/src`, `startApp` with the mock client counting every

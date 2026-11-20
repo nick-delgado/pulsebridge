@@ -333,6 +333,38 @@ def test_the_per_session_limits_come_after_the_session_check(tmp_path) -> None:
     assert h.client.get("/fhir/metadata").status_code == 401
 
 
+# ---- the capped tables ------------------------------------------------------------------------
+
+
+def test_the_address_table_is_capped_without_evicting_live_history(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "MAX_TRACKED_KEYS", 2)
+    h = demo(tmp_path)
+    first, second = ({"X-Forwarded-For": f"203.0.113.{n}"} for n in (1, 2))
+    for _ in range(300):
+        h.client.get("/auth/config", headers=first)  # an abuser: its bucket is empty
+    h.client.get("/auth/config", headers=second)
+    fresh = {"X-Forwarded-For": "203.0.113.3"}
+    assert_rate_limited(h.client.get("/auth/config", headers=fresh), "60", "address")
+    h.clock.advance(1)  # "second" has refilled (spent); "first" has 5 of 300 tokens back
+    assert h.client.get("/auth/config", headers=fresh).status_code == 200
+    assert (
+        sum(h.client.get("/auth/config", headers=first).status_code == 200 for _ in range(9)) == 5
+    )
+
+
+def test_the_session_table_is_capped_without_evicting_live_history(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(app_module, "MAX_TRACKED_KEYS", 1)
+    h = demo(tmp_path)
+    first = h.login()
+    for _ in range(120):
+        read(h, first)
+    late = h.login()
+    assert_rate_limited(read(h, late), "60", "session-reads")
+    assert read(h, first).status_code == 429  # still limited: its history was kept
+    h.clock.advance(60)
+    assert read(h, late).status_code == 200
+
+
 # ---- logs ------------------------------------------------------------------------------------
 
 

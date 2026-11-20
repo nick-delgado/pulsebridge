@@ -70,7 +70,7 @@ from fhir_proxy.messages import (
     MessagesLog,
     decode_cursor,
 )
-from fhir_proxy.rate_limit import SlidingWindows, TokenBuckets
+from fhir_proxy.rate_limit import MAX_TRACKED_KEYS, SlidingWindows, TokenBuckets
 from fhir_proxy.routes import CORE_ROUTES, Route
 from fhir_proxy.search import parse_instant
 from fhir_proxy.session_limit import SessionLimiter
@@ -267,25 +267,31 @@ def create_app(
         timeout=GOOGLE_CALL_TIMEOUT_SECONDS,
         clock=clock,
     )
-    # T46's rate limits (README, "Rate limits"): in memory, per instance.
+    # T46's rate limits (README, "Rate limits"): in memory, per instance, each table capped at
+    # MAX_TRACKED_KEYS keys (read here, at start-up, so a test can lower it).
+    max_keys = MAX_TRACKED_KEYS
     per_address = TokenBuckets(
         capacity=config.requests_per_address_per_minute,
         window_seconds=MINUTE_SECONDS,
+        max_keys=max_keys,
         monotonic=monotonic,
     )
     session_reads = TokenBuckets(
         capacity=config.reads_per_session_per_minute,
         window_seconds=MINUTE_SECONDS,
+        max_keys=max_keys,
         monotonic=monotonic,
     )
     session_cuff_sends = SlidingWindows(
         limit=config.cuff_sends_per_session_per_10_minutes,
         window_seconds=TEN_MINUTES_SECONDS,
+        max_keys=max_keys,
         monotonic=monotonic,
     )
     session_shares = SlidingWindows(
         limit=config.shares_per_session_per_10_minutes,
         window_seconds=TEN_MINUTES_SECONDS,
+        max_keys=max_keys,
         monotonic=monotonic,
     )
     all_shares = SlidingWindows(
