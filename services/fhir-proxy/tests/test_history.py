@@ -425,6 +425,32 @@ def test_a_transaction_that_wrote_only_older_windows_is_not_a_row(harness, seed_
     assert len(observations) == 2 and all("edge" in r for r in observations)
 
 
+def test_an_audit_store_that_ignores_the_bound_still_lists_nothing_older(harness, patient) -> None:  # noqa: ARG001
+    # The fake audit store answers as if it had no date index: the window is the proxy's own.
+    harness.fake.ignore_dates_for = frozenset({"AuditEvent"})
+    old = _attempt(harness, BOUNDARY - timedelta(days=2), BOUNDARY - timedelta(days=2))
+    new = _attempt(harness, BOUNDARY + timedelta(hours=1), BOUNDARY + timedelta(hours=1))
+    broken = copy.deepcopy(example("auditevent-send-rejected.json"))
+    broken["id"] = "broken-old"
+    broken["outcome"] = "0"  # contradicts the AE: unreadable
+    broken["recorded"] = "2025-12-26T11:59:59Z"
+    harness.fake.put(AUDIT_STORE, broken)
+    ids = [r["id"] for r in harness.get("/messages").get_json()["entries"]]
+    assert new in ids
+    assert old not in ids and "broken-old" not in ids
+
+
+def test_a_provenance_store_that_ignores_the_bound_still_lists_nothing_older(
+    harness, seed_heart_rate
+) -> None:
+    harness.fake.ignore_dates_for = frozenset({"Provenance"})
+    now = harness.clock.now
+    harness.clock.now = BOUNDARY - timedelta(seconds=1)  # the Provenance's recorded time
+    seed_heart_rate(BOUNDARY + timedelta(hours=1), 2)
+    harness.clock.now = now
+    assert harness.get("/messages?kind=fhir-transaction").get_json()["entries"] == []
+
+
 def test_a_transaction_recorded_before_the_window_is_not_a_row(harness, seed_heart_rate) -> None:
     now = harness.clock.now
     harness.clock.now = BOUNDARY - timedelta(seconds=1)  # the Provenance's recorded time

@@ -498,6 +498,31 @@ describe('refreshing (data changes, polling) without losing focus', () => {
     expect(m.calls).toHaveLength(3); // settled
   });
 
+  it('a 429 on a later page of a polling refresh also waits for Retry-After (T47)', async () => {
+    vi.useFakeTimers();
+    const m = mount();
+    const pendingRow = attempt({
+      application: { outcome: 'pending', reason: null },
+      observation: null,
+    });
+    // The first load: a short page with more after it, so the log reads page 2 by itself.
+    await m.answer(page([pendingRow], 'c1'));
+    expect(m.calls[1]?.query).toEqual({ count: 25, cursor: 'c1' });
+    await m.answer(page([], null));
+    await vi.advanceTimersByTimeAsync(3000);
+    // The poll's refresh: page 1 answers, page 2 is refused (gather keeps page 1 and returns it).
+    expect(m.calls).toHaveLength(3);
+    await m.answer(page([pendingRow], 'c1'));
+    expect(m.calls).toHaveLength(4);
+    m.calls[3]?.answer.reject(new ApiError(429, 'Too many requests. Wait 40 seconds.', null, 40));
+    await flush();
+    expect(m.q('#log-alert').textContent).toContain('Too many requests. Wait 40 seconds.');
+    await vi.advanceTimersByTimeAsync(39_000);
+    expect(m.calls).toHaveLength(4); // nothing asked while the wait runs
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(m.calls).toHaveLength(5);
+  });
+
   it('polling is bounded and then offers "Check again"', async () => {
     vi.useFakeTimers();
     const m = mount();

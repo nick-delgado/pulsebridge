@@ -169,6 +169,9 @@ class FakeHealthcare:
     # Apply R4's date rule to Observation searches, as a real store would (T47's count tests).
     # Off by default: most search tests prove the proxy's own post-filter.
     observation_dates: bool = False
+    # Resource types whose date bounds the fake IGNORES ("AuditEvent", "Provenance"), to test the
+    # proxy's own window filter behind a store that matched dates differently (T47).
+    ignore_dates_for: frozenset[str] = frozenset()
 
     # -- seeding --
 
@@ -328,11 +331,11 @@ class FakeHealthcare:
                         for c in ([r["type"]] if key == "type" else r.get("subtype", []))
                     )
                 ]
-            for clause in params.get("date", []):
+            for clause in params.get("date", []) if rtype not in self.ignore_dates_for else []:
                 resources = [r for r in resources if _date_ok(_instant(r["recorded"]), clause)]
             resources.sort(key=lambda r: _instant(r["recorded"]), reverse=True)
         if rtype == "Provenance":
-            for clause in params.get("recorded", []):
+            for clause in params.get("recorded", []) if rtype not in self.ignore_dates_for else []:
                 resources = [r for r in resources if _date_ok(_instant(r["recorded"]), clause)]
             resources.sort(key=lambda r: (_instant(r["recorded"]), r["id"]), reverse=True)
         if rtype == "Observation" and self.observation_dates:

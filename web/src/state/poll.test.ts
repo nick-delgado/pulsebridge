@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../api/errors';
-import { POLL_DEFAULT_RETRY_AFTER_MS, POLL_MAX_RATE_LIMIT_WAIT_MS, pollUntil } from './poll';
+import { POLL_MAX_RATE_LIMIT_WAIT_MS, pollUntil } from './poll';
 
 describe('pollUntil', () => {
   let clock = 0;
@@ -114,7 +114,7 @@ describe('pollUntil', () => {
     const check = vi.fn(() => (answers.shift() ?? (() => Promise.resolve(true)))());
     const done = pollUntil(check, opts(new AbortController().signal));
     await advance(1000);
-    await advance(POLL_DEFAULT_RETRY_AFTER_MS - 1);
+    await advance(60_000 - 1); // a minute, written out: the constant itself is under test
     expect(check).toHaveBeenCalledTimes(1);
     await advance(1);
     await expect(done).resolves.toBe(true);

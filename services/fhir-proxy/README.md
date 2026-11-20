@@ -39,7 +39,8 @@ with the app's clock and cut to whole milliseconds (`fhir_proxy/history.py`). Wh
   end is at or after the boundary, so a window that **overlaps** the boundary is shown. That is
   exactly R4's rule for `date=ge<boundary>` on a Period (the search below). A reading whose
   time has no zone or is a partial date cannot be placed, so it is not shown (no date search
-  finds it either).
+  finds it either). The share's `422 observation-not-shareable` for "no time with a time zone"
+  is therefore a guard only: such a reading is `404 not-found` first.
 - **A send attempt** (its AuditEvent) by its **attempt time** (T31's `period.start`).
 
 Where each route applies it:
@@ -48,7 +49,7 @@ Where each route applies it:
 | --- | --- |
 | `GET /fhir/Observation` | adds `date=ge<boundary>` to the store's search; a caller's lower bound (`gt`/`ge`) that is earlier is **raised** to it, not refused; a later one is kept; the upper bound is untouched. Every returned Observation is checked against the boundary again, whatever the store did. The `self` and `next` links carry the bound that was sent |
 | `GET /fhir/Observation/{id}`, `GET /trace/heart-rate/{id}`, `POST /share` | an older reading answers `404 not-found` exactly as a missing one: the same body, the same headers, no extra log line. The share checks this before any `422`, so a refusal never describes an old reading; its OpenEMR read-back is of that one reading, so it covers the same window |
-| `GET /trace/cuff-attempts/{id}` | an older attempt is `404` like a missing one (an unreadable one by its `recorded` time, instead of `422`); an attempt inside whose Observation is older (a sample's OBX-14 years back) is shown without that Observation |
+| `GET /trace/cuff-attempts/{id}` | an older attempt is `404` like a missing one (an unreadable one by its `recorded` time, instead of `422`); an attempt inside whose Observation is older (a sample's OBX-14 years back) is shown without that Observation; its HL7v2 message text (`messageSent`) is the attempt's own and is shown, even though it can carry that older OBX-14 time (accepted: cuff-sim stamps built readings with the current time) |
 | `GET /messages` | attempts by attempt time (the audit search gets `date=ge<boundary>` on `recorded`, which is never before the send), store-only messages by `createTime`, transactions by Provenance `recorded`; a row never links an older Observation (its `observation` is `null`), and a transaction lists only Observations inside (one that wrote only older windows, such as a backfill, is not a row) |
 | `GET /status` | `observationCounts` and `lastSyncAt` add `date=ge<boundary>` to their searches (still `_total=accurate&_count=0`, never `_summary`, which Cloud Healthcare refuses) |
 | `GET /fhir/metadata` | the `date` parameter's and the Observation resource's `documentation` state the rule |
