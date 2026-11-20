@@ -63,9 +63,9 @@ rewrite, see "For T22"). Every route except the three under `/auth/` needs a val
 cookie and answers `401 session-required` otherwise, **including** `GET /fhir/metadata` and
 unknown paths. Every `POST` (any method but `GET` and `HEAD`) also needs an `Origin` header
 that is exactly one of `ALLOWED_ORIGINS`, otherwise `403 origin-refused`, checked before the
-cookie. **Any route can answer `429 rate-limited`** with `Retry-After` (whole seconds): the
-per-address limit before anything else, the per-session limits after the cookie check (see
-"Rate limits (T46)"). Every error body is a FHIR
+cookie. **Any route can answer `429 rate-limited`** with `Retry-After` (whole seconds): a valid session
+against its own limits, any other request against its client address's, before anything else
+is refused (see "Rate limits (T46)"). Every error body is a FHIR
 `OperationOutcome` whose `issue[0].details.coding[0]` (system `urn:pulsebridge:fhir-proxy:reason`)
 is a fixed reason code and whose `diagnostics` is a fixed sentence.
 
@@ -199,9 +199,9 @@ docs/workplan.md, "The contract T43 to T45 share".
 
 Every step is cheaper than the next, so a flood of junk is refused before it costs anything:
 
-0. **The per-address rate limit on every route** (T46, `REQUESTS_PER_ADDRESS_PER_MINUTE`, 300;
-   "Rate limits (T46)" below) comes first, in the gate: a session attempt is one of the
-   address's requests like any other.
+0. **The per-address rate limit** (T46, `REQUESTS_PER_ADDRESS_PER_MINUTE`, 300; "Rate limits
+   (T46)" below) comes first, in the gate: a session attempt without a valid session is one of
+   the address's requests like any other.
 1. **`Origin`** must be one of `ALLOWED_ORIGINS` (the gate, for every `POST`): `403
    origin-refused`. A refused request uses none of the address's attempts.
 2. **Per-address limit** (`session_limit.py`): `SESSIONS_PER_ADDRESS_PER_HOUR` (5) attempts per
@@ -430,8 +430,8 @@ the HL7v2 store (every cuff send), the clinic's OpenEMR (every share), and the p
 
 | Limit | Default | Variable (range) | Kind | Key |
 | --- | --- | --- | --- | --- |
-| every request, every route together (`/auth/*` included) | 300 a minute | `REQUESTS_PER_ADDRESS_PER_MINUTE` (60 to 6000, at least the reads limit) | token bucket | client address |
-| reads: every `GET` and `HEAD` | 120 a minute | `READS_PER_SESSION_PER_MINUTE` (60 to 1200) | token bucket | the session token's `jti` |
+| every request **without a valid session**, every route together (`/auth/*`, no cookie, an invalid or expired one) | 300 a minute | `REQUESTS_PER_ADDRESS_PER_MINUTE` (60 to 6000) | token bucket | client address |
+| reads: every `GET` and `HEAD` of a valid session, and its few other requests that are not sends or shares (logout, a refused request) | 120 a minute | `READS_PER_SESSION_PER_MINUTE` (60 to 1200) | token bucket | the session token's `jti` |
 | cuff sends: `POST /cuff/readings` | 3 in any 10 minutes | `CUFF_SENDS_PER_SESSION_PER_10_MINUTES` (1 to 30) | sliding window | `jti` |
 | shares: `POST /share` | 2 in any 10 minutes | `SHARES_PER_SESSION_PER_10_MINUTES` (1 to 20) | sliding window | `jti` |
 | shares by all visitors together | 30 in any hour, per instance | `SHARES_PER_INSTANCE_PER_HOUR` (1 to 600) | sliding window | one key |
@@ -462,21 +462,40 @@ the HL7v2 store (every cuff send), the clinic's OpenEMR (every share), and the p
 (R4 issue-type), reason `rate-limited`, and a fixed sentence naming which limit it was
 (`app.RATE_LIMIT_TEXTS`). Nothing is forwarded or read for a refused request.
 
-**Where each limit sits** in the gate (`app.py`'s docstring has the whole order), cheapest and
-widest first:
+**Each request counts against one limit, chosen by whether it has a valid session.** A request
+with a valid session counts against its session's limits only; every other request counts
+against its client address. Why not both: with `TRUSTED_PROXY_HOPS=2` (behind Hosting) a
+caller of the direct `*.run.app` URL can send its own `X-Forwarded-For` naming any address
+("The client address" below). If sessions counted against their address too, about 300 cheap
+`401`s a minute in a visitor's name would put every request that visitor makes through Hosting
+into `429`. Keyed on the verified `jti`, a session's budget is its own.
+
+**Where the limit sits** in the gate (`app.py`'s docstring has the whole order); every step
+before the route is cheap, with no I/O:
 
 1. the time budget starts;
-2. **the per-address limit**, before anything else, on every route: it is a dictionary lookup
-   with no I/O, and a flood is counted before anything else is done for it (a request later
-   refused for a token in the URL, a missing `Origin` or a missing cookie still counts);
-3. a token in the query string (`400`), `Origin` on a `POST` (`403`), the session cookie
-   (`401`), except on the three `/auth/` routes;
-4. **the per-session limits**, by what the request does: a `GET`/`HEAD` takes a read; `POST
-   /cuff/readings` a cuff send; `POST /share` a share of the session and then one of the
-   instance's (if the instance's limit refuses, the session's share is given back, so the
-   visitor is not charged for a share that never happened);
+2. **the cookie is verified if there is one** (an HMAC-SHA256 check of a ~200-character token
+   with the cached key). Nothing is refused yet: the outcome only decides which limit applies;
+3. **the limit**: a valid session's by what the request does (a `GET`/`HEAD` takes a read;
+   `POST /cuff/readings` a cuff send; `POST /share` a share of the session and then one of the
+   instance's; if the instance's limit refuses, the session's share is given back, so the
+   visitor is not charged for a share that never happened). Without a valid session: the
+   address's. Either way before anything is refused, so a flood of requests that are refused
+   later still counts. A session's request that is refused later (a token in the URL, a
+   missing `Origin`) counts as a read, never as a cuff send or a share;
+4. a token in the query string (`400`), `Origin` on a `POST` (`403`), then the session (`401
+   session-required`, or `503 session-not-configured` without a signing key) except on the
+   three `/auth/` routes;
 5. the route. `POST /auth/session` then applies its own per-address limit on attempts, before
    the body is read (T43).
+
+**What remains of the direct-URL problem.** A caller of the `*.run.app` URL can still use up a
+victim address's **session attempts** (T43's 5 an hour) and its per-address budget for
+requests **without** a session. So a visitor who has no session yet can be held off, for up to
+an hour by the attempts limit, while one who has a session is not affected. The fix is at the
+edge, not here: trust the forwarded entry only when the immediate peer is a Firebase Hosting
+address, or make the `*.run.app` URL reachable from Hosting only. Recorded as a follow-up
+(module phr's README, "The client address and the direct run.app URL").
 
 **Every attempt counts**, whatever the route answers afterwards: a cuff send cuff-sim refuses
 (`422`, `429`) and a share that ends in `503` or `422` count. Giving them back would let a
@@ -485,7 +504,7 @@ script retry an error for free; the numbers leave room for that.
 **In memory, per instance.** No shared store (Redis, Firestore): it would cost money while the
 demo is idle, and the bounds here do not need to be exact. Each Cloud Run instance counts on
 its own, and a restart forgets. With fhir-proxy's `max_instance_count = 2` (module phr), **the
-real limits are up to twice the numbers**: 600 requests a minute per address, 240 reads a minute
+real limits are up to twice the numbers**: 600 requests without a session a minute per address, 240 reads a minute
 and 6 sends and 4 shares in 10 minutes per session, 60 shares an hour for everyone. What does
 span instances is the daily cap on bot checks, which bounds how many sessions exist (300 a day
 by default).
@@ -494,13 +513,17 @@ by default).
 history is spent (a window with nothing left in it, a bucket refilled to full) carries no
 information and is dropped to make room; a key with live history is never dropped, so a flood
 of fresh addresses cannot evict an abuser's history (T43's rule). When a table is full of live
-keys, a new key is refused for 60 s. The search for spent keys walks the table, so it runs at
+keys, a new key is refused with its own answer, limit `table-full`: "The demo is busy; wait a
+minute and try again." (not the limit's text: the caller used none of its budget) and
+`Retry-After: 60`. The 60 s is a ceiling on what the client is told, not a promise: room
+usually appears sooner (spent keys are looked for every second), and a client still refused
+then is told again. The search for spent keys walks the table, so it runs at
 most once a second. Sessions cannot fill their tables: a `jti` exists only for a session the
 bot check let through, and at most `BOT_CHECKS_PER_DAY` are made a day. The address table is
 hard to fill even through the direct `*.run.app` URL, where a caller can choose its own key
 ("The client address" below): an address that made one request has its bucket full again 0.2 s
 later and makes room, so filling the table takes about 10,000 fresh addresses within a second
-or so, far more than one instance serves. If it ever is full, new addresses wait a minute.
+or so, far more than one instance serves.
 
 **The defaults, against what the dashboard really sends.** Measured on 20 November 2026 by
 driving the dashboard's own code (`web/src`, `startApp` with the mock client counting every
@@ -514,6 +537,18 @@ call, on fake timers; one call is one request except where noted):
 | one cuff send, log open, the 3 minutes after | 40 GETs and the `POST`; at most **24 in any minute**: the log polls every 3 s while a row is pending (for up to 2 minutes), the cuff panel polls its trace every 3 s until mapped |
 | three sends 2 s apart, log open | at most **32 in any minute**; with the page load before it, **37** |
 
+Notes on these numbers:
+
+- **The 30 d range** is still on the page until T47 removes it: 30 days of 5-minute windows is
+  8,640, about 9 search pages, so one click on it is about 9 reads.
+- **Tabs share one budget.** Every tab of one browser sends the same cookie, so the same `jti`.
+  Two tabs at the busiest measured minute (2 x 37 = 74) are well inside 120; two tabs both at
+  the worst polling case (2 x 100) could be refused for a while.
+- **A 429 during polling ends that polling.** The page's `pollUntil` (`web/src/state/poll.ts`)
+  stops for good when a check throws, so a refused poll leaves its row shown as pending until
+  the visitor reloads or acts. T47 will make the page's polling resume after `Retry-After`;
+  this task does not change `web/`.
+
 The busiest minute measured is 37 reads. The worst the code allows without a person clicking
 fast is about 100 (a filtered log polling 4 pages every 3 s is 80 a minute, plus 20 trace polls
 for a pending reading). So:
@@ -521,10 +556,13 @@ for a pending reading). So:
 - **reads 120 a minute** is 3.2 times the busiest measured minute and above the worst polling
   case; the bucket's burst of 120 also absorbs about 20 page reloads at once. Each click on a
   reading adds one or two reads (its trace, and the share check).
-- **300 requests a minute per address** is at least one session's reads plus its public calls,
-  with room for two or three visitors behind one shared address (an office or a mobile
-  carrier's NAT) at their worst, or eight at the busiest measured minute. It also bounds what
-  an address without a session can do (each `401` counts).
+- **300 requests a minute per address** now counts only requests without a valid session. A
+  visitor makes about three of those before the dashboard opens (the cookie check's `401`,
+  `/auth/config`, `/auth/session`) and one to log out, so 300 leaves room for many visitors
+  behind one shared address (an office or a mobile carrier's NAT) arriving together. It also
+  bounds a flood with no session or a junk cookie (each `401` counts). T46 first required it to
+  be at least the reads limit, because a session's reads counted against its address too; they
+  no longer do, so the two are independent and that rule is gone.
 - **3 cuff sends in 10 minutes** and **2 shares in 10 minutes** are D16's numbers: enough to
   see each flow work more than once. The page sends one at a time. cuff-sim's own bucket
   (`RATE_LIMIT_BURST` 3, `RATE_LIMIT_PER_MINUTE` 6, shared by everyone) stays behind it.
@@ -533,9 +571,10 @@ for a pending reading). So:
   Observation there); with two instances, 60 an hour.
 
 **Logs.** `rate-limited` (`client_address`, `limit`: `address`, `session-reads`,
-`session-cuff-sends`, `session-shares` or `all-shares`, `retry_after`), sampled under a flood
+`session-cuff-sends`, `session-shares`, `all-shares` or `table-full` with `table` naming the
+full one, `retry_after`), sampled under a flood
 like the session events: the first per address per minute, then one
-`session-events-suppressed` count (`kind: rate-limited`).
+`session-events-suppressed` count (`kind: rate-limited`, `window_seconds`: that sampler's).
 
 ### The client address
 
@@ -966,8 +1005,8 @@ whether OpenEMR's zone was other than UTC was not checked). Not done: 7, 8, 9.
 | `RECAPTCHA_MIN_SCORE` | no | `0.5` | lowest passing score, 0-1, inclusive |
 | `SESSIONS_PER_ADDRESS_PER_HOUR` | no | `5` | 1-100; every attempt counts |
 | `BOT_CHECKS_PER_DAY` | no | `300` | assessments per UTC day across all instances, 1-100000 |
-| `REQUESTS_PER_ADDRESS_PER_MINUTE` | no | `300` | every route together, per client address, 60-6000 and at least `READS_PER_SESSION_PER_MINUTE`; per instance (T46, "Rate limits") |
-| `READS_PER_SESSION_PER_MINUTE` | no | `120` | `GET`/`HEAD` per session (`jti`), 60-1200; per instance |
+| `REQUESTS_PER_ADDRESS_PER_MINUTE` | no | `300` | requests without a valid session, every route together, per client address, 60-6000; per instance (T46, "Rate limits") |
+| `READS_PER_SESSION_PER_MINUTE` | no | `120` | `GET`/`HEAD` (and other non-send, non-share requests) per session (`jti`), 60-1200; per instance |
 | `CUFF_SENDS_PER_SESSION_PER_10_MINUTES` | no | `3` | `POST /cuff/readings` per session, 1-30; per instance |
 | `SHARES_PER_SESSION_PER_10_MINUTES` | no | `2` | `POST /share` per session, 1-20; per instance |
 | `SHARES_PER_INSTANCE_PER_HOUR` | no | `30` | `POST /share` by all visitors, per instance, 1-600 |

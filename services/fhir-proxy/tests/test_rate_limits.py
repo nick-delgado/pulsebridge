@@ -480,6 +480,24 @@ def test_refusals_are_logged_sampled(tmp_path, logs) -> None:
     assert summaries[0]["window_seconds"] == app_module.RATE_LOG_WINDOW_SECONDS
 
 
+def test_the_suppressed_count_names_the_rate_samplers_own_window(
+    tmp_path, logs, monkeypatch
+) -> None:
+    monkeypatch.setattr(app_module, "RATE_LOG_WINDOW_SECONDS", 45)
+    h = demo(tmp_path)
+    for _ in range(302):
+        h.client.get("/auth/config", headers=ADDRESS)
+    h.clock.advance(46)  # past this sampler's window (the session samplers' is 60)
+    for _ in range(301):
+        h.client.get("/auth/config", headers=ADDRESS)
+    (summary,) = [e for e in logs.events() if e.get("event") == "session-events-suppressed"]
+    assert (summary["kind"], summary["count"], summary["window_seconds"]) == (
+        "rate-limited",
+        1,
+        45,
+    )
+
+
 def test_a_session_refusal_logs_the_limit_and_never_the_token(tmp_path, logs) -> None:
     h = demo(tmp_path)
     token = h.login()
