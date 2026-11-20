@@ -16,7 +16,7 @@ import pytest
 from e2e_fake_stack import REAL_PATIENT, SECRET_PREFIX, TOKEN_ISSUER, Stack, build_stack
 from e2e_runs import BASE, bp_component, edit_json, run
 from fhir_proxy.share.testing import FakeOpenEmr
-from fhir_proxy.testing import PROJECT
+from fhir_proxy.testing import DEMO_LIMITS, PROJECT
 from pulsebridge_smoke.first_sync import GcloudSyncRuns
 from pulsebridge_smoke.http import Response, TransportError
 from pulsebridge_smoke.session import SigningKeyError, secret_manager_signing_key
@@ -159,19 +159,45 @@ def test_the_key_and_token_never_appear_in_the_output(
     result = run(stack, signing_key, "--verbose", "--report-json", str(report))
     assert result.code == 0, result.text
     tokens = {_cookie_token(r) for r in stack.transport.requests} - {None}
-    assert len(tokens) == 1
-    (token,) = tokens
-    assert len(token) > 100
+    # Two sessions: the cuff path's, and the negatives' own (T46's per-session cuff limit).
+    assert len(tokens) == 2
+    assert all(len(token) > 100 for token in tokens)
     for text in (result.text, report.read_text()):
         assert signing_key.decode() not in text
         assert base64.urlsafe_b64encode(signing_key).decode().rstrip("=") not in text
-        assert token not in text
+        for token in tokens:
+            assert token not in text
         assert "__session" not in text
     # No Authorization header is ever sent; the session goes as the cookie, and a POST always
     # carries the page's own origin.
     assert all("Authorization" not in r["headers"] for r in stack.transport.requests)
     posts = [r for r in stack.transport.requests if r["method"] == "POST"]
     assert posts and all(r["headers"]["Origin"] == "https://dashboard.example.test" for r in posts)
+
+
+def test_no_session_goes_over_the_proxys_per_session_limits(
+    stack: Stack, signing_key: bytes
+) -> None:
+    """T46: a session may send 3 cuff readings and make 2 shares in any 10 minutes. The fake
+    stack runs the proxy with those production defaults (DEMO_LIMITS), so a run that put the
+    reading and the three negatives in one session would be refused (429) at N4. The smoke test
+    signs a second session for the negatives; each session stays inside its budget."""
+    result = run(stack, signing_key)
+    assert result.code == 0, result.text
+    sends: dict[str, int] = {}
+    shares: dict[str, int] = {}
+    for r in stack.transport.requests:
+        token = _cookie_token(r)
+        if r["method"] == "POST" and r["path"] == "/cuff/readings":
+            sends[token] = sends.get(token, 0) + 1
+        if r["method"] == "POST" and r["path"] == "/share":
+            shares[token] = shares.get(token, 0) + 1
+    assert None not in sends and None not in shares
+    assert sorted(sends.values()) == [1, 3], sends  # A1; then N1, N2 and N4
+    assert list(shares.values()) == [2], shares  # A10 and A12, in the reading's session
+    assert set(shares) <= set(sends) and len(sends) == 2
+    for check in ("N1", "N2", "N4", "N5", "A10", "A12"):
+        assert result.status_of(check) == "PASS", check
 
 
 def test_the_session_routes_are_checked_before_the_session_is_used(
@@ -365,6 +391,45 @@ def test_a_rate_limited_send_is_waited_out_and_retried(stack: Stack, signing_key
     assert result.code == 0, result.text
     assert 7 in result.sleeps
     assert "nothing was sent" in result.text
+
+
+def test_a_429_during_the_negatives_is_retried_in_a_fresh_session(
+    stack: Stack, signing_key: bytes
+) -> None:
+    """cuff-sim answers 429 once during the negatives (N2). The proxy has already counted that
+    attempt against the session (T46: every attempt counts), so retrying in the same session
+    would make N4 the session's 4th cuff send in 10 minutes and the proxy would refuse it for
+    600 s. The retry runs in a newly signed session instead, and no session goes over 3."""
+    sends = [0]
+
+    def third_send_is_429(response: Response) -> Response:
+        sends[0] += 1  # A1, N1, then N2: the second send of the negatives
+        if sends[0] == 3:
+            return Response(429, b'{"resourceType": "OperationOutcome"}', {"retry-after": "5"})
+        return response
+
+    stack.tamper("POST", "/cuff/readings", third_send_is_429)
+    result = run(stack, signing_key)
+    assert result.code == 0, result.text
+    assert 5 in result.sleeps and 600 not in result.sleeps
+    per_session: dict[str | None, int] = {}
+    for r in stack.transport.requests:
+        if r["method"] == "POST" and r["path"] == "/cuff/readings":
+            token = _cookie_token(r)
+            per_session[token] = per_session.get(token, 0) + 1
+    assert None not in per_session and max(per_session.values()) <= 3, per_session
+    assert len(per_session) == 3, per_session  # the reading's, the negatives', the retry's
+    for check in ("N2", "N3", "N4", "N5"):
+        assert result.status_of(check) == "PASS", check
+
+
+def test_the_fake_stack_runs_the_proxy_with_the_production_limits(stack: Stack) -> None:
+    """The per-session tests above prove something only if the in-process proxy enforces T46's
+    defaults, not the generous limits the proxy's own unit tests use."""
+    config = stack.env.harness.config
+    assert {name: getattr(config, name) for name in DEMO_LIMITS} == DEMO_LIMITS
+    assert DEMO_LIMITS["cuff_sends_per_session_per_10_minutes"] == 3
+    assert DEMO_LIMITS["shares_per_session_per_10_minutes"] == 2
 
 
 def _gcloud_answer(key: bytes) -> str:

@@ -306,11 +306,13 @@ images-smoke: install ## Start each image built by `make images` and check it se
 # Runs against a DEPLOYED stack through its public front door (the fhir-proxy behind the Hosting
 # rewrite) and asserts from the APIs: a simulated cuff reading through MLLP to the FHIR store,
 # shared to OpenEMR, plus health-sync's first-sync checks on a real-data stack. Deliberately NOT
-# part of `check`: it needs a deployment, the network and the reviewer password, and it writes a
-# synthetic reading into the stack. Its own unit tests (against an in-process stack) run in
-# `make test`. Configuration is by environment variable only (tests/e2e/README.md), for example:
+# part of `check`: it needs a deployment, the network and read access to the stack's session
+# signing key (it signs its own demo sessions with it, D16), and it writes a synthetic reading
+# into the stack. Its own unit tests (against an in-process stack) run in `make test`.
+# Configuration is by environment variable only (tests/e2e/README.md), for example:
 #   PULSEBRIDGE_BASE_URL="$(terraform -chdir=infra/envs/dev output -raw dashboard_url)/api" \
-#   SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/dev output -raw secret_name_prefix)" make smoke
+#   SECRET_NAME_PREFIX="$(terraform -chdir=infra/envs/dev output -raw secret_name_prefix)" \
+#   PULSEBRIDGE_TOKEN_ISSUER="$(terraform -chdir=infra/envs/dev output -raw token_issuer)" make smoke
 # Extra flags go through SMOKE_ARGS, e.g. SMOKE_ARGS="--verbose --report-json /tmp/smoke.json".
 SMOKE_ARGS ?=
 

@@ -8,6 +8,7 @@
  * Landmarks: banner (header), main, one region per side and for the share area and the log.
  */
 import { el } from '../ui/dom';
+import { PRIVACY_HREF } from './landing';
 import type { CuffSlot, HeartRateSlot, MessagesSlot, ShareSlot } from './features';
 import { messagesStrip, type MessagesStrip } from './messages-strip';
 import { silhouette } from './silhouette';
@@ -117,6 +118,9 @@ export function dashboardLayout(options: {
         : null,
     ),
     status.root,
+    // The privacy note (T48), a page of its own; the cookie keeps the session, so coming back
+    // reopens the dashboard.
+    el('a', { class: 'app-header__privacy', text: 'Privacy', attrs: { href: PRIVACY_HREF } }),
     logoutButton,
   );
 

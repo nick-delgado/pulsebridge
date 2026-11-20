@@ -361,8 +361,18 @@
   color: var(--color-error);
 }
 
-.landing__recaptcha {
+.landing__recaptcha,
+.landing__privacy {
   font-size: var(--text-xs);
+}
+
+.landing__privacy a,
+.app-header__privacy {
+  color: var(--color-focus);
+}
+
+.app-header__privacy {
+  font-size: var(--text-sm);
 }
 
 /*

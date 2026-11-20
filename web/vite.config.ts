@@ -124,6 +124,11 @@ export default defineConfig(({ mode }) => {
       // bundle check reads it to prove the chart library is not loaded with the entry. It lists
       // only the public file names of the build; the hosting layer (T22) may leave it out.
       manifest: true,
+      // Two pages: the app, and the privacy note (T48), a static page with no script that the
+      // landing view and the dashboard link to. Both get the CSP <meta> above.
+      rolldownOptions: {
+        input: { index: 'index.html', privacy: 'privacy.html' },
+      },
     },
     server: {
       port: 5173,

@@ -63,6 +63,12 @@ locals {
         source  = "/index.html"
         headers = [{ key = "Cache-Control", value = "no-cache" }]
       },
+      # The privacy note (web/privacy.html, T48): revalidated too, so a corrected note reaches
+      # visitors with the next deploy, not after a browser cache expires.
+      {
+        source  = "/privacy.html"
+        headers = [{ key = "Cache-Control", value = "no-cache" }]
+      },
     ]
   }
 }

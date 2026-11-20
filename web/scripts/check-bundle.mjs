@@ -11,6 +11,7 @@
 // 4. No build points at a developer machine (localhost, 127.0.0.1).
 // 5. The chart library (uPlot) is not in the main entry chunk nor imported statically by it,
 //    so the landing view never waits for it (bundle-rules.mjs, from Vite's build manifest).
+// 6. The privacy note, privacy.html, has the same CSP and no <script> (below).
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { chartChunkProblems, mockMarkerProblems } from './bundle-rules.mjs';
@@ -28,38 +29,52 @@ const scripts = files.filter((f) => f.endsWith('.js'));
 const problems = [];
 
 const html = read('index.html');
-const match = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/);
-const csp = match?.[1].replaceAll('&#39;', "'").replaceAll('&quot;', '"');
-if (!csp) problems.push('index.html has no Content-Security-Policy meta tag');
-else {
-  const directives = new Map(
-    csp
-      .split(';')
-      .map((d) => d.trim().split(/\s+/))
-      .filter((parts) => parts[0])
-      .map(([name, ...values]) => [name, values.join(' ')]),
-  );
-  // Written out here, not imported from vite.config.ts, so a widened policy there fails here.
-  const google = {
-    script: 'https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/',
-    frame: 'https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/',
-    connect: 'https://www.google.com/recaptcha/',
-  };
-  const expected = {
-    'default-src': "'none'",
-    'script-src': mode === 'mock' ? "'self'" : `'self' ${google.script}`,
-    'base-uri': "'none'",
-    'form-action': "'none'",
-    'object-src': "'none'",
-    'connect-src': mode === 'mock' ? "'none'" : `'self' ${google.connect}`,
-    'frame-src': mode === 'mock' ? undefined : google.frame,
-  };
-  for (const [name, value] of Object.entries(expected)) {
-    const actual = directives.get(name);
-    if (actual !== value) {
-      problems.push(
-        `CSP ${name} is "${actual ?? '(missing)'}", expected "${value ?? '(missing)'}"`,
-      );
+// 6. The privacy note (privacy.html, T48) is a page of the same build: the same policy, and no
+//    script of any kind, so reading it loads nothing from Google.
+const privacy = files.includes('privacy.html') ? read('privacy.html') : null;
+if (privacy === null) problems.push('the build has no privacy.html (the privacy note)');
+else if (/<script\b/i.test(privacy)) problems.push('privacy.html has a <script>');
+for (const [page, text] of [
+  ['index.html', html],
+  ['privacy.html', privacy],
+]) {
+  if (text !== null) checkCsp(page, text);
+}
+
+function checkCsp(page, text) {
+  const match = text.match(/<meta http-equiv="Content-Security-Policy" content="([^"]+)"/);
+  const csp = match?.[1].replaceAll('&#39;', "'").replaceAll('&quot;', '"');
+  if (!csp) problems.push(`${page} has no Content-Security-Policy meta tag`);
+  else {
+    const directives = new Map(
+      csp
+        .split(';')
+        .map((d) => d.trim().split(/\s+/))
+        .filter((parts) => parts[0])
+        .map(([name, ...values]) => [name, values.join(' ')]),
+    );
+    // Written out here, not imported from vite.config.ts, so a widened policy there fails here.
+    const google = {
+      script: 'https://www.google.com/recaptcha/ https://www.gstatic.com/recaptcha/',
+      frame: 'https://www.google.com/recaptcha/ https://recaptcha.google.com/recaptcha/',
+      connect: 'https://www.google.com/recaptcha/',
+    };
+    const expected = {
+      'default-src': "'none'",
+      'script-src': mode === 'mock' ? "'self'" : `'self' ${google.script}`,
+      'base-uri': "'none'",
+      'form-action': "'none'",
+      'object-src': "'none'",
+      'connect-src': mode === 'mock' ? "'none'" : `'self' ${google.connect}`,
+      'frame-src': mode === 'mock' ? undefined : google.frame,
+    };
+    for (const [name, value] of Object.entries(expected)) {
+      const actual = directives.get(name);
+      if (actual !== value) {
+        problems.push(
+          `${page}: CSP ${name} is "${actual ?? '(missing)'}", expected "${value ?? '(missing)'}"`,
+        );
+      }
     }
   }
 }

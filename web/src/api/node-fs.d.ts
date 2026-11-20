@@ -5,4 +5,6 @@
  */
 declare module 'node:fs' {
   export function readFileSync(path: string, encoding: 'utf8'): string;
+  /** With `recursive`, relative paths of every entry below `path` (src/shell/privacy.test.ts). */
+  export function readdirSync(path: string, options: { recursive: true }): string[];
 }

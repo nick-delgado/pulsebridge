@@ -29,6 +29,10 @@ export const STARTING_LABEL = 'Starting the demo…';
 /** The wording Google's FAQ gives for a page that hides the badge. */
 export const RECAPTCHA_NOTICE = 'This site is protected by reCAPTCHA.';
 
+/** The privacy note (web/privacy.html, T48): a page of its own, linked from here and the header. */
+export const PRIVACY_HREF = '/privacy.html';
+export const PRIVACY_LINK_TEXT = 'Privacy: what the demo does with your visit';
+
 export const DEMO_INTRO =
   'PulseBridge is a personal health record built on FHIR, HL7v2 and Terraform: real heart-rate data from a watch and blood-pressure readings from a simulated cuff, stored as FHIR and shared with a test clinic. The live demo shows the real readings, and you can send cuff readings and share them yourself; there is nothing to sign up for.';
 
@@ -123,6 +127,11 @@ export function landingView(options: LandingViewOptions): HTMLElement {
       button,
       error,
       el('p', { class: 'landing__recaptcha', text: RECAPTCHA_NOTICE }),
+      el(
+        'p',
+        { class: 'landing__privacy' },
+        el('a', { text: PRIVACY_LINK_TEXT, attrs: { href: PRIVACY_HREF } }),
+      ),
     ),
   );
 }

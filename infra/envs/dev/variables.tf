@@ -462,3 +462,44 @@ variable "sessions_per_address_per_hour" {
   type        = number
   default     = null
 }
+
+# ---------------------------------------------------------------------------------------------
+# The public demo's rate limits (T46) and shown window (T47), since T48: optional; null keeps
+# module phr's default (fhir-proxy's own, services/fhir-proxy/fhir_proxy/config.py)
+# ---------------------------------------------------------------------------------------------
+
+variable "requests_per_address_per_minute" {
+  description = "fhir-proxy's REQUESTS_PER_ADDRESS_PER_MINUTE: requests without a valid session per client address a minute, all routes together, 60 to 6000. Per instance (up to twice this with fhir-proxy's 2 instances). null (default): module phr's 300."
+  type        = number
+  default     = null
+}
+
+variable "reads_per_session_per_minute" {
+  description = "fhir-proxy's READS_PER_SESSION_PER_MINUTE: requests per demo session a minute other than cuff sends and shares (every GET and HEAD, and the few others such as logout), 60 to 1200. Per instance (up to twice this with 2 instances). null (default): module phr's 120."
+  type        = number
+  default     = null
+}
+
+variable "cuff_sends_per_session_per_10_minutes" {
+  description = "fhir-proxy's CUFF_SENDS_PER_SESSION_PER_10_MINUTES: cuff readings per demo session in any 10 minutes, 1 to 30. Per instance (up to twice this with 2 instances). null (default): module phr's 3."
+  type        = number
+  default     = null
+}
+
+variable "shares_per_session_per_10_minutes" {
+  description = "fhir-proxy's SHARES_PER_SESSION_PER_10_MINUTES: shares to OpenEMR per demo session in any 10 minutes, 1 to 20. Per instance (up to twice this with 2 instances). null (default): module phr's 2."
+  type        = number
+  default     = null
+}
+
+variable "shares_per_instance_per_hour" {
+  description = "fhir-proxy's SHARES_PER_INSTANCE_PER_HOUR: shares to OpenEMR by all visitors together in any hour, counted per instance, 1 to 600. null (default): module phr's 30, so up to 60 an hour with 2 instances."
+  type        = number
+  default     = null
+}
+
+variable "history_days" {
+  description = "fhir-proxy's HISTORY_DAYS: how many days back the demo shows (older data is hidden, never deleted), 1 to 30. null (default): module phr's 7, which the page's privacy note states."
+  type        = number
+  default     = null
+}

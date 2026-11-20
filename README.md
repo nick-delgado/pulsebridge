@@ -64,7 +64,10 @@ flowchart LR
 
   subgraph front["Presentation and sharing"]
     browser["Browser"] --> hosting["Firebase Hosting<br/>static page"]
-    hosting -->|"rewrite /api/**"| proxy["fhir-proxy<br/>Cloud Run, public"]
+    browser -.->|"reCAPTCHA script, token"| fd["Fraud Defense<br/>(reCAPTCHA)"]
+    hosting -->|"rewrite /api/**,<br/>__session cookie"| proxy["fhir-proxy<br/>Cloud Run, public"]
+    proxy -->|"assessment"| fd
+    proxy -->|"daily count"| counter[("demo counter bucket")]
     proxy -->|"read"| fhir
     proxy -->|"read"| audit
     proxy -->|"read"| hl7
@@ -88,10 +91,12 @@ flowchart LR
   attempt, including rejected and unacknowledged ones, is an `AuditEvent` in a separate audit
   store that the simulator can write but that holds no health data.
 - **Presentation.** The page and `fhir-proxy` share one origin through a Hosting rewrite.
-  `fhir-proxy` is the only public service: it checks a shared reviewer password, issues an
-  8-hour signed token, exposes a narrow read API with its own CapabilityStatement, forwards cuff
-  readings, asks `health-sync` for its status (real data) for the status strip, and runs the
-  share.
+  `fhir-proxy` is the only public service. It runs the public demo's bot check (a reCAPTCHA
+  assessment, counted against a daily cap in a small bucket) and then sets a signed 24-hour
+  `__session` cookie; it exposes a narrow read API with its own CapabilityStatement, showing only
+  the last 7 days; it forwards cuff readings, asks `health-sync` for its status (real data) for
+  the status strip, runs the share, and rate-limits all of it
+  ([The public demo](#the-public-demo)).
 - **Sharing.** The share searches for or creates the Patient and an Encounter in OpenEMR, creates
   the Observation, and reads all three back for the "As stored in OpenEMR" panel. OpenEMR's
   screens are not exposed to the internet; only Cloud Run's subnet reaches the VM, which has no
@@ -102,6 +107,35 @@ The Terraform that builds this: `project-base` (APIs, VPC, firewall, Artifact Re
 `ingestion` (health-sync or the seeder, v2-to-fhir, Scheduler, alerts), `edge-vm` (the e2-micro
 and the MLLP adapter), `openemr` (OpenEMR on that VM and its OAuth client registration) and `phr`
 (Hosting, fhir-proxy, cuff-sim).
+
+## The public demo
+
+Anyone with the address can open the dashboard: no password, nothing to sign up for (decision
+D16). **View the live demo** runs an invisible **reCAPTCHA** score check (Google Cloud Fraud
+Defense: the page gets a one-time token, the proxy asks Google to assess it and gets a score
+from 0.0, likely a bot, to 1.0, likely a person). On a pass the proxy sets a signed 24-hour
+session cookie, `__session` (`HttpOnly`, `Secure`, `SameSite=Strict`, plus an `Origin` check on
+every write, against cross-site request forgery).
+
+- **Limits.** Per session: 120 requests a minute other than cuff sends and shares (the reads), 3 cuff sends and 2 shares in any 10 minutes;
+  30 shares an hour for everyone; 300 requests a minute per address without a session; 5
+  bot-check attempts an hour per address. Each is kept in memory **per instance**, so with the
+  proxy's two instances it is up to twice that. At most 300 bot checks a UTC day, counted in a
+  Cloud Storage bucket so the cap holds across instances and restarts; then the page says "The
+  demo is busy, try again tomorrow."
+- **What is shown.** Only the last 7 days; older data is hidden by the proxy, never deleted. On
+  a real-data deployment that window is the deployer's **own heart-rate data, public** to anyone
+  with the address: the author accepted that for their demo.
+- **Cost.** Fraud Defense gives 10,000 assessments a month free per organisation, then charges an
+  $8 flat fee for 10,001 to 100,000 in a month
+  ([billing information](https://docs.cloud.google.com/recaptcha/docs/billing-information)); the
+  daily cap of 300 keeps one deployment under the free 10,000.
+- **Privacy.** The page links a short privacy note ([`web/privacy.html`](web/privacy.html)): the
+  two cookies, what goes to Google (the site owner is the data controller, Google the
+  processor), what is logged and for how long (30 days).
+- **Known gap.** The proxy's own `run.app` address is public too, and a caller of it can choose
+  which client address it is counted as; the fix belongs at the edge and is a recorded
+  follow-up ([runbook](infra/envs/README.md#the-public-demo-what-is-public-and-its-known-limits)).
 
 ## Standards map
 
@@ -120,6 +154,7 @@ and the MLLP adapter), `openemr` (OpenEMR on that VM and its OAuth client regist
 | OAuth 2.0, Google | authorization code flow with PKCE (S256), `state`, loopback redirect, offline access; refresh tokens in Secret Manager | [`scripts/connect-google-health/`](scripts/connect-google-health/README.md) |
 | OAuth 2.0, OpenEMR | client credentials grant with `private_key_jwt` (RS384 signed assertion), scoped `system/*` tokens; client registered on the VM | [`services/fhir-proxy/fhir_proxy/share/oauth.py`](services/fhir-proxy/fhir_proxy/share/oauth.py), [`infra/modules/openemr/README.md`](infra/modules/openemr/README.md) |
 | OIDC service-to-service | Scheduler, Pub/Sub push and fhir-proxy call Cloud Run with Google-signed identity tokens | [`infra/modules/identity/README.md`](infra/modules/identity/README.md#who-invokes-whom-decision-d10) |
+| Public demo access | a reCAPTCHA score assessment (`projects.assessments.create`); an HS256 JWT (RFC 7519) in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie; an `Origin` check on writes; `429` with `Retry-After` (RFC 9110) | [`services/fhir-proxy/README.md`](services/fhir-proxy/README.md#demo-sessions-d16-t43) |
 | Workload Identity Federation | GitHub Actions to a read-only planner, the deployer and a page deployer that can change only Hosting, restricted to one repository by numeric ID and each to its own CI contexts (pull requests, main, a protected GitHub Environment); no keys | [`infra/bootstrap/wif.tf`](infra/bootstrap/wif.tf) |
 | Terraform CI/CD | plan on pull requests, apply dev on merge, prod after an approval, the page deployed after every apply | [`.github/workflows/`](.github/workflows/), [CI/CD in the runbook](infra/envs/README.md#cicd-t26) |
 
@@ -138,11 +173,11 @@ services/
   health-sync/      Google Health to FHIR (Cloud Run)
   v2-to-fhir/       HL7v2 store to FHIR (Cloud Run, Pub/Sub push)
   cuff-sim/         the cuff simulator backend (Cloud Run, internal only)
-  fhir-proxy/       the dashboard's only backend: login, read API, share to OpenEMR
+  fhir-proxy/       the dashboard's only backend: demo sessions, read API, share to OpenEMR
   seed/             the synthetic-data seeder (Cloud Run job)
 scripts/
   connect-google-health/   connect your own Google Health account (OAuth, PKCE)
-web/                the dashboard: Vite and TypeScript, with a mock client
+web/                the dashboard and its privacy note: Vite and TypeScript, with a mock client
 docs/               the setup guide, spike notes, the work plan
 tests/tooling/      repository-wide checks (Makefile, CI, images, these docs)
 ```
@@ -169,7 +204,7 @@ To see the dashboard right now with no cloud at all:
 ```bash
 cd web
 npm ci
-npm run dev       # mock mode on http://localhost:5173 (any non-empty password logs in)
+npm run dev       # mock mode on http://localhost:5173 ("View the live demo"; no Google script)
 ```
 
 ## OpenEMR chart
@@ -244,11 +279,14 @@ is the PulseBridge side of the same exchange:
   networking, least-privilege service accounts, Secret Manager, no public VM) and states its data
   classification; that is all.
 - **Single patient.** One deployment holds one person's record, connected with the deployer's
-  own Google Health account. There is no multi-user sign-up, and the reviewer login is one shared
-  password, not per-user sign-in.
-- **Demos use synthetic data.** The cuff is simulated; screenshots use the synthetic patient.
-- **Small by design.** The OpenEMR "clinic" runs on a free-tier e2-micro: fine for one reviewer
-  at a time, slow under sustained load. Only the FHIR searches the dashboard needs are supported.
+  own Google Health account. There is no sign-in at all: every visitor of the public demo gets
+  the same anonymous access after the bot check, and nothing asks who they are (Cloud Run's
+  request log does keep each request's network address and URL for 30 days).
+- **Screenshots use synthetic data.** The cuff is simulated; every image here shows the synthetic
+  patient. The live demo on prod shows the deployer's real heart rate for the last 7 days.
+- **Small by design.** The OpenEMR "clinic" runs on a free-tier e2-micro: it handles shares one
+  at a time and slows down under sustained load, so the public demo's limits keep the load small
+  (2 shares per session in 10 minutes, at most 30 an hour per proxy instance for everyone). Only the FHIR searches the dashboard needs are supported.
   OpenEMR receives vitals only (no orders, medications or scheduling).
 - **Not a managed mapping pipeline.** The mappings are our own code on purpose; there is no
   Whistle, Dataflow or managed HL7v2-to-FHIR conversion.
@@ -298,8 +336,18 @@ Prod's first apply through CI followed on 18 November: the plan waited for appro
 apply and the page deploy passed. On 19 November CI destroyed dev: nothing was left in its state,
 and the default Hosting site was then taken offline.
 
-**Not yet verified:** that dev's billing report shows no charges a day after the destroy, a forced
-slow cuff send, and a few inspections that need a shell on the VM. The
+**The public demo (D16, 19 to 20 November 2026)** replaced the reviewer password with the bot
+check, the session cookie, the rate limits and the 7-day window (tasks T43 to T48). It is built
+and tested offline only, against fakes of Fraud Defense and Cloud Storage and the page's mock
+client, and its rollout to prod has not happened yet.
+
+**Not yet verified:** everything about the public demo that needs a real deployment (the
+assessment call, the scores real browsers get, the page's Content-Security-Policy with Google's
+script, the cookie and the `Origin` header through Hosting, the counter with two instances, the
+limits on a normal visit, the 7-day searches against Cloud Healthcare, `make smoke` with its
+locally signed sessions: checklist rows P17 to P26); that dev's billing report shows no charges a
+day after the destroy, a forced slow cuff send, and a few inspections that need a shell on the
+VM. The
 runbook's [master checklist](infra/envs/README.md#master-checklist) records each item's result and
 lists what is still open. The demo is shown at the Firebase Hosting address of the prod project;
 a custom domain (T30) is deferred ([`docs/workplan.md`](docs/workplan.md)).

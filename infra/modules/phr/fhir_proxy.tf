@@ -174,6 +174,13 @@ resource "google_cloud_run_v2_service" "fhir_proxy" {
             SESSIONS_PER_ADDRESS_PER_HOUR = tostring(var.sessions_per_address_per_hour)
             BOT_CHECKS_PER_DAY            = tostring(var.bot_checks_per_day)
             DEMO_COUNTER_BUCKET           = google_storage_bucket.demo_counters.name
+            # T46's rate limits and T47's shown window (variables.tf; per instance, in memory).
+            REQUESTS_PER_ADDRESS_PER_MINUTE       = tostring(var.requests_per_address_per_minute)
+            READS_PER_SESSION_PER_MINUTE          = tostring(var.reads_per_session_per_minute)
+            CUFF_SENDS_PER_SESSION_PER_10_MINUTES = tostring(var.cuff_sends_per_session_per_10_minutes)
+            SHARES_PER_SESSION_PER_10_MINUTES     = tostring(var.shares_per_session_per_10_minutes)
+            SHARES_PER_INSTANCE_PER_HOUR          = tostring(var.shares_per_instance_per_hour)
+            HISTORY_DAYS                          = tostring(var.history_days)
             # Under Firebase Hosting's 60 s; the request timeout is the same as Cloud Run's.
             REQUEST_BUDGET_SECONDS       = tostring(local.timeouts.proxy_request_budget)
             CUFF_FORWARD_TIMEOUT_SECONDS = tostring(local.timeouts.proxy_cuff_forward)

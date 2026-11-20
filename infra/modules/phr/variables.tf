@@ -562,3 +562,83 @@ variable "bot_checks_per_day" {
     error_message = "bot_checks_per_day must be a whole number from 1 to 3000."
   }
 }
+
+# ---------------------------------------------------------------------------------------------
+# The public demo's rate limits (T46) and shown window (T47), passed through since T48. The
+# names, defaults and ranges are fhir-proxy's own (services/fhir-proxy/fhir_proxy/config.py,
+# VARIABLES and ServiceConfig.from_env); tests/check_proxy_settings.py fails if they drift.
+# Every limit is kept in memory by each proxy instance, so with max_instance_count = 2 the real
+# limit is up to twice the number (README, "Instances, concurrency and the rate limits").
+# ---------------------------------------------------------------------------------------------
+
+variable "requests_per_address_per_minute" {
+  description = "REQUESTS_PER_ADDRESS_PER_MINUTE: requests WITHOUT a valid session (the /auth/ routes, a missing, invalid or expired cookie) that one client address may make in a minute, all routes together (a token bucket). Per proxy instance, so up to twice this with 2 instances. 300 (default). From 60 to 6000."
+  type        = number
+  default     = 300
+  nullable    = false
+
+  validation {
+    condition     = var.requests_per_address_per_minute >= 60 && var.requests_per_address_per_minute <= 6000 && floor(var.requests_per_address_per_minute) == var.requests_per_address_per_minute
+    error_message = "requests_per_address_per_minute must be a whole number from 60 to 6000."
+  }
+}
+
+variable "reads_per_session_per_minute" {
+  description = "READS_PER_SESSION_PER_MINUTE: the requests one demo session may make in a minute other than cuff sends and shares: every GET and HEAD, and its few other requests such as logout (a token bucket keyed on the session token's jti). The dashboard's busiest measured minute is 37 (fhir-proxy README, \"Rate limits\"). Per proxy instance, so up to twice this with 2 instances. 120 (default). From 60 to 1200."
+  type        = number
+  default     = 120
+  nullable    = false
+
+  validation {
+    condition     = var.reads_per_session_per_minute >= 60 && var.reads_per_session_per_minute <= 1200 && floor(var.reads_per_session_per_minute) == var.reads_per_session_per_minute
+    error_message = "reads_per_session_per_minute must be a whole number from 60 to 1200."
+  }
+}
+
+variable "cuff_sends_per_session_per_10_minutes" {
+  description = "CUFF_SENDS_PER_SESSION_PER_10_MINUTES: cuff readings (POST /cuff/readings) one demo session may send in any 10 minutes (D16: 3). Per proxy instance, so up to twice this with 2 instances. 3 (default). From 1 to 30."
+  type        = number
+  default     = 3
+  nullable    = false
+
+  validation {
+    condition     = var.cuff_sends_per_session_per_10_minutes >= 1 && var.cuff_sends_per_session_per_10_minutes <= 30 && floor(var.cuff_sends_per_session_per_10_minutes) == var.cuff_sends_per_session_per_10_minutes
+    error_message = "cuff_sends_per_session_per_10_minutes must be a whole number from 1 to 30."
+  }
+}
+
+variable "shares_per_session_per_10_minutes" {
+  description = "SHARES_PER_SESSION_PER_10_MINUTES: shares to OpenEMR (POST /share) one demo session may make in any 10 minutes (D16: 2). Per proxy instance, so up to twice this with 2 instances. 2 (default). From 1 to 20."
+  type        = number
+  default     = 2
+  nullable    = false
+
+  validation {
+    condition     = var.shares_per_session_per_10_minutes >= 1 && var.shares_per_session_per_10_minutes <= 20 && floor(var.shares_per_session_per_10_minutes) == var.shares_per_session_per_10_minutes
+    error_message = "shares_per_session_per_10_minutes must be a whole number from 1 to 20."
+  }
+}
+
+variable "shares_per_instance_per_hour" {
+  description = "SHARES_PER_INSTANCE_PER_HOUR: shares to OpenEMR by all visitors together in any hour, counted by each proxy instance on its own: with 2 instances up to 60 an hour (accepted with D16's rollout plan). 30 (default). From 1 to 600."
+  type        = number
+  default     = 30
+  nullable    = false
+
+  validation {
+    condition     = var.shares_per_instance_per_hour >= 1 && var.shares_per_instance_per_hour <= 600 && floor(var.shares_per_instance_per_hour) == var.shares_per_instance_per_hour
+    error_message = "shares_per_instance_per_hour must be a whole number from 1 to 600."
+  }
+}
+
+variable "history_days" {
+  description = "HISTORY_DAYS: how many days back fhir-proxy shows (T47): readings by when they were measured, send attempts by when they were sent; anything older answers like a missing resource. Nothing is deleted: the data stays in the stores and in OpenEMR, only the proxy hides it. The page's privacy note says \"the last 7 days\": change it with this. 7 (default). From 1 to 30."
+  type        = number
+  default     = 7
+  nullable    = false
+
+  validation {
+    condition     = var.history_days >= 1 && var.history_days <= 30 && floor(var.history_days) == var.history_days
+    error_message = "history_days must be a whole number from 1 to 30."
+  }
+}

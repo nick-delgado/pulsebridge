@@ -86,12 +86,18 @@ output "demo_counter_bucket" {
 }
 
 output "demo_settings" {
-  description = "The public demo's settings as fhir-proxy gets them (D16): RECAPTCHA_MIN_SCORE, SESSION_TTL_SECONDS, SESSIONS_PER_ADDRESS_PER_HOUR and BOT_CHECKS_PER_DAY."
+  description = "The public demo's settings as fhir-proxy gets them (D16): RECAPTCHA_MIN_SCORE, SESSION_TTL_SECONDS, SESSIONS_PER_ADDRESS_PER_HOUR, BOT_CHECKS_PER_DAY, T46's five rate limits (per instance) and T47's HISTORY_DAYS."
   value = {
-    recaptcha_min_score           = var.recaptcha_min_score
-    session_ttl_seconds           = var.session_ttl_seconds
-    sessions_per_address_per_hour = var.sessions_per_address_per_hour
-    bot_checks_per_day            = var.bot_checks_per_day
+    recaptcha_min_score                   = var.recaptcha_min_score
+    session_ttl_seconds                   = var.session_ttl_seconds
+    sessions_per_address_per_hour         = var.sessions_per_address_per_hour
+    bot_checks_per_day                    = var.bot_checks_per_day
+    requests_per_address_per_minute       = var.requests_per_address_per_minute
+    reads_per_session_per_minute          = var.reads_per_session_per_minute
+    cuff_sends_per_session_per_10_minutes = var.cuff_sends_per_session_per_10_minutes
+    shares_per_session_per_10_minutes     = var.shares_per_session_per_10_minutes
+    shares_per_instance_per_hour          = var.shares_per_instance_per_hour
+    history_days                          = var.history_days
   }
 }
 
