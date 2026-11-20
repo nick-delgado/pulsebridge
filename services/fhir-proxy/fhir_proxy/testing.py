@@ -125,6 +125,24 @@ def _date_ok(at: datetime, clause: str) -> bool:
     }[prefix]
 
 
+def _r4_date_match(resource: dict, clause: str) -> bool:
+    """R4 search.html, prefixes on a range: ge/gt compare the END of the target's range, le/lt
+    its START (a Period overlaps the range above or below the value). Written separately from
+    fhir_proxy.search so a test does not check the proxy against itself."""
+    period = resource.get("effectivePeriod")
+    if isinstance(period, dict):
+        start = _instant(period["start"])
+        end = _instant(period["end"]) if period.get("end") else None
+    elif isinstance(resource.get("effectiveDateTime"), str):
+        start = end = _instant(resource["effectiveDateTime"])
+    else:
+        return False
+    prefix = clause[:2]
+    if prefix in ("ge", "gt"):
+        return end is None or _date_ok(end, clause)
+    return _date_ok(start, clause)
+
+
 @dataclass
 class FakeHealthcare:
     """The FHIR and HL7v2 REST surface the proxy uses, in memory. It answers only the requests
@@ -148,6 +166,9 @@ class FakeHealthcare:
     stubborn_delays: list[tuple[str, str, float]] = field(default_factory=list)
     # (path, start, end) of every delayed call, monotonic seconds: for ordering assertions.
     timeline: list[tuple[str, float, float]] = field(default_factory=list)
+    # Apply R4's date rule to Observation searches, as a real store would (T47's count tests).
+    # Off by default: most search tests prove the proxy's own post-filter.
+    observation_dates: bool = False
 
     # -- seeding --
 
@@ -314,8 +335,12 @@ class FakeHealthcare:
             for clause in params.get("recorded", []):
                 resources = [r for r in resources if _date_ok(_instant(r["recorded"]), clause)]
             resources.sort(key=lambda r: (_instant(r["recorded"]), r["id"]), reverse=True)
+        if rtype == "Observation" and self.observation_dates:
+            for clause in params.get("date", []):
+                resources = [r for r in resources if _r4_date_match(r, clause)]
         if rtype == "Observation":
-            # The fake applies NO date filter on purpose: the proxy's own R4 rule is under test.
+            # Without observation_dates the fake applies NO date filter on purpose: the proxy's
+            # own R4 rule is under test.
             sort = params.get("_sort", ["-_lastUpdated"])[0]
             if sort == "-_lastUpdated":
                 resources.sort(key=lambda r: r["meta"]["lastUpdated"], reverse=True)
