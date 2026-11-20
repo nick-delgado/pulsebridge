@@ -995,7 +995,7 @@ after T43; T47 after T45 and T46; T48 last. The rollout to prod is the orchestra
 | T44 | Infrastructure for demo sessions | D16 | `infra/modules/identity/`, `infra/modules/project-base/`, `infra/modules/phr/`, `infra/envs/`, `infra/bootstrap/`, `scripts/secrets/`, and `tests/tooling/test_phr_service_config.py` (added 19 Nov) | done |
 | T45 | Dashboard: "View the live demo" | D16 | `web/` | done |
 | T46 | fhir-proxy: rate limits for a public demo | T43 | `services/fhir-proxy/` (including `fhir_proxy/share/`) | done |
-| T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, the minimum needed elsewhere in `web/`, and the one smoke break in `tests/e2e/test_smoke_breaks.py` that the window changes (added 20 Nov) | in-review (reviewed 20 Nov: approve with minor fixes; fixes under way) |
+| T47 | Show only the last 7 days | T45, T46 | `services/fhir-proxy/`, `web/src/heart-rate/`, the minimum needed elsewhere in `web/`, and the one smoke break in `tests/e2e/test_smoke_breaks.py` that the window changes (added 20 Nov) | done |
 | T48 | Docs, smoke test and brief for the public demo | T43 to T47 | `README.md`, `docs/setup.md`, `infra/envs/README.md`, `tests/e2e/` (beyond what T43 changed), service and module READMEs not owned above | todo |
 
 ### The contract T43 to T45 share
@@ -1186,6 +1186,19 @@ new environment variables (`REQUESTS_PER_ADDRESS_PER_MINUTE`, `READS_PER_SESSION
 `CUFF_SENDS_PER_SESSION_PER_10_MINUTES`, `SHARES_PER_SESSION_PER_10_MINUTES`,
 `SHARES_PER_INSTANCE_PER_HOUR`) have defaults and are not passed by module phr yet. Open with
 the user: whether the share total should be 30 an hour (15 per instance) rather than up to 60.
+
+**T47 outcome (20 November).** Reviewed (approve with minor fixes) and merged. The proxy hides
+everything whose effective time (or, for send attempts, send time) is before now minus
+`HISTORY_DAYS` (default 7, 1 to 30): searches get `date=ge<boundary>` (an earlier bound is
+raised, not refused; results are re-checked), and a read, trace or share of anything older is a
+404 identical to a missing resource. The messages log, the status counts and the share use the
+same boundary; nothing is deleted. The page has 24 h and 7 d only, and its polling waits out a
+`429` instead of stopping. Accepted: a reading with no placeable time is hidden (404 before the
+share's 422); a next link followed more than 10 minutes later may give an empty page; an
+attempt's HL7v2 text could carry an older OBX-14 time (cuff-sim stamps the current time). Not
+verified until rollout: Cloud Healthcare's `date=ge` on `effectivePeriod`, `date` with
+`_total=accurate&_count=0`, and a `_page_token` with a changed `date`. For module phr (T48 or
+the rollout): pass `HISTORY_DAYS` and T46's five limits as optional variables.
 
 ### Rollout (orchestrator, after T48)
 
