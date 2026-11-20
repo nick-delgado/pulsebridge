@@ -6,7 +6,7 @@
  * fails and the note must be changed with it. (Module phr's defaults behind "24 hours" and
  * "the last 7 days" are checked by infra/modules/phr/tests/check_proxy_settings.py.)
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { MockClient } from '../api/mock-client';
 import { mockBotCheck } from './test-support';
@@ -14,6 +14,11 @@ import { landingView, PRIVACY_HREF, RECAPTCHA_NOTICE, START_LABEL } from './land
 import { dashboardLayout } from './layout';
 
 /** A repository file by its path from the repository root (as in src/api/reasons.test.ts). */
+function repoPath(path: string): string {
+  const base = import.meta.url;
+  return decodeURIComponent(new URL(`../../../${path}`, base).pathname).replace(/^\/@fs\//, '/');
+}
+
 function repoFile(path: string): string {
   const base = import.meta.url;
   const absolute = decodeURIComponent(new URL(`../../../${path}`, base).pathname);
@@ -109,6 +114,37 @@ describe('every claim matches the code', () => {
     expect(botCheck).not.toMatch(/"userIpAddress"|"userAgent"/);
     expect(text).toContain("with the site's key and the action name");
     expect(text).toContain('does not send Google your IP address');
+  });
+
+  it('no other log call in the proxy carries an address', () => {
+    // Every log(...) call in every module of the proxy (share/ included), found by scanning to
+    // its closing parenthesis, so a call split over lines or naming the address another way
+    // (ip=, remote_addr, the forwarded header, the address variable) is seen too.
+    const dir = repoPath('services/fhir-proxy/fhir_proxy');
+    const files = readdirSync(dir, { recursive: true })
+      .map(String)
+      .filter((f) => f.endsWith('.py'));
+    expect(files).toContain('app.py');
+    const calls: { file: string; text: string }[] = [];
+    for (const file of files) {
+      const source = readFileSync(`${dir}/${file}`, 'utf8');
+      for (const m of source.matchAll(/\blog\(/g)) {
+        let depth = 0;
+        let end = m.index;
+        for (; end < source.length; end++) {
+          if (source[end] === '(') depth++;
+          if (source[end] === ')' && --depth === 0) break;
+        }
+        calls.push({ file, text: source.slice(m.index, end + 1) });
+      }
+    }
+    expect(calls.length).toBeGreaterThan(20);
+    const addressy = /address|\bip\b|_ip\b|\bip_|remote_addr|forwarded_for|x-forwarded/i;
+    const withAddress = calls.filter((c) => addressy.test(c.text));
+    // The one allowed: _sampled's `client_address=address` (the three sampled refusals below).
+    expect(withAddress.map((c) => `${c.file}: ${c.text.replace(/\s+/g, ' ')}`)).toEqual([
+      'app.py: log(logging.WARNING, event, client_address=address, **fields)',
+    ]);
   });
 
   it('the client address is logged only in the three sampled refusals', () => {
