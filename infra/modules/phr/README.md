@@ -584,6 +584,12 @@ module passes; a blank means the service's default applies.
 | `SESSION_TTL_SECONDS` | no (86400) | `session_ttl_seconds` (default 86400) |
 | `SESSIONS_PER_ADDRESS_PER_HOUR` | no (5) | `sessions_per_address_per_hour` (default 5) |
 | `BOT_CHECKS_PER_DAY` | no (300) | `bot_checks_per_day` (default 300) |
+| `REQUESTS_PER_ADDRESS_PER_MINUTE` | no (300) | `requests_per_address_per_minute` (default 300, 60 to 6000; T46, passed since T48) |
+| `READS_PER_SESSION_PER_MINUTE` | no (120) | `reads_per_session_per_minute` (default 120, 60 to 1200) |
+| `CUFF_SENDS_PER_SESSION_PER_10_MINUTES` | no (3) | `cuff_sends_per_session_per_10_minutes` (default 3, 1 to 30) |
+| `SHARES_PER_SESSION_PER_10_MINUTES` | no (2) | `shares_per_session_per_10_minutes` (default 2, 1 to 20) |
+| `SHARES_PER_INSTANCE_PER_HOUR` | no (30) | `shares_per_instance_per_hour` (default 30, 1 to 600) |
+| `HISTORY_DAYS` | no (7) | `history_days` (default 7, 1 to 30; T47, passed since T48) |
 | `DEMO_COUNTER_BUCKET` | yes (T43) | the counter bucket's name |
 | `ALLOWED_ORIGINS` | yes | `public_origin`, `https://<site>.web.app`, `https://<site>.firebaseapp.com` (every origin the page is served from, the same hosts the reCAPTCHA key allows), then `extra_allowed_origins`; no duplicates (output `allowed_origins`) |
 | `CUFF_SIM_URL` | yes | cuff-sim's `uri` (also the identity token's audience) |
@@ -685,9 +691,25 @@ and 55 s each + 10 s ≤ 70 s (the proxy's request timeout)**.
 ## Instances, concurrency and the rate limits
 
 - **fhir-proxy**: `max_instance_count = 2`, concurrency **8** = gunicorn's 8 threads (one
-  worker). The per-address session limit is in memory per process, so with two instances the
-  real limit is `SESSIONS_PER_ADDRESS_PER_HOUR` x 2. The daily bot-check cap is not: it is
-  counted in the counter bucket, which both instances share.
+  worker). Every rate limit is kept **in memory by each instance** (no shared store, so nothing
+  bills while the demo is idle), so with two instances each real limit is up to **twice** the
+  number: the variables below, and what they allow at most with both instances running.
+  The daily bot-check cap is the exception: it is counted in the counter bucket, which both
+  instances share, so 300 means 300.
+
+  | Variable (default) | What it limits | Up to, with 2 instances |
+  | --- | --- | --- |
+  | `sessions_per_address_per_hour` (5) | `POST /auth/session` attempts per client address an hour | 10 |
+  | `requests_per_address_per_minute` (300) | requests without a valid session per client address a minute | 600 |
+  | `reads_per_session_per_minute` (120) | `GET`/`HEAD` per demo session a minute | 240 |
+  | `cuff_sends_per_session_per_10_minutes` (3) | cuff readings per session in any 10 minutes | 6 |
+  | `shares_per_session_per_10_minutes` (2) | shares to OpenEMR per session in any 10 minutes | 4 |
+  | `shares_per_instance_per_hour` (30) | shares by all visitors together in any hour | 60 (accepted for D16's rollout) |
+  | `bot_checks_per_day` (300) | reCAPTCHA assessments in a UTC day | 300 (shared counter) |
+
+  The ranges and defaults are fhir-proxy's own (`config.py`); `tests/check_proxy_settings.py`
+  fails if the module's drift from them. Why these numbers (measured against the dashboard's
+  real request pattern): services/fhir-proxy/README.md, "Rate limits (T46)".
 - **cuff-sim**: one gunicorn worker per instance with its own token bucket (6 sends a minute,
   bursts of 3). With `cuff_sim_max_instances = 1` (default) that is the service-wide limit
   (output `cuff_sim_rate_limit_per_minute` = 6); with 3 instances it would be 18.
@@ -702,7 +724,7 @@ and 55 s each + 10 s ≤ 70 s (the proxy's request timeout)**.
 | Cloud Run (both services) | request time while serving; `min_instance_count = 0`, `cpu_idle = true` | nothing while nobody uses the dashboard; inside Cloud Run's free tier for a demo (general knowledge, not checked here) |
 | Direct VPC egress | nothing beyond normal network egress; no connector VMs | $0 |
 | Cloud Healthcare API calls | per request (module healthcare) | small |
-| reCAPTCHA (Fraud Defense) | assessments: 10,000 a month free per organisation, then a flat charge (T48 cites the price) | at most `bot_checks_per_day` (300) a day, about 9,000 a month: $0 |
+| reCAPTCHA (Fraud Defense) | assessments: "0–10,000 assessments per calendar month: Free per organization (aggregates use across all accounts and all sites)", then "10,001–100,000 assessments per month: $8 flat fee", then $1 per 1,000 ([Billing information](https://docs.cloud.google.com/recaptcha/docs/billing-information), updated 11 November 2026, read directly 20 November 2026). A project with a billing account is on the Premium tier: past 10,000 requests keep working and the flat fee is billed; without billing (Essentials) they fail with a quota error | at most `bot_checks_per_day` (300) a day, at most 9,300 in a 31-day month: $0, unless other reCAPTCHA keys of the same organisation (or a second PulseBridge deployment, say dev and prod at once) use the same free 10,000 |
 | The counter bucket | storage and operations ([Cloud Storage pricing](https://cloud.google.com/storage/pricing)) | at most 7 objects of a few bytes; one read and one write per bot check: $0 |
 
 **An open tab.** The dashboard shell refreshes `/status` every 5 minutes (`STATUS_REFRESH_MS`,
@@ -845,7 +867,9 @@ Nothing in this module has been applied; every test runs against mocked provider
    chart and sending a cuff reading, and while reCAPTCHA's script and iframe load (if it adds an
    inline style or loads from a host the policy does not list, the console names it).
    Check the response headers of `/` include the policy above and `frame-ancestors 'none'`, and
-   that `/.vite/manifest.json` is 404.
+   that `/.vite/manifest.json` is 404. The privacy note, `/privacy.html`, loads with no console
+   error and no request off the site, and "Back to PulseBridge" returns to a working dashboard
+   (the cookie survives the visit).
 9. **The 60 s limit.** A forced slow cuff send (for example with the VM's adapter stopped) gets
    the proxy's own 504 OperationOutcome within about 55 s, not Hosting's bare 504, and its
    AuditEvent appears in the messages log afterwards.
@@ -893,17 +917,18 @@ Nothing in this module has been applied; every test runs against mocked provider
 
 `terraform test` in this directory runs `tests/*.tftest.hcl` against mocked `google` and
 `google-beta` providers: no credentials, nothing created. `make tf-test` runs it with Google
-credentials removed from the environment, then `tests/static_checks.sh` and
-`tests/check_hosting_csp.py`.
+credentials removed from the environment, then `tests/static_checks.sh`,
+`tests/check_hosting_csp.py` and `tests/check_proxy_settings.py`.
 
 | File | Checks |
 | --- | --- |
 | `real_data.tftest.hcl` | only fhir-proxy public (invoker check off, ingress all); cuff-sim internal with the check on; the invoker bindings are exactly fhir-proxy on cuff-sim; no public member; no page deployer grant by default, and with `page_deployer_service_account_email` exactly `roles/run.viewer` on fhir-proxy for that account, invokers unchanged; both scale to zero; max 2 and 1; concurrency 8 and 4; the timeout relations read from the deployed values (proxy timeout = `REQUEST_TIMEOUT_SECONDS` ≤ 70, budgets < 60, each budget + 10 ≤ the request timeout, forward < cuff-sim's timeout, cuff-sim's worst cases < forward) and the documented numbers; Direct VPC egress settings of both; images, accounts, probe types and limits; `deletion_protection`; the session signing key as a volume at `latest`, its mount, no secret in any environment variable; the exact environment of both services; custom origin, dev origin, the hop count (default 2, an override of 1); OpenEMR settings and mount when given and absent by default; the site, `firebase_json`'s rewrite, ignore list and headers; the CSP has no unsafe source; `manage_firebase_project` |
-| `demo.tftest.hcl` | `ALLOWED_ORIGINS` holds both Hosting origins, `public_origin` and the extras once each, and every key domain's origin; the SCORE key: in the project, not all domains, exactly `<site>.web.app` and `<site>.firebaseapp.com` (plus `public_origin`'s host, listed once), no app, WAF or testing settings, `deletion_policy` by `deletion_protection`; the bucket's name, region, uniform access, enforced public access prevention, the 7-day delete rule, no versioning or soft delete, `force_destroy` by `deletion_protection`; the one grant (`roles/storage.objectUser`, fhir-proxy); each demo variable reaching its contract name, and no password variable left; the input ranges; a split Healthcare project and a bucket name over 63 characters refused |
+| `demo.tftest.hcl` | `ALLOWED_ORIGINS` holds both Hosting origins, `public_origin` and the extras once each, and every key domain's origin; the SCORE key: in the project, not all domains, exactly `<site>.web.app` and `<site>.firebaseapp.com` (plus `public_origin`'s host, listed once), no app, WAF or testing settings, `deletion_policy` by `deletion_protection`; the bucket's name, region, uniform access, enforced public access prevention, the 7-day delete rule, no versioning or soft delete, `force_destroy` by `deletion_protection`; the one grant (`roles/storage.objectUser`, fhir-proxy); each demo variable reaching its contract name (T48: the five rate limits and `HISTORY_DAYS` too, and `demo_settings` echoing all ten), and no password variable left; the input ranges (T48: below and above each of the six, a fractional day, and the edges accepted); a split Healthcare project and a bucket name over 63 characters refused |
 | `synthetic.tftest.hcl` | the synthetic name by default and given explicitly, for both services; no `HEALTH_SYNC_URL`; the rewrite's region |
 | `validation.tftest.hcl` | tag, tag-plus-digest and short-digest images refused; `http`, path and synthetic-mode health-sync URLs; public origin with a path or `http`; wildcard, trailing-slash and hostless (`https://.`, `https://`, `https://-`, `https://.example.org`) origins; an `http` OpenEMR URL; hop counts −1, 6 and 1.5 refused and 5 allowed; a real name (family or given) with synthetic data; missing names without; `SYN-` rules both ways; a backslash in a name; a long assigning authority; audit store equal to the FHIR store; missing account or secret keys; a host name as `mllp_host`; a region Hosting cannot rewrite to; a subnet path; too many cuff-sim instances; a page deployer that is a user email or carries the `serviceAccount:` prefix (a service account email is accepted) |
 | `static_checks.sh` | no public principal; `invoker_iam_disabled = true` and `INGRESS_TRAFFIC_ALL` exactly once, on fhir-proxy; every `min_instance_count` 0 and no manual scaling; no authoritative or project IAM; no service account key; the two reviewed IAM member resources (`invoker` with members from `var.service_account_emails`; `page_deployer_viewer`, the only use of `var.page_deployer_service_account_email`, `roles/run.viewer` on fhir-proxy); no secret in an environment variable and every secret version `latest`; no hardcoded project, service account, registry path, `https://<host>` (outside variable examples), site or service ID; no child module; no Hosting version, release or channel; fhir-proxy's `depends_on` on the invoker grant and on the counter bucket's grant; the counter bucket's one grant (`roles/storage.objectUser` for fhir-proxy on that bucket) and no other bucket; the bucket's uniform access and enforced public access prevention; a SCORE key with `allow_all_domains` never true and no testing options |
 | `tests/tooling/test_phr_service_config.py` (run by `make test`) | the exact environment maps `real_data.tftest.hcl` asserts, read from that file and parsed by the services' REAL `fhir_proxy.config` and `cuff_sim.config`: each starts, every key is one the service declares (so a misspelled optional variable is not silently ignored), the parsed values are the intended ones, and both agree on the patient and stores |
+| `check_proxy_settings.py` | the ten demo settings' defaults equal fhir-proxy's (`config.py` `VARIABLES`); T46's five limits and `HISTORY_DAYS` have exactly its ranges (`from_env`'s `_number` calls), T44's four no wider; whole numbers where it wants them; `web/privacy.html` states the 24-hour session and the 7-day window; a drifted copy as its own control |
 | `check_hosting_csp.py` | the header CSP equals the policy `web/vite.config.ts`'s `contentSecurityPolicy()` returns for an HTTP build (the function and its constants are cut out of the file and run with node, so any way the page composes it works) plus `frame-ancestors 'none'`; `script-src`, `frame-src` and `connect-src` hold exactly reCAPTCHA's `https://` sources and no other directive holds any; agrees with `web/scripts/check-bundle.mjs`'s `expected` directives (also run with node), has one CSP header only, allows no `unsafe-*`, wildcard or scheme source, and requires every other security header with its documented value |
 
 ```bash
@@ -980,6 +1005,12 @@ Read directly (`curl`, 2026-11-15) unless marked otherwise:
 | `session_ttl_seconds` | `number` | `86400` | `SESSION_TTL_SECONDS`, 300 to 86400. |
 | `sessions_per_address_per_hour` | `number` | `5` | `SESSIONS_PER_ADDRESS_PER_HOUR`, 1 to 100 (per instance). |
 | `bot_checks_per_day` | `number` | `300` | `BOT_CHECKS_PER_DAY`, 1 to 3000 (the bucket counter). |
+| `requests_per_address_per_minute` | `number` | `300` | `REQUESTS_PER_ADDRESS_PER_MINUTE`, 60 to 6000 (per instance). |
+| `reads_per_session_per_minute` | `number` | `120` | `READS_PER_SESSION_PER_MINUTE`, 60 to 1200 (per instance). |
+| `cuff_sends_per_session_per_10_minutes` | `number` | `3` | `CUFF_SENDS_PER_SESSION_PER_10_MINUTES`, 1 to 30 (per instance). |
+| `shares_per_session_per_10_minutes` | `number` | `2` | `SHARES_PER_SESSION_PER_10_MINUTES`, 1 to 20 (per instance). |
+| `shares_per_instance_per_hour` | `number` | `30` | `SHARES_PER_INSTANCE_PER_HOUR`, 1 to 600 (per instance: up to 60 with 2). |
+| `history_days` | `number` | `7` | `HISTORY_DAYS`, 1 to 30: days shown; nothing is deleted. The page's privacy note says 7. |
 
 ## Outputs
 
@@ -996,4 +1027,5 @@ Read directly (`curl`, 2026-11-15) unless marked otherwise:
 | `cuff_sim_rate_limit_per_minute` | 6 × `cuff_sim_max_instances`. |
 | `recaptcha_site_key`, `recaptcha_allowed_domains` | The score key's ID (public) and its allowed domains. |
 | `demo_counter_bucket` | The counter bucket's name. |
+| `demo_settings` | The ten demo settings as fhir-proxy gets them (D16, T46, T47). |
 | `token_issuer` | fhir-proxy's exact `TOKEN_ISSUER`, for `make smoke` (`PULSEBRIDGE_TOKEN_ISSUER`); not a secret. |

@@ -41,7 +41,7 @@ variables {
     "google-health-client-id"     = "pb-google-health-client-id"
     "google-health-client-secret" = "pb-google-health-client-secret"
     "google-health-refresh-token" = "pb-google-health-refresh-token"
-    "reviewer-password"           = "pb-reviewer-password"
+    "session-signing-key"         = "pb-session-signing-key"
   }
 }
 
