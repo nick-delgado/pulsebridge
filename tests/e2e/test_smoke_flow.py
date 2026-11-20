@@ -16,7 +16,7 @@ import pytest
 from e2e_fake_stack import REAL_PATIENT, SECRET_PREFIX, TOKEN_ISSUER, Stack, build_stack
 from e2e_runs import BASE, bp_component, edit_json, run
 from fhir_proxy.share.testing import FakeOpenEmr
-from fhir_proxy.testing import PROJECT
+from fhir_proxy.testing import DEMO_LIMITS, PROJECT
 from pulsebridge_smoke.first_sync import GcloudSyncRuns
 from pulsebridge_smoke.http import Response, TransportError
 from pulsebridge_smoke.session import SigningKeyError, secret_manager_signing_key
@@ -391,6 +391,45 @@ def test_a_rate_limited_send_is_waited_out_and_retried(stack: Stack, signing_key
     assert result.code == 0, result.text
     assert 7 in result.sleeps
     assert "nothing was sent" in result.text
+
+
+def test_a_429_during_the_negatives_is_retried_in_a_fresh_session(
+    stack: Stack, signing_key: bytes
+) -> None:
+    """cuff-sim answers 429 once during the negatives (N2). The proxy has already counted that
+    attempt against the session (T46: every attempt counts), so retrying in the same session
+    would make N4 the session's 4th cuff send in 10 minutes and the proxy would refuse it for
+    600 s. The retry runs in a newly signed session instead, and no session goes over 3."""
+    sends = [0]
+
+    def third_send_is_429(response: Response) -> Response:
+        sends[0] += 1  # A1, N1, then N2: the second send of the negatives
+        if sends[0] == 3:
+            return Response(429, b'{"resourceType": "OperationOutcome"}', {"retry-after": "5"})
+        return response
+
+    stack.tamper("POST", "/cuff/readings", third_send_is_429)
+    result = run(stack, signing_key)
+    assert result.code == 0, result.text
+    assert 5 in result.sleeps and 600 not in result.sleeps
+    per_session: dict[str | None, int] = {}
+    for r in stack.transport.requests:
+        if r["method"] == "POST" and r["path"] == "/cuff/readings":
+            token = _cookie_token(r)
+            per_session[token] = per_session.get(token, 0) + 1
+    assert None not in per_session and max(per_session.values()) <= 3, per_session
+    assert len(per_session) == 3, per_session  # the reading's, the negatives', the retry's
+    for check in ("N2", "N3", "N4", "N5"):
+        assert result.status_of(check) == "PASS", check
+
+
+def test_the_fake_stack_runs_the_proxy_with_the_production_limits(stack: Stack) -> None:
+    """The per-session tests above prove something only if the in-process proxy enforces T46's
+    defaults, not the generous limits the proxy's own unit tests use."""
+    config = stack.env.harness.config
+    assert {name: getattr(config, name) for name in DEMO_LIMITS} == DEMO_LIMITS
+    assert DEMO_LIMITS["cuff_sends_per_session_per_10_minutes"] == 3
+    assert DEMO_LIMITS["shares_per_session_per_10_minutes"] == 2
 
 
 def _gcloud_answer(key: bytes) -> str:

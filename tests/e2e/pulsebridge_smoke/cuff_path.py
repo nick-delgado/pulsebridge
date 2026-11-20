@@ -214,10 +214,12 @@ def guard(ctx: Context, facts: StackFacts) -> bool:
 
 
 def send(ctx: Context, body: dict) -> Response:
-    """``POST /cuff/readings``. A 429 (cuff-sim's rate limit, or the proxy's, both checked
-    before anything is built or sent) is waited out per ``Retry-After`` (at most 60 s a time)
-    and retried; nothing was sent, so this is safe. A retry counts against the proxy's
-    per-session limit too, which is why the negatives run in a session of their own."""
+    """``POST /cuff/readings``. A 429 (cuff-sim's rate limit, or the proxy's) means nothing was
+    built or sent, so the request is retried after the ``Retry-After`` wait (at most 60 s a
+    time), at most ``rate_limit_retries`` times. Each retry runs in a newly signed session: the
+    proxy counts every attempt against the session's 3 cuff sends in any 10 minutes (T46), so a
+    retry in the same session could make a later send of the run its 4th and be refused for ten
+    minutes."""
     for attempt in range(ctx.settings.rate_limit_retries + 1):
         response = ctx.api.call("POST", "/cuff/readings", body)
         if response.status != 429 or attempt == ctx.settings.rate_limit_retries:
@@ -228,6 +230,8 @@ def send(ctx: Context, body: dict) -> Response:
             wait = 10
         ctx.report.out(f"      rate limited (HTTP 429): waiting {wait} s (nothing was sent)")
         ctx.sleep(wait)
+        if ctx.new_session is not None:
+            ctx.new_session()
     raise AssertionError("unreachable")
 
 
