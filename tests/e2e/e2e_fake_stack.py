@@ -44,6 +44,7 @@ from fhir_proxy.share.testing import ShareEnv, build_share_env, stored_patient
 from fhir_proxy.testing import (
     AUDIT_STORE,
     DATASET,
+    DEMO_LIMITS,
     FHIR_STORE,
     HEALTH_URL,
     HL7_STORE,
@@ -267,6 +268,7 @@ def build_stack(
         health_sync_url=HEALTH_URL if real_data else None,
         sample_patient=SamplePatient("PULSEBRIDGE", "Synthetic", "Demo"),
         token_issuer=TOKEN_ISSUER,
+        **DEMO_LIMITS,
     )
     env.store.put(FHIR_STORE, stored_patient(value=patient))
     edge = FakeEdge(env.store, patient)

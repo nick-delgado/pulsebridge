@@ -71,6 +71,11 @@ class Context:
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic
     choose_reading: Callable[[], tuple[int, int]] = random_reading
+    # Switches the API client to a newly signed session (cli.main sets it). The proxy allows a
+    # session 3 cuff sends in any 10 minutes (T46, CUFF_SENDS_PER_SESSION_PER_10_MINUTES): the
+    # reading (A1) and the three negatives (N1, N2, N4) are four, so the negatives get a session
+    # of their own instead of waiting ten minutes.
+    new_session: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -209,8 +214,10 @@ def guard(ctx: Context, facts: StackFacts) -> bool:
 
 
 def send(ctx: Context, body: dict) -> Response:
-    """``POST /cuff/readings``. A 429 (cuff-sim's rate limit, checked before anything is built
-    or sent) is waited out per ``Retry-After`` and retried; nothing was sent, so this is safe."""
+    """``POST /cuff/readings``. A 429 (cuff-sim's rate limit, or the proxy's, both checked
+    before anything is built or sent) is waited out per ``Retry-After`` (at most 60 s a time)
+    and retried; nothing was sent, so this is safe. A retry counts against the proxy's
+    per-session limit too, which is why the negatives run in a session of their own."""
     for attempt in range(ctx.settings.rate_limit_retries + 1):
         response = ctx.api.call("POST", "/cuff/readings", body)
         if response.status != 429 or attempt == ctx.settings.rate_limit_retries:
@@ -219,7 +226,7 @@ def send(ctx: Context, body: dict) -> Response:
             wait = min(max(int(response.headers.get("retry-after", "10")), 1), 60)
         except ValueError:
             wait = 10
-        ctx.report.out(f"      cuff-sim rate limit: waiting {wait} s (nothing was sent)")
+        ctx.report.out(f"      rate limited (HTTP 429): waiting {wait} s (nothing was sent)")
         ctx.sleep(wait)
     raise AssertionError("unreachable")
 
@@ -543,7 +550,11 @@ def run_part_a(ctx: Context, facts: StackFacts, *, may_write: bool) -> None:
             # The stack may hold real data after all: write nothing more.
             r.stop("Part A (negatives)", "A5")
             return
-    # The negatives do not depend on the reading above, so they run even after a failure.
+    # The negatives do not depend on the reading above, so they run even after a failure. They
+    # send three more cuff requests, each counted by the proxy's per-session limit (N1 too: the
+    # limit counts every attempt, whatever cuff-sim answers), so they run in a fresh session.
+    if ctx.new_session is not None:
+        ctx.new_session()
     try:
         negatives(ctx)
     except Stop as stop:

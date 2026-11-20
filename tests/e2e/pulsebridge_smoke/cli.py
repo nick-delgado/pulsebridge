@@ -290,6 +290,15 @@ def main(
         origin=origin_of(base_url),
     )
     ctx = Context(api, report, settings)
+
+    def new_session() -> None:
+        # Another token with the same claims and a new random jti: the proxy keys its
+        # per-session limits on the jti (T46), so this session starts with a full budget.
+        fresh = session_token(key, issuer, now=clock() if clock else None)
+        redact.add(fresh)
+        api.use_session(fresh)
+
+    ctx.new_session = new_session
     if sleep is not None:
         ctx.sleep = sleep
     emit(f"PulseBridge smoke test against {base_url}")

@@ -159,19 +159,45 @@ def test_the_key_and_token_never_appear_in_the_output(
     result = run(stack, signing_key, "--verbose", "--report-json", str(report))
     assert result.code == 0, result.text
     tokens = {_cookie_token(r) for r in stack.transport.requests} - {None}
-    assert len(tokens) == 1
-    (token,) = tokens
-    assert len(token) > 100
+    # Two sessions: the cuff path's, and the negatives' own (T46's per-session cuff limit).
+    assert len(tokens) == 2
+    assert all(len(token) > 100 for token in tokens)
     for text in (result.text, report.read_text()):
         assert signing_key.decode() not in text
         assert base64.urlsafe_b64encode(signing_key).decode().rstrip("=") not in text
-        assert token not in text
+        for token in tokens:
+            assert token not in text
         assert "__session" not in text
     # No Authorization header is ever sent; the session goes as the cookie, and a POST always
     # carries the page's own origin.
     assert all("Authorization" not in r["headers"] for r in stack.transport.requests)
     posts = [r for r in stack.transport.requests if r["method"] == "POST"]
     assert posts and all(r["headers"]["Origin"] == "https://dashboard.example.test" for r in posts)
+
+
+def test_no_session_goes_over_the_proxys_per_session_limits(
+    stack: Stack, signing_key: bytes
+) -> None:
+    """T46: a session may send 3 cuff readings and make 2 shares in any 10 minutes. The fake
+    stack runs the proxy with those production defaults (DEMO_LIMITS), so a run that put the
+    reading and the three negatives in one session would be refused (429) at N4. The smoke test
+    signs a second session for the negatives; each session stays inside its budget."""
+    result = run(stack, signing_key)
+    assert result.code == 0, result.text
+    sends: dict[str, int] = {}
+    shares: dict[str, int] = {}
+    for r in stack.transport.requests:
+        token = _cookie_token(r)
+        if r["method"] == "POST" and r["path"] == "/cuff/readings":
+            sends[token] = sends.get(token, 0) + 1
+        if r["method"] == "POST" and r["path"] == "/share":
+            shares[token] = shares.get(token, 0) + 1
+    assert None not in sends and None not in shares
+    assert sorted(sends.values()) == [1, 3], sends  # A1; then N1, N2 and N4
+    assert list(shares.values()) == [2], shares  # A10 and A12, in the reading's session
+    assert set(shares) <= set(sends) and len(sends) == 2
+    for check in ("N1", "N2", "N4", "N5", "A10", "A12"):
+        assert result.status_of(check) == "PASS", check
 
 
 def test_the_session_routes_are_checked_before_the_session_is_used(
